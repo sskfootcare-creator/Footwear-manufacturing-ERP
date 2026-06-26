@@ -125,17 +125,17 @@ def _parse_meta(text: str) -> dict:
     # PO Number — try the strictest form first (digits-only or alphanum after explicit label)
     po_no = ""
     for pat in [
-        r"(?:P\.?\s*O\.?|Purchase\s*Order|Order)\s*(?:No\.?|#|Number)\s*[:\-|]?\s*([0-9][0-9A-Z\-_/]{4,})",
-        r"PO\s*No\.?\s*[:\-|]?\s*([A-Z0-9][A-Z0-9\-_/]{3,})",
-        r"\bP\.?O\.?\s*#\s*([A-Z0-9][A-Z0-9\-_/]{3,})",
+        r"(?:P\.?\s*O\.?|Purchase\s*Order)\s*(?:No\.?|#|Number)[\s:\-|]+([A-Z0-9][A-Z0-9\-_/]{3,})",
+        r"\bOrder\s*(?:No\.?|#|Number)[\s:\-|]+([A-Z0-9][A-Z0-9\-_/]{3,})",
+        r"\bP\.?O\.?\s*#[\s:\-|]*([A-Z0-9][A-Z0-9\-_/]{3,})",
     ]:
         m = re.search(pat, text, flags=re.I)
         if m:
             po_no = _norm(m.group(1))
             break
 
-    po_date = _normalise_date(_find_first(r"(?:PO\s*Date|Order\s*Date|Date)\s*[:\-|]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", text))
-    delivery_date = _normalise_date(_find_first(r"(?:Delivery|Ship(?:ment)?|Due)\s*Date\s*[:\-|]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", text))
+    po_date = _normalise_date(_find_first(r"(?:PO\s*Date|Order\s*Date|Date)[\s:\-|]+(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", text))
+    delivery_date = _normalise_date(_find_first(r"(?:Delivery|Ship(?:ment)?|Due)\s*Date[\s:\-|]+(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})", text))
 
     # Client / vendor — anchor on full word labels (avoid matching "To" inside "Total" or "Article")
     # Separator can be any combination of colon, dash, pipe, whitespace.

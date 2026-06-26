@@ -43,3 +43,16 @@ Build a comprehensive local/cloud B2B footwear manufacturing ERP. Costing calcul
 ## Next Tasks
 - (When user asks) Bulk pay multi-karigar payout flow
 - (When user asks) WhatsApp Cloud API integration
+
+## Iteration 11 (2026-06-26)
+- **FREE PO Extractor**: Replaced LLM-only path with `po_extractor_free.py` using `pdfplumber` + `openpyxl`. Zero recurring cost, no Cloudflare/timeout failures. LLM remains optional fallback if EMERGENT_LLM_KEY is set. Verified working on numeric (SIYARAM 2220008835) and alphabetic (TEST-PO-001) POs.
+- **Packing List**: 
+  • Default SSK template generator (`packing_list.py`) matching uploaded template format exactly.
+  • Custom per-client templates: upload xlsx with `{{placeholders}}` like `{{po_number}}`, `{{client_name}}`, `{{vendor_gstin}}`, `{{lines}}` for the line-item row marker. Header row above `{{lines}}` is auto-detected to map columns.
+  • Endpoints: `POST /api/packing-lists/job`, `GET/POST/DELETE /api/packing-templates`.
+- **Auto-archive**: Once a job has BOTH `invoice_generated_at` and `packing_generated_at` set, it gets `archived=True`. `GET /api/production/jobs` filters out archived (use `?include_archived=true` to include).
+- **Archive UI** (`Production.jsx`): "Archive (N)" toggle button → `ArchivePanel` showing grouped archived cards with style image, PO info, sizes, three actions (View Details / Card PDF / Packing). `DetailModal` shows full size breakdown, karigar assignments, and stage history table.
+- **A4 Production Card fix** (`pdf_card.py`): Total width capped at 180mm usable. Company name strip now WHITE on dark background (was black-on-dark = invisible). Tally + size columns scale to fit. Tested with 9 sizes → all columns fit on A4.
+
+### Verified
+- iteration_11.json: Backend 7/7, Frontend 4/4 critical flows green. Auto-archive end-to-end (PATCH dispatched → POST invoice → POST packing → archived=True). PDF page size exactly 595x842 pt with 'SSK FOOTCARE MANUFACTURING LLP' string present.
