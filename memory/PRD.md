@@ -68,3 +68,16 @@ Build a comprehensive local/cloud B2B footwear manufacturing ERP. Costing calcul
 ### Verified (iteration_12.json)
 - Backend: 10/10
 - Frontend: all 4 critical flows green (Packing modal with 14 fields, Merge-Packing button, Archive view re-download, Templates upload+delete)
+
+## Iteration 13 (2026-06-27) — Accounts Receivable / Tally Ledger
+**Complete AR / Receivables system:**
+- **Invoice archive**: All generated invoices saved with PDF bytes (`file_b64`) + due_date (default +45d, override from PO payment_terms numeric) + computed totals (subtotal, CGST/SGST/IGST, grand_total). Page `/invoices` with 5 status tiles (Total / Pending / Partial / Overdue / Paid), search, status filters, row actions (view detail, download PDF, record GRN, record payment). Re-download via `/api/invoices/{id}/file`.
+- **GRN (Goods Receipts)**: `POST /api/grns` — line-item level capture of dispatched / received / accepted / rejected qty with rejection_reason. Auto-numbered `GRN-2026-NNNN`. Short / rejected pcs auto-reduce the invoice's net amount via `grn_adjustment`.
+- **Payments**: `POST /api/payments` — FIFO-allocates a lump-sum across selected invoices by due_date. Modes: Bank Transfer/RTGS/NEFT/Cheque/UPI/Cash/Adjustment. Captures reference (UTR/Cheque#), bank, notes. Over-payments record `advance_amount`. Auto-numbered `RCT-2026-NNNN`.
+- **Tally-style Client Ledger**: `GET /api/clients` + `/api/clients/{name}/ledger`. Returns chronological entries with vch_type (Invoice/Payment/GR Adj), Dr/Cr columns, running balance with Dr/Cr suffix, closing balance, aging buckets [0-30, 31-60, 61-90, 90+], totals.
+- **Overdue alert**: Dashboard red banner when any invoice past its due_date; Invoices page red tile.
+- **Legacy clean-up**: 12 pre-AR invoices flagged `legacy: True` and excluded from listing by default (toggleable via `?include_legacy=true`).
+
+### Verified (iteration_13.json)
+- Backend: 19/19 pytest passed
+- Frontend: 100% (all critical flows verified: Invoices list, modal, GRN dialog, Payment dialog, Clients list, Tally Ledger modal with aging)

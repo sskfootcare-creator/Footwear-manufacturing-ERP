@@ -1063,10 +1063,13 @@ async def po_challan(pid: str, request: Request, dispatch_qty: Optional[int] = N
 # ---------- INVOICE ARCHIVE & ACCOUNTS RECEIVABLE ----------
 @api.get("/invoices")
 async def list_invoices(request: Request, client: Optional[str] = None,
-                        status: Optional[str] = None, limit: int = 500):
+                        status: Optional[str] = None, include_legacy: bool = False,
+                        limit: int = 500):
     """Return all generated invoices, decorated with live status + outstanding."""
     await get_current_user(request)
     q: dict = {}
+    if not include_legacy:
+        q["legacy"] = {"$ne": True}
     if client:
         q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
     docs = await db.invoices.find(q, {"file_b64": 0}).sort("created_at", -1).to_list(limit)
