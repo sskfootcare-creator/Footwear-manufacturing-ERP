@@ -13,6 +13,7 @@ export default function Invoices() {
   const [view, setView] = useState(null);
   const [grnFor, setGrnFor] = useState(null);
   const [paymentFor, setPaymentFor] = useState(null);
+  const [deleteFor, setDeleteFor] = useState(null);
 
   const load = async () => {
     const { data } = await http.get("/invoices");
@@ -126,6 +127,7 @@ export default function Invoices() {
                           <button onClick={() => setPaymentFor(r)} className="text-slate-600 hover:text-[#16A34A] p-1.5" title="Record Payment" data-testid={`inv-payment-${r.invoice_no}`}><IndianRupee className="w-4 h-4" /></button>
                         </>
                       )}
+                      <button onClick={() => setDeleteFor(r)} className="text-slate-600 hover:text-red-600 p-1.5" title="Delete Invoice" data-testid={`inv-delete-${r.invoice_no}`}><Trash2 className="w-4 h-4" /></button>
                     </td>
                   </tr>
                 ))}
@@ -149,6 +151,7 @@ export default function Invoices() {
       {view && <InvoiceDetailModal inv={view} onClose={() => setView(null)} />}
       {grnFor && <GRNDialog invoiceMeta={grnFor} onClose={() => setGrnFor(null)} onSaved={() => { setGrnFor(null); load(); }} />}
       {paymentFor && <PaymentDialog invoiceMeta={paymentFor} onClose={() => setPaymentFor(null)} onSaved={() => { setPaymentFor(null); load(); }} />}
+      {deleteFor && <DeleteConfirmDialog invoice={deleteFor} onClose={() => setDeleteFor(null)} onDeleted={() => { setDeleteFor(null); load(); }} />}
     </div>
   );
 }
@@ -531,6 +534,50 @@ function Field({ label, children }) {
     <div>
       <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-1">{label}</div>
       {children}
+    </div>
+  );
+}
+
+function DeleteConfirmDialog({ invoice, onClose, onDeleted }) {
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await http.delete(`/invoices/${invoice.id}`);
+      onDeleted();
+    } catch (err) {
+      alert("Failed to delete invoice: " + (err.response?.data?.detail || err.message));
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="delete-dialog">
+      <div className="bg-white w-full max-w-md border-2 border-red-200 shadow-2xl">
+        <div className="bg-red-600 text-white px-6 py-4 flex items-baseline justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">Confirm Delete</div>
+            <div className="text-xl font-bold">{invoice.invoice_no}</div>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/20 p-1"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <p className="text-sm text-slate-700">
+            Are you sure you want to delete invoice <b>{invoice.invoice_no}</b>? 
+            This action cannot be undone.
+          </p>
+          <div className="bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-slate-700">
+            <b>Note:</b> This will also delete any associated payments and revert the original production jobs back to the "Dispatched" state.
+          </div>
+          <div className="flex gap-2 pt-4 border-t border-slate-200">
+            <BtnPrimary onClick={handleDelete} disabled={deleting} className="bg-red-600 border-red-600 hover:bg-red-700">
+              {deleting ? "Deleting…" : "Yes, Delete"}
+            </BtnPrimary>
+            <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

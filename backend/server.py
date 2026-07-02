@@ -991,6 +991,28 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         },
     )
 
+@api.delete("/invoices/{id}")
+async def delete_invoice(id: str, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    inv = await db.invoices.find_one({"_id": oid(id)})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    
+    # Revert jobs
+    job_ids = inv.get("job_ids", [])
+    if job_ids:
+        await db.jobs.update_many(
+            {"_id": {"$in": [oid(j) for j in job_ids]}},
+            {"$unset": {"invoice_generated_at": ""}}
+        )
+    
+    # Delete payments for this invoice
+    await db.payments.delete_many({"invoice_id": id})
+    
+    # Delete the invoice
+    await db.invoices.delete_one({"_id": oid(id)})
+    return {"ok": True}
+
 
 @api.post("/invoices/merged")
 async def merged_invoice(payload: dict, request: Request):
