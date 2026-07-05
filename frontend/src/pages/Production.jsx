@@ -638,13 +638,24 @@ function ColorGroupCard(props) {
   const completedTotal = group.rows.reduce((s, r) => s + (r.completed_qty || 0), 0);
   const a = group.assignments || {};
   const overdue = (group.overdueHours || 0) > 0;
+  
+  const isInactive = style?.status === "inactive";
+  const effectiveCanEdit = canEdit && !isInactive;
 
   return (
     <Card
-      className={`border-l-4 hover:border-[#C27842] transition-colors ${overdue ? "ring-2 ring-red-500 ring-inset" : ""}`}
+      className={`border-l-4 transition-colors ${overdue ? "ring-2 ring-red-500 ring-inset" : "hover:border-[#C27842]"}`}
       style={{ borderLeftColor: overdue ? "#DC2626" : stageColor }}
       data-testid={`group-${group.key}`}
     >
+      {isInactive && (
+        <div className="bg-red-600 text-white px-3 py-1.5 flex items-center justify-between text-[10px] uppercase tracking-wider font-bold animate-pulse">
+          <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Action Required: Missing BOM</span>
+          <a href={`/styles?edit=${encodeURIComponent(style?.code || "")}`} rel="noreferrer" className="underline hover:text-slate-200">
+            Fix in Styles
+          </a>
+        </div>
+      )}
       {overdue && (
         <div className="bg-red-600 text-white px-3 py-1 flex items-center justify-between text-[10px] uppercase tracking-wider font-bold" data-testid={`overdue-${group.key}`}>
           <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> OVERDUE</span>
@@ -716,7 +727,7 @@ function ColorGroupCard(props) {
               <td className="px-2 py-1.5 font-bold text-slate-700 border-r border-slate-200">{group.color}</td>
               {group.sizes.map(sz => (
                 <td key={sz} className="px-2 py-1.5 text-center font-mono border-r border-slate-200 last:border-r-0">
-                  {canEdit ? (
+                  {effectiveCanEdit ? (
                     <button onClick={() => onOpenQty(sizeTotals.rowIdBySize[sz])} className="hover:text-[#C27842] hover:underline w-full" data-testid={`qty-${group.key}-${sz}`}>
                       {sizeTotals.t[sz]}
                     </button>
@@ -727,7 +738,7 @@ function ColorGroupCard(props) {
             </tr>
           </tbody>
         </table>
-        {canEdit && (
+        {effectiveCanEdit && (
           <div className="text-[9px] text-slate-400 mt-1 italic">Click any qty cell to edit / adjust completed / rejected</div>
         )}
       </div>
@@ -737,11 +748,11 @@ function ColorGroupCard(props) {
         <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500 mb-1.5">Components</div>
         <div className="grid grid-cols-3 gap-2">
           <ComponentCell label="Upper" done={group.components.upper_done} layers={COMPONENT_LAYERS.upper}
-            disabled={!canEdit} onToggle={(v) => onToggleComponent(group, "upper_done", v)} />
+            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "upper_done", v)} />
           <ComponentCell label="Bottom/Insole" done={group.components.bottom_done} layers={COMPONENT_LAYERS.bottom}
-            disabled={!canEdit} onToggle={(v) => onToggleComponent(group, "bottom_done", v)} />
+            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "bottom_done", v)} />
           <ComponentCell label="Sole" done={group.components.sole_done} layers={COMPONENT_LAYERS.sole}
-            disabled={!canEdit} onToggle={(v) => onToggleComponent(group, "sole_done", v)} />
+            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "sole_done", v)} />
         </div>
       </div>
 
@@ -752,7 +763,7 @@ function ColorGroupCard(props) {
           {ASSIGNMENT_ROLES.map(r => (
             <button
               key={r.key}
-              disabled={!canEdit}
+              disabled={!effectiveCanEdit}
               onClick={() => onOpenAssign(r.key)}
               data-testid={`assign-${group.key}-${r.key}`}
               className={`flex items-center justify-between gap-1 px-2 py-1 border ${a[r.key] ? "border-[#C27842] bg-orange-50" : "border-dashed border-slate-300 bg-white"} hover:border-slate-900 text-left transition-colors`}
@@ -774,13 +785,13 @@ function ColorGroupCard(props) {
       <div className="px-3 pb-3 flex items-center justify-between gap-2 flex-wrap">
         {group.delivery_date && <div className="text-[10px] text-slate-500">Deliver: {group.delivery_date}</div>}
         <div className="flex gap-2 ml-auto items-center flex-wrap">
-          {canEdit && (
+          {effectiveCanEdit && (
             <button onClick={onPrint} title="Print production card" data-testid={`print-${group.key}`}
               className="text-[10px] uppercase tracking-wider font-bold text-slate-700 hover:text-white hover:bg-[#0F172A] border border-slate-300 px-2 py-1 flex items-center gap-1">
               <Printer className="w-3 h-3" /> Print
             </button>
           )}
-          {canEdit && (
+          {effectiveCanEdit && (
             <button onClick={onWhatsApp} title="Share via WhatsApp" data-testid={`whatsapp-${group.key}`}
               className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#25D366] hover:bg-[#1DA851] border border-[#25D366] px-2 py-1 flex items-center gap-1">
               <MessageCircle className="w-3 h-3" /> WhatsApp
@@ -802,10 +813,10 @@ function ColorGroupCard(props) {
             </button>
           )}
           {canEdit && prevStage && (
-            <button onClick={() => onMove(group, prevStage.key)} className="text-[10px] uppercase tracking-wider font-bold text-slate-500 hover:text-slate-900 border border-slate-300 px-2 py-1">← {prevStage.label}</button>
+            <button disabled={!effectiveCanEdit} onClick={() => onMove(group, prevStage.key)} className={`text-[10px] uppercase tracking-wider font-bold border px-2 py-1 ${effectiveCanEdit ? 'text-slate-500 hover:text-slate-900 border-slate-300' : 'text-slate-300 border-slate-200 cursor-not-allowed'}`}>← {prevStage.label}</button>
           )}
           {canEdit && nextStage && (
-            <button onClick={() => onMove(group, nextStage.key)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-[#C27842] px-3 py-1" data-testid={`move-next-${group.key}`}>{nextStage.label} →</button>
+            <button disabled={!effectiveCanEdit} onClick={() => onMove(group, nextStage.key)} className={`text-[10px] uppercase tracking-wider font-bold text-white px-3 py-1 ${effectiveCanEdit ? 'bg-[#0F172A] hover:bg-[#C27842]' : 'bg-slate-300 cursor-not-allowed'}`} data-testid={`move-next-${group.key}`}>{nextStage.label} →</button>
           )}
         </div>
       </div>

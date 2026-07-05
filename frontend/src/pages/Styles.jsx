@@ -23,16 +23,51 @@ export default function Styles() {
   const [styles, setStyles] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState(null);
+  const [bulkFile, setBulkFile] = useState(null);
+  const [bulkUploading, setBulkUploading] = useState(false);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(emptyStyle);
   const [confirm, setConfirm] = useState(null);
   const [formError, setFormError] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const load = async () => {
-    const [s, m] = await Promise.all([http.get("/styles"), http.get("/materials")]);
+  const load = async (filter = statusFilter, search = searchQuery) => {
+    const queryParams = new URLSearchParams();
+    if (filter) queryParams.append("status", filter);
+    if (search) queryParams.append("search", search);
+    const qs = queryParams.toString() ? `?${queryParams.toString()}` : "";
+    const [s, m] = await Promise.all([http.get(`/styles${qs}`), http.get("/materials")]);
     setStyles(s.data); setMaterials(m.data);
+    
+    const params = new URLSearchParams(window.location.search);
+    const editCode = params.get("edit");
+    if (editCode && s.data.length > 0) {
+      const styleToEdit = s.data.find(x => x.code === editCode);
+      if (styleToEdit) {
+        setEditId(styleToEdit.id);
+        setForm({
+          code: styleToEdit.code, name: styleToEdit.name, category: styleToEdit.category, image_url: styleToEdit.image_url || "",
+          description: styleToEdit.description || "", base_size: styleToEdit.base_size || "7",
+          bom: styleToEdit.bom || [], labor: styleToEdit.labor || [],
+          overhead_pct: styleToEdit.overhead_pct, packing_cost: styleToEdit.packing_cost,
+          margin_pct: styleToEdit.margin_pct, gst_pct: styleToEdit.gst_pct,
+        });
+        setOpen(true);
+        // Clear the query parameter so it doesn't reopen on refresh
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { 
+    const timer = setTimeout(() => {
+      load(statusFilter, searchQuery); 
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, searchQuery]);
 
   const startNew = () => { setEditId(null); setForm(emptyStyle); setFormError(""); setOpen(true); };
   const startEdit = (s) => {
@@ -81,11 +116,11 @@ export default function Styles() {
     });
   };
 
-  const onImageFile = (e) => {
+  const onImageFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 1024 * 1024) {
-      alert(`Image too large (${(file.size / 1024).toFixed(0)}KB). Please upload an image under 1MB.`);
+    if (file.size > 5 * 1024 * 1024) {
+      alert(`Image too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload an image under 5MB.`);
       e.target.value = "";
       return;
     }
@@ -94,9 +129,20 @@ export default function Styles() {
       e.target.value = "";
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => setForm((f) => ({ ...f, image_url: reader.result }));
-    reader.readAsDataURL(file);
+    
+    const formData = new FormData();
+    formData.append("file", file);
+    
+    try {
+      const res = await http.post("/upload/image", formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+      setForm((f) => ({ ...f, image_url: res.data.url }));
+    } catch (err) {
+      console.error(err);
+      alert("Failed to upload image. Please try again.");
+    }
+    e.target.value = "";
   };
 
   const addBomRow = (material) => {
@@ -111,6 +157,36 @@ export default function Styles() {
   const updateLabor = (i, key, val) => setForm((f) => ({ ...f, labor: f.labor.map((r, idx) => idx === i ? { ...r, [key]: val } : r) }));
   const addLabor = () => setForm((f) => ({ ...f, labor: [...f.labor, { name: "Labor", rate: 0 }] }));
   const removeLabor = (i) => setForm((f) => ({ ...f, labor: f.labor.filter((_, idx) => idx !== i) }));
+
+  const onPreviewBulk = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBulkFile(file);
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await http.post("/styles/bulk/preview", formData, { headers: { "Content-Type": "multipart/form-data" } });
+      setBulkPreview(res.data.preview);
+    } catch (err) {
+      alert("Preview failed: " + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const submitBulk = async () => {
+    if (!bulkPreview) return;
+    setBulkUploading(true);
+    try {
+      const res = await http.post("/styles/bulk", { styles: bulkPreview });
+      alert(`Bulk upload complete! ${res.data.success_count} styles created/updated.`);
+      setBulkOpen(false);
+      setBulkPreview(null);
+      setBulkFile(null);
+      load();
+    } catch (err) {
+      alert("Bulk upload failed: " + (err.response?.data?.detail || err.message));
+    }
+    setBulkUploading(false);
+  };
 
   // live costing — uses (rate * qty / yield) * (1 + waste%)
   const costing = useMemo(() => {
@@ -134,7 +210,27 @@ export default function Styles() {
         title="Style Master"
         subtitle="Master / Styles"
         testId="styles-header"
-        action={<BtnPrimary onClick={startNew} data-testid="add-style-btn"><Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> New Style</BtnPrimary>}
+        action={
+          <div className="flex gap-2 items-center">
+            <Input 
+              placeholder="Search style or name..." 
+              value={searchQuery} 
+              onChange={e => setSearchQuery(e.target.value)}
+              className="w-48 !py-1 !text-sm"
+            />
+            <Select 
+              value={statusFilter} 
+              onChange={e => setStatusFilter(e.target.value)} 
+              className="w-32 !py-1 !text-sm mr-2"
+            >
+              <option value="">All Styles</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </Select>
+            <BtnSecondary onClick={() => setBulkOpen(true)}>Bulk Upload</BtnSecondary>
+            <BtnPrimary onClick={startNew} data-testid="add-style-btn"><Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> New Style</BtnPrimary>
+          </div>
+        }
       />
 
       <div className="p-8 space-y-4">
@@ -157,10 +253,15 @@ export default function Styles() {
                   </div>
                 )}
                 <div className="p-5">
-                <div className="flex items-baseline justify-between mb-2">
-                  <div className="font-mono text-xs font-bold text-slate-500">{s.code}</div>
-                  <Badge color="orange">{s.category}</Badge>
-                </div>
+                  <div className="flex items-baseline justify-between mb-2">
+                    <div className="font-mono text-xs font-bold text-slate-500">{s.code}</div>
+                    <div className="flex gap-2">
+                      <Badge color={s.status === 'active' ? 'green' : 'gray'}>
+                        {s.status === 'active' ? 'Active' : 'Inactive'}
+                      </Badge>
+                      <Badge color="orange">{s.category}</Badge>
+                    </div>
+                  </div>
                 <h3 className="text-lg font-bold mb-1">{s.name}</h3>
                 <p className="text-xs text-slate-500 line-clamp-2 mb-3">{s.description || "—"}</p>
                 <div className="border-t border-dashed border-slate-200 pt-3 space-y-1 text-xs">
@@ -203,7 +304,7 @@ export default function Styles() {
 
               {/* Image upload */}
               <div>
-                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">Style Image (max 1MB)</div>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">Style Image (max 5MB)</div>
                 <div className="flex gap-3 items-start">
                   <div className="w-28 h-28 border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0">
                     {form.image_url ? (
@@ -212,15 +313,29 @@ export default function Styles() {
                       <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold text-center px-2">No image</div>
                     )}
                   </div>
-                  <div className="flex-1 space-y-2">
-                    <label className="inline-block bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-slate-300 hover:border-[#0F172A] transition-colors cursor-pointer" data-testid="image-upload-label">
-                      <Upload className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Upload Image
-                      <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={onImageFile} data-testid="image-upload-input" />
-                    </label>
+                  <div className="flex flex-col justify-center flex-1 min-w-[200px]">
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="inline-block bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-slate-300 hover:border-[#0F172A] transition-colors cursor-pointer" data-testid="image-upload-label">
+                        <Upload className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Upload File
+                        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={onImageFile} data-testid="image-upload-input" />
+                      </label>
+                      <span className="text-[10px] text-slate-400 font-bold">OR</span>
+                      <input 
+                        type="text" 
+                        placeholder="Paste image URL (e.g. OneDrive)"
+                        className="flex-1 bg-white border-2 border-slate-300 px-2 py-1.5 text-xs outline-none focus:border-slate-500"
+                        value={form.image_url}
+                        onChange={(e) => {
+                          let val = e.target.value;
+                          const srcMatch = val.match(/src=["'](.*?)["']/i);
+                          if (srcMatch && srcMatch[1]) val = srcMatch[1];
+                          setForm({ ...form, image_url: val });
+                        }}
+                      />
+                    </div>
                     {form.image_url && (
-                      <button type="button" onClick={() => setForm({ ...form, image_url: "" })} className="ml-2 text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold" data-testid="image-clear">Remove</button>
+                      <button type="button" onClick={() => setForm({ ...form, image_url: "" })} className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start" data-testid="image-clear">Clear Image</button>
                     )}
-                    <div className="text-[10px] text-slate-500">PNG, JPG, WEBP — max 1MB. Stored inline (base64).</div>
                   </div>
                 </div>
               </div>
@@ -337,6 +452,64 @@ export default function Styles() {
           </div>
         </Drawer>
       )}
+
+      {bulkOpen && (
+        <Drawer onClose={() => { setBulkOpen(false); setBulkPreview(null); setBulkFile(null); }} title="Bulk Upload Styles" width="max-w-4xl">
+          <div className="p-8 space-y-6">
+            <div className="flex justify-between items-center bg-slate-50 p-4 border border-slate-200">
+              <div className="text-sm font-medium text-slate-700">Download the Excel template and fill in your styles data.</div>
+              <a href={`${process.env.REACT_APP_BACKEND_URL || ""}/api/styles/bulk/template`} className="px-3 py-2 border-2 border-[#C27842] text-[#C27842] hover:bg-[#C27842] hover:text-white transition-colors text-xs font-bold uppercase tracking-wider bg-white" download>Download Template</a>
+            </div>
+            
+            <div className="border-2 border-dashed border-slate-300 p-10 text-center bg-slate-50 hover:bg-slate-100 transition-colors relative cursor-pointer group">
+              <input type="file" accept=".xlsx,.xls,.csv" className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" onChange={onPreviewBulk} title="" />
+              <Upload className="w-10 h-10 mx-auto text-slate-400 group-hover:text-slate-600 mb-2 transition-colors" />
+              <div className="text-slate-600 font-bold uppercase text-sm tracking-wider">Drag & drop Excel file here</div>
+              <div className="text-xs text-slate-400 mt-2">or click to browse</div>
+              {bulkFile && <div className="mt-4 text-xs font-bold text-green-600 border border-green-200 bg-green-50 p-2 inline-block rounded">{bulkFile.name} loaded</div>}
+            </div>
+            
+            {bulkPreview && (
+              <div className="space-y-4 border border-slate-200 rounded p-4 bg-white shadow-sm">
+                <div className="text-sm font-bold border-b pb-2 flex justify-between items-center">
+                  <span>Preview ({bulkPreview.length} styles)</span>
+                </div>
+                <div className="overflow-x-auto text-xs max-h-[40vh]">
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-100 sticky top-0 shadow-sm">
+                      <tr>
+                        <th className="p-2 border-b">Code</th>
+                        <th className="p-2 border-b">Name</th>
+                        <th className="p-2 border-b">Category</th>
+                        <th className="p-2 border-b">Base Size</th>
+                        <th className="p-2 border-b">Margin%</th>
+                        <th className="p-2 border-b">Image</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bulkPreview.map((r, i) => (
+                        <tr key={i} className="border-b hover:bg-slate-50">
+                          <td className="p-2 font-medium">{r.code}</td>
+                          <td className="p-2">{r.name}</td>
+                          <td className="p-2">{r.category}</td>
+                          <td className="p-2 text-center">{r.base_size}</td>
+                          <td className="p-2 text-center">{r.margin_pct}%</td>
+                          <td className="p-2 text-slate-400 text-[10px] truncate max-w-[100px]">{r.image_url || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="pt-4 border-t flex justify-end gap-3">
+                  <BtnSecondary onClick={() => { setBulkPreview(null); setBulkFile(null); }}>Cancel</BtnSecondary>
+                  <BtnPrimary onClick={submitBulk} disabled={bulkUploading}>{bulkUploading ? "Uploading..." : "Confirm & Upload"}</BtnPrimary>
+                </div>
+              </div>
+            )}
+          </div>
+        </Drawer>
+      )}
+      
       <datalist id="bom-sections-list">
         {SECTIONS.map(s => <option key={s} value={s} />)}
       </datalist>
