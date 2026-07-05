@@ -26,6 +26,7 @@ export default function Styles() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(emptyStyle);
   const [confirm, setConfirm] = useState(null);
+  const [formError, setFormError] = useState("");
 
   const load = async () => {
     const [s, m] = await Promise.all([http.get("/styles"), http.get("/materials")]);
@@ -33,7 +34,7 @@ export default function Styles() {
   };
   useEffect(() => { load(); }, []);
 
-  const startNew = () => { setEditId(null); setForm(emptyStyle); setOpen(true); };
+  const startNew = () => { setEditId(null); setForm(emptyStyle); setFormError(""); setOpen(true); };
   const startEdit = (s) => {
     setEditId(s.id);
     setForm({
@@ -43,9 +44,11 @@ export default function Styles() {
       overhead_pct: s.overhead_pct, packing_cost: s.packing_cost,
       margin_pct: s.margin_pct, gst_pct: s.gst_pct,
     });
+    setFormError("");
     setOpen(true);
   };
   const save = async () => {
+    setFormError("");
     try {
       const body = {
         ...form,
@@ -63,7 +66,7 @@ export default function Styles() {
       if (editId) await http.patch(`/styles/${editId}`, body); else await http.post("/styles", body);
       setOpen(false); load();
     } catch (e) {
-      alert(e.response?.data?.detail || e.message);
+      setFormError(e.response?.data?.detail || e.message);
     }
   };
   const remove = (id) => {
@@ -180,11 +183,16 @@ export default function Styles() {
       </div>
 
       {open && (
-        <Drawer onClose={() => setOpen(false)} title={editId ? "Edit Style" : "New Style"} width="max-w-5xl">
+        <Drawer onClose={() => { setOpen(false); setFormError(""); }} title={editId ? "Edit Style" : "New Style"} width="max-w-5xl">
           <div className="grid grid-cols-3 gap-6">
             <div className="col-span-2 space-y-4">
               <div className="grid grid-cols-2 gap-3">
-                <Input label="Style Code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} testId="form-style-code" />
+                <div>
+                  <Input label="Style Code" value={form.code} onChange={(e) => { setFormError(""); setForm({ ...form, code: e.target.value }); }} testId="form-style-code" />
+                  {formError && (
+                    <p className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2" data-testid="form-style-error">{formError}</p>
+                  )}
+                </div>
                 <Input label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} testId="form-style-name" />
               </div>
               <div className="grid grid-cols-2 gap-3">

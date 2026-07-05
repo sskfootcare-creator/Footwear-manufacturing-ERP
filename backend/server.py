@@ -151,6 +151,7 @@ class MaterialIn(BaseModel):
     rate: float
     reorder_level: float = 0
     notes: Optional[str] = ""
+    preferred_vendor_id: Optional[str] = ""
 
 class BomItem(BaseModel):
     material_id: str
@@ -384,6 +385,64 @@ class PaymentIn(BaseModel):
     reference: Optional[str] = ""  # UTR / Cheque no / Txn id
     bank: Optional[str] = ""
     notes: Optional[str] = ""
+
+# ----- Accounts Payable / Vendor models -----
+class VendorIn(BaseModel):
+    name: str
+    gstin: Optional[str] = ""
+    contact_person: Optional[str] = ""
+    phone: Optional[str] = ""
+    address: Optional[str] = ""
+    payment_terms_days: int = 30
+    active: bool = True
+    notes: Optional[str] = ""
+
+
+class VendorUpdate(BaseModel):
+    name: Optional[str] = None
+    gstin: Optional[str] = None
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    payment_terms_days: Optional[int] = None
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+# ----- Accounts Payable / Vendor Purchase Order models -----
+class VendorPOLineItem(BaseModel):
+    material_id: str
+    quantity: float
+    rate: float
+    amount: float
+    received_quantity: float = 0.0
+
+
+class VendorPOIn(BaseModel):
+    vendor_id: str
+    line_items: List[VendorPOLineItem]
+    status: Literal["draft", "sent", "partially_received", "received", "cancelled"] = "draft"
+    expected_delivery_date: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class VendorPOUpdate(BaseModel):
+    vendor_id: Optional[str] = None
+    line_items: Optional[List[VendorPOLineItem]] = None
+    status: Optional[Literal["draft", "sent", "partially_received", "received", "cancelled"]] = None
+    expected_delivery_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class VendorPOReceiveItem(BaseModel):
+    material_id: str
+    quantity: float
+
+
+class VendorPOReceiveIn(BaseModel):
+    receipt_id: str
+    items: List[VendorPOReceiveItem]
+
 
 class DefectIn(BaseModel):
     po_number: str
@@ -807,6 +866,7 @@ async def create_po(payload: POIn, request: Request):
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
             "style_id": style_id,
+            "style_match_status": "matched" if style_id else "unmatched",
             "description": li.get("description", ""),
             "color": li.get("color", ""),
             "size": li.get("size", ""),
@@ -1039,6 +1099,14 @@ async def next_payment_no() -> str:
     )
     n = (seq or {}).get("v", 1)
     return f"RCT-{datetime.now().year}-{n:04d}"
+
+
+async def next_vendor_po_no() -> str:
+    seq = await db.counters.find_one_and_update(
+        {"_id": "vendor_po_seq"}, {"$inc": {"v": 1}}, upsert=True, return_document=True,
+    )
+    n = (seq or {}).get("v", 1)
+    return f"PO-VEN-{datetime.now().year}-{n:04d}"
 
 
 async def _generate_invoice_payload(po: dict, job_ids: list[str] | None) -> tuple[dict, list[dict]]:
@@ -1484,7 +1552,267 @@ async def delete_payment(pid: str, request: Request):
     return {"ok": True}
 
 
+
+
+# ---------- VENDORS (Accounts Payable Master) ----------
+
+@api.get("/vendors")
+async def list_vendors(request: Request, include_inactive: bool = False, limit: int = 500):
+    """Return all vendor master records. Default hides inactive vendors."""
+    await get_current_user(request)
+    q: dict = {} if include_inactive else {"active": {"$ne": False}}
+    docs = await db.vendors.find(q).sort("name", 1).to_list(limit)
+    return [stringify(d) for d in docs]
+
+
+@api.post("/vendors", status_code=201)
+async def create_vendor(payload: VendorIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    doc = {
+        **payload.model_dump(),
+        "by": u["email"], "created_at": now_iso(), "updated_at": now_iso(),
+    }
+    try:
+        res = await db.vendors.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, f"A vendor named '{payload.name}' already exists.")
+    doc["_id"] = res.inserted_id
+    await log_activity("create_vendor", "vendors", f"Created vendor '{payload.name}'", u["email"])
+    return stringify(doc)
+
+
+@api.get("/vendors/{vid}")
+async def get_vendor(vid: str, request: Request):
+    await get_current_user(request)
+    doc = await db.vendors.find_one({"_id": oid(vid)})
+    if not doc:
+        raise HTTPException(404, "Vendor not found")
+    return stringify(doc)
+
+
+@api.patch("/vendors/{vid}")
+async def update_vendor(vid: str, payload: VendorUpdate, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    updates["updated_at"] = now_iso()
+    r = await db.vendors.update_one({"_id": oid(vid)}, {"$set": updates})
+    if not r.matched_count:
+        raise HTTPException(404, "Vendor not found")
+    doc = await db.vendors.find_one({"_id": oid(vid)})
+    await log_activity("update_vendor", "vendors", f"Updated vendor id={vid}", u["email"])
+    return stringify(doc)
+
+
+@api.delete("/vendors/{vid}")
+async def deactivate_vendor(vid: str, request: Request):
+    """Soft-delete: sets active=False to preserve AP history."""
+    u = await get_current_user(request); require_roles("admin")(u)
+    doc = await db.vendors.find_one({"_id": oid(vid)})
+    if not doc:
+        raise HTTPException(404, "Vendor not found")
+    await db.vendors.update_one({"_id": oid(vid)}, {"$set": {"active": False, "updated_at": now_iso()}})
+    await log_activity("deactivate_vendor", "vendors", f"Deactivated vendor '{doc.get('name')}'", u["email"])
+    return {"ok": True}
+
+
+# ---------- VENDOR PURCHASE ORDERS (to vendors) ----------
+
+@api.get("/vendor-pos")
+async def list_vendor_pos(request: Request, vendor_id: Optional[str] = None, status: Optional[str] = None, limit: int = 500):
+    await get_current_user(request)
+    q: dict = {}
+    if vendor_id:
+        q["vendor_id"] = vendor_id
+    if status:
+        q["status"] = status
+    docs = await db.vendor_purchase_orders.find(q).sort("created_at", -1).to_list(limit)
+    
+    # Decorate with vendor name
+    vendors = await db.vendors.find({}).to_list(2000)
+    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
+    
+    out = []
+    for d in docs:
+        d = stringify(d)
+        d["vendor_name"] = vendor_map.get(d.get("vendor_id", ""), "Unknown Vendor")
+        for li in d.get("line_items", []):
+            if "received_quantity" not in li:
+                li["received_quantity"] = 0.0
+        out.append(d)
+    return out
+
+
+@api.post("/vendor-pos", status_code=201)
+async def create_vendor_po(payload: VendorPOIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    # Validate vendor exists
+    vendor = await db.vendors.find_one({"_id": oid(payload.vendor_id)})
+    if not vendor:
+        raise HTTPException(404, "Vendor not found")
+        
+    po_no = await next_vendor_po_no()
+    doc = {
+        **payload.model_dump(),
+        "po_number": po_no,
+        "by": u["email"],
+        "processed_receipt_ids": [],
+        "created_at": now_iso(),
+        "updated_at": now_iso()
+    }
+    res = await db.vendor_purchase_orders.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_activity("create_vendor_po", "vendor_pos", f"Created Vendor PO '{po_no}'", u["email"])
+    return stringify(doc)
+
+
+@api.get("/vendor-pos/{id}")
+async def get_vendor_po(id: str, request: Request):
+    await get_current_user(request)
+    doc = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    if not doc:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+    vendor = await db.vendors.find_one({"_id": oid(doc.get("vendor_id"))})
+    out = stringify(doc)
+    out["vendor_name"] = vendor.get("name", "Unknown Vendor") if vendor else "Unknown Vendor"
+    for li in out.get("line_items", []):
+        if "received_quantity" not in li:
+            li["received_quantity"] = 0.0
+    return out
+
+
+@api.patch("/vendor-pos/{id}")
+async def update_vendor_po(id: str, payload: VendorPOUpdate, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    
+    if "vendor_id" in updates:
+        vendor = await db.vendors.find_one({"_id": oid(updates["vendor_id"])})
+        if not vendor:
+            raise HTTPException(404, "Vendor not found")
+
+    updates["updated_at"] = now_iso()
+    r = await db.vendor_purchase_orders.update_one({"_id": oid(id)}, {"$set": updates})
+    if not r.matched_count:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+        
+    doc = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    await log_activity("update_vendor_po", "vendor_pos", f"Updated Vendor PO id={id}", u["email"])
+    return stringify(doc)
+
+
+@api.post("/vendor-pos/{id}/receive")
+async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    
+    po = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    if not po:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+        
+    receipt_id = payload.receipt_id
+    processed = po.get("processed_receipt_ids") or []
+    if receipt_id in processed:
+        # Idempotent retry: already processed
+        return stringify(po)
+        
+    vendor = await db.vendors.find_one({"_id": oid(po.get("vendor_id"))})
+    vendor_name = vendor.get("name", "Unknown Vendor") if vendor else "Unknown Vendor"
+    
+    line_items = po.get("line_items") or []
+    for li in line_items:
+        if "received_quantity" not in li:
+            li["received_quantity"] = 0.0
+            
+    li_map = {li["material_id"]: li for li in line_items}
+    
+    movements = []
+    material_ids = [item.material_id for item in payload.items]
+    materials_list = await db.materials.find({"_id": {"$in": [oid(mid) for mid in material_ids]}}).to_list(100)
+    materials_map = {str(m["_id"]): m for m in materials_list}
+    
+    for item in payload.items:
+        if item.material_id not in li_map:
+            raise HTTPException(400, f"Material {item.material_id} is not in PO line items")
+        if item.quantity <= 0:
+            continue
+            
+        li = li_map[item.material_id]
+        li["received_quantity"] = round(li["received_quantity"] + item.quantity, 4)
+        
+        mat = materials_map.get(item.material_id)
+        if not mat:
+            raise HTTPException(404, f"Material {item.material_id} not found in DB")
+            
+        movements.append({
+            "material_id": item.material_id,
+            "material_code": mat.get("code"),
+            "material_name": mat.get("name"),
+            "unit": mat.get("unit"),
+            "type": "in",
+            "quantity": item.quantity,
+            "rate": li.get("rate") or mat.get("rate") or 0.0,
+            "party": vendor_name,
+            "vendor_po_id": str(po["_id"]),
+            "receipt_id": receipt_id,
+            "notes": f"Received against PO {po.get('po_number')}",
+            "by": u["email"],
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "created_at": now_iso(),
+            "auto": True
+        })
+        
+    if movements:
+        # Determine status
+        all_received = True
+        any_received = False
+        for li in line_items:
+            req_qty = li.get("quantity", 0)
+            rec_qty = li.get("received_quantity", 0)
+            if rec_qty < req_qty:
+                all_received = False
+            if rec_qty > 0:
+                any_received = True
+                
+        new_status = po.get("status", "draft")
+        if all_received:
+            new_status = "received"
+        elif any_received:
+            new_status = "partially_received"
+            
+        processed.append(receipt_id)
+        
+        await db.vendor_purchase_orders.update_one(
+            {"_id": po["_id"]},
+            {"$set": {
+                "line_items": line_items,
+                "status": new_status,
+                "processed_receipt_ids": processed,
+                "updated_at": now_iso()
+            }}
+        )
+        await db.inventory_movements.insert_many(movements)
+        po = await db.vendor_purchase_orders.find_one({"_id": po["_id"]})
+        
+    await log_activity("receive_vendor_po", "vendor_pos", f"Received materials for PO {po.get('po_number')} (receipt: {receipt_id})", u["email"])
+    return stringify(po)
+
+
+@api.delete("/vendor-pos/{id}")
+async def delete_vendor_po(id: str, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    r = await db.vendor_purchase_orders.delete_one({"_id": oid(id)})
+    if not r.deleted_count:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+    await log_activity("delete_vendor_po", "vendor_pos", f"Deleted Vendor PO id={id}", u["email"])
+    return {"ok": True}
+
+
 # ---------- CLIENTS / TALLY-STYLE LEDGER ----------
+
 @api.get("/clients")
 async def list_clients(request: Request):
     """Return unique clients seen on invoices + their aggregate AR snapshot."""
@@ -2120,6 +2448,48 @@ async def overdue_jobs(request: Request):
     return out
 
 
+@api.get("/production/unmatched-styles")
+async def unmatched_styles(request: Request):
+    """Return active (non-dispatched, non-archived) production jobs whose style
+    could not be resolved at creation time (style_match_status='unmatched') OR
+    whose inventory_consume_error contains a style-not-found message.
+    Results are grouped by style_code so the operator sees at a glance which
+    style codes need fixing in the Style Master.
+    """
+    await get_current_user(request)
+    jobs = await db.production_jobs.find({
+        "archived": {"$ne": True},
+        "stage": {"$ne": "dispatched"},
+        "$or": [
+            {"style_match_status": "unmatched"},
+            {"inventory_consume_error": {"$regex": "style", "$options": "i"}},
+        ],
+    }).to_list(2000)
+
+    # Group by style_code
+    groups: dict[str, dict] = {}
+    for j in jobs:
+        code = j.get("style_code") or "(blank)"
+        if code not in groups:
+            groups[code] = {"style_code": code, "job_count": 0, "jobs": []}
+        groups[code]["job_count"] += 1
+        groups[code]["jobs"].append({
+            "id": str(j["_id"]),
+            "po_number": j.get("po_number"),
+            "color": j.get("color"),
+            "size": j.get("size"),
+            "quantity": j.get("quantity"),
+            "stage": j.get("stage"),
+            "style_match_status": j.get("style_match_status"),
+            "inventory_consume_error": j.get("inventory_consume_error"),
+            "created_at": j.get("created_at"),
+        })
+
+    result = list(groups.values())
+    result.sort(key=lambda g: -g["job_count"])
+    return result
+
+
 # ---------- VISUAL REPORTS ----------
 @api.get("/reports/monthly-production")
 async def report_monthly_production(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
@@ -2682,17 +3052,42 @@ async def inventory_shortage(payload: dict, request: Request):
     # current stock map
     bal_list = await list_inventory(request)
     bal_map = {(b["code"], b["name"]): b for b in bal_list}
+    
+    materials = await db.materials.find({}).to_list(2000)
+    mat_details = {(m.get("code"), m.get("name")): m for m in materials}
+    
+    vendors = await db.vendors.find({}).to_list(2000)
+    vendor_map = {str(v["_id"]): v for v in vendors}
+
     rows = []
     for m in req["materials"]:
         key = (m["code"], m["name"])
         b = bal_map.get(key, {"balance": 0, "unit": m["unit"]})
         shortage = max(0, m["total_qty_required"] - b.get("balance", 0))
+        
+        # Get material metadata
+        mat_doc = mat_details.get(key) or {}
+        pref_v_id = mat_doc.get("preferred_vendor_id") or ""
+        pref_v_name = ""
+        if pref_v_id:
+            try:
+                v_doc = vendor_map.get(pref_v_id)
+                if v_doc:
+                    pref_v_name = v_doc.get("name")
+            except Exception:
+                pass
+
         rows.append({
             "code": m["code"], "name": m["name"], "unit": m["unit"],
             "required": m["total_qty_required"],
             "in_stock": b.get("balance", 0),
             "shortage": round(shortage, 2),
             "purchase_cost_estimated": round(shortage * m["rate"], 2),
+            "material_id": str(mat_doc.get("_id")) if mat_doc else "",
+            "reorder_level": mat_doc.get("reorder_level", 0),
+            "preferred_vendor_id": pref_v_id,
+            "preferred_vendor_name": pref_v_name,
+            "rate": m["rate"],
         })
     return {"jobs": req["jobs"], "shortage": rows}
 
@@ -3402,6 +3797,7 @@ async def on_startup():
         except Exception as drop_err:
             log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
     await db.production_jobs.create_index("po_id")
+    await db.vendors.create_index("name")
     await seed_admin(db)
     try:
         profile = await db.settings.find_one({"_id": "company_profile"})

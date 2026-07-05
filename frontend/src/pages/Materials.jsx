@@ -6,7 +6,7 @@ import { Plus, Trash2, Pencil, X, Save } from "lucide-react";
 const CATEGORIES = ["upper", "sole", "lining", "accessory", "consumable", "packing", "other"];
 const UNITS = ["sqft", "pcs", "kg", "gm", "ltr", "ml", "mtr", "set"];
 
-const emptyForm = { code: "", name: "", category: "upper", unit: "sqft", rate: 0, reorder_level: 0, notes: "" };
+const emptyForm = { code: "", name: "", category: "upper", unit: "sqft", rate: 0, reorder_level: 0, preferred_vendor_id: "", notes: "" };
 
 export default function Materials() {
   const [items, setItems] = useState([]);
@@ -15,23 +15,31 @@ export default function Materials() {
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState(emptyForm);
+  const [formError, setFormError] = useState("");
   const [confirm, setConfirm] = useState(null);
 
+  const [vendors, setVendors] = useState([]);
+
   const load = async () => {
-    const { data } = await http.get("/materials");
-    setItems(data);
+    const [matsRes, vendorsRes] = await Promise.all([
+      http.get("/materials"),
+      http.get("/vendors?include_inactive=true")
+    ]);
+    setItems(matsRes.data || []);
+    setVendors(vendorsRes.data || []);
   };
   useEffect(() => { load(); }, []);
 
-  const startNew = () => { setEdit(null); setForm(emptyForm); setOpen(true); };
-  const startEdit = (m) => { setEdit(m.id); setForm({ code: m.code, name: m.name, category: m.category, unit: m.unit, rate: m.rate, reorder_level: m.reorder_level || 0, notes: m.notes || "" }); setOpen(true); };
+  const startNew = () => { setEdit(null); setForm(emptyForm); setFormError(""); setOpen(true); };
+  const startEdit = (m) => { setEdit(m.id); setForm({ code: m.code, name: m.name, category: m.category, unit: m.unit, rate: m.rate, reorder_level: m.reorder_level || 0, preferred_vendor_id: m.preferred_vendor_id || "", notes: m.notes || "" }); setFormError(""); setOpen(true); };
   const save = async () => {
+    setFormError("");
     try {
       const body = { ...form, rate: Number(form.rate), reorder_level: Number(form.reorder_level || 0) };
       if (edit) await http.patch(`/materials/${edit}`, body); else await http.post("/materials", body);
       setOpen(false); load();
     } catch (e) {
-      alert(e.response?.data?.detail || e.message);
+      setFormError(e.response?.data?.detail || e.message);
     }
   };
   const remove = (id) => {
@@ -111,9 +119,14 @@ export default function Materials() {
       </div>
 
       {open && (
-        <Drawer onClose={() => setOpen(false)} title={edit ? "Edit Material" : "New Material"}>
+        <Drawer onClose={() => { setOpen(false); setFormError(""); }} title={edit ? "Edit Material" : "New Material"}>
           <div className="space-y-3">
-            <Input label="Code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} testId="form-mat-code" />
+            <div>
+              <Input label="Code" value={form.code} onChange={(e) => { setFormError(""); setForm({ ...form, code: e.target.value }); }} testId="form-mat-code" />
+              {formError && (
+                <p className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2" data-testid="form-mat-error">{formError}</p>
+              )}
+            </div>
             <Input label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} testId="form-mat-name" />
             <div className="grid grid-cols-2 gap-3">
               <Select label="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
@@ -125,6 +138,12 @@ export default function Materials() {
             </div>
             <Input label="Rate (INR)" type="number" step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} testId="form-mat-rate" />
             <Input label="Reorder Level (min stock)" type="number" step="0.5" value={form.reorder_level} onChange={(e) => setForm({ ...form, reorder_level: e.target.value })} testId="form-mat-reorder" />
+            <Select label="Preferred Vendor" value={form.preferred_vendor_id} onChange={(e) => setForm({ ...form, preferred_vendor_id: e.target.value })} testId="form-mat-vendor">
+              <option value="">-- No Preferred Vendor --</option>
+              {vendors.map((v) => (
+                <option key={v.id} value={v.id}>{v.name}</option>
+              ))}
+            </Select>
             <Input label="Notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             <div className="flex gap-2 pt-3">
               <BtnPrimary onClick={save} data-testid="save-material-btn"><Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save</BtnPrimary>

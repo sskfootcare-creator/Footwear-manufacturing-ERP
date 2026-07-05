@@ -24,7 +24,9 @@ http.interceptors.response.use(
         await http.post("/auth/refresh");
         return http(originalRequest);
       } catch (refreshError) {
-        window.location.href = "/login";
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
         return Promise.reject(refreshError);
       }
     }

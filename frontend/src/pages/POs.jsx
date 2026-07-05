@@ -23,6 +23,7 @@ export default function POs() {
   const [uploading, setUploading] = useState(false);
   const [view, setView] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const [formError, setFormError] = useState("");
 
   const load = async () => {
     try {
@@ -39,7 +40,7 @@ export default function POs() {
     return new Set(styles.map((s) => s.code.trim().toUpperCase()));
   }, [styles]);
 
-  const startNew = () => { setEditId(null); setForm(emptyPO); setOpen(true); };
+  const startNew = () => { setEditId(null); setForm(emptyPO); setFormError(""); setOpen(true); };
   const onExtractFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -108,6 +109,7 @@ export default function POs() {
   }, [form]);
 
   const save = async () => {
+    setFormError("");
     try {
       const body = {
         ...form,
@@ -121,7 +123,7 @@ export default function POs() {
       if (editId) await http.patch(`/pos/${editId}`, body); else await http.post("/pos", body);
       setOpen(false); load();
     } catch (err) {
-      alert("Save failed: " + (err.response?.data?.detail || err.message));
+      setFormError(err.response?.data?.detail || err.message);
     }
   };
 
@@ -221,10 +223,15 @@ export default function POs() {
       </div>
 
       {open && (
-        <Drawer onClose={() => setOpen(false)} title={editId ? "Edit Purchase Order" : "New Purchase Order"} width="max-w-5xl">
+        <Drawer onClose={() => { setOpen(false); setFormError(""); }} title={editId ? "Edit Purchase Order" : "New Purchase Order"} width="max-w-5xl">
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-3">
-              <Input label="PO Number" value={form.po_number} onChange={(e) => setForm({ ...form, po_number: e.target.value })} testId="form-po-number" />
+              <div>
+                <Input label="PO Number" value={form.po_number} onChange={(e) => { setFormError(""); setForm({ ...form, po_number: e.target.value }); }} testId="form-po-number" />
+                {formError && (
+                  <p className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2" data-testid="form-po-error">{formError}</p>
+                )}
+              </div>
               <Input label="PO Date" type="date" value={form.po_date} onChange={(e) => setForm({ ...form, po_date: e.target.value })} />
               <Input label="Delivery Date" type="date" value={form.delivery_date} onChange={(e) => setForm({ ...form, delivery_date: e.target.value })} />
             </div>

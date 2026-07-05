@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { http } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle } from "lucide-react";
 
 const STAGES = [
   { key: "procurement", label: "Procurement", color: "#64748B" },
@@ -100,11 +101,13 @@ function aggregateOverdue(rows) {
 }
 
 export default function Production() {
+  const navigate = useNavigate();
   const [jobs, setJobs] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [styles, setStyles] = useState([]);
   const [selected, setSelected] = useState({});
   const [procSelected, setProcSelected] = useState({});
+  const [shortageModal, setShortageModal] = useState(null);
   const [merging, setMerging] = useState(false);
   const [assignFor, setAssignFor] = useState(null);
   const [qtyFor, setQtyFor] = useState(null);
@@ -316,6 +319,19 @@ export default function Production() {
     } catch (e) { alert("Material requirement failed: " + (e.response?.data?.detail || e.message)); }
   };
 
+  const checkShortage = async (groups) => {
+    const job_ids = [];
+    groups.forEach(g => g.rows.forEach(r => job_ids.push(r.id)));
+    setShortageModal({ loading: true, shortage: [] });
+    try {
+      const { data } = await http.post("/inventory/shortage", { job_ids });
+      setShortageModal({ loading: false, shortage: data.shortage || [] });
+    } catch (e) {
+      alert("Shortage calculation failed: " + (e.response?.data?.detail || e.message));
+      setShortageModal(null);
+    }
+  };
+
   // ---- Drag & Drop bulk assignment ----
   const onDragStartWorker = (w) => (e) => {
     setDraggingWorker(w);
@@ -379,9 +395,14 @@ export default function Production() {
               <Archive className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Archive ({groupJobsByColor(archivedJobs).length})
             </button>
             {procSelectedCount > 0 && (
-              <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`); setProcSelected({}); }} data-testid="merged-mr-btn">
-                <ClipboardList className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Material Requirement ({procSelectedCount})
-              </BtnPrimary>
+              <>
+                <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`); setProcSelected({}); }} data-testid="merged-mr-btn">
+                  <ClipboardList className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Material Requirement ({procSelectedCount})
+                </BtnPrimary>
+                <BtnSecondary onClick={() => checkShortage(Object.values(procSelected))} data-testid="check-shortage-btn" className="!bg-amber-50 hover:!bg-amber-100 border-amber-300 text-amber-900">
+                  <AlertTriangle className="w-3.5 h-3.5 inline -mt-0.5 mr-1 text-amber-600 animate-pulse" /> Check Shortage ({procSelectedCount})
+                </BtnSecondary>
+              </>
             )}
             {dispatchedCount > 0 && (
               <BtnPrimary onClick={downloadMergedInvoice} disabled={merging} data-testid="merged-invoice-btn">
@@ -582,6 +603,14 @@ export default function Production() {
             </div>
           </div>
         </div>
+      )}
+
+      {shortageModal && (
+        <ShortageModal
+          state={shortageModal}
+          onClose={() => setShortageModal(null)}
+          navigate={navigate}
+        />
       )}
     </div>
   );
@@ -1428,6 +1457,128 @@ function Field({ label, children }) {
     <div>
       <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-1">{label}</div>
       {children}
+    </div>
+  );
+}
+
+/* ------------------- SHORTAGE CHECK MODAL & PO AUTO-RAISE ------------------- */
+function ShortageModal({ state, onClose, navigate }) {
+  const { loading, shortage } = state;
+
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4">
+        <Card className="p-8 max-w-sm w-full text-center space-y-4">
+          <div className="w-10 h-10 border-4 border-[#C27842] border-t-transparent rounded-full animate-spin mx-auto" />
+          <div className="text-sm font-bold text-slate-800">Calculating inventory requirements & shortage...</div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Filter materials below reorder level (current stock < reorder level)
+  const qualifying = shortage.filter(item => item.in_stock < item.reorder_level);
+
+  // Group by preferred vendor
+  const grouped = {};
+  qualifying.forEach(item => {
+    const vId = item.preferred_vendor_id || "unassigned";
+    const vName = item.preferred_vendor_name || "No Preferred Vendor";
+    if (!grouped[vId]) {
+      grouped[vId] = { vendor_id: vId, vendor_name: vName, items: [] };
+    }
+    grouped[vId].items.push(item);
+  });
+
+  const hasShortages = qualifying.length > 0;
+
+  const raisePoForVendor = (group) => {
+    navigate("/vendor-pos", {
+      state: {
+        prefill: {
+          vendor_id: group.vendor_id === "unassigned" ? "" : group.vendor_id,
+          items: group.items
+        }
+      }
+    });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="shortage-modal">
+      <div className="bg-white w-full max-w-4xl max-h-[85vh] overflow-y-auto border-2 border-slate-200 shadow-2xl flex flex-col">
+        <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#C27842]">Inventory Analytics</div>
+            <h3 className="text-lg font-bold">Shortage & Reorder Alert Analysis</h3>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/10 p-1"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-6 space-y-6 flex-1 overflow-y-auto">
+          {!hasShortages ? (
+            <div className="text-center py-12 text-slate-500">
+              <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-3" />
+              <p className="font-bold">No materials are below their minimum reorder level!</p>
+              <p className="text-xs text-slate-400 mt-1">All required materials for selected jobs are currently in sufficient supply.</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <p className="text-xs text-slate-600">
+                The following materials are required for the selected production jobs and their current stock level is at or below the reorder threshold. Grouped by preferred vendor.
+              </p>
+
+              {Object.values(grouped).map(group => (
+                <div key={group.vendor_id} className="border-2 border-slate-200" data-testid={`shortage-group-${group.vendor_id}`}>
+                  <div className="bg-slate-100 px-4 py-3 flex items-center justify-between border-b border-slate-200 flex-wrap gap-2">
+                    <div>
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Preferred Vendor:</span>
+                      <span className="ml-2 font-bold text-slate-900">{group.vendor_name}</span>
+                    </div>
+                    {group.vendor_id !== "unassigned" && (
+                      <button
+                        onClick={() => raisePoForVendor(group)}
+                        className="bg-[#0F172A] text-white font-bold uppercase tracking-wider text-[10px] px-3 py-1.5 hover:bg-slate-800 transition-colors flex items-center gap-1"
+                        data-testid={`raise-po-${group.vendor_id}`}
+                      >
+                        <Plus className="w-3 h-3" /> Raise Vendor PO
+                      </button>
+                    )}
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr className="text-left text-[9px] uppercase tracking-wider text-slate-600 font-bold">
+                        <th className="px-4 py-2">Code</th>
+                        <th className="px-4 py-2">Material Name</th>
+                        <th className="px-4 py-2 text-right">Job Requirement</th>
+                        <th className="px-4 py-2 text-right">Current Stock</th>
+                        <th className="px-4 py-2 text-right">Reorder Level</th>
+                        <th className="px-4 py-2 text-right text-red-600">Shortage Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.items.map(item => (
+                        <tr key={item.code} className="border-b border-slate-100 hover:bg-slate-50">
+                          <td className="px-4 py-2.5 font-mono font-bold">{item.code}</td>
+                          <td className="px-4 py-2.5">{item.name}</td>
+                          <td className="px-4 py-2.5 text-right font-mono">{item.required} {item.unit}</td>
+                          <td className="px-4 py-2.5 text-right font-mono">{item.in_stock} {item.unit}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-bold text-[#C27842]">{item.reorder_level} {item.unit}</td>
+                          <td className="px-4 py-2.5 text-right font-mono font-bold text-red-600">{item.shortage} {item.unit}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="shrink-0 border-t-2 border-slate-200 px-6 py-4 flex justify-end bg-slate-50">
+          <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        </div>
+      </div>
     </div>
   );
 }

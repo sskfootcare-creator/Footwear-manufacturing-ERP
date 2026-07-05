@@ -3,7 +3,7 @@ import { http, inr } from "../lib/api";
 import { PageHeader, StatTile, Card, BtnSecondary } from "../components/ui-kit";
 import { Link } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { AlertTriangle, Clock, ArrowRight, Receipt } from "lucide-react";
+import { AlertTriangle, Clock, ArrowRight, Receipt, Wrench } from "lucide-react";
 
 const STAGE_COLORS = {
   procurement: "#64748B", cutting: "#2563EB", folding: "#0284C7",
@@ -21,12 +21,14 @@ export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [overdue, setOverdue] = useState([]);
   const [overdueInvoices, setOverdueInvoices] = useState([]);
+  const [unmatchedStyles, setUnmatchedStyles] = useState([]);
   const { user } = useAuth();
 
   useEffect(() => {
     http.get("/dashboard/stats").then((r) => setStats(r.data)).catch(() => {});
     http.get("/dashboard/overdue").then((r) => setOverdue(r.data || [])).catch(() => {});
     http.get("/invoices/overdue").then((r) => setOverdueInvoices(r.data || [])).catch(() => {});
+    http.get("/production/unmatched-styles").then((r) => setUnmatchedStyles(r.data || [])).catch(() => {});
   }, []);
 
   const seedDemo = async () => {
@@ -106,6 +108,41 @@ export default function Dashboard() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </Card>
+        )}
+
+        {unmatchedStyles.length > 0 && (
+          <Card className="bg-amber-50 border-2 border-amber-400 overflow-hidden" data-testid="unmatched-styles-banner">
+            <div className="bg-amber-500 text-white px-5 py-2 flex items-baseline justify-between">
+              <div className="flex items-center gap-2 font-bold uppercase tracking-wider text-xs">
+                <Wrench className="w-4 h-4" />
+                {unmatchedStyles.reduce((s, g) => s + g.job_count, 0)} job{unmatchedStyles.reduce((s, g) => s + g.job_count, 0) !== 1 ? "s" : ""} with unresolved style code{unmatchedStyles.length !== 1 ? "s" : ""} — inventory will NOT be deducted
+              </div>
+              <Link to="/production" className="text-[10px] uppercase tracking-wider font-bold hover:underline flex items-center gap-1">
+                Open production floor <ArrowRight className="w-3 h-3" />
+              </Link>
+            </div>
+            <div className="px-5 py-3 space-y-2" data-testid="unmatched-styles-list">
+              <p className="text-xs text-amber-800 font-medium mb-2">
+                The following style codes don't match any entry in the Style Master. Fix them in
+                {" "}<Link to="/styles" className="underline font-bold">Styles</Link> or correct the PO line items.
+              </p>
+              {unmatchedStyles.map((g) => (
+                <div key={g.style_code} className="flex items-start gap-3 border border-amber-200 bg-white px-3 py-2" data-testid={`unmatched-${g.style_code}`}>
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono font-bold text-sm text-amber-900">{g.style_code}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-amber-700 font-bold">{g.job_count} job{g.job_count !== 1 ? "s" : ""}</span>
+                    </div>
+                    <div className="text-[11px] text-amber-700 mt-0.5">
+                      {g.jobs.slice(0, 3).map((j) => `PO ${j.po_number} · ${j.color || "—"} · Sz ${j.size || "—"} · ${j.quantity} pairs`).join("   |   ")}
+                      {g.jobs.length > 3 && <span className="italic"> + {g.jobs.length - 3} more</span>}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </Card>
         )}
