@@ -13,6 +13,7 @@ const STATUS_COLOR = {
   cancelled: "red"
 };
 
+
 const EMPTY_LINE = { material_id: "", quantity: 0, rate: 0, amount: 0 };
 
 export default function VendorPOs() {
@@ -56,7 +57,7 @@ export default function VendorPOs() {
   useEffect(() => {
     if (location.state && location.state.prefill && vendors.length > 0 && materials.length > 0) {
       const { vendor_id, items } = location.state.prefill;
-      
+
       // Clear location state to prevent triggering on page refreshes
       navigate(location.pathname, { replace: true, state: {} });
 
@@ -150,7 +151,7 @@ export default function VendorPOs() {
       setError("Please enter a positive quantity to receive for at least one item.");
       return;
     }
-    
+
     setSaving(true);
     setError("");
     try {
@@ -209,7 +210,7 @@ export default function VendorPOs() {
     if (!form.vendor_id) { setError("Please select a vendor."); return; }
     const validLines = form.line_items.filter(li => li.material_id && Number(li.quantity) > 0);
     if (validLines.length === 0) { setError("PO must contain at least one line item with a material and positive quantity."); return; }
-    
+
     setSaving(true);
     setError("");
     try {
