@@ -13,7 +13,6 @@ const STATUS_COLOR = {
   cancelled: "red"
 };
 
-
 const EMPTY_LINE = { material_id: "", quantity: 0, rate: 0, amount: 0 };
 
 export default function VendorPOs() {
