@@ -100,25 +100,23 @@ export default function AppShell() {
       {/* Mobile Top Header */}
       <header className="lg:hidden bg-[#0F172A] text-white flex items-center justify-between px-4 py-3 sticky top-0 z-40 border-b border-slate-800">
         <div className="flex items-center gap-3">
+          <button onClick={() => setMobileOpen(true)} className="text-slate-300 hover:text-white mr-1">
+            <Menu className="w-6 h-6" />
+          </button>
           <div className="w-8 h-8 bg-[#C27842] text-white grid place-items-center font-black">
             <Factory className="w-4 h-4" />
           </div>
           <span className="font-bold text-sm tracking-tight">SSK FOOTCARE</span>
         </div>
-        <button onClick={() => setMobileOpen(true)} className="text-slate-300 hover:text-white">
-          <Menu className="w-6 h-6" />
-        </button>
       </header>
 
       {/* Mobile Overlay Sidebar Drawer */}
-      {mobileOpen && (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
-          <aside className="relative flex w-full max-w-xs flex-1 flex-col bg-[#0F172A] pt-0 pb-4 text-slate-300 outline-none">
-            <SidebarContent />
-          </aside>
-        </div>
-      )}
+      <div className={`fixed inset-0 z-50 flex lg:hidden transition-all duration-300 ${mobileOpen ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}>
+        <div className={`fixed inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity duration-300 ${mobileOpen ? "opacity-100" : "opacity-0"}`} onClick={() => setMobileOpen(false)} />
+        <aside className={`relative flex w-full max-w-xs flex-1 flex-col bg-[#0F172A] pt-0 pb-4 text-slate-300 outline-none transform transition-transform duration-300 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
+          <SidebarContent />
+        </aside>
+      </div>
 
       {/* Desktop Static Sidebar */}
       <aside className="hidden lg:flex w-64 bg-[#0F172A] text-slate-300 flex-col sticky top-0 h-screen" data-testid="sidebar">
