@@ -1,35 +1,78 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck, Menu, X } from "lucide-react";
+import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck, Menu, X, ArrowLeftRight, ShoppingBag } from "lucide-react";
 
-const navItems = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, roles: ["admin", "manager", "production", "sales"] },
-  { to: "/styles", label: "Styles", icon: Layers, roles: ["admin", "manager", "sales"] },
-  { to: "/materials", label: "Materials", icon: Boxes, roles: ["admin", "manager"] },
-  { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["admin", "manager", "production"] },
-  { to: "/workers", label: "Karigars", icon: HardHat, roles: ["admin", "manager", "production"] },
-  { to: "/costing", label: "Costing", icon: Calculator, roles: ["admin", "manager"] },
-  { to: "/pos", label: "Purchase Orders", icon: FileText, roles: ["admin", "manager", "sales"] },
-  { to: "/production", label: "Production", icon: Hammer, roles: ["admin", "manager", "production"] },
-  { to: "/defects", label: "Defects & QC", icon: AlertOctagon, roles: ["admin", "manager", "production"] },
-  { to: "/payroll", label: "Payroll", icon: IndianRupee, roles: ["admin", "manager"] },
-  { to: "/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "manager", "sales"] },
-  { to: "/clients", label: "Clients", icon: BookOpen, roles: ["admin", "manager", "sales"] },
-  { to: "/vendors", label: "Vendors", icon: Truck, roles: ["admin", "manager"] },
-  { to: "/vendor-pos", label: "Vendor POs", icon: FileText, roles: ["admin", "manager"] },
-  { to: "/reports", label: "Reports", icon: BarChart3, roles: ["admin", "manager"] },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, roles: ["admin", "manager"] },
-  { to: "/users", label: "Users", icon: Users, roles: ["admin"] },
+const navGroups = [
+  {
+    key: "core",
+    title: "Core Operations",
+    workspaces: ["b2b", "online", "management"],
+    items: [
+      { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, roles: ["admin", "manager", "production", "sales"] },
+      { to: "/styles", label: "Styles", icon: Layers, roles: ["admin", "manager", "sales"] },
+      { to: "/materials", label: "Materials", icon: Boxes, roles: ["admin", "manager"] },
+      { to: "/inventory", label: "Raw Material Inventory", icon: Warehouse, roles: ["admin", "manager", "production"] },
+      { to: "/workers", label: "Workers", icon: HardHat, roles: ["admin", "manager", "production"] },
+      { to: "/payroll", label: "Payroll", icon: IndianRupee, roles: ["admin", "manager"] },
+      { to: "/settings", label: "Settings", icon: SettingsIcon, roles: ["admin", "manager"] },
+      { to: "/users", label: "Users", icon: Users, roles: ["admin"] },
+    ]
+  },
+  {
+    key: "b2b",
+    title: "B2B Manufacturing",
+    workspaces: ["b2b", "management"],
+    items: [
+      { to: "/pos", label: "POs", icon: FileText, roles: ["admin", "manager", "sales"] },
+      { to: "/production", label: "Production", icon: Hammer, roles: ["admin", "manager", "production"] },
+      { to: "/vendors", label: "Vendors", icon: Truck, roles: ["admin", "manager"] },
+      { to: "/vendor-pos", label: "Vendor POs", icon: FileText, roles: ["admin", "manager"] },
+      { to: "/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "manager", "sales"] },
+      { to: "/grns", label: "GRNs", icon: FileText, roles: ["admin", "manager"] },
+      { to: "/payments", label: "Payments", icon: IndianRupee, roles: ["admin", "manager"] },
+      { to: "/clients", label: "Clients", icon: BookOpen, roles: ["admin", "manager", "sales"] },
+    ]
+  },
+  {
+    key: "online",
+    title: "Online Commerce",
+    workspaces: ["online", "management"],
+    items: [
+      { to: "/sku-map", label: "Online Style Pipeline", icon: ArrowLeftRight, roles: ["admin", "manager"] },
+      { to: "/ready-stock", label: "Ready Stock", icon: Boxes, roles: ["admin", "manager"] },
+      { to: "/online-orders", label: "Online Orders", icon: ShoppingBag, roles: ["admin", "manager", "sales"] },
+      { to: "/dispatch", label: "Dispatch", icon: Truck, roles: ["admin", "manager", "production"] },
+      { to: "/returns", label: "Returns", icon: AlertOctagon, roles: ["admin", "manager", "production"] },
+      { to: "/settlements", label: "Settlements", icon: IndianRupee, roles: ["admin", "manager"] },
+      { to: "/liquidation", label: "Liquidation Watchlist", icon: BarChart3, roles: ["admin", "manager"] },
+    ]
+  }
 ];
 
 export default function AppShell() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [workspace, setWorkspace] = useState(localStorage.getItem("workspace") || "management");
+
+  useEffect(() => {
+    const onWsChange = () => {
+      setWorkspace(localStorage.getItem("workspace") || "management");
+    };
+    window.addEventListener("workspaceChanged", onWsChange);
+    return () => window.removeEventListener("workspaceChanged", onWsChange);
+  }, []);
+
+  const switchWorkspace = (ws) => {
+    localStorage.setItem("workspace", ws);
+    setWorkspace(ws);
+    nav("/");
+  };
 
   const doLogout = async () => {
     await logout();
+    localStorage.removeItem("workspace"); // clear workspace on logout too
     nav("/login");
   };
 
@@ -50,28 +93,56 @@ export default function AppShell() {
         </button>
       </div>
 
-      <nav className="flex-1 py-3 overflow-y-auto">
-        {navItems
-          .filter((n) => !user?.role || n.roles.includes(user.role))
-          .map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              onClick={() => setMobileOpen(false)}
-              data-testid={`nav-${n.label.toLowerCase().replace(/\s+/g, "-")}`}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-5 py-3 text-sm border-l-4 transition-colors ${
-                  isActive
-                    ? "bg-slate-800 text-white border-[#C27842]"
-                    : "border-transparent hover:bg-slate-800 hover:text-white hover:border-[#C27842]/50"
-                }`
-              }
-            >
-              <n.icon className="w-4 h-4" />
-              <span className="font-medium">{n.label}</span>
-            </NavLink>
-          ))}
+      {/* Workspace Switcher Widget */}
+      <div className="px-5 py-3 bg-slate-950/65 border-b border-slate-800 flex flex-col gap-1.5" data-testid="workspace-switcher-panel">
+        <span className="text-[9px] uppercase font-bold text-slate-500 tracking-wider">Active Workspace</span>
+        <select
+          value={workspace}
+          onChange={(e) => switchWorkspace(e.target.value)}
+          className="bg-slate-800 text-white text-xs font-semibold px-2 py-1.5 border border-slate-700 focus:outline-none w-full cursor-pointer hover:border-slate-500 transition-colors"
+          data-testid="workspace-select-dropdown"
+        >
+          <option value="b2b">B2B Manufacturing</option>
+          <option value="online">Online Commerce</option>
+          <option value="management">Management Dashboard</option>
+        </select>
+      </div>
+
+      <nav className="flex-1 py-3 overflow-y-auto space-y-4">
+        {navGroups
+          .filter((g) => g.workspaces.includes(workspace))
+          .map((group) => {
+            const filteredItems = group.items.filter(
+              (n) => !user?.role || n.roles.includes(user.role)
+            );
+            if (filteredItems.length === 0) return null;
+            return (
+              <div key={group.key} className="space-y-1">
+                <div className="px-5 py-1 text-[9px] uppercase tracking-wider font-black text-slate-500">
+                  {group.title}
+                </div>
+                {filteredItems.map((n) => (
+                  <NavLink
+                    key={n.to}
+                    to={n.to}
+                    end={n.end}
+                    onClick={() => setMobileOpen(false)}
+                    data-testid={`nav-${n.label.toLowerCase().replace(/\s+/g, "-")}`}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-5 py-2 text-xs border-l-4 transition-colors ${
+                        isActive
+                          ? "bg-slate-800 text-white border-[#C27842]"
+                          : "border-transparent text-slate-400 hover:bg-slate-800 hover:text-white hover:border-[#C27842]/50"
+                      }`
+                    }
+                  >
+                    <n.icon className="w-3.5 h-3.5" />
+                    <span className="font-semibold">{n.label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            );
+          })}
       </nav>
 
       <div className="border-t border-slate-800 p-4">

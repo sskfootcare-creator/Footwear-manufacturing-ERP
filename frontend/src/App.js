@@ -20,12 +20,21 @@ import Invoices from "@/pages/Invoices";
 import Clients from "@/pages/Clients";
 import Vendors from "@/pages/Vendors";
 import VendorPOs from "@/pages/VendorPOs";
+import SkuMap from "@/pages/SkuMap";
+import OnlineOrders from "@/pages/OnlineOrders";
+import SelectWorkspace from "@/pages/SelectWorkspace";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
   const { user } = useAuth();
   if (user === null) return <div className="min-h-screen grid place-items-center text-slate-500"><Loader2 className="w-6 h-6 animate-spin" /></div>;
   if (user === false) return <Navigate to="/login" replace />;
+
+  const workspace = localStorage.getItem("workspace");
+  const isSelectPage = window.location.pathname === "/select-workspace";
+  if (!workspace && !isSelectPage) {
+    return <Navigate to="/select-workspace" replace />;
+  }
   return children;
 }
 
@@ -42,7 +51,9 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
+          <Route path="/select-workspace" element={<Protected><SelectWorkspace /></Protected>} />
           <Route path="/" element={<Protected><AppShell /></Protected>}>
+
             <Route index element={<Dashboard />} />
             <Route path="materials" element={<Materials />} />
             <Route path="workers" element={<Workers />} />
@@ -58,6 +69,8 @@ function App() {
             <Route path="clients" element={<Clients />} />
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />
+            <Route path="sku-map" element={<SkuMap />} />
+            <Route path="online-orders" element={<OnlineOrders />} />
             <Route path="settings" element={<Settings />} />
             <Route path="users" element={<Users />} />
           </Route>

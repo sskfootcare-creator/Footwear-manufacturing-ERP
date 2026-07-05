@@ -520,6 +520,60 @@ class StageDurationsIn(BaseModel):
     hours: Dict[str, float]
 
 
+# ---------- SKU Map models ----------
+SourceType = Literal["b2b_client", "online_channel"]
+OnlineChannel = Literal["myntra", "flipkart", "nykaa", "website"]
+
+class SkuMapIn(BaseModel):
+    style_id: str                                   # ObjectId string ref to db.styles
+    source_type: SourceType
+    source_name: str                                # client_name (b2b) or channel slug (online)
+    external_sku: str
+    external_style_name: Optional[str] = ""
+    color_map: Optional[Dict[str, str]] = {}        # e.g. {"Tan": "TAN01"}
+    size_map:  Optional[Dict[str, str]] = {}        # e.g. {"8 UK": "8"}
+
+class SkuMapUpdate(BaseModel):
+    external_style_name: Optional[str] = None
+    color_map: Optional[Dict[str, str]] = None
+    size_map:  Optional[Dict[str, str]] = None
+
+
+class FgInventoryIn(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    ready_stock_qty: Optional[int] = 0
+    reserved_qty: Optional[int] = 0
+    in_transit_qty: Optional[int] = 0
+    return_qty: Optional[int] = 0
+    damaged_qty: Optional[int] = 0
+    liquidation_qty: Optional[int] = 0
+    min_stock_level: Optional[int] = 25
+
+class FgInventoryUpdate(BaseModel):
+    ready_stock_qty: Optional[int] = None
+    reserved_qty: Optional[int] = None
+    in_transit_qty: Optional[int] = None
+    return_qty: Optional[int] = None
+    damaged_qty: Optional[int] = None
+    liquidation_qty: Optional[int] = None
+    min_stock_level: Optional[int] = None
+
+class StockReservation(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    quantity: int
+
+class StockRelease(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    quantity: int
+    release_type: Literal["ship", "cancel"]
+
+
 # Sensible factory defaults (in hours)
 DEFAULT_STAGE_HOURS = {
     "procurement": 24, "cutting": 24, "folding": 8, "attachment": 8,
@@ -769,6 +823,540 @@ def compute_style_costing(style: dict) -> dict:
         "gst_amount": round(gst_amount, 2),
         "final_price": round(final_price, 2),
     }
+
+# ---------- SKU MAP ----------
+
+@api.get("/sku-map")
+async def list_sku_map(
+    request: Request,
+    style_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    source_name: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    await get_current_user(request)
+    query: dict = {}
+    if style_id:
+        query["style_id"] = style_id
+    if source_type:
+        query["source_type"] = source_type
+    if source_name:
+        query["source_name"] = {"$regex": re.escape(source_name), "$options": "i"}
+    if search:
+        query["$or"] = [
+            {"external_sku": {"$regex": re.escape(search), "$options": "i"}},
+            {"external_style_name": {"$regex": re.escape(search), "$options": "i"}},
+            {"source_name": {"$regex": re.escape(search), "$options": "i"}},
+            {"style_code": {"$regex": re.escape(search), "$options": "i"}},
+        ]
+    docs = await db.sku_map.find(query).sort("created_at", -1).to_list(2000)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/sku-map/resolve")
+async def resolve_sku_endpoint(
+    source_type: str,
+    source_name: str,
+    external_sku: str,
+    external_color: Optional[str] = None,
+    external_size: Optional[str] = None,
+    request: Request = None,
+):
+    """Resolve (source_type, source_name, external_sku) → internal style + translated color/size.
+
+    Returns the full resolve_style() dict including matched, match_via, color, size.
+    Always returns 200; the caller should check `matched` in the response body.
+    """
+    await get_current_user(request)
+    return await resolve_style(
+        source_type=source_type,
+        source_name=source_name,
+        external_sku=external_sku,
+        external_color=external_color,
+        external_size=external_size,
+    )
+
+
+@api.post("/sku-map")
+async def create_sku_map(payload: SkuMapIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    # Validate style_id exists
+    style = await db.styles.find_one({"_id": oid(payload.style_id)})
+    if not style:
+        raise HTTPException(404, f"Style '{payload.style_id}' not found")
+    doc = payload.model_dump()
+    doc["style_code"] = style["code"]          # denormalised for display
+    doc["created_at"] = now_iso()
+    doc["updated_at"] = now_iso()
+    doc["created_by"] = u["email"]
+    try:
+        res = await db.sku_map.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, f"A mapping for source '{payload.source_name}' / SKU '{payload.external_sku}' already exists")
+    await log_activity("CREATE", "sku_map", f"Mapped {payload.external_sku} ({payload.source_name}) → {style['code']}", u["email"])
+    doc.pop("_id", None)
+    doc["id"] = str(res.inserted_id)
+    # Update previously unmatched production jobs
+    await _update_unmatched_jobs_for_sku_mapping(res.inserted_id, doc)
+    return doc
+
+
+@api.put("/sku-map/{mid}")
+async def update_sku_map(mid: str, payload: SkuMapUpdate, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    existing = await db.sku_map.find_one({"_id": oid(mid)})
+    if not existing:
+        raise HTTPException(404, "Mapping not found")
+    update: dict = {"updated_at": now_iso()}
+    if payload.external_style_name is not None:
+        update["external_style_name"] = payload.external_style_name
+    if payload.color_map is not None:
+        update["color_map"] = payload.color_map
+    if payload.size_map is not None:
+        update["size_map"] = payload.size_map
+    await db.sku_map.update_one({"_id": oid(mid)}, {"$set": update})
+    await log_activity("UPDATE", "sku_map", f"Updated mapping {mid}", u["email"])
+    updated_doc = await db.sku_map.find_one({"_id": oid(mid)})
+    if updated_doc:
+        await _update_unmatched_jobs_for_sku_mapping(mid, updated_doc)
+    return stringify(await db.sku_map.find_one({"_id": oid(mid)}))
+
+
+@api.delete("/sku-map/{mid}")
+async def delete_sku_map(mid: str, request: Request):
+    u = await get_current_user(request); require_roles("admin")(u)
+    existing = await db.sku_map.find_one({"_id": oid(mid)})
+    if not existing:
+        raise HTTPException(404, "Mapping not found")
+    await db.sku_map.delete_one({"_id": oid(mid)})
+    await log_activity("DELETE", "sku_map", f"Deleted mapping {mid} ({existing.get('source_name')} / {existing.get('external_sku')})", u["email"])
+    return {"ok": True}
+
+
+@api.post("/sku-map/bulk")
+async def bulk_create_sku_map(
+    file: UploadFile = File(...),
+    source_type: str = "b2b_client",
+    source_name: str = "",
+    request: Request = None,
+):
+    """Bulk-import SKU mappings from a CSV file.
+
+    The CSV must contain at minimum the columns:
+      external_sku  — the code the client / platform uses          (required)
+      style_code    — our internal styles.code to map it to        (required)
+
+    Optional columns (any absent column is silently skipped):
+      external_style_name — human-readable description from that source
+      color_from / color_to  — one color translation pair per row
+      size_from  / size_to   — one size  translation pair per row
+
+    source_type and source_name can be supplied either as form fields or as
+    columns inside the CSV (CSV columns take priority per row).
+
+    Returns a summary: {created, skipped_duplicate, errors: [{row, reason}]}
+    """
+    import io
+    import csv
+
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")   # strip BOM if present
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    # Normalise column names: strip whitespace, lower-case
+    def norm_row(row: dict) -> dict:
+        return {k.strip().lower().replace(" ", "_"): (v or "").strip() for k, v in row.items()}
+
+    created = 0
+    skipped_duplicate = 0
+    errors = []
+
+    # Pre-fetch all style codes for fast lookup (code.upper() → ObjectId str)
+    all_styles_cursor = await db.styles.find({}, {"code": 1}).to_list(10000)
+    style_code_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles_cursor}
+
+    for idx, raw_row in enumerate(reader, start=2):   # row 1 = header
+        row = norm_row(raw_row)
+
+        # Resolve source_type / source_name: CSV column > form field
+        row_src_type = row.get("source_type", "") or source_type
+        row_src_name = row.get("source_name", "") or source_name
+
+        ext_sku   = row.get("external_sku", "").strip()
+        s_code    = row.get("style_code", "").strip()
+
+        if not ext_sku:
+            errors.append({"row": idx, "reason": "external_sku is empty"})
+            continue
+        if not s_code:
+            errors.append({"row": idx, "reason": "style_code is empty"})
+            continue
+        if not row_src_name:
+            errors.append({"row": idx, "reason": "source_name is empty (not in CSV and not provided as form field)"})
+            continue
+
+        style_id = style_code_map.get(s_code.upper())
+        if not style_id:
+            errors.append({"row": idx, "reason": f"style_code '{s_code}' not found in Style Master"})
+            continue
+
+        # Build optional color_map / size_map from per-row from/to columns
+        color_map: dict = {}
+        size_map:  dict = {}
+        cf = row.get("color_from", ""); ct = row.get("color_to", "")
+        sf = row.get("size_from",  ""); st = row.get("size_to",  "")
+        if cf and ct:
+            color_map[cf] = ct
+        if sf and st:
+            size_map[sf] = st
+
+        doc = {
+            "style_id":           style_id,
+            "style_code":         s_code,
+            "source_type":        row_src_type,
+            "source_name":        row_src_name,
+            "external_sku":       ext_sku,
+            "external_style_name": row.get("external_style_name", ""),
+            "color_map":          color_map,
+            "size_map":           size_map,
+            "created_at":         now_iso(),
+            "updated_at":         now_iso(),
+            "created_by":         u["email"],
+        }
+        try:
+            res = await db.sku_map.insert_one(doc)
+            created += 1
+            await _update_unmatched_jobs_for_sku_mapping(res.inserted_id, doc)
+        except DuplicateKeyError:
+            skipped_duplicate += 1
+
+    await log_activity(
+        "BULK_CREATE", "sku_map",
+        f"Bulk import: {created} created, {skipped_duplicate} duplicates, {len(errors)} errors (source: {source_name or 'per-row'})",
+        u["email"],
+    )
+    return {"created": created, "skipped_duplicate": skipped_duplicate, "errors": errors}
+
+
+@api.get("/sku-map/unmapped")
+async def sku_map_unmapped(request: Request):
+    """Return all active production jobs with style_match_status='unmatched',
+    grouped by source_type + source_name (derived from the job's client_name, always
+    'b2b_client' for PO-originated jobs), mirroring the grouping shape of
+    /api/production/unmatched-styles.
+
+    Each group has:
+      source_type  — always 'b2b_client' for now
+      source_name  — the client name from the originating PO
+      job_count    — total unresolved jobs in this group
+      external_skus — distinct external SKU codes seen in this group (for quick mapping)
+      jobs         — list of individual job summaries
+    """
+    await get_current_user(request)
+    jobs = await db.production_jobs.find({
+        "archived":           {"$ne": True},
+        "stage":              {"$ne": "dispatched"},
+        "style_match_status": "unmatched",
+    }).to_list(5000)
+
+    # Group by (source_type, source_name). All PO jobs are b2b_client for now.
+    groups: dict[tuple, dict] = {}
+    for j in jobs:
+        src_type = "b2b_client"
+        src_name = j.get("client_name") or "(unknown)"
+        key = (src_type, src_name)
+        if key not in groups:
+            groups[key] = {
+                "source_type":  src_type,
+                "source_name":  src_name,
+                "job_count":    0,
+                "external_skus": [],
+                "jobs":         [],
+            }
+        g = groups[key]
+        g["job_count"] += 1
+        ext_sku = j.get("style_code") or "(blank)"
+        if ext_sku not in g["external_skus"]:
+            g["external_skus"].append(ext_sku)
+        g["jobs"].append({
+            "id":                  str(j["_id"]),
+            "po_number":           j.get("po_number"),
+            "style_code":          j.get("style_code"),
+            "color":               j.get("color"),
+            "size":                j.get("size"),
+            "quantity":            j.get("quantity"),
+            "stage":               j.get("stage"),
+            "style_match_status":  j.get("style_match_status"),
+            "created_at":          j.get("created_at"),
+        })
+
+    result = list(groups.values())
+    result.sort(key=lambda g: -g["job_count"])
+    return result
+
+
+# ---------- FINISHED GOODS INVENTORY & RESERVATION ENGINE ----------
+
+@api.get("/fg-inventory")
+async def list_fg_inventory(
+    request: Request,
+    style_id: Optional[str] = None,
+    color: Optional[str] = None,
+    size: Optional[str] = None,
+    search: Optional[str] = None,
+    low_stock: Optional[bool] = None
+):
+    await get_current_user(request)
+    query = {}
+    if style_id:
+        try:
+            query["style_id"] = ObjectId(style_id)
+        except Exception:
+            pass
+    if color:
+        query["color"] = color
+    if size:
+        query["size"] = size
+    
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"style_code": search_regex},
+            {"color": search_regex},
+            {"size": search_regex}
+        ]
+    
+    docs = await db.fg_inventory.find(query).to_list(2000)
+    out = []
+    for d in docs:
+        d = stringify(d)
+        ready = d.get("ready_stock_qty", 0)
+        reserved = d.get("reserved_qty", 0)
+        damaged = d.get("damaged_qty", 0)
+        liq = d.get("liquidation_qty", 0)
+        min_stock = d.get("min_stock_level", 25)
+        
+        available = ready - reserved - damaged - liq
+        d["available_qty"] = available
+        d["is_low_stock"] = available < min_stock
+        
+        if low_stock is not None:
+            if low_stock and not d["is_low_stock"]:
+                continue
+            if not low_stock and d["is_low_stock"]:
+                continue
+        
+        out.append(d)
+    return out
+
+@api.get("/fg-inventory/{id}")
+async def get_fg_inventory_item(request: Request, id: str):
+    await get_current_user(request)
+    doc = await db.fg_inventory.find_one({"_id": ObjectId(id)})
+    if not doc:
+        raise HTTPException(404, "Inventory record not found")
+    doc = stringify(doc)
+    ready = doc.get("ready_stock_qty", 0)
+    reserved = doc.get("reserved_qty", 0)
+    damaged = doc.get("damaged_qty", 0)
+    liq = doc.get("liquidation_qty", 0)
+    min_stock = doc.get("min_stock_level", 25)
+    
+    doc["available_qty"] = ready - reserved - damaged - liq
+    doc["is_low_stock"] = doc["available_qty"] < min_stock
+    return doc
+
+@api.post("/fg-inventory")
+async def create_fg_inventory(request: Request, payload: FgInventoryIn):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    
+    style = await db.styles.find_one({"_id": ObjectId(payload.style_id)})
+    if not style:
+        raise HTTPException(400, "Style does not exist")
+        
+    doc = {
+        "style_id": ObjectId(payload.style_id),
+        "style_code": style["code"],
+        "color": payload.color,
+        "size": payload.size,
+        "ready_stock_qty": payload.ready_stock_qty,
+        "reserved_qty": payload.reserved_qty,
+        "in_transit_qty": payload.in_transit_qty,
+        "return_qty": payload.return_qty,
+        "damaged_qty": payload.damaged_qty,
+        "liquidation_qty": payload.liquidation_qty,
+        "min_stock_level": payload.min_stock_level,
+        "updated_at": now_iso()
+    }
+    try:
+        res = await db.fg_inventory.insert_one(doc)
+        doc["_id"] = str(res.inserted_id)
+        doc["style_id"] = str(doc["style_id"])
+        
+        ready = doc.get("ready_stock_qty", 0)
+        reserved = doc.get("reserved_qty", 0)
+        damaged = doc.get("damaged_qty", 0)
+        liq = doc.get("liquidation_qty", 0)
+        min_stock = doc.get("min_stock_level", 25)
+        
+        doc["available_qty"] = ready - reserved - damaged - liq
+        doc["is_low_stock"] = doc["available_qty"] < min_stock
+        return doc
+    except DuplicateKeyError:
+        raise HTTPException(400, "Inventory entry for this style/color/size already exists")
+
+@api.patch("/fg-inventory/{id}")
+async def update_fg_inventory(request: Request, id: str, payload: FgInventoryUpdate):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    
+    update_data = {}
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            update_data[field] = value
+    
+    if not update_data:
+        raise HTTPException(400, "No fields to update")
+        
+    update_data["updated_at"] = now_iso()
+    res = await db.fg_inventory.update_one(
+        {"_id": ObjectId(id)},
+        {"$set": update_data}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Inventory record not found")
+        
+    doc = await db.fg_inventory.find_one({"_id": ObjectId(id)})
+    doc = stringify(doc)
+    ready = doc.get("ready_stock_qty", 0)
+    reserved = doc.get("reserved_qty", 0)
+    damaged = doc.get("damaged_qty", 0)
+    liq = doc.get("liquidation_qty", 0)
+    min_stock = doc.get("min_stock_level", 25)
+    
+    doc["available_qty"] = ready - reserved - damaged - liq
+    doc["is_low_stock"] = doc["available_qty"] < min_stock
+    return doc
+
+@api.post("/fg-inventory/reserve")
+async def reserve_stock(request: Request, payload: StockReservation):
+    await get_current_user(request)
+    qty = payload.quantity
+    if qty <= 0:
+        raise HTTPException(400, "Quantity must be greater than zero")
+        
+    max_retries = 5
+    for attempt in range(max_retries):
+        doc = await db.fg_inventory.find_one({
+            "style_id": ObjectId(payload.style_id),
+            "color": payload.color,
+            "size": payload.size
+        })
+        if not doc:
+            raise HTTPException(404, "No finished goods stock record exists for this style/color/size configuration")
+            
+        ready = doc.get("ready_stock_qty", 0)
+        reserved = doc.get("reserved_qty", 0)
+        damaged = doc.get("damaged_qty", 0)
+        liq = doc.get("liquidation_qty", 0)
+        available = ready - reserved - damaged - liq
+        
+        if available < qty:
+            raise HTTPException(400, f"Insufficient stock: Requested {qty}, but only {available} available")
+            
+        res = await db.fg_inventory.update_one(
+            {
+                "_id": doc["_id"],
+                "reserved_qty": reserved
+            },
+            {
+                "$inc": {"reserved_qty": qty},
+                "$set": {"updated_at": now_iso()}
+            }
+        )
+        if res.modified_count > 0:
+            updated = await db.fg_inventory.find_one({"_id": doc["_id"]})
+            updated = stringify(updated)
+            updated["available_qty"] = available - qty
+            return {"success": True, "message": f"Reserved {qty} pairs", "inventory": updated}
+            
+    raise HTTPException(409, "Concurrency conflict during stock reservation. Please try again.")
+
+@api.post("/fg-inventory/release")
+async def release_stock(request: Request, payload: StockRelease):
+    await get_current_user(request)
+    qty = payload.quantity
+    if qty <= 0:
+        raise HTTPException(400, "Quantity must be greater than zero")
+        
+    max_retries = 5
+    for attempt in range(max_retries):
+        doc = await db.fg_inventory.find_one({
+            "style_id": ObjectId(payload.style_id),
+            "color": payload.color,
+            "size": payload.size
+        })
+        if not doc:
+            raise HTTPException(404, "No finished goods stock record exists for this style/color/size configuration")
+            
+        current_reserved = doc.get("reserved_qty", 0)
+        current_ready = doc.get("ready_stock_qty", 0)
+        
+        if current_reserved < qty:
+            raise HTTPException(400, f"Cannot release {qty} reserved pairs; only {current_reserved} are currently reserved")
+            
+        if payload.release_type == "ship":
+            if current_ready < qty:
+                raise HTTPException(400, f"Cannot ship {qty} ready stock pairs; only {current_ready} are in stock")
+                
+            res = await db.fg_inventory.update_one(
+                {
+                    "_id": doc["_id"],
+                    "reserved_qty": current_reserved,
+                    "ready_stock_qty": current_ready
+                },
+                {
+                    "$inc": {
+                        "reserved_qty": -qty,
+                        "ready_stock_qty": -qty,
+                        "in_transit_qty": qty
+                    },
+                    "$set": {"updated_at": now_iso()}
+                }
+            )
+        else:
+            res = await db.fg_inventory.update_one(
+                {
+                    "_id": doc["_id"],
+                    "reserved_qty": current_reserved
+                },
+                {
+                    "$inc": {"reserved_qty": -qty},
+                    "$set": {"updated_at": now_iso()}
+                }
+            )
+            
+        if res.modified_count > 0:
+            updated = await db.fg_inventory.find_one({"_id": doc["_id"]})
+            updated = stringify(updated)
+            u_ready = updated.get("ready_stock_qty", 0)
+            u_reserved = updated.get("reserved_qty", 0)
+            u_damaged = updated.get("damaged_qty", 0)
+            u_liq = updated.get("liquidation_qty", 0)
+            updated["available_qty"] = u_ready - u_reserved - u_damaged - u_liq
+            return {"success": True, "message": f"Released {qty} pairs via {payload.release_type}", "inventory": updated}
+            
+    raise HTTPException(409, "Concurrency conflict during stock release. Please try again.")
+
+
+# ---------- STYLES ----------
 
 @api.get("/styles")
 async def list_styles(request: Request, status: Optional[str] = None, search: Optional[str] = None):
@@ -1024,27 +1612,222 @@ async def get_po(pid: str, request: Request):
         raise HTTPException(404, "Not found")
     return stringify(d)
 
+async def resolve_style(
+    source_type: str,
+    source_name: str,
+    external_sku: str,
+    external_color: Optional[str] = None,
+    external_size: Optional[str] = None,
+) -> dict:
+    """Canonical resolver: external SKU → internal style + translated color/size.
+
+    Resolution order:
+      1. Exact match in sku_map on (source_type, source_name, external_sku) — all
+         comparisons are case-insensitive and trimmed.
+         If found: translate color and size through the mapping's color_map / size_map
+         (pass values through unchanged when a key is absent from the map).
+      2. Fallback: exact case-insensitive match on styles.code — backward compat for
+         existing B2B flows that already use the internal code on their POs.
+      3. Neither matched: return matched=False so the caller can queue it for manual
+         mapping via the /sku-map UI.
+
+    Returns a dict with keys:
+      style_id   – str ObjectId or None
+      style_code – str internal code or None
+      color      – translated internal color string (or original if no mapping)
+      size       – translated internal size  string (or original if no mapping)
+      matched    – bool  (False when nothing resolved)
+      match_via  – "sku_map" | "style_code" | None  (audit trail)
+      mapping_id – str ObjectId of the sku_map doc, or None
+      mapped_from_sku – the original external_sku that triggered a sku_map hit, or None
+    """
+    ext_sku    = (external_sku   or "").strip()
+    ext_color  = (external_color or "").strip()
+    ext_size   = (external_size  or "").strip()
+    src_name   = (source_name    or "").strip()
+    src_type   = (source_type    or "").strip()
+
+    # ── Pass 1: sku_map lookup ──────────────────────────────────────────────
+    mapping = await db.sku_map.find_one({
+        "source_type": src_type,
+        "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
+        "external_sku": {"$regex": f"^{re.escape(ext_sku)}$",  "$options": "i"},
+    })
+
+    if mapping:
+        style = await db.styles.find_one({"_id": ObjectId(mapping["style_id"])})
+        if style:
+            color_map: dict = mapping.get("color_map") or {}
+            size_map:  dict = mapping.get("size_map")  or {}
+            # Translate: try the external value as-is first, then case-insensitive fallback
+            def translate(m: dict, val: str) -> str:
+                if not val:
+                    return val
+                if val in m:
+                    return m[val]
+                val_lower = val.lower()
+                for k, v in m.items():
+                    if k.lower() == val_lower:
+                        return v
+                return val   # pass through unchanged when key not in map
+
+            return {
+                "style_id":       str(style["_id"]),
+                "style_code":     style["code"],
+                "color":          translate(color_map, ext_color),
+                "size":           translate(size_map,  ext_size),
+                "matched":        True,
+                "match_via":      "sku_map",
+                "mapping_id":     str(mapping["_id"]),
+                "mapped_from_sku": ext_sku,
+            }
+
+    # ── Pass 2: fallback – exact case-insensitive match on styles.code ──────
+    style = await db.styles.find_one(
+        {"code": {"$regex": f"^{re.escape(ext_sku)}$", "$options": "i"}}
+    )
+    if style:
+        return {
+            "style_id":       str(style["_id"]),
+            "style_code":     style["code"],
+            "color":          ext_color,   # no mapping available, pass through
+            "size":           ext_size,
+            "matched":        True,
+            "match_via":      "style_code",
+            "mapping_id":     None,
+            "mapped_from_sku": None,
+        }
+
+    # ── Pass 3: nothing found ────────────────────────────────────────────────
+    return {
+        "style_id":       None,
+        "style_code":     None,
+        "color":          ext_color,
+        "size":           ext_size,
+        "matched":        False,
+        "match_via":      None,
+        "mapping_id":     None,
+        "mapped_from_sku": None,
+    }
+
+
+async def _update_unmatched_jobs_for_sku_mapping(mapping_id: str, mapping_doc: dict):
+    """Scan and resolve all 'unmatched' production jobs that can now be resolved
+
+    by the newly created or updated SKU mapping. Updates style_id, style_code,
+    style_match_status, and translates color/size.
+    """
+    style_id = mapping_doc.get("style_id")
+    style_code = mapping_doc.get("style_code")
+    source_name = mapping_doc.get("source_name", "").strip()
+    external_sku = mapping_doc.get("external_sku", "").strip()
+
+    if not style_id or not style_code or not source_name or not external_sku:
+        return
+
+    # Find jobs where client_name matches source_name and style_code matches external_sku
+    jobs = await db.production_jobs.find({
+        "style_match_status": "unmatched",
+        "client_name": {"$regex": f"^{re.escape(source_name)}$", "$options": "i"},
+        "style_code": {"$regex": f"^{re.escape(external_sku)}$", "$options": "i"},
+    }).to_list(2000)
+
+    if not jobs:
+        return
+
+    color_map = mapping_doc.get("color_map") or {}
+    size_map = mapping_doc.get("size_map") or {}
+
+    def translate(m: dict, val: str) -> str:
+        if not val:
+            return val
+        if val in m:
+            return m[val]
+        val_lower = val.lower()
+        for k, v in m.items():
+            if k.lower() == val_lower:
+                return v
+        return val
+
+    for j in jobs:
+        ext_color = j.get("color") or ""
+        ext_size = str(j.get("size") or "")
+
+        translated_color = translate(color_map, ext_color)
+        translated_size = translate(size_map, ext_size)
+
+        await db.production_jobs.update_one(
+            {"_id": j["_id"]},
+            {"$set": {
+                "style_id": style_id,
+                "style_code": style_code,
+                "style_match_status": "mapped",
+                "mapped_from_sku": external_sku,
+                "sku_mapping_id": str(mapping_id),
+                "color": translated_color,
+                "size": translated_size,
+                "updated_at": now_iso(),
+            }}
+        )
+
+
 async def validate_po_styles(payload: POIn):
-    # Fetch all style codes from the database
+    """Validate and normalise style codes on a PO payload.
+
+    Pass 1 — exact case-insensitive match against styles.code (unchanged behaviour).
+    Pass 2 — for any line item still unresolved, try the sku_map cross-reference using
+             (client_name, external_sku). If resolved, the line item's style_code is
+             replaced with the internal code; no auto-create placeholder is created.
+    Pass 3 — codes that are still unresolved after both passes are auto-created as
+             placeholder inactive styles (original behaviour, preserved for backward compat).
+    """
     all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
-    existing_codes_upper = set(s["code"].strip().upper() for s in all_styles)
-    
-    missing_codes = []
-    for li in payload.line_items:
-        style_code = li.style_code.strip()
-        if style_code.upper() not in existing_codes_upper:
-            missing_codes.append(style_code)
+    existing_codes_upper = {s["code"].strip().upper(): s["code"] for s in all_styles}
+
+    # Pass 1 — exact match
+    unresolved = []          # (index, original external code)
+    for i, li in enumerate(payload.line_items):
+        ext_code = li.style_code.strip()
+        if ext_code.upper() in existing_codes_upper:
+            li.style_code = existing_codes_upper[ext_code.upper()]   # normalise casing
         else:
-            # Normalize casing to match the database exactly
-            for s in all_styles:
-                if s["code"].strip().upper() == style_code.upper():
-                    li.style_code = s["code"]
-                    break
-                    
-    if missing_codes:
+            unresolved.append((i, ext_code))
+
+    # Pass 2 — resolve_style() sku_map lookup
+    still_missing = []
+    for i, ext_code in unresolved:
+        li_obj = payload.line_items[i]
+        result = await resolve_style(
+            source_type="b2b_client",      # POs are always B2B in this flow
+            source_name=payload.client_name,
+            external_sku=ext_code,
+            external_color=li_obj.color or None,
+            external_size=str(li_obj.size) if li_obj.size else None,
+        )
+        if result["matched"] and result["match_via"] == "sku_map":
+            payload.line_items[i].style_code = result["style_code"]
+            # translate color/size in-place if the mapping provided translations
+            if result["color"] and result["color"] != (li_obj.color or ""):
+                payload.line_items[i].color = result["color"]
+            if result["size"] and result["size"] != str(li_obj.size or ""):
+                payload.line_items[i].size = result["size"]
+            # stash resolution metadata for create_po() to pick up
+            payload.line_items[i].__dict__["_sku_map_meta"] = {
+                "mapped_from_sku": result["mapped_from_sku"],
+                "mapping_id":      result["mapping_id"],
+            }
+        elif result["matched"] and result["match_via"] == "style_code":
+            # resolve_style fell back to a direct styles.code match — treat as matched,
+            # no auto-create needed, but also no sku_map metadata.
+            payload.line_items[i].style_code = result["style_code"]
+        else:
+            still_missing.append(ext_code)
+
+    # Pass 3 — auto-create placeholder styles for anything still unresolved
+    if still_missing:
         new_styles = []
         now = now_iso()
-        for code in set(missing_codes):
+        for code in set(still_missing):
             new_styles.append({
                 "code": code,
                 "name": f"Auto-created Style {code}",
@@ -1099,20 +1882,36 @@ async def create_po(payload: POIn, request: Request):
     entered = now_iso()
     deadline = _compute_deadline(entered, durations.get("procurement", 24))
     
-    all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
+    all_styles = await db.styles.find({}, {"code": 1, "_id": 1}).to_list(10000)
     style_id_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles}
-    
+
+    # Build a lookup of sku_map metadata stored on payload line items during validate_po_styles
+    sku_meta_by_code = {}
+    for li_obj in payload.line_items:
+        meta = getattr(li_obj, "__dict__", {}).get("_sku_map_meta")
+        if meta:
+            sku_meta_by_code[li_obj.style_code.strip().upper()] = meta
+
     for li in doc["line_items"]:
         style_code_upper = li["style_code"].strip().upper()
         style_id = style_id_map.get(style_code_upper)
-        
+        sku_meta = sku_meta_by_code.get(style_code_upper)
+
+        if style_id and sku_meta:
+            match_status = "mapped"      # resolved via sku_map cross-reference
+        elif style_id:
+            match_status = "matched"     # direct exact match against styles.code
+        else:
+            match_status = "unmatched"   # not found anywhere
+
         jobs.append({
             "po_id": doc["id"],
             "po_number": doc["po_number"],
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
             "style_id": style_id,
-            "style_match_status": "matched" if style_id else "unmatched",
+            "style_match_status": match_status,
+            **(({"mapped_from_sku": sku_meta["mapped_from_sku"], "sku_mapping_id": sku_meta["mapping_id"]}) if sku_meta else {}),
             "description": li.get("description", ""),
             "color": li.get("color", ""),
             "size": li.get("size", ""),
@@ -2786,6 +3585,208 @@ async def report_karigar_output(request: Request,
     return rows
 
 
+# ---------- ONLINE ORDERS ----------
+
+class OnlineOrderImportResult(BaseModel):
+    channel: str
+    imported: int
+    unresolved: int
+    errors: List[dict]
+
+@api.post("/online-orders/import")
+async def import_online_orders(
+    file: UploadFile = File(...),
+    channel: str = "myntra",          # form field: myntra|flipkart|nykaa|website
+    order_date: Optional[str] = None, # ISO date string, defaults to today
+    request: Request = None,
+):
+    """Import online marketplace orders from a CSV and create production jobs.
+
+    CSV required columns:
+      order_id   — marketplace order / shipment ID     (required, used as po_number)
+      style_sku  — the platform's SKU code             (required)
+      quantity   — integer                             (required)
+
+    Optional columns:
+      color, size, description, unit_price, delivery_date
+
+    Resolution uses resolve_style(source_type="online_channel", source_name=channel).
+    Unresolved rows are NOT auto-created as placeholder styles — they are returned
+    in the errors list for manual mapping via /sku-map.
+
+    Returns: { channel, imported, unresolved, errors: [{row, order_id, style_sku, reason}] }
+    """
+    import io
+    import csv as csv_mod
+
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+
+    channel = channel.strip().lower()
+    if channel not in ["myntra", "flipkart", "nykaa", "website"]:
+        raise HTTPException(400, f"Unknown channel '{channel}'. Must be: myntra, flipkart, nykaa, website")
+
+    today = (order_date or now_iso()[:10])
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv_mod.DictReader(io.StringIO(text))
+
+    def norm(row: dict) -> dict:
+        return {k.strip().lower().replace(" ", "_"): (v or "").strip() for k, v in row.items()}
+
+    imported = 0
+    unresolved = 0
+    errors = []
+
+    durations = await _get_stage_durations()
+
+    jobs_to_insert = []
+    for idx, raw_row in enumerate(reader, start=2):
+        row = norm(raw_row)
+
+        order_id   = row.get("order_id",  "").strip()
+        style_sku  = row.get("style_sku", "").strip()
+        qty_str    = row.get("quantity",  "0").strip()
+
+        if not order_id:
+            errors.append({"row": idx, "order_id": None, "style_sku": style_sku, "reason": "order_id is empty"})
+            continue
+        if not style_sku:
+            errors.append({"row": idx, "order_id": order_id, "style_sku": None, "reason": "style_sku is empty"})
+            continue
+        try:
+            quantity = int(float(qty_str))
+            if quantity <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            errors.append({"row": idx, "order_id": order_id, "style_sku": style_sku, "reason": f"Invalid quantity '{qty_str}'"})
+            continue
+
+        ext_color  = row.get("color", "")
+        ext_size   = row.get("size",  "")
+        unit_price = 0.0
+        try:
+            unit_price = float(row.get("unit_price", 0) or 0)
+        except (ValueError, TypeError):
+            pass
+        delivery_date = row.get("delivery_date", "")
+        description   = row.get("description", "")
+
+        # ── resolve_style: online_channel pass ──────────────────────────────
+        result = await resolve_style(
+            source_type="online_channel",
+            source_name=channel,
+            external_sku=style_sku,
+            external_color=ext_color or None,
+            external_size=ext_size  or None,
+        )
+
+        if not result["matched"]:
+            unresolved += 1
+            errors.append({
+                "row":       idx,
+                "order_id":  order_id,
+                "style_sku": style_sku,
+                "reason":    f"No sku_map entry and no styles.code match for '{style_sku}' on channel '{channel}'. "
+                             f"Add a mapping at /sku-map before re-importing.",
+            })
+            continue
+
+        entered  = now_iso()
+        deadline = _compute_deadline(entered, durations.get("procurement", 24))
+
+        match_status = result["match_via"]   # "sku_map" or "style_code"
+        if match_status == "sku_map":
+            match_status = "mapped"
+        else:
+            match_status = "matched"
+
+        job = {
+            # Link to source — use order_id as po_number, channel as client_name
+            "po_id":              None,          # no PO doc; this is a direct channel order
+            "po_number":          order_id,
+            "client_name":        channel,
+            "channel":            channel,
+            "source_type":        "online_channel",
+            "order_date":         today,
+
+            # Style resolution
+            "style_code":         result["style_code"],
+            "style_id":           result["style_id"],
+            "style_match_status": match_status,
+            **({"mapped_from_sku": result["mapped_from_sku"], "sku_mapping_id": result["mapping_id"]} if result["match_via"] == "sku_map" else {}),
+
+            # Line details
+            "description":        description,
+            "color":              result["color"],
+            "size":               result["size"],
+            "quantity":           quantity,
+            "unit_price":         unit_price,
+            "amount":             round(unit_price * quantity, 2),
+            "completed_qty":      0,
+            "rejected_qty":       0,
+            "delivery_date":      delivery_date,
+
+            # Production pipeline
+            "stage":              "procurement",
+            "stage_entered_at":   entered,
+            "stage_deadline":     deadline,
+            "created_at":         now_iso(),
+            "updated_at":         now_iso(),
+            "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"],
+                         "notes": f"Auto-created from {channel} CSV import"}],
+        }
+        jobs_to_insert.append(job)
+        imported += 1
+
+    if jobs_to_insert:
+        await db.production_jobs.insert_many(jobs_to_insert)
+
+    await log_activity(
+        "IMPORT", "online_orders",
+        f"{channel.capitalize()} CSV import: {imported} jobs created, {unresolved} unresolved, {len(errors)-unresolved} errors",
+        u["email"],
+    )
+    return {
+        "channel":    channel,
+        "imported":   imported,
+        "unresolved": unresolved,
+        "errors":     errors,
+    }
+
+
+@api.get("/online-orders")
+async def list_online_orders(
+    request: Request,
+    channel: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    style_match_status: Optional[str] = None,
+):
+    """List production jobs that originated from online channel CSV imports.
+    Filterable by channel, date range, and style_match_status.
+    """
+    await get_current_user(request)
+    query: dict = {"source_type": "online_channel"}
+    if channel:
+        query["channel"] = channel.lower()
+    if style_match_status:
+        query["style_match_status"] = style_match_status
+    if from_date or to_date:
+        date_q: dict = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date + "T23:59:59.999Z"
+        query["created_at"] = date_q
+    docs = await db.production_jobs.find(query).sort("created_at", -1).to_list(5000)
+    return [stringify(j) for j in docs]
+
+
 # ---------- PRODUCTION ----------
 @api.get("/production/jobs")
 async def list_jobs(request: Request, include_archived: bool = False):
@@ -3927,27 +4928,74 @@ async def dashboard_stats(request: Request):
     await get_current_user(request)
     total_pos = await db.pos.count_documents({})
     pending_pos = await db.pos.count_documents({"status": "pending"})
-    jobs = await db.production_jobs.find({}).to_list(5000)
-    pairs_in_wip = sum(j["quantity"] for j in jobs if j["stage"] != "dispatched")
-    dispatched = sum(j["quantity"] for j in jobs if j["stage"] == "dispatched")
+    
+    jobs = await db.production_jobs.find({}).to_list(10000)
+    
+    # B2B vs Online WIP/dispatched
+    b2b_jobs = [j for j in jobs if j.get("source_type") != "online_channel"]
+    online_jobs = [j for j in jobs if j.get("source_type") == "online_channel"]
+    
+    b2b_wip = sum(j["quantity"] for j in b2b_jobs if j["stage"] != "dispatched")
+    b2b_dispatched = sum(j["quantity"] for j in b2b_jobs if j["stage"] == "dispatched")
+    
+    online_wip = sum(j["quantity"] for j in online_jobs if j["stage"] != "dispatched")
+    online_dispatched = sum(j["quantity"] for j in online_jobs if j["stage"] == "dispatched")
+    
+    pairs_in_wip = b2b_wip + online_wip
+    dispatched = b2b_dispatched + online_dispatched
+    
+    # Stage counts
     stage_counts = {s: 0 for s in PRODUCTION_STAGES}
+    b2b_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
+    online_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
+    
     for j in jobs:
         stage_counts[j["stage"]] = stage_counts.get(j["stage"], 0) + j["quantity"]
-    revenue = 0.0
+        if j.get("source_type") == "online_channel":
+            online_stage_counts[j["stage"]] = online_stage_counts.get(j["stage"], 0) + j["quantity"]
+        else:
+            b2b_stage_counts[j["stage"]] = b2b_stage_counts.get(j["stage"], 0) + j["quantity"]
+            
+    # Revenue split
+    b2b_revenue = 0.0
     pos = await db.pos.find({}).to_list(2000)
     for p in pos:
-        revenue += p.get("grand_total", 0) or 0
+        b2b_revenue += p.get("grand_total", 0) or 0
+        
+    online_revenue = sum(j.get("amount", 0.0) or 0.0 for j in online_jobs)
+    
     recent_pos = [stringify(p) for p in pos[-5:][::-1]]
+    recent_online = [stringify(j) for j in online_jobs[-5:][::-1]]
+    
     return {
         "total_pos": total_pos,
         "pending_pos": pending_pos,
         "pairs_in_wip": pairs_in_wip,
         "dispatched": dispatched,
         "stage_counts": stage_counts,
-        "revenue": round(revenue, 2),
-        "recent_pos": recent_pos,
+        "revenue": round(b2b_revenue + online_revenue, 2),
         "materials_count": await db.materials.count_documents({}),
         "styles_count": await db.styles.count_documents({}),
+        
+        # Detailed split for Management View
+        "b2b": {
+            "revenue": round(b2b_revenue, 2),
+            "wip": b2b_wip,
+            "dispatched": b2b_dispatched,
+            "stage_counts": b2b_stage_counts,
+            "recent_pos": recent_pos,
+            "total_pos": total_pos,
+            "pending_pos": pending_pos,
+        },
+        "online": {
+            "revenue": round(online_revenue, 2),
+            "wip": online_wip,
+            "dispatched": online_dispatched,
+            "stage_counts": online_stage_counts,
+            "recent_orders": recent_online,
+            "total_orders": len(online_jobs),
+            "total_qty": sum(j["quantity"] for j in online_jobs),
+        }
     }
 
 
@@ -4044,6 +5092,26 @@ async def on_startup():
             log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
     await db.production_jobs.create_index("po_id")
     await db.vendors.create_index("name")
+
+    # SKU map indexes: unique compound on (source_type, source_name, external_sku) + style lookup
+    try:
+        await db.sku_map.create_index(
+            [("source_type", 1), ("source_name", 1), ("external_sku", 1)],
+            unique=True, name="sku_map_unique"
+        )
+        await db.sku_map.create_index("style_id", name="sku_map_style_id")
+    except Exception as e:
+        log.warning(f"Could not create sku_map indexes: {e}")
+
+    # fg_inventory unique index
+    try:
+        await db.fg_inventory.create_index(
+            [("style_id", 1), ("color", 1), ("size", 1)],
+            unique=True, name="fg_inventory_unique"
+        )
+    except Exception as e:
+        log.warning(f"Could not create fg_inventory unique index: {e}")
+
     await seed_admin(db)
     try:
         profile = await db.settings.find_one({"_id": "company_profile"})

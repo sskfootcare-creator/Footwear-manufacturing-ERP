@@ -18,7 +18,10 @@ import {
   Save,
   Calculator as CalcIcon,
   Upload,
+  ArrowLeftRight,
 } from "lucide-react";
+
+const ONLINE_CHANNELS = ["myntra", "flipkart", "nykaa", "website"];
 
 const SECTIONS = [
   "Upper Top",
@@ -69,6 +72,105 @@ export default function Styles() {
   const [formError, setFormError] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+
+  const [styleMappings, setStyleMappings] = useState([]);
+  const [addingMapping, setAddingMapping] = useState(false);
+  const [editingMappingId, setEditingMappingId] = useState(null);
+  const [newMapping, setNewMapping] = useState({
+    source_type: "b2b_client",
+    source_name: "",
+    external_sku: "",
+    external_style_name: "",
+    color_map_str: "",
+    size_map_str: "",
+  });
+  const [editingMapping, setEditingMapping] = useState({
+    external_style_name: "",
+    color_map_str: "",
+    size_map_str: "",
+  });
+
+  const loadStyleMappings = async (styleId) => {
+    try {
+      const res = await http.get(`/sku-map?style_id=${styleId}`);
+      setStyleMappings(res.data);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleAddMapping = async () => {
+    if (!newMapping.source_name.trim() || !newMapping.external_sku.trim()) {
+      alert("Source Name and External SKU are required.");
+      return;
+    }
+    try {
+      await http.post("/sku-map", {
+        style_id: editId,
+        source_type: newMapping.source_type,
+        source_name: newMapping.source_name.trim(),
+        external_sku: newMapping.external_sku.trim(),
+        external_style_name: newMapping.external_style_name.trim(),
+        color_map: stringToMap(newMapping.color_map_str),
+        size_map: stringToMap(newMapping.size_map_str),
+      });
+      setAddingMapping(false);
+      setNewMapping({
+        source_type: "b2b_client",
+        source_name: "",
+        external_sku: "",
+        external_style_name: "",
+        color_map_str: "",
+        size_map_str: "",
+      });
+      loadStyleMappings(editId);
+    } catch (e) {
+      alert(e.response?.data?.detail || "Failed to add mapping.");
+    }
+  };
+
+  const handleUpdateMapping = async (mid) => {
+    try {
+      await http.put(`/sku-map/${mid}`, {
+        external_style_name: editingMapping.external_style_name.trim(),
+        color_map: stringToMap(editingMapping.color_map_str),
+        size_map: stringToMap(editingMapping.size_map_str),
+      });
+      setEditingMappingId(null);
+      loadStyleMappings(editId);
+    } catch (e) {
+      alert(e.response?.data?.detail || "Failed to update mapping.");
+    }
+  };
+
+  const handleDeleteMapping = async (mid) => {
+    if (!window.confirm("Are you sure you want to delete this mapping?")) return;
+    try {
+      await http.delete(`/sku-map/${mid}`);
+      loadStyleMappings(editId);
+    } catch (e) {
+      alert("Failed to delete mapping.");
+    }
+  };
+
+  const mapToString = (map) => {
+    if (!map) return "";
+    return Object.entries(map).map(([k, v]) => `${k}:${v}`).join(", ");
+  };
+
+  const stringToMap = (str) => {
+    const map = {};
+    if (!str) return map;
+    str.split(",").forEach(item => {
+      const parts = item.split(":");
+      if (parts.length === 2) {
+        const k = parts[0].trim();
+        const v = parts[1].trim();
+        if (k && v) map[k] = v;
+      }
+    });
+    return map;
+  };
 
   const load = async (filter = statusFilter, search = searchQuery) => {
     const queryParams = new URLSearchParams();
@@ -124,6 +226,9 @@ export default function Styles() {
     setEditId(null);
     setForm(emptyStyle);
     setFormError("");
+    setStyleMappings([]);
+    setAddingMapping(false);
+    setEditingMappingId(null);
     setOpen(true);
   };
   const startEdit = (s) => {
@@ -143,7 +248,11 @@ export default function Styles() {
       gst_pct: s.gst_pct,
     });
     setFormError("");
+    setStyleMappings([]);
+    setAddingMapping(false);
+    setEditingMappingId(null);
     setOpen(true);
+    loadStyleMappings(s.id);
   };
   const save = async () => {
     setFormError("");
@@ -826,6 +935,207 @@ export default function Styles() {
                   }
                 />
               </div>
+
+              {/* External Codes / mappings */}
+              {editId && (
+                <div className="border-2 border-slate-200 p-4 mt-6 bg-slate-50">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-bold uppercase tracking-wider flex items-center gap-1.5 text-slate-800">
+                      <ArrowLeftRight className="w-4 h-4 text-slate-500" />
+                      External Codes / Mappings
+                    </h3>
+                    {!addingMapping && (
+                      <button
+                        onClick={() => {
+                          setAddingMapping(true);
+                          setNewMapping({
+                            source_type: "b2b_client",
+                            source_name: "",
+                            external_sku: "",
+                            external_style_name: "",
+                            color_map_str: "",
+                            size_map_str: "",
+                          });
+                        }}
+                        className="text-xs uppercase font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Add Mapping
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs bg-white border border-slate-200" id="style-inline-mappings-table">
+                      <thead className="bg-slate-100 text-left border-b border-slate-200">
+                        <tr>
+                          <th className="px-3 py-2 font-bold text-slate-600">Source Type</th>
+                          <th className="px-3 py-2 font-bold text-slate-600">Source Name</th>
+                          <th className="px-3 py-2 font-bold text-slate-600">Ext. SKU</th>
+                          <th className="px-3 py-2 font-bold text-slate-600">Ext. Name</th>
+                          <th className="px-3 py-2 font-bold text-slate-600">Color Map</th>
+                          <th className="px-3 py-2 font-bold text-slate-600">Size Map</th>
+                          <th className="px-3 py-2 font-bold text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {/* New Mapping inline row */}
+                        {addingMapping && (
+                          <tr className="bg-blue-50/50">
+                            <td className="p-2">
+                              <select
+                                className="w-full border border-slate-300 p-1"
+                                value={newMapping.source_type}
+                                onChange={(e) => setNewMapping({ ...newMapping, source_type: e.target.value, source_name: "" })}
+                              >
+                                <option value="b2b_client">B2B Client</option>
+                                <option value="online_channel">Online Channel</option>
+                              </select>
+                            </td>
+                            <td className="p-2">
+                              {newMapping.source_type === "online_channel" ? (
+                                <select
+                                  className="w-full border border-slate-300 p-1"
+                                  value={newMapping.source_name}
+                                  onChange={(e) => setNewMapping({ ...newMapping, source_name: e.target.value })}
+                                >
+                                  <option value="">— Select —</option>
+                                  {ONLINE_CHANNELS.map(ch => <option key={ch} value={ch}>{ch}</option>)}
+                                </select>
+                              ) : (
+                                <input
+                                  className="w-full border border-slate-300 p-1 font-sans text-xs"
+                                  placeholder="e.g. Bata"
+                                  value={newMapping.source_name}
+                                  onChange={(e) => setNewMapping({ ...newMapping, source_name: e.target.value })}
+                                />
+                              )}
+                            </td>
+                            <td className="p-2">
+                              <input
+                                className="w-full border border-slate-300 p-1 font-mono text-xs font-bold"
+                                placeholder="Ext. SKU"
+                                value={newMapping.external_sku}
+                                onChange={(e) => setNewMapping({ ...newMapping, external_sku: e.target.value })}
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                className="w-full border border-slate-300 p-1 text-xs"
+                                placeholder="Description"
+                                value={newMapping.external_style_name}
+                                onChange={(e) => setNewMapping({ ...newMapping, external_style_name: e.target.value })}
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                className="w-full border border-slate-300 p-1 font-mono text-xs"
+                                placeholder="ext:int, ..."
+                                value={newMapping.color_map_str}
+                                onChange={(e) => setNewMapping({ ...newMapping, color_map_str: e.target.value })}
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                className="w-full border border-slate-300 p-1 font-mono text-xs"
+                                placeholder="ext:int, ..."
+                                value={newMapping.size_map_str}
+                                onChange={(e) => setNewMapping({ ...newMapping, size_map_str: e.target.value })}
+                              />
+                            </td>
+                            <td className="p-2 text-center whitespace-nowrap">
+                              <button onClick={handleAddMapping} className="text-green-600 hover:text-green-800 font-bold mr-2 text-xs">Save</button>
+                              <button onClick={() => setAddingMapping(false)} className="text-slate-500 hover:text-slate-700 text-xs">Cancel</button>
+                            </td>
+                          </tr>
+                        )}
+
+                        {styleMappings.length === 0 && !addingMapping && (
+                          <tr>
+                            <td colSpan="7" className="px-3 py-4 text-center text-slate-400">
+                              No external codes mapped to this style yet.
+                            </td>
+                          </tr>
+                        )}
+
+                        {styleMappings.map((m) => {
+                          const isEditing = editingMappingId === m.id;
+                          return (
+                            <tr key={m.id} className="hover:bg-slate-50">
+                              <td className="px-3 py-2">
+                                <Badge color={m.source_type === "b2b_client" ? "blue" : "orange"}>
+                                  {m.source_type === "b2b_client" ? "B2B" : "Online"}
+                                </Badge>
+                              </td>
+                              <td className="px-3 py-2 font-bold text-slate-700">{m.source_name}</td>
+                              <td className="px-3 py-2 font-mono font-bold text-slate-900">{m.external_sku}</td>
+                              <td className="px-3 py-2">
+                                {isEditing ? (
+                                  <input
+                                    className="w-full border border-slate-300 p-0.5 text-xs"
+                                    value={editingMapping.external_style_name}
+                                    onChange={(e) => setEditingMapping({ ...editingMapping, external_style_name: e.target.value })}
+                                  />
+                                ) : (
+                                  m.external_style_name || <span className="text-slate-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-slate-600">
+                                {isEditing ? (
+                                  <input
+                                    className="w-full border border-slate-300 p-0.5 text-xs font-mono"
+                                    value={editingMapping.color_map_str}
+                                    onChange={(e) => setEditingMapping({ ...editingMapping, color_map_str: e.target.value })}
+                                    placeholder="ext:int, ..."
+                                  />
+                                ) : (
+                                  mapToString(m.color_map) || <span className="text-slate-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-slate-600">
+                                {isEditing ? (
+                                  <input
+                                    className="w-full border border-slate-300 p-0.5 text-xs font-mono"
+                                    value={editingMapping.size_map_str}
+                                    onChange={(e) => setEditingMapping({ ...editingMapping, size_map_str: e.target.value })}
+                                    placeholder="ext:int, ..."
+                                  />
+                                ) : (
+                                  mapToString(m.size_map) || <span className="text-slate-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-center whitespace-nowrap">
+                                {isEditing ? (
+                                  <>
+                                    <button onClick={() => handleUpdateMapping(m.id)} className="text-green-600 hover:text-green-800 font-bold mr-2 text-xs">Save</button>
+                                    <button onClick={() => setEditingMappingId(null)} className="text-slate-500 hover:text-slate-700 text-xs">Cancel</button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        setEditingMappingId(m.id);
+                                        setEditingMapping({
+                                          external_style_name: m.external_style_name || "",
+                                          color_map_str: mapToString(m.color_map),
+                                          size_map_str: mapToString(m.size_map),
+                                        });
+                                      }}
+                                      className="text-blue-600 hover:text-blue-800 mr-3 text-xs"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button onClick={() => handleDeleteMapping(m.id)} className="text-red-500 hover:text-red-700 text-xs">Delete</button>
+                                  </>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Live cost preview */}
