@@ -69,8 +69,12 @@ def set_auth_cookies(response, access_token: str, refresh_token: str = None):
 
 
 def clear_auth_cookies(response):
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
+    secure = True
+    if os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!" or os.environ.get("COOKIE_SECURE", "true").lower() == "false":
+        secure = False
+    samesite = "none" if secure else "lax"
+    response.delete_cookie("access_token", path="/", secure=secure, samesite=samesite)
+    response.delete_cookie("refresh_token", path="/", secure=secure, samesite=samesite)
 
 
 def _extract_token(request: Request) -> str | None:

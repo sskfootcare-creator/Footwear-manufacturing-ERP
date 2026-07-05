@@ -7,6 +7,17 @@ export const http = axios.create({
   withCredentials: true,
 });
 
+http.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem("token");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
 http.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -21,9 +32,13 @@ http.interceptors.response.use(
     ) {
       originalRequest._retry = true;
       try {
-        await http.post("/auth/refresh");
+        const { data } = await http.post("/auth/refresh");
+        if (data.access_token) {
+          localStorage.setItem("token", data.access_token);
+        }
         return http(originalRequest);
       } catch (refreshError) {
+        localStorage.removeItem("token");
         if (window.location.pathname !== "/login") {
           window.location.href = "/login";
         }
