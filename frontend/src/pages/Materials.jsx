@@ -136,9 +136,9 @@ export default function Materials() {
         }
       />
 
-      <div className="p-2 sm:p-4 lg:p-8 space-y-4">
-        <div className="flex gap-3 items-end">
-          <div className="flex-1 max-w-md">
+      <div className="p-4 sm:p-8 space-y-4">
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="w-full sm:flex-1 sm:max-w-md">
             <Input
               testId="materials-search"
               label="Search"
@@ -147,7 +147,7 @@ export default function Materials() {
               onChange={(e) => setFilter(e.target.value)}
             />
           </div>
-          <div className="w-48">
+          <div className="w-full sm:w-48">
             <Select
               label="Category"
               value={filterCat}

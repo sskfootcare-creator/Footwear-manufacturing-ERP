@@ -164,8 +164,8 @@ export default function Inventory() {
           />
         </div>
 
-        <div className="flex gap-3 items-end">
-          <div className="flex-1 max-w-md">
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="w-full sm:flex-1 sm:max-w-md">
             <Input
               testId="inventory-search"
               label="Search"
@@ -174,7 +174,7 @@ export default function Inventory() {
               onChange={(e) => setFilter(e.target.value)}
             />
           </div>
-          <div className="w-48">
+          <div className="w-full sm:w-48">
             <Select
               label="Category"
               value={filterCat}
