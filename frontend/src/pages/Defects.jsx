@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { http } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Plus, Trash2, Pencil, Save, AlertOctagon } from "lucide-react";
 
@@ -20,6 +20,7 @@ export default function Defects() {
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(empty);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const { data } = await http.get("/defects");
@@ -38,9 +39,16 @@ export default function Defects() {
     if (editId) await http.patch(`/defects/${editId}`, body); else await http.post("/defects", body);
     setOpen(false); load();
   };
-  const remove = async (id) => {
-    if (!window.confirm("Delete this defect record?")) return;
-    await http.delete(`/defects/${id}`); load();
+  const remove = (id) => {
+    setConfirm({
+      title: "Delete Defect Record",
+      message: "Are you sure you want to delete this defect record? Rework and scrap costs will be deleted from reports.",
+      onConfirm: async () => {
+        await http.delete(`/defects/${id}`);
+        setConfirm(null);
+        load();
+      }
+    });
   };
 
   const statusColor = { open: "red", in_progress: "yellow", closed: "green" };
@@ -127,6 +135,13 @@ export default function Defects() {
           </div>
         </Drawer>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

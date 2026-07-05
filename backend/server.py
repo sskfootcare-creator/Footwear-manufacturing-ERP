@@ -16,13 +16,17 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
+import jwt
 from auth import (
     hash_password, verify_password,
-    create_access_token, create_refresh_token,
+    create_access_token, create_refresh_token, validate_password,
     set_auth_cookies, clear_auth_cookies,
     get_current_user_factory, require_roles, seed_admin,
+    JWT_ALGORITHM, get_jwt_secret,
 )
+from collections import defaultdict
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
 from packing_list import build_default_packing_list, build_from_template
@@ -41,6 +45,12 @@ api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ssk")
+
+# ---------- Login rate limiting (in-memory, per-IP) ----------
+# Stores timestamps of failed login attempts keyed by IP string.
+_login_failures: dict = defaultdict(list)
+LOGIN_MAX_ATTEMPTS = 5       # max failures before lockout
+LOGIN_WINDOW_SECONDS = 900   # 15-minute sliding window
 
 # ---------- Keep Awake Job ----------
 async def keep_awake_job():
@@ -78,6 +88,19 @@ def stringify(doc: dict) -> dict:
     if "_id" in doc:
         doc["id"] = str(doc.pop("_id"))
     return doc
+
+
+async def log_activity(action: str, category: str, details: str, email: str):
+    try:
+        await db.audit_logs.insert_one({
+            "action": action,
+            "category": category,
+            "details": details,
+            "by": email,
+            "created_at": now_iso()
+        })
+    except Exception as e:
+        log.warning(f"Failed to write audit log: {e}")
 
 
 # ---------- Pydantic models ----------
@@ -155,6 +178,9 @@ class POIn(BaseModel):
     client_address: Optional[str] = ""
     billing_address: Optional[str] = ""
     shipping_address: Optional[str] = ""
+    client_gstin: Optional[str] = ""
+    client_state: Optional[str] = ""
+    client_state_code: Optional[str] = ""
     delivery_date: Optional[str] = ""
     payment_terms: Optional[str] = ""
     currency: str = "INR"
@@ -182,6 +208,7 @@ class ProductionStageUpdate(BaseModel):
     rejected_qty: Optional[int] = None
     qc_pass: Optional[bool] = None
     notes: Optional[str] = ""
+    confirm_skip: bool = False
 
 class ComponentUpdate(BaseModel):
     upper_done: Optional[bool] = None
@@ -407,24 +434,69 @@ def _overdue_hours(deadline_iso: str | None) -> float:
 
 # ---------- AUTH ----------
 @api.post("/auth/login")
-async def login(payload: LoginInput, response: Response):
+async def login(payload: LoginInput, request: Request, response: Response):
+    # --- Rate limiting: reject IPs that have too many recent failures ---
+    client_ip = request.client.host if request.client else "unknown"
+    now_ts = datetime.now(timezone.utc).timestamp()
+    window_start = now_ts - LOGIN_WINDOW_SECONDS
+    # Prune old entries
+    _login_failures[client_ip] = [
+        t for t in _login_failures[client_ip] if t > window_start
+    ]
+    if len(_login_failures[client_ip]) >= LOGIN_MAX_ATTEMPTS:
+        retry_after = int(LOGIN_WINDOW_SECONDS - (now_ts - _login_failures[client_ip][0]))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {retry_after // 60} minutes.",
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )
+
     email = payload.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not user.get("active", True) or not verify_password(payload.password, user["password_hash"]):
+        # Record the failure for rate limiting
+        _login_failures[client_ip].append(now_ts)
+        log.warning("Failed login attempt for email=%s from ip=%s (attempt %d/%d)",
+                    email, client_ip, len(_login_failures[client_ip]), LOGIN_MAX_ATTEMPTS)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Success — clear failure counter for this IP
+    _login_failures.pop(client_ip, None)
     uid = str(user["_id"])
     access = create_access_token(uid, email, user["role"])
     refresh = create_refresh_token(uid)
     set_auth_cookies(response, access, refresh)
     return {
         "id": uid, "email": email, "name": user["name"], "role": user["role"],
-        "access_token": access,
+        "access_token": access, "refresh_token": refresh
     }
 
 @api.post("/auth/logout")
 async def logout(response: Response):
     clear_auth_cookies(response)
     return {"ok": True}
+
+@api.post("/auth/refresh")
+async def refresh_token_route(request: Request, response: Response):
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+    try:
+        payload = jwt.decode(refresh_token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user or not user.get("active", True):
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+        
+        new_access = create_access_token(str(user["_id"]), user["email"], user["role"])
+        set_auth_cookies(response, new_access)
+        return {"ok": True, "access_token": new_access}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Expired refresh token")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 @api.get("/auth/me")
 async def me(request: Request):
@@ -444,6 +516,7 @@ async def list_users(request: Request):
 async def create_user(payload: UserCreate, request: Request):
     user = await get_current_user(request)
     require_roles("admin")(user)
+    validate_password(payload.password)  # enforce password policy
     email = payload.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(409, "Email already exists")
@@ -468,6 +541,7 @@ async def update_user(user_id: str, payload: UserUpdate, request: Request):
     require_roles("admin")(user)
     update = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     if "password" in update:
+        validate_password(update["password"])  # enforce password policy
         update["password_hash"] = hash_password(update.pop("password"))
     await db.users.update_one({"_id": oid(user_id)}, {"$set": update})
     doc = await db.users.find_one({"_id": oid(user_id)}, {"password_hash": 0})
@@ -479,7 +553,8 @@ async def delete_user(user_id: str, request: Request):
     require_roles("admin")(user)
     if user["id"] == user_id:
         raise HTTPException(400, "Cannot delete yourself")
-    await db.users.delete_one({"_id": oid(user_id)})
+    # Soft delete / deactivate instead of hard delete to preserve audit trails (e.g. POs, history)
+    await db.users.update_one({"_id": oid(user_id)}, {"$set": {"active": False}})
     return {"ok": True}
 
 
@@ -493,10 +568,17 @@ async def list_materials(request: Request):
 @api.post("/materials")
 async def create_material(payload: MaterialIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    code = payload.code.strip()
+    if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}}):
+        raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
+    payload.code = code
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
-    res = await db.materials.insert_one(doc)
+    try:
+        res = await db.materials.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
     return doc
@@ -504,9 +586,16 @@ async def create_material(payload: MaterialIn, request: Request):
 @api.patch("/materials/{mid}")
 async def update_material(mid: str, payload: MaterialIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    code = payload.code.strip()
+    if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}, "_id": {"$ne": oid(mid)}}):
+        raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
+    payload.code = code
     update = payload.model_dump()
     update["updated_at"] = now_iso()
-    await db.materials.update_one({"_id": oid(mid)}, {"$set": update})
+    try:
+        await db.materials.update_one({"_id": oid(mid)}, {"$set": update})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     return stringify(await db.materials.find_one({"_id": oid(mid)}))
 
 @api.delete("/materials/{mid}")
@@ -571,10 +660,17 @@ async def get_style(sid: str, request: Request):
 @api.post("/styles")
 async def create_style(payload: StyleIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    code = payload.code.strip()
+    if await db.styles.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}}):
+        raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
+    payload.code = code
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
-    res = await db.styles.insert_one(doc)
+    try:
+        res = await db.styles.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
     doc["costing"] = compute_style_costing(doc)
@@ -583,9 +679,16 @@ async def create_style(payload: StyleIn, request: Request):
 @api.patch("/styles/{sid}")
 async def update_style(sid: str, payload: StyleIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    code = payload.code.strip()
+    if await db.styles.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}, "_id": {"$ne": oid(sid)}}):
+        raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
+    payload.code = code
     update = payload.model_dump()
     update["updated_at"] = now_iso()
-    await db.styles.update_one({"_id": oid(sid)}, {"$set": update})
+    try:
+        await db.styles.update_one({"_id": oid(sid)}, {"$set": update})
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
     d = stringify(await db.styles.find_one({"_id": oid(sid)}))
     d["costing"] = compute_style_costing(d)
     return d
@@ -619,9 +722,37 @@ async def get_po(pid: str, request: Request):
         raise HTTPException(404, "Not found")
     return stringify(d)
 
+async def validate_po_styles(payload: POIn):
+    # Fetch all style codes from the database
+    all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
+    existing_codes_upper = set(s["code"].strip().upper() for s in all_styles)
+    
+    missing_codes = []
+    for li in payload.line_items:
+        style_code = li.style_code.strip()
+        if style_code.upper() not in existing_codes_upper:
+            missing_codes.append(style_code)
+        else:
+            # Normalize casing to match the database exactly
+            for s in all_styles:
+                if s["code"].strip().upper() == style_code.upper():
+                    li.style_code = s["code"]
+                    break
+                    
+    if missing_codes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The following style codes do not exist in the Style Master: {', '.join(set(missing_codes))}. Please create them first."
+        )
+
 @api.post("/pos")
 async def create_po(payload: POIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
+    await validate_po_styles(payload)
+    po_num = payload.po_number.strip()
+    if await db.pos.find_one({"po_number": {"$regex": f"^{re.escape(po_num)}$", "$options": "i"}}):
+        raise HTTPException(status_code=409, detail=f"Purchase Order with PO number '{po_num}' already exists")
+    payload.po_number = po_num
     doc = payload.model_dump()
     doc["status"] = "pending"
     doc["created_at"] = now_iso()
@@ -630,7 +761,10 @@ async def create_po(payload: POIn, request: Request):
         doc["total_quantity"] = sum(li["quantity"] for li in doc["line_items"])
     if not doc.get("subtotal"):
         doc["subtotal"] = sum(li["amount"] for li in doc["line_items"])
-    res = await db.pos.insert_one(doc)
+    try:
+        res = await db.pos.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail=f"Purchase Order with PO number '{po_num}' already exists")
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
     # auto-create production jobs (one per line item)
@@ -638,12 +772,20 @@ async def create_po(payload: POIn, request: Request):
     durations = await _get_stage_durations()
     entered = now_iso()
     deadline = _compute_deadline(entered, durations.get("procurement", 24))
+    
+    all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
+    style_id_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles}
+    
     for li in doc["line_items"]:
+        style_code_upper = li["style_code"].strip().upper()
+        style_id = style_id_map.get(style_code_upper)
+        
         jobs.append({
             "po_id": doc["id"],
             "po_number": doc["po_number"],
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
+            "style_id": style_id,
             "description": li.get("description", ""),
             "color": li.get("color", ""),
             "size": li.get("size", ""),
@@ -665,6 +807,11 @@ async def create_po(payload: POIn, request: Request):
 @api.patch("/pos/{pid}")
 async def update_po(pid: str, payload: POIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
+    await validate_po_styles(payload)
+    po_num = payload.po_number.strip()
+    if await db.pos.find_one({"po_number": {"$regex": f"^{re.escape(po_num)}$", "$options": "i"}, "_id": {"$ne": oid(pid)}}):
+        raise HTTPException(status_code=409, detail=f"Purchase Order with PO number '{po_num}' already exists")
+    payload.po_number = po_num
     update = payload.model_dump()
     update["updated_at"] = now_iso()
     await db.pos.update_one({"_id": oid(pid)}, {"$set": update})
@@ -680,7 +827,10 @@ async def delete_po(pid: str, request: Request):
 @api.post("/pos/extract")
 async def extract_po(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
-    content = await file.read()
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+    content = await file.read(MAX_FILE_SIZE + 1)
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File size exceeds the maximum limit of 10MB.")
     fname = (file.filename or "").lower()
     try:
         if fname.endswith(".pdf"):
@@ -1706,21 +1856,24 @@ async def create_packing_template(payload: PackingTemplateIn, request: Request):
     doc["_id"] = res.inserted_id
     safe = stringify(doc)
     safe.pop("file_b64", None)
+    await log_activity("create_packing_template", "settings", f"Created packing template: {payload.name}", u["email"])
     return safe
 
 
 @api.delete("/packing-templates/{tid}")
 async def delete_packing_template(tid: str, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
-    res = await db.packing_templates.delete_one({"_id": oid(tid)})
-    if res.deleted_count == 0:
+    t = await db.packing_templates.find_one({"_id": oid(tid)})
+    if not t:
         raise HTTPException(404, "Template not found")
+    await db.packing_templates.delete_one({"_id": oid(tid)})
+    await log_activity("delete_packing_template", "settings", f"Deleted packing template: {t.get('name')}", u["email"])
     return {"ok": True}
 
 
 # ---------- REPORTS ----------
 @api.get("/reports/cost-variance")
-async def report_cost_variance(request: Request):
+async def report_cost_variance(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
     await get_current_user(request)
     styles = await db.styles.find({}).to_list(1000)
     style_costs = {}
@@ -1728,7 +1881,17 @@ async def report_cost_variance(request: Request):
         s_obj = stringify(s)
         c = compute_style_costing(s_obj)
         style_costs[s["code"]] = {"name": s["name"], "computed_cost": c["total_cost"], "selling_price": c["selling_price"]}
-    pos = await db.pos.find({}).to_list(1000)
+        
+    po_query = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        po_query["po_date"] = date_q
+        
+    pos = await db.pos.find(po_query).to_list(1000)
     rows = []
     for p in pos:
         for li in p.get("line_items", []):
@@ -1751,9 +1914,19 @@ async def report_cost_variance(request: Request):
 
 
 @api.get("/reports/stage-cycle-time")
-async def report_stage_cycle_time(request: Request):
+async def report_stage_cycle_time(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
     await get_current_user(request)
-    jobs = await db.production_jobs.find({}).to_list(5000)
+    
+    job_query = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date + "T23:59:59.999Z"
+        job_query["created_at"] = date_q
+        
+    jobs = await db.production_jobs.find(job_query).to_list(5000)
     from collections import defaultdict
     durations = defaultdict(list)
     for j in jobs:
@@ -1780,10 +1953,22 @@ async def report_stage_cycle_time(request: Request):
 
 
 @api.get("/reports/defect-rate")
-async def report_defect_rate(request: Request):
+async def report_defect_rate(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
     await get_current_user(request)
-    defects = await db.defects.find({}).to_list(2000)
-    jobs = await db.production_jobs.find({}).to_list(5000)
+    
+    defect_query = {}
+    job_query = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date + "T23:59:59.999Z"
+        defect_query["created_at"] = date_q
+        job_query["created_at"] = date_q
+        
+    defects = await db.defects.find(defect_query).to_list(2000)
+    jobs = await db.production_jobs.find(job_query).to_list(5000)
     from collections import defaultdict
     stage_qty = defaultdict(int)
     for j in jobs:
@@ -1841,7 +2026,52 @@ async def put_stage_durations(payload: StageDurationsIn, request: Request):
         {"$set": {"hours": cleaned, "updated_at": now_iso(), "updated_by": u["email"]}},
         upsert=True,
     )
+    await log_activity("update_stage_durations", "settings", "Updated stage ETAs/deadlines", u["email"])
     return {"ok": True, "hours": await _get_stage_durations()}
+
+@api.get("/settings/company")
+async def get_company_profile(request: Request):
+    await get_current_user(request)
+    profile = await db.settings.find_one({"_id": "company_profile"})
+    if not profile:
+        from pdf_docs import COMPANY
+        return COMPANY
+    profile.pop("_id", None)
+    return profile
+
+@api.put("/settings/company")
+async def put_company_profile(payload: dict, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    await db.settings.update_one(
+        {"_id": "company_profile"},
+        {"$set": payload},
+        upsert=True
+    )
+    from pdf_docs import update_company_profile
+    update_company_profile(payload)
+    await log_activity("update_company_profile", "settings", "Updated company profile details", u["email"])
+    return {"ok": True}
+
+@api.get("/settings/audit-logs")
+async def get_audit_logs(request: Request):
+    await get_current_user(request)
+    logs = await db.audit_logs.find({}).sort("created_at", -1).to_list(100)
+    return [stringify(l) for l in logs]
+
+@api.get("/settings/export-backup")
+async def get_export_backup(request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    backup_data = {}
+    collections = [
+        "users", "materials", "styles", "pos", "production_jobs", 
+        "workers", "defects", "packing_templates", "invoices", 
+        "grns", "payments", "settings", "inventory_movements", "audit_logs"
+    ]
+    for col_name in collections:
+        docs = await db[col_name].find({}).to_list(10000)
+        backup_data[col_name] = [stringify(d) for d in docs]
+    await log_activity("database_backup", "settings", f"Full database backup downloaded by {u['email']}", u["email"])
+    return backup_data
 
 
 # ---------- OVERDUE / DEADLINE ALERTS ----------
@@ -1871,10 +2101,20 @@ async def overdue_jobs(request: Request):
 
 # ---------- VISUAL REPORTS ----------
 @api.get("/reports/monthly-production")
-async def report_monthly_production(request: Request):
+async def report_monthly_production(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
     """Pairs produced (dispatched) and started (procurement created) per month for last 12 months."""
     await get_current_user(request)
-    jobs = await db.production_jobs.find({}).to_list(10000)
+    
+    job_query = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date + "T23:59:59.999Z"
+        job_query["created_at"] = date_q
+        
+    jobs = await db.production_jobs.find(job_query).to_list(10000)
     from collections import defaultdict
     monthly = defaultdict(lambda: {"started": 0, "dispatched": 0})
     for j in jobs:
@@ -1886,7 +2126,8 @@ async def report_monthly_production(request: Request):
             if disp_at:
                 monthly[disp_at]["dispatched"] += j.get("quantity", 0) or 0
     rows = [{"month": m, **v} for m, v in sorted(monthly.items())]
-    # Limit to last 12 months
+    if from_date or to_date:
+        return rows
     return rows[-12:]
 
 
@@ -1969,14 +2210,32 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     job = await db.production_jobs.find_one({"_id": oid(jid)})
     if not job:
         raise HTTPException(404, "Not found")
-    update = {"stage": payload.stage, "updated_at": now_iso()}
+    
+    update = {"updated_at": now_iso()}
     # If stage actually changed, reset the per-stage clock and deadline
     if job.get("stage") != payload.stage:
+        try:
+            curr_idx = PRODUCTION_STAGES.index(job.get("stage", "procurement"))
+            target_idx = PRODUCTION_STAGES.index(payload.stage)
+        except ValueError:
+            curr_idx = 0
+            target_idx = 0
+            
+        # Check if they are skipping stages or moving backward by more than 1 stage
+        is_production_only = "production" in u.get("roles", []) and not any(r in u.get("roles", []) for r in ["admin", "manager"])
+        if is_production_only and abs(target_idx - curr_idx) > 1 and not getattr(payload, "confirm_skip", False):
+            raise HTTPException(
+                status_code=400,
+                detail="Skipping stages requires explicit confirmation. Please confirm stage skip."
+            )
+            
         durations = await _get_stage_durations()
         entered = now_iso()
         hours = float(durations.get(payload.stage, 24))
+        update["stage"] = payload.stage
         update["stage_entered_at"] = entered
         update["stage_deadline"] = _compute_deadline(entered, hours) if payload.stage != "dispatched" else None
+        
     if payload.completed_qty is not None:
         update["completed_qty"] = payload.completed_qty
     if payload.rejected_qty is not None:
@@ -1997,6 +2256,11 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         try:
             await _auto_consume_inventory(await db.production_jobs.find_one({"_id": oid(jid)}), u["email"])
         except Exception as e:
+            err_msg = str(e)
+            await db.production_jobs.update_one(
+                {"_id": oid(jid)},
+                {"$set": {"inventory_consume_error": err_msg}}
+            )
             log.warning(f"Auto-consume inventory failed for job {jid}: {e}")
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
 
@@ -2112,7 +2376,7 @@ async def update_worker(wid: str, payload: WorkerIn, request: Request):
 @api.delete("/workers/{wid}")
 async def delete_worker(wid: str, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
-    await db.workers.delete_one({"_id": oid(wid)})
+    await db.workers.update_one({"_id": oid(wid)}, {"$set": {"active": False, "updated_at": now_iso()}})
     return {"ok": True}
 
 
@@ -2349,6 +2613,22 @@ async def create_movement(payload: InventoryMovement, request: Request):
         mat = None
     if not mat:
         raise HTTPException(404, "Material not found")
+        
+    # Block deductions that exceed current stock balance
+    deduction_qty = 0.0
+    if payload.type == "out":
+        deduction_qty = payload.quantity
+    elif payload.type == "adjustment" and payload.quantity < 0:
+        deduction_qty = -payload.quantity
+        
+    if deduction_qty > 0:
+        current_bal = await _get_material_balance(payload.material_id)
+        if current_bal - deduction_qty < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Deduction of {deduction_qty} {mat.get('unit', '')} exceeds current stock balance ({current_bal} {mat.get('unit', '')})."
+            )
+            
     doc = payload.model_dump()
     doc["material_code"] = mat.get("code")
     doc["material_name"] = mat.get("name")
@@ -2770,6 +3050,22 @@ async def report_wage_slip_pdf(worker_id: str, request: Request,
 
 
 # ---------- AUTO INVENTORY CONSUMPTION (on stage transition) ----------
+async def _get_material_balance(material_id: str) -> float:
+    movements = await db.inventory_movements.find({"material_id": material_id}).to_list(10000)
+    stock = 0.0
+    for m in movements:
+        qty = float(m.get("quantity", 0) or 0)
+        mtype = m.get("type")
+        if mtype == "in":
+            stock += qty
+        elif mtype == "out":
+            stock -= qty
+        else: # adjustment
+            stock += qty
+    return stock
+
+
+# ---------- AUTO INVENTORY CONSUMPTION (on stage transition) ----------
 async def _auto_consume_inventory(job: dict, by_email: str):
     """When a job advances from procurement → cutting, auto-create stock-out movements
     for each BOM material based on job's quantity × yield-adjusted consumption.
@@ -2777,9 +3073,17 @@ async def _auto_consume_inventory(job: dict, by_email: str):
     """
     if job.get("inventory_consumed"):
         return False
-    # Lookup style
-    style = await db.styles.find_one({"code": job.get("style_code")})
+    # Lookup style: store style_id on job and try that first, fall back to code matching
+    style = None
+    if job.get("style_id"):
+        style = await db.styles.find_one({"_id": oid(job["style_id"])})
     if not style:
+        style = await db.styles.find_one({"code": job.get("style_code")})
+    if not style:
+        await db.production_jobs.update_one(
+            {"_id": job["_id"]},
+            {"$set": {"inventory_consume_error": f"Style '{job.get('style_code')}' not found in Style Master"}}
+        )
         return False
     style_d = stringify(style)
     pairs = job.get("quantity", 0)
@@ -2791,6 +3095,7 @@ async def _auto_consume_inventory(job: dict, by_email: str):
     by_code = {m["code"]: m for m in materials}
 
     movements = []
+    temp_balances = {}
     for b in style_d["bom"]:
         rate = float(b.get("rate", 0))
         qty = float(b.get("quantity", 0))
@@ -2801,9 +3106,24 @@ async def _auto_consume_inventory(job: dict, by_email: str):
             continue
         mat = by_code.get(b.get("material_code"))
         if not mat:
-            continue
+            await db.production_jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {"inventory_consume_error": f"Material '{b.get('material_code')}' not found"}}
+            )
+            return False
+        mat_id = str(mat["_id"])
+        if mat_id not in temp_balances:
+            temp_balances[mat_id] = await _get_material_balance(mat_id)
+        if temp_balances[mat_id] - consume < 0:
+            await db.production_jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {"inventory_consume_error": f"Insufficient stock for '{mat.get('name')}'"}}
+            )
+            return False
+        temp_balances[mat_id] -= consume
+
         movements.append({
-            "material_id": str(mat["_id"]),
+            "material_id": mat_id,
             "material_code": mat.get("code"),
             "material_name": mat.get("name"),
             "unit": mat.get("unit"),
@@ -2822,7 +3142,7 @@ async def _auto_consume_inventory(job: dict, by_email: str):
         await db.inventory_movements.insert_many(movements)
         await db.production_jobs.update_one(
             {"_id": job["_id"]},
-            {"$set": {"inventory_consumed": True, "inventory_consumed_at": now_iso()}}
+            {"$set": {"inventory_consumed": True, "inventory_consumed_at": now_iso(), "inventory_consume_error": None}}
         )
         return True
     return False
@@ -3027,11 +3347,49 @@ async def on_startup():
     global get_current_user
     get_current_user = await get_current_user_factory(db)
     await db.users.create_index("email", unique=True)
-    await db.materials.create_index("code")
-    await db.styles.create_index("code")
-    await db.pos.create_index("po_number")
+    
+    # Safely create unique index for materials
+    try:
+        await db.materials.create_index("code", unique=True)
+    except Exception as e:
+        log.warning(f"Could not create unique index on materials.code directly: {e}. Dropping old index and retrying.")
+        try:
+            await db.materials.drop_index("code_1")
+            await db.materials.create_index("code", unique=True)
+        except Exception as drop_err:
+            log.error(f"Failed to force unique index on materials.code: {drop_err}")
+
+    # Safely create unique index for styles
+    try:
+        await db.styles.create_index("code", unique=True)
+    except Exception as e:
+        log.warning(f"Could not create unique index on styles.code directly: {e}. Dropping old index and retrying.")
+        try:
+            await db.styles.drop_index("code_1")
+            await db.styles.create_index("code", unique=True)
+        except Exception as drop_err:
+            log.error(f"Failed to force unique index on styles.code: {drop_err}")
+
+    # Safely create unique index for POs
+    try:
+        await db.pos.create_index("po_number", unique=True)
+    except Exception as e:
+        log.warning(f"Could not create unique index on pos.po_number directly: {e}. Dropping old index and retrying.")
+        try:
+            await db.pos.drop_index("po_number_1")
+            await db.pos.create_index("po_number", unique=True)
+        except Exception as drop_err:
+            log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
     await db.production_jobs.create_index("po_id")
     await seed_admin(db)
+    try:
+        profile = await db.settings.find_one({"_id": "company_profile"})
+        if profile:
+            from pdf_docs import update_company_profile
+            update_company_profile(profile)
+            log.info("Loaded custom company profile from DB.")
+    except Exception as e:
+        log.warning(f"Could not load company profile from DB: {e}")
     log.info("Startup complete; admin seeded.")
 
 @app.on_event("shutdown")

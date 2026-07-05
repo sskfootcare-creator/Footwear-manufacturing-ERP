@@ -16,6 +16,7 @@ from po_extractor_free import (
     ExtractionFailed,
     extract_po_from_pdf_local,
     extract_po_from_xlsx_local,
+    STATE_CODE_MAP,
 )
 
 
@@ -31,6 +32,9 @@ Extract the following fields from the attached PO document and return ONLY valid
   "po_date": "YYYY-MM-DD",
   "client_name": "string",
   "client_address": "string",
+  "client_gstin": "string",
+  "client_state": "string",
+  "client_state_code": "string",
   "vendor_name": "string",
   "vendor_address": "string",
   "billing_address": "string",
@@ -153,7 +157,7 @@ async def _llm_extract_pdf(file_bytes: bytes) -> dict:
         ).with_model("gemini", "gemini-2.5-flash")
         attach = FileContentWithMimeType(file_path=tmp_path, mime_type="application/pdf")
         resp = await chat.send_message(UserMessage(text=EXTRACTION_PROMPT, file_contents=[attach]))
-        return json.loads(_clean_json(resp))
+        return _post_process_extracted_data(json.loads(_clean_json(resp)))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -180,6 +184,21 @@ async def _llm_extract_xlsx(file_bytes: bytes) -> dict:
             system_message="You extract structured data from purchase orders and return strict JSON.",
         ).with_model("gemini", "gemini-2.5-flash")
         resp = await chat.send_message(UserMessage(text=f"{EXTRACTION_PROMPT}\n\n--- Document Content ---\n{text_content}"))
-        return json.loads(_clean_json(resp))
+        return _post_process_extracted_data(json.loads(_clean_json(resp)))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _post_process_extracted_data(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    cg = str(data.get("client_gstin") or "").strip().upper()
+    if cg:
+        cg = "".join(c for c in cg if c.isalnum())
+        data["client_gstin"] = cg
+        if len(cg) >= 2 and cg[:2].isdigit():
+            if not data.get("client_state_code"):
+                data["client_state_code"] = cg[:2]
+            if not data.get("client_state"):
+                data["client_state"] = STATE_CODE_MAP.get(cg[:2], "")
+    return data

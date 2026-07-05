@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, API, inr } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Calendar, FileDown, IndianRupee, Plus, Trash2, Check, X, Users as UsersIcon, BookOpen, ArrowDownLeft, Sparkles } from "lucide-react";
 
@@ -22,6 +22,7 @@ export default function Payroll() {
   const [advances, setAdvances] = useState([]);
   const [advForm, setAdvForm] = useState(null);
   const [ledgerFor, setLedgerFor] = useState(null);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const params = new URLSearchParams();
@@ -70,12 +71,18 @@ export default function Payroll() {
     await loadAdvances();
     load();
   };
-  const delAdvance = async (adv) => {
-    if (!window.confirm("Delete this transaction?")) return;
-    await http.delete(`/advances/${adv.id}`);
-    await loadAdvances();
-    load();
-    if (ledgerFor) openLedger(ledgerFor.row);
+  const delAdvance = (adv) => {
+    setConfirm({
+      title: "Delete Transaction",
+      message: `Are you sure you want to delete this ${adv.txn_type} transaction of ₹${adv.amount}?`,
+      onConfirm: async () => {
+        await http.delete(`/advances/${adv.id}`);
+        setConfirm(null);
+        await loadAdvances();
+        load();
+        if (ledgerFor) openLedger(ledgerFor.row);
+      }
+    });
   };
 
   const openLedger = async (row) => {
@@ -313,6 +320,13 @@ export default function Payroll() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

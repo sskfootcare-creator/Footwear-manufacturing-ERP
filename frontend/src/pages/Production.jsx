@@ -249,8 +249,12 @@ export default function Production() {
   };
 
   const moveGroup = async (group, nextStage) => {
-    await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}`, { stage: nextStage })));
-    load();
+    try {
+      await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}`, { stage: nextStage })));
+      load();
+    } catch (e) {
+      alert("Stage transition failed: " + (e.response?.data?.detail || e.message));
+    }
   };
   const toggleComponent = async (group, key, val) => {
     await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}/components`, { [key]: val })));
@@ -590,6 +594,8 @@ function ColorGroupCard(props) {
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
+  const consumeError = group.rows.find(r => r.inventory_consume_error);
+
   const sizeTotals = useMemo(() => {
     const t = {}; const rowIdBySize = {};
     for (const sz of group.sizes) {
@@ -616,6 +622,12 @@ function ColorGroupCard(props) {
           <span className="font-mono">
             {group.overdueHours >= 24 ? `${(group.overdueHours / 24).toFixed(1)} d late` : `${group.overdueHours.toFixed(1)} h late`}
           </span>
+        </div>
+      )}
+      {consumeError && (
+        <div className="bg-amber-600 text-white px-3 py-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold animate-pulse" data-testid={`consume-error-${group.key}`}>
+          <AlertTriangle className="w-3 h-3" />
+          <span>⚠ {consumeError.inventory_consume_error}</span>
         </div>
       )}
       {style?.image_url && (
@@ -790,16 +802,19 @@ function ComponentCell({ label, done, layers, onToggle, disabled }) {
 }
 
 function AssignDialog({ group, role, workers, current, onSave, onClose }) {
-  const roleObj = ASSIGNMENT_ROLES.find(r => r.key === role);
-  const matchingSkill = role;
-  const sorted = [...workers].sort((a, b) => {
-    const am = (a.skill === matchingSkill || a.skill === "general") ? 0 : 1;
-    const bm = (b.skill === matchingSkill || b.skill === "general") ? 0 : 1;
-    return am - bm;
-  });
   const [selectedWid, setSelectedWid] = useState(current?.worker_id || "");
   const [rate, setRate] = useState(current?.rate_per_pair ?? "");
   const selectedWorker = workers.find(w => w.id === selectedWid);
+
+  const roleObj = ASSIGNMENT_ROLES.find(r => r.key === role);
+  const matchingSkill = role;
+  const sorted = [...workers]
+    .filter(w => w.active !== false || w.id === selectedWid)
+    .sort((a, b) => {
+      const am = (a.skill === matchingSkill || a.skill === "general") ? 0 : 1;
+      const bm = (b.skill === matchingSkill || b.skill === "general") ? 0 : 1;
+      return am - bm;
+    });
   const onPickWorker = (w) => {
     setSelectedWid(w.id);
     if (rate === "" || rate === null || rate === undefined) setRate(w.rate_per_pair);

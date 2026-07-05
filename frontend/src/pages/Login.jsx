@@ -4,8 +4,8 @@ import { Loader2 } from "lucide-react";
 
 export default function Login() {
   const { login, error } = useAuth();
-  const [email, setEmail] = useState("admin@sskfootcare.com");
-  const [password, setPassword] = useState("Admin@123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   const onSubmit = async (e) => {
@@ -72,10 +72,7 @@ export default function Login() {
               Sign in
             </button>
 
-            <div className="text-xs text-slate-500 pt-4 border-t border-slate-200">
-              <div className="font-bold uppercase tracking-wider mb-1">Demo credentials</div>
-              <div className="font-mono">admin@sskfootcare.com / Admin@123</div>
-            </div>
+
           </form>
         </div>
 

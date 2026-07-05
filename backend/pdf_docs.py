@@ -24,6 +24,10 @@ COMPANY = {
     "email": "",
 }
 
+def update_company_profile(profile: dict):
+    global COMPANY
+    COMPANY.update({k: v for k, v in profile.items() if k != "_id"})
+
 BLACK = colors.black
 BRAND = colors.HexColor("#0F172A")
 ACCENT = colors.HexColor("#C27842")

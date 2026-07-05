@@ -129,6 +129,19 @@ def _extract_pdf(file_bytes: bytes) -> dict:
     return data
 
 
+STATE_CODE_MAP = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh",
+    "24": "Gujarat", "25": "Daman & Diu", "26": "Dadra & Nagar Haveli", "27": "Maharashtra",
+    "28": "Andhra Pradesh (Old)", "29": "Karnataka", "30": "Goa", "31": "Lakshadweep",
+    "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman & Nicobar Islands",
+    "36": "Telangana", "37": "Andhra Pradesh (New)", "38": "Ladakh"
+}
+
+
 def _parse_meta(text: str) -> dict:
     """Return all header / metadata fields from free text."""
     # PO Number — try the strictest form first (digits-only or alphanum after explicit label)
@@ -170,7 +183,7 @@ def _parse_meta(text: str) -> dict:
                 ln = lines[i]
                 # Heuristic: a corporate name is upper-case-heavy, 4+ chars, contains a space or known suffix
                 if (re.match(r"^[A-Z][A-Z0-9 &.,'\-/]{4,80}$", ln)
-                        and any(k in ln.upper() for k in ["LIMITED", "LIMITED.", "LTD", "LLP", "PVT", "PRIVATE", "INC", "CO.", "CORP", "COMPANY"])):
+                         and any(k in ln.upper() for k in ["LIMITED", "LIMITED.", "LTD", "LLP", "PVT", "PRIVATE", "INC", "CO.", "CORP", "COMPANY"])):
                     client_name = ln
                     break
                 if i == 0 and ln and ln.isupper():
@@ -214,9 +227,22 @@ def _parse_meta(text: str) -> dict:
                 cand = _norm(m.group(1))
                 # Reject template/cover words
                 if (" " in cand
-                        and not re.search(r"\b(DRAFT|PURCHASE|ORDER|CODE|ACCEPT|SIGN|TITLE|DATE)\b", cand, re.I)):
+                         and not re.search(r"\b(DRAFT|PURCHASE|ORDER|CODE|ACCEPT|SIGN|TITLE|DATE)\b", cand, re.I)):
                     vendor_name = cand
                     break
+
+    # GSTIN extraction
+    client_gstin = ""
+    m_gst = re.search(r"(?:Bill\s*To|Buyer|Customer|Consignee|Destination|Receiver|Billed\s*To)[\s\S]{1,300}?\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{3})\b", text, flags=re.I)
+    if m_gst:
+        client_gstin = m_gst.group(1).upper()
+    else:
+        all_gstins = re.findall(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{3})\b", text, flags=re.I)
+        if all_gstins:
+            client_gstin = all_gstins[0].upper()
+            
+    client_state_code = client_gstin[:2] if client_gstin else ""
+    client_state = STATE_CODE_MAP.get(client_state_code, "")
 
     return {
         "po_number": po_no or "",
@@ -228,6 +254,9 @@ def _parse_meta(text: str) -> dict:
         "vendor_address": "",
         "billing_address": "",
         "shipping_address": "",
+        "client_gstin": client_gstin,
+        "client_state": client_state,
+        "client_state_code": client_state_code,
         "payment_terms": _find_first(r"Payment\s*Terms?\s*[:\-|]?\s*([^\n|]+)", text),
         "currency": "INR",
         "notes": "",

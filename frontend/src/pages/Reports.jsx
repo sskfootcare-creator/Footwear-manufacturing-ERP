@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { http, inr, num } from "../lib/api";
 import { PageHeader, Card, Badge } from "../components/ui-kit";
 import { TrendingUp, Clock, AlertOctagon, BarChart3, Users as UsersIcon } from "lucide-react";
@@ -28,14 +28,35 @@ export default function Reports() {
   const [variance, setVariance] = useState([]);
   const [cycle, setCycle] = useState([]);
   const [defects, setDefects] = useState(null);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+
+  const load = useCallback(async () => {
+    const params = {};
+    if (fromDate) params.from_date = fromDate;
+    if (toDate) params.to_date = toDate;
+    
+    try {
+      const [monthlyRes, karigarRes, varianceRes, cycleRes, defectsRes] = await Promise.all([
+        http.get("/reports/monthly-production", { params }),
+        http.get("/reports/karigar-output", { params }),
+        http.get("/reports/cost-variance", { params }),
+        http.get("/reports/stage-cycle-time", { params }),
+        http.get("/reports/defect-rate", { params }),
+      ]);
+      setMonthly(monthlyRes.data || []);
+      setKarigar(karigarRes.data || []);
+      setVariance(varianceRes.data || []);
+      setCycle(cycleRes.data || []);
+      setDefects(defectsRes.data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [fromDate, toDate]);
 
   useEffect(() => {
-    http.get("/reports/monthly-production").then(r => setMonthly(r.data || [])).catch(() => {});
-    http.get("/reports/karigar-output").then(r => setKarigar(r.data || [])).catch(() => {});
-    http.get("/reports/cost-variance").then(r => setVariance(r.data || [])).catch(() => {});
-    http.get("/reports/stage-cycle-time").then(r => setCycle(r.data || [])).catch(() => {});
-    http.get("/reports/defect-rate").then(r => setDefects(r.data)).catch(() => {});
-  }, []);
+    load();
+  }, [load]);
 
   const tabs = [
     { key: "monthly", label: "Production Trend", icon: TrendingUp },
@@ -47,7 +68,42 @@ export default function Reports() {
 
   return (
     <div>
-      <PageHeader title="Reports" subtitle="Analytics / Visual Reports" testId="reports-header" />
+      <PageHeader
+        title="Reports"
+        subtitle="Analytics / Visual Reports"
+        testId="reports-header"
+        action={
+          <div className="flex items-center gap-3 bg-white border-2 border-slate-200 px-4 py-2">
+            <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Filter Period :</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="border border-slate-300 px-2 py-1 text-xs focus:border-[#C27842] focus:outline-none"
+                data-testid="report-from-date"
+              />
+              <span className="text-slate-400 text-xs">—</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="border border-slate-300 px-2 py-1 text-xs focus:border-[#C27842] focus:outline-none"
+                data-testid="report-to-date"
+              />
+              {(fromDate || toDate) && (
+                <button
+                  onClick={() => { setFromDate(""); setToDate(""); }}
+                  className="text-xs font-bold uppercase tracking-wider text-red-600 hover:text-red-800 ml-2"
+                  data-testid="report-clear-dates"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        }
+      />
       <div className="p-8">
         <div className="flex border-b-2 border-slate-200 mb-6 overflow-x-auto">
           {tabs.map(t => (

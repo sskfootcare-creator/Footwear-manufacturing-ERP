@@ -7,6 +7,31 @@ export const http = axios.create({
   withCredentials: true,
 });
 
+http.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    if (
+      error.response &&
+      error.response.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !originalRequest.url.includes("auth/refresh") &&
+      !originalRequest.url.includes("auth/login")
+    ) {
+      originalRequest._retry = true;
+      try {
+        await http.post("/auth/refresh");
+        return http(originalRequest);
+      } catch (refreshError) {
+        window.location.href = "/login";
+        return Promise.reject(refreshError);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export function formatApiError(detail) {
   if (detail == null) return "Something went wrong. Please try again.";
   if (typeof detail === "string") return detail;

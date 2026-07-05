@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { http, inr, num } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Plus, Trash2, Pencil, Save, Calculator as CalcIcon, Upload } from "lucide-react";
 
@@ -25,6 +25,7 @@ export default function Styles() {
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(emptyStyle);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const [s, m] = await Promise.all([http.get("/styles"), http.get("/materials")]);
@@ -45,25 +46,36 @@ export default function Styles() {
     setOpen(true);
   };
   const save = async () => {
-    const body = {
-      ...form,
-      overhead_pct: Number(form.overhead_pct), packing_cost: Number(form.packing_cost),
-      margin_pct: Number(form.margin_pct), gst_pct: Number(form.gst_pct),
-      bom: form.bom.map(b => ({
-        ...b,
-        quantity: Number(b.quantity),
-        yield_per_unit: Number(b.yield_per_unit || 1),
-        waste_pct: Number(b.waste_pct || 0),
-        rate: Number(b.rate),
-      })),
-      labor: form.labor.map(l => ({ ...l, rate: Number(l.rate) })),
-    };
-    if (editId) await http.patch(`/styles/${editId}`, body); else await http.post("/styles", body);
-    setOpen(false); load();
+    try {
+      const body = {
+        ...form,
+        overhead_pct: Number(form.overhead_pct), packing_cost: Number(form.packing_cost),
+        margin_pct: Number(form.margin_pct), gst_pct: Number(form.gst_pct),
+        bom: form.bom.map(b => ({
+          ...b,
+          quantity: Number(b.quantity),
+          yield_per_unit: Number(b.yield_per_unit || 1),
+          waste_pct: Number(b.waste_pct || 0),
+          rate: Number(b.rate),
+        })),
+        labor: form.labor.map(l => ({ ...l, rate: Number(l.rate) })),
+      };
+      if (editId) await http.patch(`/styles/${editId}`, body); else await http.post("/styles", body);
+      setOpen(false); load();
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message);
+    }
   };
-  const remove = async (id) => {
-    if (!window.confirm("Delete this style?")) return;
-    await http.delete(`/styles/${id}`); load();
+  const remove = (id) => {
+    setConfirm({
+      title: "Delete Style",
+      message: "Are you sure you want to delete this style from the Master catalog?",
+      onConfirm: async () => {
+        await http.delete(`/styles/${id}`);
+        setConfirm(null);
+        load();
+      }
+    });
   };
 
   const onImageFile = (e) => {
@@ -320,6 +332,13 @@ export default function Styles() {
       <datalist id="bom-sections-list">
         {SECTIONS.map(s => <option key={s} value={s} />)}
       </datalist>
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

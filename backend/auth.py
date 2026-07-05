@@ -1,12 +1,15 @@
 """Auth helpers: password hashing, JWT, current user dependency, admin seed."""
 import os
+import re
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
-from fastapi import HTTPException, Request, Depends
+from fastapi import HTTPException, Request
 from bson import ObjectId
 
 JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_HOURS = 12
+REFRESH_TOKEN_DAYS = 7
 
 
 def get_jwt_secret() -> str:
@@ -21,12 +24,20 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
+def validate_password(password: str) -> None:
+    """Enforce minimum password policy: at least 8 characters.
+    Raises HTTPException 422 on violation.
+    """
+    if not password or len(password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters long.")
+
+
 def create_access_token(user_id: str, email: str, role: str) -> str:
     payload = {
         "sub": user_id,
         "email": email,
         "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_HOURS),
         "type": "access",
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
@@ -35,17 +46,26 @@ def create_access_token(user_id: str, email: str, role: str) -> str:
 def create_refresh_token(user_id: str) -> str:
     payload = {
         "sub": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_DAYS),
         "type": "refresh",
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
-def set_auth_cookies(response, access_token: str, refresh_token: str):
-    response.set_cookie("access_token", access_token, httponly=True, secure=True,
-                        samesite="none", max_age=43200, path="/")
-    response.set_cookie("refresh_token", refresh_token, httponly=True, secure=True,
-                        samesite="none", max_age=604800, path="/")
+def set_auth_cookies(response, access_token: str, refresh_token: str = None):
+    secure = True
+    if os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!" or os.environ.get("COOKIE_SECURE", "true").lower() == "false":
+        secure = False
+    samesite = "none" if secure else "lax"
+    response.set_cookie(
+        "access_token", access_token, httponly=True, secure=secure,
+        samesite=samesite, max_age=ACCESS_TOKEN_HOURS * 3600, path="/"
+    )
+    if refresh_token:
+        response.set_cookie(
+            "refresh_token", refresh_token, httponly=True, secure=secure,
+            samesite=samesite, max_age=REFRESH_TOKEN_DAYS * 24 * 3600, path="/"
+        )
 
 
 def clear_auth_cookies(response):

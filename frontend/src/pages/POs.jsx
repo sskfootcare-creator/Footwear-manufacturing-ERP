@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { http, inr } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Plus, Upload, Trash2, Eye, Save, FileText, Loader2, Sparkles, FileDown, Truck, Package } from "lucide-react";
 
@@ -9,23 +9,35 @@ import { API } from "../lib/api";
 const emptyLine = { style_code: "", description: "", color: "", size: "", hsn_code: "", quantity: 0, unit_price: 0, amount: 0 };
 const emptyPO = {
   po_number: "", po_date: "", client_name: "", client_address: "", billing_address: "", shipping_address: "",
+  client_gstin: "", client_state: "", client_state_code: "",
   delivery_date: "", payment_terms: "", currency: "INR", line_items: [{ ...emptyLine }],
   cgst_rate: 0, sgst_rate: 0, igst_rate: 0, notes: "",
 };
 
 export default function POs() {
   const [pos, setPos] = useState([]);
+  const [styles, setStyles] = useState([]);
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(emptyPO);
   const [uploading, setUploading] = useState(false);
   const [view, setView] = useState(null);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
-    const { data } = await http.get("/pos");
-    setPos(data);
+    try {
+      const [posRes, stylesRes] = await Promise.all([http.get("/pos"), http.get("/styles")]);
+      setPos(posRes.data);
+      setStyles(stylesRes.data);
+    } catch (e) {
+      alert("Failed to load PO data: " + e.message);
+    }
   };
   useEffect(() => { load(); }, []);
+
+  const validStyleCodes = useMemo(() => {
+    return new Set(styles.map((s) => s.code.trim().toUpperCase()));
+  }, [styles]);
 
   const startNew = () => { setEditId(null); setForm(emptyPO); setOpen(true); };
   const onExtractFile = async (e) => {
@@ -43,6 +55,9 @@ export default function POs() {
         client_address: data.client_address || "",
         billing_address: data.billing_address || "",
         shipping_address: data.shipping_address || "",
+        client_gstin: data.client_gstin || "",
+        client_state: data.client_state || "",
+        client_state_code: data.client_state_code || "",
         delivery_date: data.delivery_date || "",
         payment_terms: data.payment_terms || "",
         currency: data.currency || "INR",
@@ -93,22 +108,33 @@ export default function POs() {
   }, [form]);
 
   const save = async () => {
-    const body = {
-      ...form,
-      line_items: form.line_items.map(li => ({
-        ...li, quantity: Number(li.quantity), unit_price: Number(li.unit_price), amount: Number(li.amount),
-      })),
-      cgst_rate: Number(form.cgst_rate), sgst_rate: Number(form.sgst_rate), igst_rate: Number(form.igst_rate),
-      cgst_amount: totals.cgst_amount, sgst_amount: totals.sgst_amount, igst_amount: totals.igst_amount,
-      subtotal: totals.subtotal, grand_total: totals.grand_total, total_quantity: totals.total_quantity,
-    };
-    if (editId) await http.patch(`/pos/${editId}`, body); else await http.post("/pos", body);
-    setOpen(false); load();
+    try {
+      const body = {
+        ...form,
+        line_items: form.line_items.map(li => ({
+          ...li, quantity: Number(li.quantity), unit_price: Number(li.unit_price), amount: Number(li.amount),
+        })),
+        cgst_rate: Number(form.cgst_rate), sgst_rate: Number(form.sgst_rate), igst_rate: Number(form.igst_rate),
+        cgst_amount: totals.cgst_amount, sgst_amount: totals.sgst_amount, igst_amount: totals.igst_amount,
+        subtotal: totals.subtotal, grand_total: totals.grand_total, total_quantity: totals.total_quantity,
+      };
+      if (editId) await http.patch(`/pos/${editId}`, body); else await http.post("/pos", body);
+      setOpen(false); load();
+    } catch (err) {
+      alert("Save failed: " + (err.response?.data?.detail || err.message));
+    }
   };
 
-  const remove = async (id) => {
-    if (!window.confirm("Delete this PO? Production jobs will also be removed.")) return;
-    await http.delete(`/pos/${id}`); load();
+  const remove = (id) => {
+    setConfirm({
+      title: "Delete Purchase Order",
+      message: "Are you sure you want to delete this Purchase Order? All associated production jobs will also be deleted from the system.",
+      onConfirm: async () => {
+        await http.delete(`/pos/${id}`);
+        setConfirm(null);
+        load();
+      }
+    });
   };
 
   const downloadPacking = async (po) => {
@@ -207,6 +233,18 @@ export default function POs() {
               <Input label="Billing Address" value={form.billing_address} onChange={(e) => setForm({ ...form, billing_address: e.target.value })} />
               <Input label="Shipping Address" value={form.shipping_address} onChange={(e) => setForm({ ...form, shipping_address: e.target.value })} />
             </div>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="Client GSTIN" value={form.client_gstin} onChange={(e) => {
+                const gstin = e.target.value.toUpperCase();
+                let sc = form.client_state_code;
+                if (gstin.length >= 2 && /^\d{2}$/.test(gstin.substring(0, 2))) {
+                  sc = gstin.substring(0, 2);
+                }
+                setForm({ ...form, client_gstin: gstin, client_state_code: sc });
+              }} testId="form-po-client-gstin" />
+              <Input label="Client State" value={form.client_state} onChange={(e) => setForm({ ...form, client_state: e.target.value })} />
+              <Input label="Client State Code" value={form.client_state_code} onChange={(e) => setForm({ ...form, client_state_code: e.target.value })} />
+            </div>
             <Input label="Payment Terms" value={form.payment_terms} onChange={(e) => setForm({ ...form, payment_terms: e.target.value })} />
 
             <div className="flex items-baseline justify-between pt-3">
@@ -229,19 +267,34 @@ export default function POs() {
                   </tr>
                 </thead>
                 <tbody>
-                  {form.line_items.map((li, i) => (
-                    <tr key={i} className="border-t border-slate-200">
-                      <td className="px-1 py-1"><input value={li.style_code} onChange={(e) => updateLine(i, "style_code", e.target.value)} className="w-28 border border-slate-300 px-1 py-0.5 font-mono" /></td>
-                      <td className="px-1 py-1"><input value={li.description} onChange={(e) => updateLine(i, "description", e.target.value)} className="w-44 border border-slate-300 px-1 py-0.5" /></td>
-                      <td className="px-1 py-1"><input value={li.color} onChange={(e) => updateLine(i, "color", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5" /></td>
-                      <td className="px-1 py-1"><input value={li.size} onChange={(e) => updateLine(i, "size", e.target.value)} className="w-12 border border-slate-300 px-1 py-0.5 text-center font-mono" /></td>
-                      <td className="px-1 py-1"><input value={li.hsn_code} onChange={(e) => updateLine(i, "hsn_code", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5 font-mono" /></td>
-                      <td className="px-1 py-1"><input type="number" value={li.quantity} onChange={(e) => updateLine(i, "quantity", e.target.value)} className="w-16 border border-slate-300 px-1 py-0.5 text-right font-mono" /></td>
-                      <td className="px-1 py-1"><input type="number" step="0.01" value={li.unit_price} onChange={(e) => updateLine(i, "unit_price", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5 text-right font-mono" /></td>
-                      <td className="px-2 py-1 text-right font-mono font-bold">{inr(li.amount)}</td>
-                      <td className="px-1 py-1"><button onClick={() => removeLine(i)} className="text-slate-500 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button></td>
-                    </tr>
-                  ))}
+                  {form.line_items.map((li, i) => {
+                    const isStyleValid = !li.style_code || validStyleCodes.has(li.style_code.trim().toUpperCase());
+                    return (
+                      <tr key={i} className="border-t border-slate-200">
+                        <td className="px-1 py-1 relative">
+                          <input 
+                            value={li.style_code} 
+                            onChange={(e) => updateLine(i, "style_code", e.target.value)} 
+                            className={`w-28 border px-1 py-0.5 font-mono ${
+                              isStyleValid ? "border-slate-300" : "border-red-500 bg-red-50 text-red-900 focus:border-red-500"
+                            }`} 
+                            title={isStyleValid ? "" : "Style code does not exist in Style Master"}
+                          />
+                          {!isStyleValid && (
+                            <div className="text-[9px] text-red-600 font-bold mt-0.5">Not in Style Master</div>
+                          )}
+                        </td>
+                        <td className="px-1 py-1"><input value={li.description} onChange={(e) => updateLine(i, "description", e.target.value)} className="w-44 border border-slate-300 px-1 py-0.5" /></td>
+                        <td className="px-1 py-1"><input value={li.color} onChange={(e) => updateLine(i, "color", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5" /></td>
+                        <td className="px-1 py-1"><input value={li.size} onChange={(e) => updateLine(i, "size", e.target.value)} className="w-12 border border-slate-300 px-1 py-0.5 text-center font-mono" /></td>
+                        <td className="px-1 py-1"><input value={li.hsn_code} onChange={(e) => updateLine(i, "hsn_code", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5 font-mono" /></td>
+                        <td className="px-1 py-1"><input type="number" value={li.quantity} onChange={(e) => updateLine(i, "quantity", e.target.value)} className="w-16 border border-slate-300 px-1 py-0.5 text-right font-mono" /></td>
+                        <td className="px-1 py-1"><input type="number" step="0.01" value={li.unit_price} onChange={(e) => updateLine(i, "unit_price", e.target.value)} className="w-20 border border-slate-300 px-1 py-0.5 text-right font-mono" /></td>
+                        <td className="px-2 py-1 text-right font-mono font-bold">{inr(li.amount)}</td>
+                        <td className="px-1 py-1"><button onClick={() => removeLine(i)} className="text-slate-500 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button></td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -280,6 +333,8 @@ export default function POs() {
           <div className="space-y-4 text-sm">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Client" value={view.client_name} />
+              <Field label="Client GSTIN" value={view.client_gstin || "—"} />
+              <Field label="Client State" value={view.client_state ? `${view.client_state} (Code: ${view.client_state_code})` : "—"} />
               <Field label="PO Date" value={view.po_date} />
               <Field label="Delivery" value={view.delivery_date} />
               <Field label="Payment Terms" value={view.payment_terms} />
@@ -318,6 +373,13 @@ export default function POs() {
           </div>
         </Drawer>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

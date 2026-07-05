@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { http } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
-import { Clock, RotateCcw, Save, Check, Package, Upload, Trash2, FileSpreadsheet } from "lucide-react";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, ConfirmDialog } from "../components/ui-kit";
+import { Clock, RotateCcw, Save, Check, Package, Upload, Trash2, FileSpreadsheet, Settings2, History } from "lucide-react";
 
 const STAGE_LABEL = {
   procurement: "Procurement",
@@ -109,6 +109,12 @@ export default function Settings() {
         </Card>
 
         <PackingTemplatesSection />
+        <CompanyProfileSection />
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <BackupExportSection />
+          <ActivityFeedSection />
+        </div>
       </div>
     </div>
   );
@@ -119,6 +125,7 @@ function PackingTemplatesSection() {
   const [templates, setTemplates] = useState([]);
   const [form, setForm] = useState({ client_name: "", name: "", aliases: "", file_b64: "", file_name: "" });
   const [uploading, setUploading] = useState(false);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const { data } = await http.get("/packing-templates");
@@ -157,10 +164,16 @@ function PackingTemplatesSection() {
     }
   };
 
-  const remove = async (t) => {
-    if (!window.confirm(`Delete template "${t.name}"?`)) return;
-    await http.delete(`/packing-templates/${t.id}`);
-    load();
+  const remove = (t) => {
+    setConfirm({
+      title: "Delete Packing Template",
+      message: `Are you sure you want to delete the packing-list template "${t.name}"?`,
+      onConfirm: async () => {
+        await http.delete(`/packing-templates/${t.id}`);
+        setConfirm(null);
+        load();
+      }
+    });
   };
 
   return (
@@ -228,6 +241,176 @@ function PackingTemplatesSection() {
           </tbody>
         </table>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
+    </Card>
+  );
+}
+
+/* -------------------- COMPANY PROFILE SECTION -------------------- */
+function CompanyProfileSection() {
+  const [form, setForm] = useState({
+    name: "", address1: "", address2: "", address3: "", gstin: "",
+    state: "", state_code: "", bank_acc: "", bank_ifsc: "", bank_name: "",
+    phone: "", email: ""
+  });
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    try {
+      const { data } = await http.get("/settings/company");
+      setForm(data);
+    } catch (e) {
+      alert("Failed to load company profile: " + e.message);
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await http.put("/settings/company", form);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      alert("Failed to save company profile: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="p-6" data-testid="company-profile-section">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-xl font-bold flex items-center gap-2">
+          <Settings2 className="w-5 h-5 text-[#C27842]" /> Company Profile (PDF Branding)
+        </h2>
+        <BtnPrimary onClick={save} disabled={saving} data-testid="save-profile-btn"
+          className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36]">
+          {saved ? <><Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Saved</> : <><Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> {saving ? "Saving..." : "Save Profile"}</>}
+        </BtnPrimary>
+      </div>
+      <p className="text-xs text-slate-600 mb-5">
+        Configure the official legal entity name, address lines, GSTIN, and bank account information. These details are dynamically rendered on invoices, packing lists, and dispatch challans.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="md:col-span-2">
+          <Input label="Company Name" value={form.name} onChange={e => setForm(s => ({ ...s, name: e.target.value }))} testId="profile-name" />
+        </div>
+        <Input label="Address Line 1" value={form.address1} onChange={e => setForm(s => ({ ...s, address1: e.target.value }))} />
+        <Input label="Address Line 2" value={form.address2} onChange={e => setForm(s => ({ ...s, address2: e.target.value }))} />
+        <Input label="Address Line 3 / City / PIN" value={form.address3} onChange={e => setForm(s => ({ ...s, address3: e.target.value }))} />
+        <Input label="GSTIN" value={form.gstin} onChange={e => setForm(s => ({ ...s, gstin: e.target.value }))} testId="profile-gstin" />
+        <Input label="State" value={form.state} onChange={e => setForm(s => ({ ...s, state: e.target.value }))} />
+        <Input label="State Code" value={form.state_code} onChange={e => setForm(s => ({ ...s, state_code: e.target.value }))} />
+        <Input label="Bank Name" value={form.bank_name} onChange={e => setForm(s => ({ ...s, bank_name: e.target.value }))} />
+        <Input label="Bank Account Number" value={form.bank_acc} onChange={e => setForm(s => ({ ...s, bank_acc: e.target.value }))} />
+        <Input label="Bank Branch IFSC" value={form.bank_ifsc} onChange={e => setForm(s => ({ ...s, bank_ifsc: e.target.value }))} />
+        <Input label="Phone" value={form.phone} onChange={e => setForm(s => ({ ...s, phone: e.target.value }))} />
+        <Input label="Email" value={form.email} onChange={e => setForm(s => ({ ...s, email: e.target.value }))} />
+      </div>
+    </Card>
+  );
+}
+
+/* -------------------- DATABASE BACKUP & EXPORT SECTION -------------------- */
+function BackupExportSection() {
+  const [downloading, setDownloading] = useState(false);
+
+  const downloadBackup = async () => {
+    setDownloading(true);
+    try {
+      const { data } = await http.get("/settings/export-backup");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ssk_erp_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Failed to export backup: " + e.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <Card className="p-6 h-full flex flex-col justify-between" data-testid="backup-export-section">
+      <div>
+        <h2 className="text-xl font-bold flex items-center gap-2 mb-1">
+          <FileSpreadsheet className="w-5 h-5 text-[#2563EB]" /> Database Backup & Export
+        </h2>
+        <p className="text-xs text-slate-600 mb-5">
+          Download a complete snapshot of all collections (materials, styles, POs, workers, settings, and logs) in a structured JSON format. This backup can be stored securely for data retention and business continuity.
+        </p>
+      </div>
+      <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
+        <span className="text-[10px] text-slate-500 font-mono">Format: JSON File</span>
+        <BtnPrimary onClick={downloadBackup} disabled={downloading} data-testid="download-backup-btn">
+          {downloading ? "Exporting..." : "Download Full Backup"}
+        </BtnPrimary>
+      </div>
+    </Card>
+  );
+}
+
+/* -------------------- SYSTEM ACTIVITY FEED SECTION -------------------- */
+function ActivityFeedSection() {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const { data } = await http.get("/settings/audit-logs");
+      setLogs(data || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  return (
+    <Card className="p-6 h-full" data-testid="activity-feed-section">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold flex items-center gap-2">
+          <History className="w-5 h-5 text-[#C27842]" /> System Activity Feed
+        </h2>
+        <button onClick={load} disabled={loading} className="text-xs font-bold uppercase tracking-wider text-[#C27842] hover:text-[#A65D24]">
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      <div className="max-h-[350px] overflow-y-auto pr-1 space-y-4">
+        {logs.length === 0 ? (
+          <div className="text-center text-slate-400 text-xs py-8">No recent activity logs.</div>
+        ) : (
+          <div className="relative border-l border-slate-200 pl-4 ml-2 space-y-4">
+            {logs.map((log) => (
+              <div key={log.id} className="relative">
+                <div className="absolute -left-[21px] top-1.5 w-2 h-2 rounded-full bg-[#C27842] border-2 border-white" />
+                <div className="text-xs">
+                  <span className="font-bold text-slate-900">{log.details}</span>
+                </div>
+                <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                  {log.by} · {new Date(log.created_at).toLocaleString("en-IN")}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </Card>
   );
 }

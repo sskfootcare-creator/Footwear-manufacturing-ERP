@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { http } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Plus, Trash2, Pencil, Save, Phone } from "lucide-react";
 
@@ -28,6 +28,7 @@ export default function Workers() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(empty);
   const [filterSkill, setFilterSkill] = useState("");
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const { data } = await http.get("/workers");
@@ -43,9 +44,28 @@ export default function Workers() {
     if (editId) await http.patch(`/workers/${editId}`, body); else await http.post("/workers", body);
     setOpen(false); load();
   };
-  const remove = async (id) => {
-    if (!window.confirm("Delete this karigar?")) return;
-    await http.delete(`/workers/${id}`); load();
+  const remove = (w) => {
+    if (w.active !== false) {
+      setConfirm({
+        title: "Deactivate Karigar",
+        message: `Are you sure you want to deactivate karigar "${w.name}"?`,
+        onConfirm: async () => {
+          await http.delete(`/workers/${w.id}`);
+          setConfirm(null);
+          load();
+        }
+      });
+    } else {
+      setConfirm({
+        title: "Reactivate Karigar",
+        message: `Are you sure you want to reactivate karigar "${w.name}"?`,
+        onConfirm: async () => {
+          await http.patch(`/workers/${w.id}`, { ...w, active: true });
+          setConfirm(null);
+          load();
+        }
+      });
+    }
   };
 
   const filtered = items.filter(w => !filterSkill || w.skill === filterSkill);
@@ -87,15 +107,15 @@ export default function Workers() {
               {filtered.length === 0 ? (
                 <tr><td colSpan="6" className="px-6 py-10 text-center text-slate-400">No karigars yet. Add your first karigar so you can assign them to production cards.</td></tr>
               ) : filtered.map((w) => (
-                <tr key={w.id} className="border-b border-slate-100 hover:bg-slate-50">
+                <tr key={w.id} className={`border-b border-slate-100 hover:bg-slate-50 ${w.active === false ? "opacity-50 line-through bg-slate-50 text-slate-400" : ""}`}>
                   <td className="px-4 py-3 font-bold">{w.name}</td>
                   <td className="px-4 py-3"><Badge color={SKILL_COLOR[w.skill] || "slate"}>{(SKILLS.find(s => s.key === w.skill) || {}).label || w.skill}</Badge></td>
                   <td className="px-4 py-3 font-mono text-xs"><Phone className="w-3 h-3 inline -mt-0.5 mr-1 text-slate-400" />{w.phone || "—"}</td>
                   <td className="px-4 py-3 text-right font-mono font-bold">₹{w.rate_per_pair}</td>
                   <td className="px-4 py-3"><Badge color={w.active === false ? "red" : "green"}>{w.active === false ? "Inactive" : "Active"}</Badge></td>
                   <td className="px-4 py-3 text-right">
-                    <button onClick={() => startEdit(w)} className="text-slate-600 hover:text-[#2563EB] p-1.5"><Pencil className="w-4 h-4" /></button>
-                    <button onClick={() => remove(w.id)} className="text-slate-600 hover:text-red-600 p-1.5 ml-1"><Trash2 className="w-4 h-4" /></button>
+                    <button onClick={() => startEdit(w)} className="text-slate-600 hover:text-[#2563EB] p-1.5" disabled={w.active === false} title="Edit"><Pencil className="w-4 h-4" /></button>
+                    <button onClick={() => remove(w)} className="text-slate-600 hover:text-red-600 p-1.5 ml-1" title={w.active === false ? "Reactivate" : "Deactivate"} data-testid={`delete-worker-${w.name}`}><Trash2 className="w-4 h-4" /></button>
                   </td>
                 </tr>
               ))}
@@ -130,6 +150,13 @@ export default function Workers() {
           </div>
         </Drawer>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

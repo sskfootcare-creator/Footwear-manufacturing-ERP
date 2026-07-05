@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
-import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
+import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Plus, Trash2, Pencil, X, Save } from "lucide-react";
 
 const CATEGORIES = ["upper", "sole", "lining", "accessory", "consumable", "packing", "other"];
@@ -15,6 +15,7 @@ export default function Materials() {
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState(emptyForm);
+  const [confirm, setConfirm] = useState(null);
 
   const load = async () => {
     const { data } = await http.get("/materials");
@@ -25,13 +26,24 @@ export default function Materials() {
   const startNew = () => { setEdit(null); setForm(emptyForm); setOpen(true); };
   const startEdit = (m) => { setEdit(m.id); setForm({ code: m.code, name: m.name, category: m.category, unit: m.unit, rate: m.rate, reorder_level: m.reorder_level || 0, notes: m.notes || "" }); setOpen(true); };
   const save = async () => {
-    const body = { ...form, rate: Number(form.rate), reorder_level: Number(form.reorder_level || 0) };
-    if (edit) await http.patch(`/materials/${edit}`, body); else await http.post("/materials", body);
-    setOpen(false); load();
+    try {
+      const body = { ...form, rate: Number(form.rate), reorder_level: Number(form.reorder_level || 0) };
+      if (edit) await http.patch(`/materials/${edit}`, body); else await http.post("/materials", body);
+      setOpen(false); load();
+    } catch (e) {
+      alert(e.response?.data?.detail || e.message);
+    }
   };
-  const remove = async (id) => {
-    if (!window.confirm("Delete this material?")) return;
-    await http.delete(`/materials/${id}`); load();
+  const remove = (id) => {
+    setConfirm({
+      title: "Delete Material",
+      message: "Are you sure you want to delete this material? This will remove the material from catalog listings and history references.",
+      onConfirm: async () => {
+        await http.delete(`/materials/${id}`);
+        setConfirm(null);
+        load();
+      }
+    });
   };
 
   const filtered = items.filter((m) => {
@@ -121,6 +133,13 @@ export default function Materials() {
           </div>
         </Drawer>
       )}
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        onConfirm={confirm?.onConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }
