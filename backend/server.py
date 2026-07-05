@@ -34,7 +34,10 @@ from packing_list import build_default_packing_list, build_from_template
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from io import BytesIO
+import uuid
+import boto3
 
 # ---------- DB & app ----------
 mongo_url = os.environ["MONGO_URL"]
@@ -43,6 +46,56 @@ db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="SSK Footcare ERP")
 api = APIRouter(prefix="/api")
+
+# ---------- Object Storage / Local Uploads ----------
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_REGION = os.environ.get("S3_REGION", "us-east-1")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT_URL", "")
+if S3_BUCKET:
+    s3_client = boto3.client(
+        "s3",
+        region_name=S3_REGION,
+        endpoint_url=S3_ENDPOINT if S3_ENDPOINT else None,
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+    )
+else:
+    s3_client = None
+
+@api.post("/upload/image")
+async def upload_image(file: UploadFile = File(...), request: Request = None):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    
+    ext = file.filename.split('.')[-1].lower() if '.' in file.filename else 'png'
+    if ext not in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
+        raise HTTPException(400, "Invalid image format")
+        
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    content = await file.read()
+    
+    if s3_client:
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=f"images/{filename}",
+            Body=content,
+            ContentType=file.content_type
+        )
+        if S3_ENDPOINT:
+            url = f"{S3_ENDPOINT.rstrip('/')}/{S3_BUCKET}/images/{filename}"
+        else:
+            url = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/images/{filename}"
+        return {"url": url}
+    else:
+        filepath = os.path.join("uploads", filename)
+        with open(filepath, "wb") as f:
+            f.write(content)
+        base = str(request.base_url).rstrip('/')
+        return {"url": f"{base}/uploads/{filename}"}
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ssk")
@@ -182,6 +235,7 @@ class StyleIn(BaseModel):
     packing_cost: float = 0
     margin_pct: float = 25
     gst_pct: float = 5
+    status: Optional[str] = "inactive"
 
 class POLineItem(BaseModel):
     style_code: str
@@ -717,15 +771,181 @@ def compute_style_costing(style: dict) -> dict:
     }
 
 @api.get("/styles")
-async def list_styles(request: Request):
+async def list_styles(request: Request, status: Optional[str] = None, search: Optional[str] = None):
     await get_current_user(request)
-    docs = await db.styles.find({}).sort("created_at", -1).to_list(1000)
+    query = {}
+    if status:
+        query["status"] = status
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"code": search_regex},
+            {"name": search_regex},
+            {"description": search_regex}
+        ]
+    docs = await db.styles.find(query).sort("created_at", -1).to_list(1000)
     out = []
     for d in docs:
         d = stringify(d)
         d["costing"] = compute_style_costing(d)
         out.append(d)
     return out
+
+@api.get("/styles/bulk/template")
+async def get_styles_template():
+    import io
+    import pandas as pd
+    
+    columns = [
+        "Style Code", "Name", "Category", "Description", "Base Size",
+        "Overhead %", "Packing Cost", "Margin %", "GST %", "Image URL",
+        "Labor: Cutting", "Labor: Fitting", "Labor: Pasting", "Labor: Finishing", "Labor: Packing"
+    ]
+    
+    sample_data = [
+        {
+            "Style Code": "SAMPLE-01", "Name": "Classic Oxford", "Category": "Footwear", "Description": "Men's leather shoe",
+            "Base Size": 8, "Overhead %": 10, "Packing Cost": 15, "Margin %": 25, "GST %": 5, "Image URL": "",
+            "Labor: Cutting": 12, "Labor: Fitting": 18, "Labor: Pasting": 10, "Labor: Finishing": 8, "Labor: Packing": 5
+        }
+    ]
+    df = pd.DataFrame(sample_data, columns=columns)
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+    output.seek(0)
+    
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="style_master_template.xlsx"'}
+    )
+
+@api.post("/styles/bulk/preview")
+async def bulk_upload_preview(file: UploadFile = File(...), request: Request = None):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    import pandas as pd
+    import io
+    content = await file.read()
+    try:
+        df = pd.read_excel(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(400, "Invalid Excel file")
+        
+    col_map = {
+        "Style Code": "code",
+        "Name": "name",
+        "Category": "category",
+        "Description": "description",
+        "Base Size": "base_size",
+        "Overhead %": "overhead_pct",
+        "Packing Cost": "packing_cost",
+        "Margin %": "margin_pct",
+        "GST %": "gst_pct",
+        "Image URL": "image_url"
+    }
+    df = df.rename(columns=col_map)
+    if "code" not in df.columns or "name" not in df.columns:
+        raise HTTPException(400, "Missing required columns (Style Code, Name)")
+        
+    labor_cols = [c for c in df.columns if str(c).strip().lower().startswith("labor:")]
+    
+    preview = []
+    
+    for idx, row in df.iterrows():
+        code = str(row.get("code", "")).strip()
+        if not code or code == "nan":
+            continue
+            
+        name = str(row.get("name", "")).strip()
+        if not name or name == "nan": continue
+        
+        labor = None
+        if labor_cols:
+            labor = []
+            for lc in labor_cols:
+                op_name = lc.split(":", 1)[1].strip()
+                val = row.get(lc)
+                if pd.notna(val) and str(val).strip() != "":
+                    try:
+                        rate = float(val)
+                        labor.append({"name": op_name, "rate": rate})
+                    except:
+                        pass
+                        
+        preview.append({
+            "code": code,
+            "name": name,
+            "category": str(row.get("category", "Footwear")).strip() if pd.notna(row.get("category")) else "Footwear",
+            "description": str(row.get("description", "")).strip() if pd.notna(row.get("description")) else "",
+            "base_size": str(row.get("base_size", "7")).strip() if pd.notna(row.get("base_size")) else "7",
+            "overhead_pct": float(row.get("overhead_pct", 0)) if pd.notna(row.get("overhead_pct")) else 0,
+            "packing_cost": float(row.get("packing_cost", 0)) if pd.notna(row.get("packing_cost")) else 0,
+            "margin_pct": float(row.get("margin_pct", 25)) if pd.notna(row.get("margin_pct")) else 25,
+            "gst_pct": float(row.get("gst_pct", 5)) if pd.notna(row.get("gst_pct")) else 5,
+            "image_url": str(row.get("image_url", "")).strip() if pd.notna(row.get("image_url")) else "",
+            "labor": labor
+        })
+                    
+    return {"preview": preview}
+
+@api.post("/styles/bulk")
+async def bulk_upload_styles(payload: dict, request: Request = None):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    
+    styles_list = payload.get("styles", [])
+    if not styles_list:
+        raise HTTPException(400, "No styles provided")
+    
+    success = 0
+    errors = []
+    
+    for idx, row in enumerate(styles_list):
+        try:
+            code = row.get("code", "").strip()
+            name = row.get("name", "").strip()
+            if not code or not name:
+                errors.append(f"Row {idx+1}: Missing code or name")
+                continue
+                
+            doc = {
+                "code": code,
+                "name": name,
+                "category": row.get("category", "Footwear"),
+                "description": row.get("description", ""),
+                "base_size": row.get("base_size", "7"),
+                "overhead_pct": float(row.get("overhead_pct", 0)),
+                "packing_cost": float(row.get("packing_cost", 0)),
+                "margin_pct": float(row.get("margin_pct", 25)),
+                "gst_pct": float(row.get("gst_pct", 5)),
+                "image_url": row.get("image_url", ""),
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+            if row.get("labor") is not None: doc["labor"] = row.get("labor")
+            else: doc["labor"] = []
+                
+            existing = await db.styles.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}})
+            
+            if existing:
+                doc.pop("created_at")
+                if row.get("labor") is None:
+                    doc["labor"] = existing.get("labor", [])
+                
+                doc["bom"] = existing.get("bom", [])
+                doc["status"] = "active" if len(doc["bom"]) > 0 else "inactive"
+                await db.styles.update_one({"_id": existing["_id"]}, {"$set": doc})
+            else:
+                doc["bom"] = []
+                doc["status"] = "inactive"
+                await db.styles.insert_one(doc)
+            
+            success += 1
+        except Exception as e:
+            errors.append(f"Row {idx+1}: {str(e)}")
+            
+    return {"ok": True, "success_count": success, "errors": errors}
 
 @api.get("/styles/{sid}")
 async def get_style(sid: str, request: Request):
@@ -745,6 +965,7 @@ async def create_style(payload: StyleIn, request: Request):
         raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
     payload.code = code
     doc = payload.model_dump()
+    doc["status"] = "active" if len(doc.get("bom", [])) > 0 else "inactive"
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
     try:
@@ -764,6 +985,7 @@ async def update_style(sid: str, payload: StyleIn, request: Request):
         raise HTTPException(status_code=409, detail=f"Style code '{code}' already exists")
     payload.code = code
     update = payload.model_dump()
+    update["status"] = "active" if len(update.get("bom", [])) > 0 else "inactive"
     update["updated_at"] = now_iso()
     try:
         await db.styles.update_one({"_id": oid(sid)}, {"$set": update})
@@ -820,10 +1042,34 @@ async def validate_po_styles(payload: POIn):
                     break
                     
     if missing_codes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"The following style codes do not exist in the Style Master: {', '.join(set(missing_codes))}. Please create them first."
-        )
+        new_styles = []
+        now = now_iso()
+        for code in set(missing_codes):
+            new_styles.append({
+                "code": code,
+                "name": f"Auto-created Style {code}",
+                "category": "Footwear",
+                "image_url": "",
+                "description": "Auto-created from PO upload",
+                "base_size": "7",
+                "bom": [],
+                "labor": [
+                    {"name": "Cutting", "rate": 6},
+                    {"name": "Fitting", "rate": 12},
+                    {"name": "Pasting", "rate": 8},
+                    {"name": "Finishing", "rate": 6},
+                    {"name": "Packing", "rate": 3}
+                ],
+                "overhead_pct": 8,
+                "packing_cost": 12,
+                "margin_pct": 25,
+                "gst_pct": 5,
+                "status": "inactive",
+                "created_at": now,
+                "updated_at": now
+            })
+        if new_styles:
+            await db.styles.insert_many(new_styles)
 
 @api.post("/pos")
 async def create_po(payload: POIn, request: Request):

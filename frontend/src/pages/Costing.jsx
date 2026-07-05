@@ -9,7 +9,7 @@ export default function Costing() {
   const [overrides, setOverrides] = useState({ margin_pct: null, gst_pct: null });
 
   useEffect(() => {
-    http.get("/styles").then(r => setStyles(r.data));
+    http.get("/styles?status=active").then(r => setStyles(r.data));
   }, []);
 
   const selected = useMemo(() => styles.find(s => s.id === selectedId), [styles, selectedId]);
