@@ -14,7 +14,8 @@ from typing import List, Optional, Literal, Dict
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Query
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic_core import PydanticCustomError
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
@@ -116,11 +117,31 @@ class UserCreate(BaseModel):
     name: str
     role: Role = "production"
 
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        if v is not None and len(v) < 8:
+            raise PydanticCustomError(
+                "string_too_short",
+                "Password must be at least 8 characters long."
+            )
+        return v
+
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[Role] = None
     active: Optional[bool] = None
     password: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and len(v) < 8:
+            raise PydanticCustomError(
+                "string_too_short",
+                "Password must be at least 8 characters long."
+            )
+        return v
 
 class MaterialIn(BaseModel):
     code: str

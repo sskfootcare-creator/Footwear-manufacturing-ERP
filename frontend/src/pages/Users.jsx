@@ -146,7 +146,7 @@ export default function Users() {
             <Select label="Role" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} testId="form-user-role">
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </Select>
-            <Input label={editId ? "New password (optional)" : "Password"} type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            <Input label={editId ? "New password (optional)" : "Password"} type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} testId="form-user-password" minLength={8} />
             {error && (
               <div className="text-xs text-red-600 font-bold bg-red-50 border border-red-200 px-3 py-2" data-testid="user-form-error">
                 {error}
