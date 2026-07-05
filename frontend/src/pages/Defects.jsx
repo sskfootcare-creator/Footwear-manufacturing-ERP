@@ -59,11 +59,17 @@ export default function Defects() {
         title="Defect & Rework Tracker"
         subtitle="Quality / Defects"
         testId="defects-header"
-        action={<BtnPrimary onClick={startNew} data-testid="add-defect-btn"><Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Log Defect</BtnPrimary>}
+        action={
+          <BtnPrimary onClick={startNew} data-testid="add-defect-btn" className="px-3 sm:px-5">
+            <Plus className="w-3.5 h-3.5 inline -mt-0.5" />
+            <span className="hidden sm:inline ml-1">Log Defect</span>
+          </BtnPrimary>
+        }
       />
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         <Card className="overflow-hidden">
-          <table className="w-full text-sm" data-testid="defects-table">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="defects-table">
             <thead className="bg-slate-50 border-b-2 border-slate-200">
               <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                 <th className="px-3 py-3 font-bold">PO #</th>
@@ -94,8 +100,9 @@ export default function Defects() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         </Card>
       </div>
 

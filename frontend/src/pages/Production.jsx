@@ -386,42 +386,51 @@ export default function Production() {
           <div className="flex gap-2 items-center">
             {canEdit && (
               <button onClick={() => setDockOpen(d => !d)} data-testid="toggle-karigar-dock"
-                className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 ${dockOpen ? "bg-[#C27842] text-white border-[#C27842]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
-                <HardHat className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Karigars
+                className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 flex items-center gap-1 ${dockOpen ? "bg-[#C27842] text-white border-[#C27842]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
+                <HardHat className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">Karigars</span>
               </button>
             )}
             <button onClick={() => setViewArchive(v => !v)} data-testid="toggle-archive"
-              className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 ${viewArchive ? "bg-[#0F172A] text-white border-[#0F172A]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
-              <Archive className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Archive ({groupJobsByColor(archivedJobs).length})
+              className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 flex items-center gap-1 ${viewArchive ? "bg-[#0F172A] text-white border-[#0F172A]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
+              <Archive className="w-3.5 h-3.5 inline" />
+              <span className="hidden sm:inline">Archive ({groupJobsByColor(archivedJobs).length})</span>
+              <span className="inline sm:hidden">({groupJobsByColor(archivedJobs).length})</span>
             </button>
             {procSelectedCount > 0 && (
               <>
-                <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`); setProcSelected({}); }} data-testid="merged-mr-btn">
-                  <ClipboardList className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Material Requirement ({procSelectedCount})
+                <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`); setProcSelected({}); }} data-testid="merged-mr-btn" className="px-3 sm:px-4 flex items-center gap-1">
+                  <ClipboardList className="w-3.5 h-3.5 inline" />
+                  <span className="hidden sm:inline">Material Requirement ({procSelectedCount})</span>
+                  <span className="inline sm:hidden">({procSelectedCount})</span>
                 </BtnPrimary>
-                <BtnSecondary onClick={() => checkShortage(Object.values(procSelected))} data-testid="check-shortage-btn" className="!bg-amber-50 hover:!bg-amber-100 border-amber-300 text-amber-900">
-                  <AlertTriangle className="w-3.5 h-3.5 inline -mt-0.5 mr-1 text-amber-600 animate-pulse" /> Check Shortage ({procSelectedCount})
+                <BtnSecondary onClick={() => checkShortage(Object.values(procSelected))} data-testid="check-shortage-btn" className="!bg-amber-50 hover:!bg-amber-100 border-amber-300 text-amber-900 px-3 sm:px-4 flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 inline text-amber-600 animate-pulse" />
+                  <span className="hidden sm:inline">Check Shortage ({procSelectedCount})</span>
+                  <span className="inline sm:hidden">({procSelectedCount})</span>
                 </BtnSecondary>
               </>
             )}
             {dispatchedCount > 0 && (
-              <BtnPrimary onClick={downloadMergedInvoice} disabled={merging} data-testid="merged-invoice-btn">
-                <FileDown className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />
-                {merging ? "..." : `Merge Invoice (${dispatchedCount})`}
+              <BtnPrimary onClick={downloadMergedInvoice} disabled={merging} data-testid="merged-invoice-btn" className="px-3 sm:px-4 flex items-center gap-1">
+                <FileDown className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">{merging ? "..." : `Merge Invoice (${dispatchedCount})`}</span>
+                <span className="inline sm:hidden">({dispatchedCount})</span>
               </BtnPrimary>
             )}
             {dispatchedCount > 0 && (
               <BtnPrimary onClick={openPackingMerged} data-testid="merged-packing-btn"
-                className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36]">
-                <Package className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />
-                Merge Packing ({dispatchedCount})
+                className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] px-3 sm:px-4 flex items-center gap-1">
+                <Package className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">Merge Packing ({dispatchedCount})</span>
+                <span className="inline sm:hidden">({dispatchedCount})</span>
               </BtnPrimary>
             )}
           </div>
         }
       />
 
-      <div className="p-8">
+      <div className="p-4 sm:p-8">
         {viewArchive ? (
           <ArchivePanel
             jobs={archivedJobs}

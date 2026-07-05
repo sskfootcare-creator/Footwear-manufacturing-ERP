@@ -65,6 +65,15 @@ h1, h2, h3, h4, h5, h6 {
 ::-webkit-scrollbar-thumb { background: var(--border-default); border: 2px solid var(--bg-page); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
 
+/* Hide scrollbar utility */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE/Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
 /* Shadcn theme tokens (light) */
 @layer base {
   :root {

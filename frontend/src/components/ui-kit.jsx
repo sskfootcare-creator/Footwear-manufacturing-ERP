@@ -1,9 +1,9 @@
 export function PageHeader({ title, subtitle, action, testId }) {
   return (
-    <div className="flex items-end justify-between border-b-2 border-slate-200 px-8 py-6 bg-white" data-testid={testId}>
+    <div className="flex items-center justify-between gap-4 border-b-2 border-slate-200 px-4 sm:px-8 py-4 sm:py-6 bg-white" data-testid={testId}>
       <div>
-        <div className="text-xs uppercase tracking-[0.2em] text-slate-500 font-bold mb-1">SSK / {subtitle || title}</div>
-        <h1 className="text-3xl font-black tracking-tight">{title}</h1>
+        <div className="text-[10px] sm:text-xs uppercase tracking-[0.2em] text-slate-500 font-bold mb-1">SSK / {subtitle || title}</div>
+        <h1 className="text-xl sm:text-3xl font-black tracking-tight">{title}</h1>
       </div>
       <div>{action}</div>
     </div>
@@ -40,11 +40,11 @@ export function Card({ children, className = "", style, ...rest }) {
 
 export function StatTile({ label, value, sub, accent = "#C27842", testId }) {
   return (
-    <Card className="p-5 relative overflow-hidden" >
+    <Card className="p-3 sm:p-5 relative overflow-hidden" >
       <div data-testid={testId}>
-        <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">{label}</div>
-        <div className="font-mono text-3xl font-bold mt-2">{value}</div>
-        {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
+        <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">{label}</div>
+        <div className="font-mono text-lg sm:text-2xl lg:text-3xl font-bold mt-2 truncate" title={String(value)}>{value}</div>
+        {sub && <div className="text-xs text-slate-500 mt-1 truncate" title={String(sub)}>{sub}</div>}
       </div>
       <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ background: accent }} />
     </Card>

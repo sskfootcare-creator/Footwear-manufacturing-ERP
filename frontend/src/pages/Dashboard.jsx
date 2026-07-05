@@ -55,7 +55,7 @@ export default function Dashboard() {
         }
       />
 
-      <div className="p-8 space-y-6">
+      <div className="p-4 sm:p-8 space-y-6">
         {overdueInvoices.length > 0 && (
           <Card className="bg-red-50 border-2 border-red-300 px-5 py-3 flex items-center justify-between" data-testid="overdue-invoices-banner">
             <div className="flex items-center gap-3">
@@ -81,7 +81,7 @@ export default function Dashboard() {
                 Open production floor <ArrowRight className="w-3 h-3" />
               </Link>
             </div>
-            <div className="max-h-72 overflow-y-auto">
+            <div className="max-h-72 overflow-auto">
               <table className="w-full text-xs" data-testid="overdue-table">
                 <thead className="bg-red-100 sticky top-0">
                   <tr className="text-left text-[10px] uppercase tracking-wider text-red-800 border-b border-red-200">
@@ -155,9 +155,9 @@ export default function Dashboard() {
         </div>
 
         <div className="grid lg:grid-cols-3 gap-6">
-          <Card className="lg:col-span-2 p-6">
+          <Card className="lg:col-span-2 p-4 sm:p-6">
             <div className="flex items-baseline justify-between mb-5">
-              <h2 className="text-xl font-bold">Production Funnel</h2>
+              <h2 className="text-lg sm:text-xl font-bold">Production Funnel</h2>
               <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Pairs by stage</span>
             </div>
             <div className="space-y-3" data-testid="production-funnel">
@@ -176,8 +176,8 @@ export default function Dashboard() {
             </div>
           </Card>
 
-          <Card className="p-6">
-            <h2 className="text-xl font-bold mb-4 flex items-center gap-2"><Clock className="w-4 h-4 text-[#C27842]" /> Quick Stats</h2>
+          <Card className="p-4 sm:p-6">
+            <h2 className="text-lg sm:text-xl font-bold mb-4 flex items-center gap-2"><Clock className="w-4 h-4 text-[#C27842]" /> Quick Stats</h2>
             <div className="space-y-3 text-sm">
               <Row label="Materials" value={stats.materials_count} />
               <Row label="Styles" value={stats.styles_count} />
@@ -194,11 +194,12 @@ export default function Dashboard() {
         </div>
 
         <Card className="overflow-hidden">
-          <div className="px-6 py-4 border-b-2 border-slate-200 flex items-baseline justify-between">
-            <h2 className="text-xl font-bold">Recent Purchase Orders</h2>
+          <div className="px-4 sm:px-6 py-4 border-b-2 border-slate-200 flex items-baseline justify-between">
+            <h2 className="text-lg sm:text-xl font-bold">Recent Purchase Orders</h2>
             <Link to="/pos" className="text-xs uppercase tracking-wider font-bold text-slate-600 hover:text-[#C27842]">View all →</Link>
           </div>
-          <table className="w-full text-sm" data-testid="recent-pos-table">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="recent-pos-table">
             <thead className="bg-slate-50 border-b-2 border-slate-200">
               <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                 <th className="px-6 py-3 font-bold">PO #</th>
@@ -221,7 +222,8 @@ export default function Dashboard() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         </Card>
       </div>
     </div>

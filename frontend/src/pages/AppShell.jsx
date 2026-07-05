@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck } from "lucide-react";
+import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck, Menu, X } from "lucide-react";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, roles: ["admin", "manager", "production", "sales"] },
@@ -25,16 +26,17 @@ const navItems = [
 export default function AppShell() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const doLogout = async () => {
     await logout();
     nav("/login");
   };
 
-  return (
-    <div className="min-h-screen flex bg-[#F7F7F5]">
-      <aside className="w-64 bg-[#0F172A] text-slate-300 flex flex-col sticky top-0 h-screen" data-testid="sidebar">
-        <div className="px-5 py-5 border-b border-slate-800 flex items-center gap-3">
+  const SidebarContent = () => (
+    <>
+      <div className="px-5 py-5 border-b border-slate-800 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-[#C27842] text-white grid place-items-center font-black">
             <Factory className="w-5 h-5" />
           </div>
@@ -43,48 +45,84 @@ export default function AppShell() {
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">ERP v1.0</div>
           </div>
         </div>
+        <button className="lg:hidden text-slate-400 hover:text-white" onClick={() => setMobileOpen(false)}>
+          <X className="w-6 h-6" />
+        </button>
+      </div>
 
-        <nav className="flex-1 py-3 overflow-y-auto">
-          {navItems
-            .filter((n) => !user?.role || n.roles.includes(user.role))
-            .map((n) => (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                end={n.end}
-                data-testid={`nav-${n.label.toLowerCase().replace(/\s+/g, "-")}`}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-5 py-3 text-sm border-l-4 transition-colors ${
-                    isActive
-                      ? "bg-slate-800 text-white border-[#C27842]"
-                      : "border-transparent hover:bg-slate-800 hover:text-white hover:border-[#C27842]/50"
-                  }`
-                }
-              >
-                <n.icon className="w-4 h-4" />
-                <span className="font-medium">{n.label}</span>
-              </NavLink>
-            ))}
-        </nav>
+      <nav className="flex-1 py-3 overflow-y-auto">
+        {navItems
+          .filter((n) => !user?.role || n.roles.includes(user.role))
+          .map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.end}
+              onClick={() => setMobileOpen(false)}
+              data-testid={`nav-${n.label.toLowerCase().replace(/\s+/g, "-")}`}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-5 py-3 text-sm border-l-4 transition-colors ${
+                  isActive
+                    ? "bg-slate-800 text-white border-[#C27842]"
+                    : "border-transparent hover:bg-slate-800 hover:text-white hover:border-[#C27842]/50"
+                }`
+              }
+            >
+              <n.icon className="w-4 h-4" />
+              <span className="font-medium">{n.label}</span>
+            </NavLink>
+          ))}
+      </nav>
 
-        <div className="border-t border-slate-800 p-4">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-9 h-9 bg-[#C27842] text-white grid place-items-center font-bold">
-              {user?.name?.[0]?.toUpperCase() || "U"}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-semibold text-white truncate">{user?.name}</div>
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">{user?.role}</div>
-            </div>
+      <div className="border-t border-slate-800 p-4">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="w-9 h-9 bg-[#C27842] text-white grid place-items-center font-bold">
+            {user?.name?.[0]?.toUpperCase() || "U"}
           </div>
-          <button
-            onClick={doLogout}
-            data-testid="logout-btn"
-            className="w-full flex items-center justify-center gap-2 text-xs uppercase tracking-wider font-bold py-2 border border-slate-700 hover:border-[#C27842] hover:text-white transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" /> Sign out
-          </button>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-white truncate">{user?.name}</div>
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">{user?.role}</div>
+          </div>
         </div>
+        <button
+          onClick={doLogout}
+          data-testid="logout-btn"
+          className="w-full flex items-center justify-center gap-2 text-xs uppercase tracking-wider font-bold py-2 border border-slate-700 hover:border-[#C27842] hover:text-white transition-colors"
+        >
+          <LogOut className="w-3.5 h-3.5" /> Sign out
+        </button>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F7F7F5]">
+      {/* Mobile Top Header */}
+      <header className="lg:hidden bg-[#0F172A] text-white flex items-center justify-between px-4 py-3 sticky top-0 z-40 border-b border-slate-800">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-[#C27842] text-white grid place-items-center font-black">
+            <Factory className="w-4 h-4" />
+          </div>
+          <span className="font-bold text-sm tracking-tight">SSK FOOTCARE</span>
+        </div>
+        <button onClick={() => setMobileOpen(true)} className="text-slate-300 hover:text-white">
+          <Menu className="w-6 h-6" />
+        </button>
+      </header>
+
+      {/* Mobile Overlay Sidebar Drawer */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 flex lg:hidden">
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setMobileOpen(false)} />
+          <aside className="relative flex w-full max-w-xs flex-1 flex-col bg-[#0F172A] pt-0 pb-4 text-slate-300 outline-none">
+            <SidebarContent />
+          </aside>
+        </div>
+      )}
+
+      {/* Desktop Static Sidebar */}
+      <aside className="hidden lg:flex w-64 bg-[#0F172A] text-slate-300 flex-col sticky top-0 h-screen" data-testid="sidebar">
+        <SidebarContent />
       </aside>
 
       <main className="flex-1 min-w-0" data-testid="main-content">
