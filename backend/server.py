@@ -141,6 +141,14 @@ def stringify(doc: dict) -> dict:
     doc = dict(doc)
     if "_id" in doc:
         doc["id"] = str(doc.pop("_id"))
+    # Recursively stringify any ObjectId values
+    for key, value in doc.items():
+        if isinstance(value, ObjectId):
+            doc[key] = str(value)
+        elif isinstance(value, dict):
+            doc[key] = stringify(value)
+        elif isinstance(value, list):
+            doc[key] = [stringify(item) if isinstance(item, dict) else (str(item) if isinstance(item, ObjectId) else item) for item in value]
     return doc
 
 
@@ -572,6 +580,45 @@ class StockRelease(BaseModel):
     size: str
     quantity: int
     release_type: Literal["ship", "cancel"]
+
+
+# ----- Phase 2 : FG Stock Movements ledger -----
+MovementType = Literal[
+    "production_in", "reserved", "unreserved", "dispatched",
+    "return_in", "return_restocked", "return_damaged",
+    "liquidation_out", "adjustment"
+]
+
+ReferenceType = Literal["job", "online_order", "return", "manual"]
+
+# Field to adjust when movement_type == "adjustment" (positive or negative delta)
+AdjustmentField = Literal[
+    "ready_stock_qty", "reserved_qty", "in_transit_qty",
+    "return_qty", "damaged_qty", "liquidation_qty"
+]
+
+
+class FgStockMovementIn(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    movement_type: MovementType
+    quantity: int  # always POSITIVE; sign is derived from movement_type. For "adjustment" a negative value is allowed.
+    reference_type: ReferenceType = "manual"
+    reference_id: Optional[str] = ""
+    notes: Optional[str] = ""
+    # For movement_type == "adjustment"
+    adjustment_field: Optional[AdjustmentField] = None
+    # For movement_type == "reserved" / "unreserved" : online_order line item id used to log inventory_reservations
+    online_order_id: Optional[str] = None
+
+
+class InventoryReservationIn(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    qty: int
+    online_order_id: str
 
 
 # Sensible factory defaults (in hours)
@@ -1144,7 +1191,8 @@ async def list_fg_inventory(
         
         available = ready - reserved - damaged - liq
         d["available_qty"] = available
-        d["is_low_stock"] = available < min_stock
+        # Per Phase-2 spec: low_stock triggers on READY vs MIN, not AVAILABLE vs MIN
+        d["is_low_stock"] = ready < min_stock
         
         if low_stock is not None:
             if low_stock and not d["is_low_stock"]:
@@ -1154,6 +1202,296 @@ async def list_fg_inventory(
         
         out.append(d)
     return out
+
+
+# ---------- FG Movement Engine (Phase 2) ----------
+# Map movement_type → dict of {fg_inventory_field: signed_delta_multiplier}.
+# `quantity` from the request is multiplied by these to produce the delta applied to each field.
+_MOVEMENT_DELTAS = {
+    "production_in":     {"ready_stock_qty":  1},
+    "reserved":          {"reserved_qty":     1},
+    "unreserved":        {"reserved_qty":    -1},
+    "dispatched":        {"ready_stock_qty": -1, "reserved_qty": -1},
+    "return_in":         {"return_qty":       1},
+    "return_restocked":  {"return_qty":      -1, "ready_stock_qty": 1},
+    "return_damaged":    {"return_qty":      -1, "damaged_qty":    1},
+    "liquidation_out":   {"ready_stock_qty": -1, "liquidation_qty": 1},
+    # "adjustment" is dynamic — applied via payload.adjustment_field
+}
+
+
+async def _get_or_create_fg_row(style_id: str, color: str, size: str):
+    """Return the fg_inventory row for (style_id, color, size). Auto-create at zero if absent."""
+    style = await db.styles.find_one({"_id": ObjectId(style_id)})
+    if not style:
+        raise HTTPException(404, f"Style '{style_id}' not found")
+    row = await db.fg_inventory.find_one({
+        "style_id": ObjectId(style_id),
+        "color": color,
+        "size":  size,
+    })
+    if row:
+        return row
+    doc = {
+        "style_id":         ObjectId(style_id),
+        "style_code":       style["code"],
+        "color":            color,
+        "size":             size,
+        "ready_stock_qty":  0,
+        "reserved_qty":     0,
+        "in_transit_qty":   0,
+        "return_qty":       0,
+        "damaged_qty":      0,
+        "liquidation_qty":  0,
+        "min_stock_level":  25,
+        "updated_at":       now_iso(),
+    }
+    try:
+        res = await db.fg_inventory.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        return doc
+    except DuplicateKeyError:
+        return await db.fg_inventory.find_one({
+            "style_id": ObjectId(style_id), "color": color, "size": size,
+        })
+
+
+async def _apply_movement(payload: "FgStockMovementIn", user_email: str):
+    """Single write path to fg_inventory. Creates a ledger row and updates the inventory
+    row atomically. Blocks any movement that would push a field below zero.
+
+    Also, for movement_type in {"reserved", "unreserved", "dispatched"} it maintains the
+    inventory_reservations collection linked via `online_order_id`.
+    """
+    row = await _get_or_create_fg_row(payload.style_id, payload.color, payload.size)
+
+    # ── Build the delta dict (field → signed change) ────────────────────
+    if payload.movement_type == "adjustment":
+        if not payload.adjustment_field:
+            raise HTTPException(400, "adjustment_field is required for movement_type='adjustment'")
+        # For adjustment, `quantity` may be negative (raw delta)
+        delta = {payload.adjustment_field: int(payload.quantity)}
+    else:
+        if payload.quantity <= 0:
+            raise HTTPException(400, "quantity must be > 0 for this movement_type")
+        multipliers = _MOVEMENT_DELTAS.get(payload.movement_type)
+        if multipliers is None:
+            raise HTTPException(400, f"Unsupported movement_type '{payload.movement_type}'")
+        delta = {f: m * int(payload.quantity) for f, m in multipliers.items()}
+
+    # ── Validate no field goes below zero ───────────────────────────────
+    for field, d in delta.items():
+        current = int(row.get(field, 0))
+        if current + d < 0:
+            raise HTTPException(
+                400,
+                f"Movement would push {field} below zero (current {current}, delta {d}). "
+                f"Movement blocked."
+            )
+
+    # ── Atomic $inc with concurrency guard (match on current values) ────
+    match_filter = {"_id": row["_id"]}
+    for field in delta:
+        match_filter[field] = int(row.get(field, 0))
+
+    update = {
+        "$inc": {field: int(d) for field, d in delta.items()},
+        "$set": {"updated_at": now_iso()},
+    }
+    res = await db.fg_inventory.update_one(match_filter, update)
+    if res.modified_count == 0:
+        raise HTTPException(
+            409,
+            "Concurrent modification detected on fg_inventory. Please retry the movement."
+        )
+
+    # ── Post the ledger row ─────────────────────────────────────────────
+    mv_doc = {
+        "style_id":       ObjectId(payload.style_id),
+        "style_code":     row.get("style_code", ""),
+        "color":          payload.color,
+        "size":           payload.size,
+        "movement_type":  payload.movement_type,
+        "quantity":       int(payload.quantity),
+        "reference_type": payload.reference_type,
+        "reference_id":   payload.reference_id or "",
+        "notes":          payload.notes or "",
+        "delta":          {k: int(v) for k, v in delta.items()},
+        "created_at":     now_iso(),
+        "by":             user_email,
+    }
+    if payload.movement_type == "adjustment":
+        mv_doc["adjustment_field"] = payload.adjustment_field
+    mv_res = await db.fg_stock_movements.insert_one(mv_doc)
+    mv_doc["_id"] = mv_res.inserted_id
+
+    # ── Maintain inventory_reservations for reserve / unreserve / dispatch ──
+    if payload.movement_type == "reserved" and payload.online_order_id:
+        await db.inventory_reservations.insert_one({
+            "style_id":        ObjectId(payload.style_id),
+            "style_code":      row.get("style_code", ""),
+            "color":           payload.color,
+            "size":            payload.size,
+            "qty":             int(payload.quantity),
+            "online_order_id": payload.online_order_id,
+            "reserved_at":     now_iso(),
+            "released_at":     None,
+            "status":          "active",
+        })
+    elif payload.movement_type == "unreserved" and payload.online_order_id:
+        await db.inventory_reservations.update_many(
+            {
+                "online_order_id": payload.online_order_id,
+                "style_id":        ObjectId(payload.style_id),
+                "color":           payload.color,
+                "size":            payload.size,
+                "status":          "active",
+            },
+            {"$set": {"status": "released", "released_at": now_iso()}}
+        )
+    elif payload.movement_type == "dispatched" and payload.online_order_id:
+        await db.inventory_reservations.update_many(
+            {
+                "online_order_id": payload.online_order_id,
+                "style_id":        ObjectId(payload.style_id),
+                "color":           payload.color,
+                "size":            payload.size,
+                "status":          "active",
+            },
+            {"$set": {"status": "fulfilled", "released_at": now_iso()}}
+        )
+
+    updated = await db.fg_inventory.find_one({"_id": row["_id"]})
+    updated = stringify(updated)
+    u_ready = updated.get("ready_stock_qty", 0)
+    u_res   = updated.get("reserved_qty", 0)
+    u_dmg   = updated.get("damaged_qty", 0)
+    u_liq   = updated.get("liquidation_qty", 0)
+    u_min   = updated.get("min_stock_level", 25)
+    updated["available_qty"] = u_ready - u_res - u_dmg - u_liq
+    updated["is_low_stock"]  = u_ready < u_min
+
+    # Stringify movement doc for JSON response
+    mv_out = stringify(mv_doc)
+    return {"inventory": updated, "movement": mv_out}
+
+
+@api.post("/fg-inventory/movements")
+async def create_fg_movement(request: Request, payload: FgStockMovementIn):
+    """Single write path to fg_inventory. Creates a movement ledger row and atomically
+    updates the inventory row. Auto-creates the fg_inventory row at zero if none exists.
+    Blocks any movement that would push a quantity below zero.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+    return await _apply_movement(payload, u["email"])
+
+
+@api.get("/fg-inventory/movements")
+async def list_fg_movements(
+    request: Request,
+    style_id: Optional[str]      = None,
+    movement_type: Optional[str] = None,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[str]  = None,
+    from_date: Optional[str]     = None,
+    to_date: Optional[str]       = None,
+    limit: int                    = 500,
+):
+    """Ledger view of every fg_inventory movement. Ordered newest first."""
+    await get_current_user(request)
+    query: dict = {}
+    if style_id:
+        try:
+            query["style_id"] = ObjectId(style_id)
+        except Exception:
+            pass
+    if movement_type:
+        query["movement_type"] = movement_type
+    if reference_type:
+        query["reference_type"] = reference_type
+    if reference_id:
+        query["reference_id"] = reference_id
+    if from_date or to_date:
+        date_q: dict = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date + "T23:59:59.999Z"
+        query["created_at"] = date_q
+    docs = await db.fg_stock_movements.find(query).sort("created_at", -1).to_list(int(limit))
+    return [stringify(d) for d in docs]
+
+
+@api.get("/fg-inventory/by-style/{style_id}")
+async def get_fg_inventory_by_style(request: Request, style_id: str):
+    """Full color × size breakdown for a single style, with computed available_qty
+    and low-stock flag per row. Non-breaking sibling of /fg-inventory/{id}.
+    """
+    await get_current_user(request)
+    style = await db.styles.find_one({"_id": ObjectId(style_id)})
+    if not style:
+        raise HTTPException(404, "Style not found")
+    rows = await db.fg_inventory.find({"style_id": ObjectId(style_id)}).to_list(500)
+    out_rows = []
+    colors: set = set()
+    sizes:  set = set()
+    for r in rows:
+        r = stringify(r)
+        ready = int(r.get("ready_stock_qty", 0))
+        res   = int(r.get("reserved_qty",   0))
+        dmg   = int(r.get("damaged_qty",    0))
+        liq   = int(r.get("liquidation_qty", 0))
+        mn    = int(r.get("min_stock_level", 25))
+        r["available_qty"] = ready - res - dmg - liq
+        r["is_low_stock"]  = ready < mn
+        out_rows.append(r)
+        if r.get("color"): colors.add(r["color"])
+        if r.get("size"):  sizes.add(r["size"])
+
+    # Reservation drill-down: active reservations for this style
+    active = await db.inventory_reservations.find({
+        "style_id": ObjectId(style_id),
+        "status":   "active",
+    }).to_list(500)
+    active_reservations = [stringify(a) for a in active]
+
+    return {
+        "style": {
+            "id":    str(style["_id"]),
+            "code":  style["code"],
+            "name":  style.get("name", ""),
+            "image_url": style.get("image_url", ""),
+        },
+        "rows":               out_rows,
+        "colors":             sorted(colors),
+        "sizes":              sorted(sizes),
+        "active_reservations": active_reservations,
+    }
+
+
+@api.get("/inventory-reservations")
+async def list_inventory_reservations(
+    request: Request,
+    online_order_id: Optional[str] = None,
+    style_id: Optional[str]        = None,
+    status: Optional[str]          = None,
+):
+    """Read-only view of the reservations ledger — which orders are holding which stock."""
+    await get_current_user(request)
+    query: dict = {}
+    if online_order_id:
+        query["online_order_id"] = online_order_id
+    if style_id:
+        try:
+            query["style_id"] = ObjectId(style_id)
+        except Exception:
+            pass
+    if status:
+        query["status"] = status
+    docs = await db.inventory_reservations.find(query).sort("reserved_at", -1).to_list(2000)
+    return [stringify(d) for d in docs]
+
 
 @api.get("/fg-inventory/{id}")
 async def get_fg_inventory_item(request: Request, id: str):
@@ -1169,7 +1507,7 @@ async def get_fg_inventory_item(request: Request, id: str):
     min_stock = doc.get("min_stock_level", 25)
     
     doc["available_qty"] = ready - reserved - damaged - liq
-    doc["is_low_stock"] = doc["available_qty"] < min_stock
+    doc["is_low_stock"] = ready < min_stock
     return doc
 
 @api.post("/fg-inventory")
@@ -1207,24 +1545,35 @@ async def create_fg_inventory(request: Request, payload: FgInventoryIn):
         min_stock = doc.get("min_stock_level", 25)
         
         doc["available_qty"] = ready - reserved - damaged - liq
-        doc["is_low_stock"] = doc["available_qty"] < min_stock
+        doc["is_low_stock"] = ready < min_stock
         return doc
     except DuplicateKeyError:
         raise HTTPException(400, "Inventory entry for this style/color/size already exists")
 
 @api.patch("/fg-inventory/{id}")
 async def update_fg_inventory(request: Request, id: str, payload: FgInventoryUpdate):
+    """Config-only patch: only `min_stock_level` may be updated here. Every stock-qty
+    change MUST go through POST /api/fg-inventory/movements so the ledger stays intact.
+    """
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
-    
-    update_data = {}
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        if value is not None:
-            update_data[field] = value
-    
+
+    payload_data = payload.model_dump(exclude_unset=True)
+    stock_fields = {"ready_stock_qty", "reserved_qty", "in_transit_qty",
+                    "return_qty", "damaged_qty", "liquidation_qty"}
+    illegal = [k for k in payload_data.keys() if k in stock_fields and payload_data[k] is not None]
+    if illegal:
+        raise HTTPException(
+            400,
+            f"Direct edits to {illegal} are forbidden. Post a movement via "
+            f"POST /api/fg-inventory/movements (movement_type='adjustment', "
+            f"adjustment_field='{illegal[0]}') to change stock quantities."
+        )
+
+    update_data = {k: v for k, v in payload_data.items() if v is not None}
     if not update_data:
         raise HTTPException(400, "No fields to update")
-        
+
     update_data["updated_at"] = now_iso()
     res = await db.fg_inventory.update_one(
         {"_id": ObjectId(id)},
@@ -1232,7 +1581,7 @@ async def update_fg_inventory(request: Request, id: str, payload: FgInventoryUpd
     )
     if res.matched_count == 0:
         raise HTTPException(404, "Inventory record not found")
-        
+
     doc = await db.fg_inventory.find_one({"_id": ObjectId(id)})
     doc = stringify(doc)
     ready = doc.get("ready_stock_qty", 0)
@@ -1240,120 +1589,49 @@ async def update_fg_inventory(request: Request, id: str, payload: FgInventoryUpd
     damaged = doc.get("damaged_qty", 0)
     liq = doc.get("liquidation_qty", 0)
     min_stock = doc.get("min_stock_level", 25)
-    
+
     doc["available_qty"] = ready - reserved - damaged - liq
-    doc["is_low_stock"] = doc["available_qty"] < min_stock
+    doc["is_low_stock"] = ready < min_stock
     return doc
 
 @api.post("/fg-inventory/reserve")
 async def reserve_stock(request: Request, payload: StockReservation):
-    await get_current_user(request)
-    qty = payload.quantity
-    if qty <= 0:
-        raise HTTPException(400, "Quantity must be greater than zero")
-        
-    max_retries = 5
-    for attempt in range(max_retries):
-        doc = await db.fg_inventory.find_one({
-            "style_id": ObjectId(payload.style_id),
-            "color": payload.color,
-            "size": payload.size
-        })
-        if not doc:
-            raise HTTPException(404, "No finished goods stock record exists for this style/color/size configuration")
-            
-        ready = doc.get("ready_stock_qty", 0)
-        reserved = doc.get("reserved_qty", 0)
-        damaged = doc.get("damaged_qty", 0)
-        liq = doc.get("liquidation_qty", 0)
-        available = ready - reserved - damaged - liq
-        
-        if available < qty:
-            raise HTTPException(400, f"Insufficient stock: Requested {qty}, but only {available} available")
-            
-        res = await db.fg_inventory.update_one(
-            {
-                "_id": doc["_id"],
-                "reserved_qty": reserved
-            },
-            {
-                "$inc": {"reserved_qty": qty},
-                "$set": {"updated_at": now_iso()}
-            }
-        )
-        if res.modified_count > 0:
-            updated = await db.fg_inventory.find_one({"_id": doc["_id"]})
-            updated = stringify(updated)
-            updated["available_qty"] = available - qty
-            return {"success": True, "message": f"Reserved {qty} pairs", "inventory": updated}
-            
-    raise HTTPException(409, "Concurrency conflict during stock reservation. Please try again.")
+    """Legacy convenience wrapper — routes through the movement engine."""
+    u = await get_current_user(request)
+    mv = FgStockMovementIn(
+        style_id       = payload.style_id,
+        color          = payload.color,
+        size           = payload.size,
+        movement_type  = "reserved",
+        quantity       = payload.quantity,
+        reference_type = "manual",
+        reference_id   = "",
+        notes          = "Legacy /reserve call",
+    )
+    result = await _apply_movement(mv, u["email"])
+    return {"success": True, "message": f"Reserved {payload.quantity} pairs", **result}
 
 @api.post("/fg-inventory/release")
 async def release_stock(request: Request, payload: StockRelease):
-    await get_current_user(request)
-    qty = payload.quantity
-    if qty <= 0:
-        raise HTTPException(400, "Quantity must be greater than zero")
-        
-    max_retries = 5
-    for attempt in range(max_retries):
-        doc = await db.fg_inventory.find_one({
-            "style_id": ObjectId(payload.style_id),
-            "color": payload.color,
-            "size": payload.size
-        })
-        if not doc:
-            raise HTTPException(404, "No finished goods stock record exists for this style/color/size configuration")
-            
-        current_reserved = doc.get("reserved_qty", 0)
-        current_ready = doc.get("ready_stock_qty", 0)
-        
-        if current_reserved < qty:
-            raise HTTPException(400, f"Cannot release {qty} reserved pairs; only {current_reserved} are currently reserved")
-            
-        if payload.release_type == "ship":
-            if current_ready < qty:
-                raise HTTPException(400, f"Cannot ship {qty} ready stock pairs; only {current_ready} are in stock")
-                
-            res = await db.fg_inventory.update_one(
-                {
-                    "_id": doc["_id"],
-                    "reserved_qty": current_reserved,
-                    "ready_stock_qty": current_ready
-                },
-                {
-                    "$inc": {
-                        "reserved_qty": -qty,
-                        "ready_stock_qty": -qty,
-                        "in_transit_qty": qty
-                    },
-                    "$set": {"updated_at": now_iso()}
-                }
-            )
-        else:
-            res = await db.fg_inventory.update_one(
-                {
-                    "_id": doc["_id"],
-                    "reserved_qty": current_reserved
-                },
-                {
-                    "$inc": {"reserved_qty": -qty},
-                    "$set": {"updated_at": now_iso()}
-                }
-            )
-            
-        if res.modified_count > 0:
-            updated = await db.fg_inventory.find_one({"_id": doc["_id"]})
-            updated = stringify(updated)
-            u_ready = updated.get("ready_stock_qty", 0)
-            u_reserved = updated.get("reserved_qty", 0)
-            u_damaged = updated.get("damaged_qty", 0)
-            u_liq = updated.get("liquidation_qty", 0)
-            updated["available_qty"] = u_ready - u_reserved - u_damaged - u_liq
-            return {"success": True, "message": f"Released {qty} pairs via {payload.release_type}", "inventory": updated}
-            
-    raise HTTPException(409, "Concurrency conflict during stock release. Please try again.")
+    """Legacy convenience wrapper — routes through the movement engine.
+
+    release_type == "ship"   → "dispatched" movement (decrement ready + reserved)
+    release_type == "cancel" → "unreserved" movement (decrement reserved only)
+    """
+    u = await get_current_user(request)
+    mv_type = "dispatched" if payload.release_type == "ship" else "unreserved"
+    mv = FgStockMovementIn(
+        style_id       = payload.style_id,
+        color          = payload.color,
+        size           = payload.size,
+        movement_type  = mv_type,
+        quantity       = payload.quantity,
+        reference_type = "manual",
+        reference_id   = "",
+        notes          = f"Legacy /release call ({payload.release_type})",
+    )
+    result = await _apply_movement(mv, u["email"])
+    return {"success": True, "message": f"Released {payload.quantity} pairs via {payload.release_type}", **result}
 
 
 # ---------- STYLES ----------
@@ -5111,6 +5389,28 @@ async def on_startup():
         )
     except Exception as e:
         log.warning(f"Could not create fg_inventory unique index: {e}")
+
+    # Phase 2: FG movements & inventory reservations indexes
+    try:
+        await db.fg_stock_movements.create_index(
+            [("style_id", 1), ("created_at", -1)], name="fg_mv_style_ts"
+        )
+        await db.fg_stock_movements.create_index("movement_type",  name="fg_mv_type")
+        await db.fg_stock_movements.create_index("reference_id",   name="fg_mv_ref_id")
+        await db.fg_stock_movements.create_index("created_at",     name="fg_mv_ts")
+    except Exception as e:
+        log.warning(f"Could not create fg_stock_movements indexes: {e}")
+
+    try:
+        await db.inventory_reservations.create_index(
+            [("online_order_id", 1), ("status", 1)], name="inv_res_order_status"
+        )
+        await db.inventory_reservations.create_index(
+            [("style_id", 1), ("color", 1), ("size", 1), ("status", 1)],
+            name="inv_res_sku_status"
+        )
+    except Exception as e:
+        log.warning(f"Could not create inventory_reservations indexes: {e}")
 
     await seed_admin(db)
     try:

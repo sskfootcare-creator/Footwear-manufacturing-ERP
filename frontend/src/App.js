@@ -22,6 +22,7 @@ import Vendors from "@/pages/Vendors";
 import VendorPOs from "@/pages/VendorPOs";
 import SkuMap from "@/pages/SkuMap";
 import OnlineOrders from "@/pages/OnlineOrders";
+import ReadyStock from "@/pages/ReadyStock";
 import SelectWorkspace from "@/pages/SelectWorkspace";
 import { Loader2 } from "lucide-react";
 
@@ -70,6 +71,7 @@ function App() {
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />
             <Route path="sku-map" element={<SkuMap />} />
+            <Route path="ready-stock" element={<ReadyStock />} />
             <Route path="online-orders" element={<OnlineOrders />} />
             <Route path="settings" element={<Settings />} />
             <Route path="users" element={<Users />} />

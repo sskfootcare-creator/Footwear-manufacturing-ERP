@@ -101,3 +101,127 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: "Phase 2 — Finished Goods Inventory + Reservation Engine. Build the Online branch's stock model with explicit states so overselling on Myntra/Flipkart/Nykaa/Website is structurally impossible. Add fg_stock_movements ledger and inventory_reservations collection. Every write to fg_inventory MUST go through a movement row. Add ReadyStock.jsx frontend page with color×size matrix."
+
+backend:
+  - task: "Phase 2 — FG movement engine (single writer)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Added POST /api/fg-inventory/movements with atomic write, ledger insert, block-on-negative, optimistic concurrency retry. Movement types: production_in, reserved, unreserved, dispatched, return_in, return_restocked, return_damaged, liquidation_out, adjustment. Auto-creates fg_inventory row at zero if none exists for (style_id, color, size). For reserved/unreserved/dispatched movements with an online_order_id, maintains the inventory_reservations collection (status: active|released|fulfilled)."
+        - working: true
+          agent: "testing"
+          comment: "✅ All movement types tested successfully: production_in (qty=50), reserved (qty=10 with online_order_id), dispatched (qty=10), unreserved (correctly blocked without active reservation), return_in (qty=3), return_damaged (qty=2), return_restocked (qty=1), liquidation_out (qty=5), adjustment (qty=-2 with adjustment_field). Verified inventory quantities update correctly, available_qty computed correctly, is_low_stock flag works, reservations collection maintained with correct status transitions (active→fulfilled, active→released). Negative quantity and zero quantity correctly blocked. Fixed ObjectId serialization issue in stringify() function to handle nested ObjectIds."
+
+  - task: "Phase 2 — GET /api/fg-inventory/movements (ledger view)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Filterable by style_id, movement_type, reference_type, reference_id, date range. Ordered newest first. Limit default 500."
+        - working: true
+          agent: "testing"
+          comment: "✅ Ledger view working correctly. Tested: (1) GET without filters returns all movements ordered newest first, (2) Filter by style_id returns only movements for that style, (3) Filter by movement_type=production_in returns only production_in movements. All filters working as expected."
+
+  - task: "Phase 2 — GET /api/fg-inventory/by-style/{style_id}"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Returns full color×size breakdown for one style, including computed available_qty and is_low_stock per row, plus active_reservations list. Non-breaking sibling of /fg-inventory/{id} (which is unchanged)."
+        - working: true
+          agent: "testing"
+          comment: "✅ Endpoint working correctly. Response structure includes: style object, rows array with computed available_qty and is_low_stock per row, colors array, sizes array, active_reservations array (showing only status='active' reservations). All fields present and correctly computed."
+
+  - task: "Phase 2 — GET /api/inventory-reservations"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "List reservations filterable by online_order_id, style_id, status. Read-only."
+        - working: true
+          agent: "testing"
+          comment: "✅ Reservations endpoint working correctly. Tested: (1) GET without filters returns all reservations, (2) Filter by status='fulfilled' returns only fulfilled reservations, (3) Filter by online_order_id returns exactly that order's reservation. All filters working as expected."
+
+  - task: "Phase 2 — Refactor /reserve, /release, PATCH — enforce ledger-only writes"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Legacy POST /api/fg-inventory/reserve and /release now delegate to the movement engine (backward-compatible response shape preserved). PATCH /api/fg-inventory/{id} refuses any stock-qty field edits with a 400 pointing to /movements — only min_stock_level may be patched here."
+        - working: true
+          agent: "testing"
+          comment: "✅ All refactored endpoints working correctly. (1) PATCH with ready_stock_qty correctly blocked with 400 error mentioning '/api/fg-inventory/movements' and 'adjustment_field', (2) PATCH with min_stock_level=30 succeeded and updated correctly, (3) Legacy /reserve endpoint succeeded and created movement row of type 'reserved' in ledger, (4) Legacy /release with release_type='ship' succeeded and created movement row of type 'dispatched', (5) Legacy /release with release_type='cancel' succeeded and created movement row of type 'unreserved'. All backward-compatible responses preserved."
+
+  - task: "Phase 2 — low_stock filter semantics"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "is_low_stock now computed as (ready_stock_qty < min_stock_level) per spec, was previously (available_qty < min_stock_level). Applied consistently on list, single-get, and by-style endpoints."
+        - working: true
+          agent: "testing"
+          comment: "✅ low_stock filter semantics working correctly. Set min_stock_level=44 when ready_stock_qty=34. (1) GET /api/fg-inventory?low_stock=true correctly includes the row with is_low_stock=true, (2) GET /api/fg-inventory?low_stock=false correctly excludes the row. Filter based on (ready_stock_qty < min_stock_level) as per spec."
+
+frontend:
+  - task: "Phase 2 — ReadyStock.jsx page"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/ReadyStock.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New page at /ready-stock (Online branch nav). Groups by style with expandable color×size matrix. Each cell shows Ready/Reserved/Available/In-Transit/Return/Damaged/Liquidation. Red LOW badge when ready_stock_qty < min_stock_level. Movement drawer supports all 9 movement types with proper hints. Ledger drawer paginated view of fg_stock_movements filterable by type. Route wired in App.js."
+
+metadata:
+  created_by: "main_agent"
+  version: "phase-2"
+  test_sequence: 2
+  run_ui: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: "Phase 2 implemented. Please test the FG movement engine end-to-end: (1) POST /api/fg-inventory/movements with movement_type=production_in creates a row + ledger entry; (2) then reserved+unreserved+dispatched flow through the engine correctly (both with and without online_order_id — reservations collection should reflect status transitions); (3) any movement that would push a field below zero returns 400; (4) GET /api/fg-inventory/movements returns the ledger, filterable; (5) GET /api/fg-inventory/by-style/{style_id} returns color×size breakdown; (6) PATCH /api/fg-inventory/{id} refuses stock-qty edits (400) but allows min_stock_level; (7) legacy /reserve and /release still work and now leave ledger entries; (8) low_stock=true filter returns only rows where ready_stock_qty < min_stock_level. Admin login: admin@example.com / admin123."
+    - agent: "testing"
+      message: "✅ Phase 2 backend testing COMPLETE. All 6 backend tasks tested and working correctly. Fixed one bug: stringify() function was not handling nested ObjectIds, causing 500 errors on movement API responses. Updated stringify() to recursively handle ObjectIds in nested dicts and lists. All movement types, ledger views, reservations, legacy endpoints, and low_stock filter working as specified. No issues found with the core implementation."
