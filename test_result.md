@@ -113,7 +113,7 @@ backend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "Added POST /api/fg-inventory/movements with atomic write, ledger insert, block-on-negative, optimistic concurrency retry. Movement types: production_in, reserved, unreserved, dispatched, return_in, return_restocked, return_damaged, liquidation_out, adjustment. Auto-creates fg_inventory row at zero if none exists for (style_id, color, size). For reserved/unreserved/dispatched movements with an online_order_id, maintains the inventory_reservations collection (status: active|released|fulfilled)."
         - working: true
@@ -128,7 +128,7 @@ backend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "Filterable by style_id, movement_type, reference_type, reference_id, date range. Ordered newest first. Limit default 500."
         - working: true
@@ -143,7 +143,7 @@ backend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "Returns full color×size breakdown for one style, including computed available_qty and is_low_stock per row, plus active_reservations list. Non-breaking sibling of /fg-inventory/{id} (which is unchanged)."
         - working: true
@@ -158,7 +158,7 @@ backend:
     priority: "medium"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "List reservations filterable by online_order_id, style_id, status. Read-only."
         - working: true
@@ -173,7 +173,7 @@ backend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "Legacy POST /api/fg-inventory/reserve and /release now delegate to the movement engine (backward-compatible response shape preserved). PATCH /api/fg-inventory/{id} refuses any stock-qty field edits with a 400 pointing to /movements — only min_stock_level may be patched here."
         - working: true
@@ -188,7 +188,7 @@ backend:
     priority: "medium"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "is_low_stock now computed as (ready_stock_qty < min_stock_level) per spec, was previously (available_qty < min_stock_level). Applied consistently on list, single-get, and by-style endpoints."
         - working: true
@@ -204,7 +204,7 @@ frontend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
           comment: "New page at /ready-stock (Online branch nav). Groups by style with expandable color×size matrix. Each cell shows Ready/Reserved/Available/In-Transit/Return/Damaged/Liquidation. Red LOW badge when ready_stock_qty < min_stock_level. Movement drawer supports all 9 movement types with proper hints. Ledger drawer paginated view of fg_stock_movements filterable by type. Route wired in App.js."
 
