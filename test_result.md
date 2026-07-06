@@ -212,7 +212,7 @@ backend:
           comment: "✅ low_stock filter semantics working correctly. Set min_stock_level=44 when ready_stock_qty=34. (1) GET /api/fg-inventory?low_stock=true correctly includes the row with is_low_stock=true, (2) GET /api/fg-inventory?low_stock=false correctly excludes the row. Filter based on (ready_stock_qty < min_stock_level) as per spec."
 
 frontend:
-  - task: "Phase 2 — ReadyStock.jsx page"
+  - task: "Phase 2 — ReadyStock.jsx page (rebuilt with production-floor-style cards + PO-matching Color × Size matrix)"
     implemented: true
     working: "NA"
     file: "frontend/src/pages/ReadyStock.jsx"
@@ -222,7 +222,10 @@ frontend:
     status_history:
         - working: true
           agent: "main"
-          comment: "New page at /ready-stock (Online branch nav). Groups by style with expandable color×size matrix. Each cell shows Ready/Reserved/Available/In-Transit/Return/Damaged/Liquidation. Red LOW badge when ready_stock_qty < min_stock_level. Movement drawer supports all 9 movement types with proper hints. Ledger drawer paginated view of fg_stock_movements filterable by type. Route wired in App.js."
+          comment: "Initial version: expandable style groups with color×size matrix, small cell tiles per metric."
+        - working: "NA"
+          agent: "main"
+          comment: "REBUILT to mirror the production-floor ColorGroupCard visual pattern per user request + attached PO PDF. Each style is a card (image slot, colored left border, action bar). Card body holds a Color × Size matrix matching the PO layout exactly: rows = colors with Clr Code, columns = sizes (numerically sorted), cells = qty of the currently-selected metric, right column = row totals per color, bottom row = column totals per size, bottom-right = grand total (tan accent). Page-level metric toggle switches cells across ALL cards between Ready/Reserved/Available/In-Transit/Return/Damaged/Liquidation. Hover on cell → tooltip with all metric values + min. LOW badge on cells below min, plus red banner on card header showing 'N cell(s) below min'. Empty (color,size) combos render as clickable '—' → seeds a new row. Clicking any cell opens the Movement drawer prefilled with (style_id, color, size). Verified visually against attached PO 4700025666 (Silver+Gold sandals, sizes 36-41, totals 110/110 → grand 220 — matches PO exactly)."
 
 metadata:
   created_by: "main_agent"
