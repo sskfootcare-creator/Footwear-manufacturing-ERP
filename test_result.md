@@ -211,6 +211,52 @@ backend:
           agent: "testing"
           comment: "✅ low_stock filter semantics working correctly. Set min_stock_level=44 when ready_stock_qty=34. (1) GET /api/fg-inventory?low_stock=true correctly includes the row with is_low_stock=true, (2) GET /api/fg-inventory?low_stock=false correctly excludes the row. Filter based on (ready_stock_qty < min_stock_level) as per spec."
 
+
+  - task: "Phase 2 — POST /api/fg-inventory/bulk-movements"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Added bulk-movements endpoint that accepts up to 2000 movements in one request. Best-effort processing: each row validated and applied independently, failures reported per-row without aborting the batch. Returns {total, success, failed, results} with per-row status (ok:true/false, error, delta)."
+        - working: true
+          agent: "testing"
+          comment: "✅ All bulk-movements tests passed. (1) Happy path: 3 valid movements → 200 with total=3, success=3, failed=0, all results have ok=true with delta, inventory rows verified with correct quantities ✓ (2) Partial-success: mix of 1 valid + 2 invalid (one dispatched below zero, one bad style_id) → 200 with total=3, success=1, failed=2, results[0] ok=true, results[1,2] ok=false with error messages, valid movement still applied ✓ (3) Batch too large: 2001 movements → 400 with 'max 2000' error ✓ (4) Empty list: [] → 400 with 'non-empty list' error ✓"
+
+  - task: "Phase 2 — GET /api/fg-inventory/csv-template"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Added CSV template download endpoint. Returns text/csv with all required headers (style_code, color, size, movement_type, quantity, reference_type, reference_id, notes, adjustment_field, online_order_id) plus commented example rows."
+        - working: true
+          agent: "testing"
+          comment: "✅ CSV template endpoint working correctly. Returns 200 with Content-Type: text/csv, Content-Disposition contains 'fg_stock_template.csv', header line includes all required columns (style_code, color, size, movement_type, quantity) ✓"
+
+  - task: "Phase 2 — POST /api/fg-inventory/import-csv (dry_run + commit)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Added CSV import endpoint with dry_run mode. Parses CSV (handles UTF-8 BOM), resolves style_code → style_id via master styles, validates all fields, silently skips quantity=0 rows, returns {parsed, errors, summary}. On dry_run=false, applies each parsed row through movement engine. Unknown style_code produces per-row error without aborting. Adjustment movements require adjustment_field or produce error."
+        - working: true
+          agent: "testing"
+          comment: "✅ All CSV import tests passed. (1) Dry_run with 5 rows (2 valid production_in, 1 valid adjustment, 1 bad style_code, 1 qty=0) → 200 with dry_run=true, parsed=3 (qty=0 skipped), errors=1 ('Unknown style_code'), no inventory rows created ✓ (2) Commit with 2 valid rows → 200 with committed=true, results all ok=true, ledger rows created, inventory updated correctly ✓ (3) CSV missing 'color' column → 200 with per-line errors 'Missing color' ✓ (4) Adjustment without adjustment_field → 200 with error 'adjustment_field is required' ✓ (5) UTF-8 BOM handling works correctly ✓"
+
 frontend:
   - task: "Phase 2 — ReadyStock.jsx page (rebuilt with production-floor-style cards + PO-matching Color × Size matrix)"
     implemented: true
@@ -229,8 +275,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "phase-2-auth-fix"
-  test_sequence: 3
+  version: "phase-2-bulk-stock-entry"
+  test_sequence: 4
   run_ui: false
 
 test_plan:
@@ -242,9 +288,14 @@ test_plan:
 agent_communication:
     - agent: "main"
       message: "Phase 2 implemented. Please test the FG movement engine end-to-end: (1) POST /api/fg-inventory/movements with movement_type=production_in creates a row + ledger entry; (2) then reserved+unreserved+dispatched flow through the engine correctly (both with and without online_order_id — reservations collection should reflect status transitions); (3) any movement that would push a field below zero returns 400; (4) GET /api/fg-inventory/movements returns the ledger, filterable; (5) GET /api/fg-inventory/by-style/{style_id} returns color×size breakdown; (6) PATCH /api/fg-inventory/{id} refuses stock-qty edits (400) but allows min_stock_level; (7) legacy /reserve and /release still work and now leave ledger entries; (8) low_stock=true filter returns only rows where ready_stock_qty < min_stock_level. Admin login: admin@example.com / admin123."
+    - agent: "main"
+      message: "Added bulk-stock-entry endpoints. Please verify: (1) POST /api/fg-inventory/bulk-movements with a list of 3+ valid movements returns {total,success,failed,results} with per-row status — all should apply and the fg_inventory rows should reflect the deltas. (2) Same endpoint with a MIX of valid + invalid rows (e.g. one with movement_type='dispatched' that would go below zero, one with a bad style_id) should return partial-success with per-row 'ok:false, error:...' — valid rows still applied. (3) Batch of >2000 rows returns 400. (4) POST /api/fg-inventory/import-csv with dry_run=true parses the CSV, resolves style_code → style_id via master styles, returns {parsed, errors, summary} without writing anything (verify by re-listing fg_inventory: no new rows). CSV must handle utf-8-sig BOM. Rows with quantity=0 must be silently skipped (not counted as errors). Unknown style_code should produce a per-row error but not abort. (5) Same endpoint with dry_run=false actually applies each parsed row through the same movement engine — verify ledger rows are posted and fg_inventory rows updated. (6) GET /api/fg-inventory/csv-template returns text/csv with correct headers and Content-Disposition. Focus: only these new endpoints; existing Phase 2 endpoints are already verified and must not regress."
     - agent: "testing"
       message: "✅ Phase 2 backend testing COMPLETE. All 6 backend tasks tested and working correctly. Fixed one bug: stringify() function was not handling nested ObjectIds, causing 500 errors on movement API responses. Updated stringify() to recursively handle ObjectIds in nested dicts and lists. All movement types, ledger views, reservations, legacy endpoints, and low_stock filter working as specified. No issues found with the core implementation."
     - agent: "testing"
       message: "✅ LOGIN FLOW VERIFICATION COMPLETE (user-reported issue: 'credentials not working'). Tested all 7 scenarios: (1) Correct credentials (admin@example.com/admin123) → 200 OK with access_token, refresh_token in body AND cookies ✓ (2) GET /api/auth/me with Bearer token → 200 with admin user object ✓ (3) Wrong password → 401 'Invalid email or password' ✓ (4) Uppercase email (ADMIN@EXAMPLE.COM) → 200 (email normalized to lowercase) ✓ (5) Email with whitespace (' admin@example.com ') → 200 (Pydantic EmailStr auto-strips whitespace) ✓ (6) Database verification: exactly 1 user with email='admin@example.com', role='admin', active=true, password_hash verifies against 'admin123' ✓ (7) Rate limiting: After 5 failed attempts, 6th attempt returns 429 'Too many failed login attempts. Try again in 14 minutes.' Correct credentials also blocked during lockout. Lockout window: 900 seconds (15 minutes). NOTE: Rate limiting works per-backend-pod (in-memory), so on load-balanced public URL it may take more attempts to trigger. On localhost (single instance) it works perfectly. ROOT CAUSE ANALYSIS: The most likely reason user sees 'invalid credentials' is (a) Rate limiting after multiple failed attempts - requires backend restart or 15-min wait to clear, (b) Copy-paste error with password (case-sensitive), or (c) Typing wrong password. Email case and whitespace are NOT issues (backend handles both). RECOMMENDATION: If user still reports issue, ask them to try: (1) Wait 15 minutes or ask admin to restart backend to clear rate limit, (2) Carefully re-type password 'admin123' (case-sensitive, no spaces), (3) Ensure no browser extensions interfering with login."
     - agent: "testing"
       message: "✅ AUTH BUG FIX VERIFICATION COMPLETE. Tested the CORS/withCredentials fix where backend /api/auth/refresh now accepts refresh_token from either cookie OR JSON body, and frontend no longer uses withCredentials: true. RESULTS: 9/10 tests passed. All core auth flows working perfectly: login with correct/wrong credentials, refresh via body flow (new), refresh via cookie flow (legacy backward compatibility), missing token handling, invalid token handling, wrong token type handling, /auth/me with Bearer token, and Phase 2 endpoints regression check. The one failed test (rate limiting) is an environmental limitation in Kubernetes load-balanced setup where in-memory rate limiting doesn't work reliably across multiple pods — NOT a bug in the auth fix. The rate limiting code is unchanged and correct. Recommendation: If rate limiting is critical, implement distributed rate limiting using Redis."
+
+    - agent: "testing"
+      message: "✅ BULK STOCK-ENTRY ENDPOINTS TESTING COMPLETE. All 10 tests passed (100% success rate). Tested: (1) POST /api/fg-inventory/bulk-movements happy path with 3 movements → all applied correctly with proper deltas and inventory verification ✓ (2) Partial-success scenario with 1 valid + 2 invalid movements → valid one applied, invalid ones returned with error messages ✓ (3) Batch size limit enforcement → 2001 movements correctly rejected with 400 'max 2000' ✓ (4) Empty list validation → correctly rejected with 400 ✓ (5) GET /api/fg-inventory/csv-template → correct Content-Type, Content-Disposition, and headers ✓ (6) CSV import dry_run with UTF-8 BOM, mixed valid/invalid rows, qty=0 skip → parsed correctly, no writes performed ✓ (7) CSV import commit → movements applied, ledger updated, inventory verified ✓ (8) CSV missing required column → per-line errors returned ✓ (9) CSV adjustment without adjustment_field → validation error returned ✓ (10) Regression smoke test → all previously-passing Phase 2 endpoints (POST /movements single, GET /fg-inventory, GET /by-style) still work with Bearer auth ✓. No issues found. All bulk and CSV import flows working as specified."

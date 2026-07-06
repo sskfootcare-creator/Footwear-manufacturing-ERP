@@ -1398,6 +1398,266 @@ async def create_fg_movement(request: Request, payload: FgStockMovementIn):
     return await _apply_movement(payload, u["email"])
 
 
+# ---------- Bulk FG movement flows (matrix entry + CSV import) ----------
+
+async def _resolve_style_by_code(code: str):
+    """Resolve a style_code → style ObjectId. Returns None if not found."""
+    if not code:
+        return None
+    doc = await db.styles.find_one({"code": code.strip()})
+    return doc
+
+
+@api.post("/fg-inventory/bulk-movements")
+async def bulk_fg_movements(request: Request, payload: dict):
+    """Apply many movements in one request. Best-effort: each row is validated and
+    applied independently; failures are reported per-row and don't abort the batch.
+
+    Body:
+    {
+      "movements": [ FgStockMovementIn ... ],
+      "dry_run":  false        # optional; if true, only validate (still allocates
+                               # nothing) — implemented as a soft check by applying
+                               # then aborting? kept simple: just runs live for now.
+    }
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+
+    movements = (payload or {}).get("movements") or []
+    if not isinstance(movements, list) or not movements:
+        raise HTTPException(400, "movements must be a non-empty list")
+    if len(movements) > 2000:
+        raise HTTPException(400, "Batch too large — max 2000 movements per request")
+
+    results = []
+    ok_count  = 0
+    err_count = 0
+    for idx, row in enumerate(movements):
+        try:
+            mv = FgStockMovementIn(**row)
+            out = await _apply_movement(mv, u["email"])
+            results.append({
+                "index":     idx,
+                "style_id":  mv.style_id,
+                "color":     mv.color,
+                "size":      mv.size,
+                "movement":  mv.movement_type,
+                "ok":        True,
+                "delta":     out["movement"].get("delta"),
+            })
+            ok_count += 1
+        except HTTPException as he:
+            results.append({
+                "index":    idx,
+                "row":      row,
+                "ok":       False,
+                "error":    str(he.detail),
+                "status":   he.status_code,
+            })
+            err_count += 1
+        except Exception as e:
+            results.append({
+                "index":    idx,
+                "row":      row,
+                "ok":       False,
+                "error":    str(e),
+                "status":   500,
+            })
+            err_count += 1
+
+    return {
+        "total":    len(movements),
+        "success":  ok_count,
+        "failed":   err_count,
+        "results":  results,
+    }
+
+
+@api.post("/fg-inventory/import-csv")
+async def import_fg_stock_csv(
+    request: Request,
+    file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="If true, only preview — nothing is written."),
+):
+    """Import many FG stock movements from a CSV file.
+
+    Expected columns (case-insensitive, order-independent):
+      style_code (or style_id)   REQUIRED
+      color                       REQUIRED
+      size                        REQUIRED
+      quantity                    REQUIRED (int)
+      movement_type               optional, default "production_in"
+      reference_type              optional, default "manual"
+      reference_id                optional
+      notes                       optional
+      adjustment_field            required only if movement_type == "adjustment"
+      online_order_id             optional (used by reserved/unreserved/dispatched)
+
+    Rows with quantity == 0 are SKIPPED silently.
+
+    On dry_run=true, no writes happen — the response includes validation errors
+    and a per-row preview so the frontend can confirm before committing.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
+
+    import csv as _csv, io as _io
+    # Sniff encoding — default to utf-8-sig to strip BOMs
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = _csv.DictReader(_io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(400, "CSV appears to be empty or unreadable")
+
+    # Normalise header names to snake_case_lower for easy lookup
+    norm_map = {(h or "").strip().lower().replace(" ", "_"): h for h in reader.fieldnames}
+
+    def col(row, key):
+        h = norm_map.get(key)
+        return (row.get(h, "") if h else "").strip() if isinstance(row.get(h, ""), str) else row.get(h, "")
+
+    parsed = []
+    errors = []
+    style_code_cache = {}   # code → style_id str
+
+    for line_no, r in enumerate(reader, start=2):  # header row is line 1
+        code = col(r, "style_code")
+        sid  = col(r, "style_id")
+        color = col(r, "color")
+        size  = str(col(r, "size") or "").strip()
+        try:
+            qty = int(float(str(col(r, "quantity") or "0")))
+        except Exception:
+            qty = None
+        mv_type = (col(r, "movement_type") or "production_in").strip().lower()
+        ref_type = (col(r, "reference_type") or "manual").strip().lower()
+        ref_id  = col(r, "reference_id") or ""
+        notes   = col(r, "notes") or ""
+        adj_fld = col(r, "adjustment_field") or None
+        oo_id   = col(r, "online_order_id") or None
+
+        # Validate & resolve
+        if not (code or sid):
+            errors.append({"line": line_no, "error": "Missing style_code / style_id"})
+            continue
+        if not color:
+            errors.append({"line": line_no, "error": "Missing color"})
+            continue
+        if not size:
+            errors.append({"line": line_no, "error": "Missing size"})
+            continue
+        if qty is None:
+            errors.append({"line": line_no, "error": "quantity is not a valid number"})
+            continue
+        if qty == 0:
+            continue  # silently skip
+
+        resolved_sid = sid
+        if not resolved_sid:
+            if code in style_code_cache:
+                resolved_sid = style_code_cache[code]
+            else:
+                sdoc = await _resolve_style_by_code(code)
+                if not sdoc:
+                    errors.append({"line": line_no, "error": f"Unknown style_code '{code}'"})
+                    continue
+                resolved_sid = str(sdoc["_id"])
+                style_code_cache[code] = resolved_sid
+
+        row = {
+            "style_id":       resolved_sid,
+            "color":          color,
+            "size":           size,
+            "movement_type":  mv_type,
+            "quantity":       qty,
+            "reference_type": ref_type if ref_type in ("manual","job","online_order","return") else "manual",
+            "reference_id":   ref_id,
+            "notes":          notes,
+        }
+        if mv_type == "adjustment":
+            if not adj_fld:
+                errors.append({"line": line_no, "error": "adjustment_field is required for movement_type='adjustment'"})
+                continue
+            row["adjustment_field"] = adj_fld
+        if oo_id:
+            row["online_order_id"] = oo_id
+        row["_line"] = line_no
+        parsed.append(row)
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "parsed":  parsed,
+            "errors":  errors,
+            "summary": {
+                "total_rows_seen":  len(parsed) + len(errors),
+                "valid":            len(parsed),
+                "invalid":          len(errors),
+            },
+        }
+
+    # Commit: apply each parsed row through the movement engine
+    results = []
+    ok = 0
+    err = 0
+    for row in parsed:
+        line = row.pop("_line", None)
+        try:
+            mv = FgStockMovementIn(**row)
+            out = await _apply_movement(mv, u["email"])
+            results.append({"line": line, "ok": True, "delta": out["movement"].get("delta")})
+            ok += 1
+        except HTTPException as he:
+            results.append({"line": line, "ok": False, "error": str(he.detail)})
+            err += 1
+        except Exception as e:
+            results.append({"line": line, "ok": False, "error": str(e)})
+            err += 1
+
+    return {
+        "committed": True,
+        "summary": {
+            "total_rows_seen": len(parsed) + len(errors),
+            "attempted":       len(parsed),
+            "success":         ok,
+            "failed":          err,
+            "parse_errors":    len(errors),
+        },
+        "results":       results,
+        "parse_errors":  errors,
+    }
+
+
+@api.get("/fg-inventory/csv-template")
+async def download_fg_csv_template(request: Request):
+    """Return a ready-to-fill CSV template with headers + one commented example row."""
+    await get_current_user(request)
+    csv_text = (
+        "style_code,color,size,movement_type,quantity,reference_type,reference_id,notes,adjustment_field,online_order_id\n"
+        "# Fill one row per (style, color, size). Leave quantity blank / 0 to skip a row.\n"
+        "# movement_type defaults to production_in (adds ready stock). Other types:\n"
+        "#   reserved, unreserved, dispatched, return_in, return_restocked,\n"
+        "#   return_damaged, liquidation_out, adjustment (needs adjustment_field).\n"
+        "33-1065-ME,SILVER,36,production_in,10,manual,,First lot from production,,\n"
+        "33-1065-ME,SILVER,37,production_in,20,manual,,,,\n"
+        "33-1065-ME,GOLD,38,production_in,30,manual,,,,\n"
+    )
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="fg_stock_template.csv"'},
+    )
+
+
 @api.get("/fg-inventory/movements")
 async def list_fg_movements(
     request: Request,

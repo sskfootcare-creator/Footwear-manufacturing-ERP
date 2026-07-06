@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-Backend test suite for auth bug fix verification.
+Backend test suite for Phase 2 bulk stock-entry endpoints.
 
-Tests the CORS/withCredentials fix where:
-- Backend /api/auth/refresh now accepts refresh_token from either cookie OR JSON body
-- Frontend no longer uses withCredentials: true
-- Login stores refresh_token in localStorage
-- Refresh interceptor sends refresh_token in body
+Tests:
+1. POST /api/fg-inventory/bulk-movements — happy path
+2. POST /api/fg-inventory/bulk-movements — partial-success (mix of valid + invalid)
+3. POST /api/fg-inventory/bulk-movements — batch too large (2001 movements)
+4. POST /api/fg-inventory/bulk-movements — empty list
+5. GET /api/fg-inventory/csv-template
+6. POST /api/fg-inventory/import-csv?dry_run=true — happy path + errors
+7. POST /api/fg-inventory/import-csv?dry_run=false — commit
+8. CSV missing required column
+9. CSV import — adjustment_field enforcement
+10. Regression smoke: previously-passing endpoints still work
 """
 
 import requests
 import json
 import sys
+import io
 
 # Backend URL from frontend/.env
 BASE_URL = "https://4411416a-6779-4d1b-ba32-8060d6385338.preview.emergentagent.com/api"
@@ -35,10 +42,10 @@ def print_info(msg):
     print(f"ℹ️  INFO: {msg}")
 
 # ============================================================================
-# TEST 1: POST /api/auth/login with correct credentials
+# SETUP: Login and get access token
 # ============================================================================
-def test_login_success():
-    print_test("POST /api/auth/login with correct credentials")
+def login():
+    print_test("SETUP: Login to get access token")
     
     url = f"{BASE_URL}/auth/login"
     payload = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
@@ -46,209 +53,99 @@ def test_login_success():
     resp = requests.post(url, json=payload)
     
     print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
     
     if resp.status_code != 200:
-        print_fail(f"Expected 200, got {resp.status_code}")
+        print_fail(f"Login failed with {resp.status_code}: {resp.text[:500]}")
+        return None
+    
+    data = resp.json()
+    access_token = data.get("access_token")
+    
+    if not access_token:
+        print_fail("No access_token in response")
+        return None
+    
+    print_pass(f"Login successful, got access token")
+    return access_token
+
+# ============================================================================
+# SETUP: Get or create a style to use for testing
+# ============================================================================
+def get_or_create_style(headers):
+    print_test("SETUP: Get or create a style for testing")
+    
+    # Try to get existing styles
+    resp = requests.get(f"{BASE_URL}/styles", headers=headers)
+    
+    if resp.status_code == 200:
+        styles = resp.json()
+        if styles:
+            style = styles[0]
+            print_pass(f"Using existing style: {style['id']} (code: {style.get('code', 'N/A')})")
+            return style['id'], style.get('code', 'TEST-STYLE')
+    
+    # Create a new style
+    print_info("No existing styles found, creating a new one...")
+    
+    payload = {
+        "code": "TEST-BULK-001",
+        "name": "Test Style for Bulk Operations",
+        "category": "Footwear",
+        "brand": "Test Brand"
+    }
+    
+    resp = requests.post(f"{BASE_URL}/styles", json=payload, headers=headers)
+    
+    if resp.status_code not in [200, 201]:
+        print_fail(f"Failed to create style: {resp.status_code} - {resp.text[:500]}")
         return None, None
     
     data = resp.json()
+    style_id = data.get("id")
+    style_code = data.get("code", "TEST-BULK-001")
     
-    # Check response body contains access_token and refresh_token
-    if "access_token" not in data:
-        print_fail("Response missing 'access_token' in body")
-        return None, None
-    
-    if "refresh_token" not in data:
-        print_fail("Response missing 'refresh_token' in body")
-        return None, None
-    
-    print_pass(f"Login successful with access_token and refresh_token in response body")
-    print_info(f"User: {data.get('email')} (role: {data.get('role')})")
-    
-    return data["access_token"], data["refresh_token"]
+    print_pass(f"Created new style: {style_id} (code: {style_code})")
+    return style_id, style_code
 
 # ============================================================================
-# TEST 2: POST /api/auth/login with wrong password
+# TEST 1: POST /api/fg-inventory/bulk-movements — happy path
 # ============================================================================
-def test_login_wrong_password():
-    print_test("POST /api/auth/login with wrong password")
+def test_bulk_movements_happy_path(headers, style_id):
+    print_test("TEST 1: POST /api/fg-inventory/bulk-movements — happy path")
     
-    url = f"{BASE_URL}/auth/login"
-    payload = {"email": ADMIN_EMAIL, "password": "wrongpassword123"}
+    payload = {
+        "movements": [
+            {
+                "style_id": style_id,
+                "color": "BULK-A",
+                "size": "41",
+                "movement_type": "production_in",
+                "quantity": 5,
+                "reference_type": "manual"
+            },
+            {
+                "style_id": style_id,
+                "color": "BULK-A",
+                "size": "42",
+                "movement_type": "production_in",
+                "quantity": 7,
+                "reference_type": "manual"
+            },
+            {
+                "style_id": style_id,
+                "color": "BULK-B",
+                "size": "41",
+                "movement_type": "production_in",
+                "quantity": 3,
+                "reference_type": "manual"
+            }
+        ]
+    }
     
-    resp = requests.post(url, json=payload)
+    resp = requests.post(f"{BASE_URL}/fg-inventory/bulk-movements", json=payload, headers=headers)
     
     print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 401:
-        print_fail(f"Expected 401, got {resp.status_code}")
-        return False
-    
-    data = resp.json()
-    detail = data.get("detail", "")
-    
-    if "Invalid email or password" not in detail:
-        print_fail(f"Expected 'Invalid email or password', got: {detail}")
-        return False
-    
-    print_pass(f"Wrong password correctly rejected with 401 and detail: '{detail}'")
-    return True
-
-# ============================================================================
-# TEST 3: POST /api/auth/refresh with body flow (new)
-# ============================================================================
-def test_refresh_body_flow(refresh_token):
-    print_test("POST /api/auth/refresh with body flow (new)")
-    
-    url = f"{BASE_URL}/auth/refresh"
-    payload = {"refresh_token": refresh_token}
-    
-    # NO cookies, only body
-    resp = requests.post(url, json=payload)
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 200:
-        print_fail(f"Expected 200, got {resp.status_code}")
-        return None
-    
-    data = resp.json()
-    
-    if "access_token" not in data:
-        print_fail("Response missing 'access_token'")
-        return None
-    
-    print_pass(f"Refresh via body flow successful, new access_token received")
-    return data["access_token"]
-
-# ============================================================================
-# TEST 4: POST /api/auth/refresh with cookie flow (legacy)
-# ============================================================================
-def test_refresh_cookie_flow(refresh_token):
-    print_test("POST /api/auth/refresh with cookie flow (legacy)")
-    
-    url = f"{BASE_URL}/auth/refresh"
-    
-    # Send refresh_token as cookie, empty body
-    cookies = {"refresh_token": refresh_token}
-    resp = requests.post(url, json={}, cookies=cookies)
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 200:
-        print_fail(f"Expected 200, got {resp.status_code}")
-        return None
-    
-    data = resp.json()
-    
-    if "access_token" not in data:
-        print_fail("Response missing 'access_token'")
-        return None
-    
-    print_pass(f"Refresh via cookie flow (legacy) successful, new access_token received")
-    return data["access_token"]
-
-# ============================================================================
-# TEST 5: POST /api/auth/refresh with no cookie and no body
-# ============================================================================
-def test_refresh_missing_token():
-    print_test("POST /api/auth/refresh with no cookie and no body")
-    
-    url = f"{BASE_URL}/auth/refresh"
-    
-    # No cookies, empty body
-    resp = requests.post(url, json={})
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 401:
-        print_fail(f"Expected 401, got {resp.status_code}")
-        return False
-    
-    data = resp.json()
-    detail = data.get("detail", "")
-    
-    if "Missing refresh token" not in detail:
-        print_fail(f"Expected 'Missing refresh token', got: {detail}")
-        return False
-    
-    print_pass(f"Missing token correctly rejected with 401 and detail: '{detail}'")
-    return True
-
-# ============================================================================
-# TEST 6: POST /api/auth/refresh with invalid refresh token in body
-# ============================================================================
-def test_refresh_invalid_token():
-    print_test("POST /api/auth/refresh with invalid refresh token in body")
-    
-    url = f"{BASE_URL}/auth/refresh"
-    payload = {"refresh_token": "not-a-jwt-token"}
-    
-    resp = requests.post(url, json=payload)
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 401:
-        print_fail(f"Expected 401, got {resp.status_code}")
-        return False
-    
-    data = resp.json()
-    detail = data.get("detail", "")
-    
-    if "Invalid refresh token" not in detail:
-        print_fail(f"Expected 'Invalid refresh token', got: {detail}")
-        return False
-    
-    print_pass(f"Invalid token correctly rejected with 401 and detail: '{detail}'")
-    return True
-
-# ============================================================================
-# TEST 7: POST /api/auth/refresh with wrong token type (access token instead of refresh)
-# ============================================================================
-def test_refresh_wrong_token_type(access_token):
-    print_test("POST /api/auth/refresh with wrong token type (access token instead of refresh)")
-    
-    url = f"{BASE_URL}/auth/refresh"
-    payload = {"refresh_token": access_token}  # Send access token instead of refresh
-    
-    resp = requests.post(url, json=payload)
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
-    
-    if resp.status_code != 401:
-        print_fail(f"Expected 401, got {resp.status_code}")
-        return False
-    
-    data = resp.json()
-    detail = data.get("detail", "")
-    
-    if "Invalid token type" not in detail:
-        print_fail(f"Expected 'Invalid token type', got: {detail}")
-        return False
-    
-    print_pass(f"Wrong token type correctly rejected with 401 and detail: '{detail}'")
-    return True
-
-# ============================================================================
-# TEST 8: GET /api/auth/me with Bearer token (no cookies)
-# ============================================================================
-def test_auth_me(access_token):
-    print_test("GET /api/auth/me with Bearer token (no cookies)")
-    
-    url = f"{BASE_URL}/auth/me"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    
-    resp = requests.get(url, headers=headers)
-    
-    print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
+    print_info(f"Response: {resp.text[:1000]}")
     
     if resp.status_code != 200:
         print_fail(f"Expected 200, got {resp.status_code}")
@@ -256,133 +153,616 @@ def test_auth_me(access_token):
     
     data = resp.json()
     
-    if data.get("email") != ADMIN_EMAIL:
-        print_fail(f"Expected email '{ADMIN_EMAIL}', got: {data.get('email')}")
+    # Check response structure
+    if data.get("total") != 3:
+        print_fail(f"Expected total=3, got {data.get('total')}")
         return False
     
-    if data.get("role") != "admin":
-        print_fail(f"Expected role 'admin', got: {data.get('role')}")
+    if data.get("success") != 3:
+        print_fail(f"Expected success=3, got {data.get('success')}")
         return False
     
-    print_pass(f"Auth /me successful with Bearer token only (no cookies)")
-    print_info(f"User: {data.get('email')} (role: {data.get('role')})")
+    if data.get("failed") != 0:
+        print_fail(f"Expected failed=0, got {data.get('failed')}")
+        return False
+    
+    results = data.get("results", [])
+    if len(results) != 3:
+        print_fail(f"Expected 3 results, got {len(results)}")
+        return False
+    
+    # Check all results have ok=True
+    for i, result in enumerate(results):
+        if not result.get("ok"):
+            print_fail(f"Result {i} has ok=False: {result}")
+            return False
+        if "delta" not in result:
+            print_fail(f"Result {i} missing 'delta' field")
+            return False
+    
+    print_pass("Bulk movements happy path successful: 3/3 movements applied")
+    
+    # Verify inventory rows were created
+    print_info("Verifying inventory rows...")
+    resp = requests.get(f"{BASE_URL}/fg-inventory/by-style/{style_id}", headers=headers)
+    
+    if resp.status_code != 200:
+        print_fail(f"Failed to fetch inventory by style: {resp.status_code}")
+        return False
+    
+    inv_data = resp.json()
+    rows = inv_data.get("rows", [])
+    
+    # Check for the three (color, size) combinations
+    expected = [
+        ("BULK-A", "41", 5),
+        ("BULK-A", "42", 7),
+        ("BULK-B", "41", 3)
+    ]
+    
+    for color, size, qty in expected:
+        found = False
+        for row in rows:
+            if row.get("color") == color and row.get("size") == size:
+                found = True
+                if row.get("ready_stock_qty") != qty:
+                    print_fail(f"Expected ready_stock_qty={qty} for {color}/{size}, got {row.get('ready_stock_qty')}")
+                    return False
+                break
+        
+        if not found:
+            print_fail(f"Inventory row not found for {color}/{size}")
+            return False
+    
+    print_pass("All 3 inventory rows verified with correct quantities")
     return True
 
 # ============================================================================
-# TEST 9: Regression check - Phase 2 endpoints still work with Bearer token only
+# TEST 2: POST /api/fg-inventory/bulk-movements — partial-success
 # ============================================================================
-def test_phase2_regression(access_token):
-    print_test("Regression check - Phase 2 endpoints with Bearer token only")
+def test_bulk_movements_partial_success(headers, style_id):
+    print_test("TEST 2: POST /api/fg-inventory/bulk-movements — partial-success")
     
-    headers = {"Authorization": f"Bearer {access_token}"}
+    payload = {
+        "movements": [
+            # Valid: production_in of 4
+            {
+                "style_id": style_id,
+                "color": "PARTIAL-TEST",
+                "size": "40",
+                "movement_type": "production_in",
+                "quantity": 4,
+                "reference_type": "manual"
+            },
+            # Invalid: dispatched on a (color,size) with 0 stock → should fail
+            {
+                "style_id": style_id,
+                "color": "NONEXISTENT-COLOR",
+                "size": "99",
+                "movement_type": "dispatched",
+                "quantity": 10,
+                "reference_type": "manual"
+            },
+            # Invalid: unresolvable style_id
+            {
+                "style_id": "000000000000000000000000",
+                "color": "ANY",
+                "size": "50",
+                "movement_type": "production_in",
+                "quantity": 5,
+                "reference_type": "manual"
+            }
+        ]
+    }
     
-    # Test 1: GET /api/fg-inventory
-    print_info("Testing GET /api/fg-inventory")
-    resp = requests.get(f"{BASE_URL}/fg-inventory", headers=headers)
+    resp = requests.post(f"{BASE_URL}/fg-inventory/bulk-movements", json=payload, headers=headers)
+    
     print_info(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print_fail(f"GET /api/fg-inventory failed with {resp.status_code}")
-        return False
-    print_pass("GET /api/fg-inventory works")
+    print_info(f"Response: {resp.text[:1500]}")
     
-    # Test 2: GET /api/fg-inventory/movements
-    print_info("Testing GET /api/fg-inventory/movements")
-    resp = requests.get(f"{BASE_URL}/fg-inventory/movements", headers=headers)
+    if resp.status_code != 200:
+        print_fail(f"Expected 200, got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    
+    # Check response structure
+    if data.get("total") != 3:
+        print_fail(f"Expected total=3, got {data.get('total')}")
+        return False
+    
+    if data.get("success") != 1:
+        print_fail(f"Expected success=1, got {data.get('success')}")
+        return False
+    
+    if data.get("failed") != 2:
+        print_fail(f"Expected failed=2, got {data.get('failed')}")
+        return False
+    
+    results = data.get("results", [])
+    if len(results) != 3:
+        print_fail(f"Expected 3 results, got {len(results)}")
+        return False
+    
+    # Check result 0 is ok=True
+    if not results[0].get("ok"):
+        print_fail(f"Result 0 should be ok=True, got: {results[0]}")
+        return False
+    
+    # Check results 1 and 2 are ok=False with error messages
+    if results[1].get("ok"):
+        print_fail(f"Result 1 should be ok=False, got: {results[1]}")
+        return False
+    
+    if not results[1].get("error"):
+        print_fail(f"Result 1 should have 'error' field")
+        return False
+    
+    if results[2].get("ok"):
+        print_fail(f"Result 2 should be ok=False, got: {results[2]}")
+        return False
+    
+    if not results[2].get("error"):
+        print_fail(f"Result 2 should have 'error' field")
+        return False
+    
+    print_pass("Partial-success test passed: 1 valid movement applied, 2 failed with errors")
+    
+    # Verify the valid movement was applied
+    print_info("Verifying the valid movement was applied...")
+    resp = requests.get(f"{BASE_URL}/fg-inventory/by-style/{style_id}", headers=headers)
+    
+    if resp.status_code != 200:
+        print_fail(f"Failed to fetch inventory by style: {resp.status_code}")
+        return False
+    
+    inv_data = resp.json()
+    rows = inv_data.get("rows", [])
+    
+    found = False
+    for row in rows:
+        if row.get("color") == "PARTIAL-TEST" and row.get("size") == "40":
+            found = True
+            if row.get("ready_stock_qty") != 4:
+                print_fail(f"Expected ready_stock_qty=4, got {row.get('ready_stock_qty')}")
+                return False
+            break
+    
+    if not found:
+        print_fail("Valid movement was not applied to inventory")
+        return False
+    
+    print_pass("Valid movement verified in inventory")
+    return True
+
+# ============================================================================
+# TEST 3: POST /api/fg-inventory/bulk-movements — batch too large
+# ============================================================================
+def test_bulk_movements_too_large(headers, style_id):
+    print_test("TEST 3: POST /api/fg-inventory/bulk-movements — batch too large")
+    
+    # Create 2001 movements
+    movements = []
+    for i in range(2001):
+        movements.append({
+            "style_id": style_id,
+            "color": f"COLOR-{i}",
+            "size": "40",
+            "movement_type": "production_in",
+            "quantity": 1,
+            "reference_type": "manual"
+        })
+    
+    payload = {"movements": movements}
+    
+    resp = requests.post(f"{BASE_URL}/fg-inventory/bulk-movements", json=payload, headers=headers)
+    
     print_info(f"Status: {resp.status_code}")
-    if resp.status_code != 200:
-        print_fail(f"GET /api/fg-inventory/movements failed with {resp.status_code}")
+    print_info(f"Response: {resp.text[:500]}")
+    
+    if resp.status_code != 400:
+        print_fail(f"Expected 400, got {resp.status_code}")
         return False
-    print_pass("GET /api/fg-inventory/movements works")
     
-    # Test 3: POST /api/fg-inventory/movements (smoke test with production_in)
-    print_info("Testing POST /api/fg-inventory/movements")
+    data = resp.json()
+    detail = data.get("detail", "")
     
-    # First, get a style_id to use
-    styles_resp = requests.get(f"{BASE_URL}/styles", headers=headers)
-    if styles_resp.status_code != 200:
-        print_info("No styles available, skipping POST movement test")
-        return True
+    if "max 2000" not in detail.lower():
+        print_fail(f"Expected error message mentioning 'max 2000', got: {detail}")
+        return False
     
-    styles = styles_resp.json()
-    if not styles:
-        print_info("No styles available, skipping POST movement test")
-        return True
+    print_pass("Batch too large correctly rejected with 400 and appropriate error message")
+    return True
+
+# ============================================================================
+# TEST 4: POST /api/fg-inventory/bulk-movements — empty list
+# ============================================================================
+def test_bulk_movements_empty_list(headers):
+    print_test("TEST 4: POST /api/fg-inventory/bulk-movements — empty list")
     
-    style_id = styles[0]["id"]
+    payload = {"movements": []}
+    
+    resp = requests.post(f"{BASE_URL}/fg-inventory/bulk-movements", json=payload, headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Response: {resp.text[:500]}")
+    
+    if resp.status_code != 400:
+        print_fail(f"Expected 400, got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    detail = data.get("detail", "")
+    
+    if "non-empty" not in detail.lower():
+        print_fail(f"Expected error message mentioning 'non-empty', got: {detail}")
+        return False
+    
+    print_pass("Empty list correctly rejected with 400")
+    return True
+
+# ============================================================================
+# TEST 5: GET /api/fg-inventory/csv-template
+# ============================================================================
+def test_csv_template(headers):
+    print_test("TEST 5: GET /api/fg-inventory/csv-template")
+    
+    resp = requests.get(f"{BASE_URL}/fg-inventory/csv-template", headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Content-Type: {resp.headers.get('Content-Type')}")
+    print_info(f"Content-Disposition: {resp.headers.get('Content-Disposition')}")
+    print_info(f"Response (first 500 chars): {resp.text[:500]}")
+    
+    if resp.status_code != 200:
+        print_fail(f"Expected 200, got {resp.status_code}")
+        return False
+    
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/csv" not in content_type:
+        print_fail(f"Expected Content-Type 'text/csv', got: {content_type}")
+        return False
+    
+    content_disp = resp.headers.get("Content-Disposition", "")
+    if "fg_stock_template.csv" not in content_disp:
+        print_fail(f"Expected Content-Disposition to contain 'fg_stock_template.csv', got: {content_disp}")
+        return False
+    
+    # Check header line
+    lines = resp.text.split('\n')
+    if not lines:
+        print_fail("CSV template is empty")
+        return False
+    
+    header = lines[0]
+    required_cols = ["style_code", "color", "size", "movement_type", "quantity"]
+    
+    for col in required_cols:
+        if col not in header:
+            print_fail(f"Header missing required column '{col}': {header}")
+            return False
+    
+    print_pass("CSV template downloaded successfully with correct headers")
+    return True
+
+# ============================================================================
+# TEST 6: POST /api/fg-inventory/import-csv?dry_run=true — happy path + errors
+# ============================================================================
+def test_csv_import_dry_run(headers, style_code):
+    print_test("TEST 6: POST /api/fg-inventory/import-csv?dry_run=true — happy path + errors")
+    
+    # Create CSV with UTF-8 BOM, 5 rows:
+    # - 2 valid production_in
+    # - 1 valid adjustment
+    # - 1 with bogus style_code
+    # - 1 with quantity=0 (should be silently skipped)
+    
+    csv_content = (
+        "\ufeff"  # UTF-8 BOM
+        "style_code,color,size,movement_type,quantity,reference_type,adjustment_field,notes\n"
+        f"{style_code},CSV-COLOR-1,36,production_in,10,manual,,Test row 1\n"
+        f"{style_code},CSV-COLOR-2,37,production_in,15,manual,,Test row 2\n"
+        f"{style_code},CSV-COLOR-3,38,adjustment,5,manual,ready_stock_qty,Test adjustment\n"
+        "DOES-NOT-EXIST,CSV-COLOR-4,39,production_in,20,manual,,Bad style code\n"
+        f"{style_code},CSV-COLOR-5,40,production_in,0,manual,,Should be skipped\n"
+    )
+    
+    # Get inventory count before
+    resp_before = requests.get(f"{BASE_URL}/fg-inventory", headers=headers)
+    count_before = len(resp_before.json()) if resp_before.status_code == 200 else 0
+    
+    # Upload CSV
+    files = {"file": ("test.csv", csv_content.encode("utf-8"), "text/csv")}
+    resp = requests.post(f"{BASE_URL}/fg-inventory/import-csv?dry_run=true", files=files, headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Response: {resp.text[:2000]}")
+    
+    if resp.status_code != 200:
+        print_fail(f"Expected 200, got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    
+    # Check dry_run flag
+    if not data.get("dry_run"):
+        print_fail("Expected dry_run=true in response")
+        return False
+    
+    # Check parsed rows (should be 3: 2 production_in + 1 adjustment, NOT the qty=0 row)
+    parsed = data.get("parsed", [])
+    if len(parsed) != 3:
+        print_fail(f"Expected 3 parsed rows (qty=0 should be skipped), got {len(parsed)}")
+        return False
+    
+    # Check errors (should be 1: the bogus style_code)
+    errors = data.get("errors", [])
+    if len(errors) != 1:
+        print_fail(f"Expected 1 error (bogus style_code), got {len(errors)}")
+        return False
+    
+    error_msg = errors[0].get("error", "")
+    if "Unknown style_code" not in error_msg:
+        print_fail(f"Expected error mentioning 'Unknown style_code', got: {error_msg}")
+        return False
+    
+    # Check summary
+    summary = data.get("summary", {})
+    if summary.get("valid") != 3:
+        print_fail(f"Expected summary.valid=3, got {summary.get('valid')}")
+        return False
+    
+    if summary.get("invalid") != 1:
+        print_fail(f"Expected summary.invalid=1, got {summary.get('invalid')}")
+        return False
+    
+    print_pass("CSV dry_run successful: 3 valid rows parsed, 1 error, qty=0 row skipped")
+    
+    # Verify NO new inventory rows were created
+    resp_after = requests.get(f"{BASE_URL}/fg-inventory", headers=headers)
+    count_after = len(resp_after.json()) if resp_after.status_code == 200 else 0
+    
+    if count_after != count_before:
+        print_fail(f"Inventory count changed during dry_run: before={count_before}, after={count_after}")
+        return False
+    
+    print_pass("Verified: No inventory rows created during dry_run")
+    return True
+
+# ============================================================================
+# TEST 7: POST /api/fg-inventory/import-csv?dry_run=false — commit
+# ============================================================================
+def test_csv_import_commit(headers, style_code, style_id):
+    print_test("TEST 7: POST /api/fg-inventory/import-csv?dry_run=false — commit")
+    
+    # Create CSV with only valid rows
+    csv_content = (
+        "style_code,color,size,movement_type,quantity,reference_type,notes\n"
+        f"{style_code},CSV-COMMIT-1,36,production_in,12,manual,Commit test 1\n"
+        f"{style_code},CSV-COMMIT-2,37,production_in,18,manual,Commit test 2\n"
+    )
+    
+    # Get movements count before
+    resp_before = requests.get(f"{BASE_URL}/fg-inventory/movements?style_id={style_id}", headers=headers)
+    movements_before = len(resp_before.json()) if resp_before.status_code == 200 else 0
+    
+    # Upload CSV
+    files = {"file": ("test_commit.csv", csv_content.encode("utf-8"), "text/csv")}
+    resp = requests.post(f"{BASE_URL}/fg-inventory/import-csv?dry_run=false", files=files, headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Response: {resp.text[:2000]}")
+    
+    if resp.status_code != 200:
+        print_fail(f"Expected 200, got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    
+    # Check committed flag
+    if not data.get("committed"):
+        print_fail("Expected committed=true in response")
+        return False
+    
+    # Check results
+    results = data.get("results", [])
+    if len(results) != 2:
+        print_fail(f"Expected 2 results, got {len(results)}")
+        return False
+    
+    # All results should have ok=True
+    for i, result in enumerate(results):
+        if not result.get("ok"):
+            print_fail(f"Result {i} has ok=False: {result}")
+            return False
+    
+    print_pass("CSV commit successful: 2 rows applied")
+    
+    # Verify ledger rows were created
+    resp_after = requests.get(f"{BASE_URL}/fg-inventory/movements?style_id={style_id}", headers=headers)
+    movements_after = len(resp_after.json()) if resp_after.status_code == 200 else 0
+    
+    if movements_after <= movements_before:
+        print_fail(f"No new movements created: before={movements_before}, after={movements_after}")
+        return False
+    
+    print_pass(f"Verified: {movements_after - movements_before} new movement(s) in ledger")
+    
+    # Verify inventory rows were updated
+    resp_inv = requests.get(f"{BASE_URL}/fg-inventory/by-style/{style_id}", headers=headers)
+    
+    if resp_inv.status_code != 200:
+        print_fail(f"Failed to fetch inventory: {resp_inv.status_code}")
+        return False
+    
+    inv_data = resp_inv.json()
+    rows = inv_data.get("rows", [])
+    
+    # Check for the two (color, size) combinations
+    expected = [
+        ("CSV-COMMIT-1", "36", 12),
+        ("CSV-COMMIT-2", "37", 18)
+    ]
+    
+    for color, size, qty in expected:
+        found = False
+        for row in rows:
+            if row.get("color") == color and row.get("size") == size:
+                found = True
+                if row.get("ready_stock_qty") != qty:
+                    print_fail(f"Expected ready_stock_qty={qty} for {color}/{size}, got {row.get('ready_stock_qty')}")
+                    return False
+                break
+        
+        if not found:
+            print_fail(f"Inventory row not found for {color}/{size}")
+            return False
+    
+    print_pass("Verified: Inventory rows updated with correct quantities")
+    return True
+
+# ============================================================================
+# TEST 8: CSV missing required column
+# ============================================================================
+def test_csv_missing_column(headers, style_code):
+    print_test("TEST 8: CSV missing required column")
+    
+    # CSV missing "color" column
+    csv_content = (
+        "style_code,size,quantity\n"
+        f"{style_code},40,10\n"
+        f"{style_code},41,15\n"
+    )
+    
+    files = {"file": ("test_missing_col.csv", csv_content.encode("utf-8"), "text/csv")}
+    resp = requests.post(f"{BASE_URL}/fg-inventory/import-csv?dry_run=true", files=files, headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Response: {resp.text[:1000]}")
+    
+    if resp.status_code != 200:
+        print_fail(f"Expected 200 (per-line errors), got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    
+    # Check errors
+    errors = data.get("errors", [])
+    if len(errors) != 2:
+        print_fail(f"Expected 2 errors (one per row), got {len(errors)}")
+        return False
+    
+    # Both errors should mention "Missing color"
+    for error in errors:
+        error_msg = error.get("error", "")
+        if "Missing color" not in error_msg:
+            print_fail(f"Expected error mentioning 'Missing color', got: {error_msg}")
+            return False
+    
+    print_pass("CSV with missing column correctly produces per-line errors")
+    return True
+
+# ============================================================================
+# TEST 9: CSV import — adjustment_field enforcement
+# ============================================================================
+def test_csv_adjustment_field_enforcement(headers, style_code):
+    print_test("TEST 9: CSV import — adjustment_field enforcement")
+    
+    # CSV with movement_type=adjustment but NO adjustment_field
+    csv_content = (
+        "style_code,color,size,movement_type,quantity,reference_type\n"
+        f"{style_code},ADJ-TEST,40,adjustment,5,manual\n"
+    )
+    
+    files = {"file": ("test_adj.csv", csv_content.encode("utf-8"), "text/csv")}
+    resp = requests.post(f"{BASE_URL}/fg-inventory/import-csv?dry_run=true", files=files, headers=headers)
+    
+    print_info(f"Status: {resp.status_code}")
+    print_info(f"Response: {resp.text[:1000]}")
+    
+    if resp.status_code != 200:
+        print_fail(f"Expected 200, got {resp.status_code}")
+        return False
+    
+    data = resp.json()
+    
+    # Check errors
+    errors = data.get("errors", [])
+    if len(errors) != 1:
+        print_fail(f"Expected 1 error, got {len(errors)}")
+        return False
+    
+    error_msg = errors[0].get("error", "")
+    if "adjustment_field is required" not in error_msg:
+        print_fail(f"Expected error mentioning 'adjustment_field is required', got: {error_msg}")
+        return False
+    
+    print_pass("CSV adjustment without adjustment_field correctly produces error")
+    return True
+
+# ============================================================================
+# TEST 10: Regression smoke — previously-passing endpoints still work
+# ============================================================================
+def test_regression_smoke(headers, style_id):
+    print_test("TEST 10: Regression smoke — previously-passing endpoints")
+    
+    # Test 1: POST /api/fg-inventory/movements (single movement)
+    print_info("Testing POST /api/fg-inventory/movements (single)")
     
     movement_payload = {
         "style_id": style_id,
-        "color": "TestColor",
-        "size": "8",
+        "color": "REGRESSION-TEST",
+        "size": "42",
         "movement_type": "production_in",
-        "quantity": 10,
+        "quantity": 8,
         "reference_type": "manual",
-        "notes": "Regression test movement"
+        "notes": "Regression smoke test"
     }
     
     resp = requests.post(f"{BASE_URL}/fg-inventory/movements", json=movement_payload, headers=headers)
     print_info(f"Status: {resp.status_code}")
+    
     if resp.status_code not in [200, 201]:
         print_fail(f"POST /api/fg-inventory/movements failed with {resp.status_code}: {resp.text[:200]}")
         return False
+    
     print_pass("POST /api/fg-inventory/movements works")
     
-    print_pass("All Phase 2 regression checks passed")
-    return True
-
-# ============================================================================
-# TEST 10: Rate limit check - 5 wrong-password attempts → 429
-# ============================================================================
-def test_rate_limit():
-    print_test("Rate limit check - 5 wrong-password attempts → 429")
+    # Test 2: GET /api/fg-inventory
+    print_info("Testing GET /api/fg-inventory")
     
-    url = f"{BASE_URL}/auth/login"
-    
-    print_info("Attempting 5 failed logins to trigger rate limit...")
-    
-    for i in range(1, 6):
-        payload = {"email": ADMIN_EMAIL, "password": f"wrongpass{i}"}
-        resp = requests.post(url, json=payload)
-        print_info(f"Attempt {i}: Status {resp.status_code}")
-        
-        if resp.status_code != 401:
-            print_fail(f"Expected 401 on attempt {i}, got {resp.status_code}")
-            return False
-    
-    # 6th attempt should be rate-limited
-    print_info("Attempting 6th failed login (should be rate-limited)...")
-    payload = {"email": ADMIN_EMAIL, "password": "wrongpass6"}
-    resp = requests.post(url, json=payload)
-    
+    resp = requests.get(f"{BASE_URL}/fg-inventory", headers=headers)
     print_info(f"Status: {resp.status_code}")
-    print_info(f"Response: {resp.text[:500]}")
     
-    if resp.status_code != 429:
-        print_fail(f"Expected 429 (rate limited), got {resp.status_code}")
-        print_info("NOTE: Rate limiting is per-backend-pod (in-memory). On load-balanced environments, it may take more attempts.")
+    if resp.status_code != 200:
+        print_fail(f"GET /api/fg-inventory failed with {resp.status_code}")
         return False
     
     data = resp.json()
-    detail = data.get("detail", "")
-    
-    if "Too many failed login attempts" not in detail:
-        print_fail(f"Expected 'Too many failed login attempts', got: {detail}")
+    if not isinstance(data, list):
+        print_fail(f"Expected list response, got: {type(data)}")
         return False
     
-    print_pass(f"Rate limit correctly triggered after 5 failed attempts with 429 and detail: '{detail}'")
+    print_pass("GET /api/fg-inventory works")
     
-    # Test that correct credentials are also blocked during lockout
-    print_info("Testing that correct credentials are also blocked during lockout...")
-    payload = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
-    resp = requests.post(url, json=payload)
+    # Test 3: GET /api/fg-inventory/by-style/{style_id}
+    print_info("Testing GET /api/fg-inventory/by-style/{style_id}")
     
+    resp = requests.get(f"{BASE_URL}/fg-inventory/by-style/{style_id}", headers=headers)
     print_info(f"Status: {resp.status_code}")
     
-    if resp.status_code != 429:
-        print_fail(f"Expected 429 (rate limited) even with correct credentials, got {resp.status_code}")
+    if resp.status_code != 200:
+        print_fail(f"GET /api/fg-inventory/by-style failed with {resp.status_code}")
         return False
     
-    print_pass("Correct credentials also blocked during lockout (as expected)")
+    data = resp.json()
+    if "rows" not in data:
+        print_fail(f"Expected 'rows' in response, got: {data.keys()}")
+        return False
+    
+    print_pass("GET /api/fg-inventory/by-style works")
+    
+    print_pass("All regression smoke tests passed")
     return True
 
 # ============================================================================
@@ -390,50 +770,39 @@ def test_rate_limit():
 # ============================================================================
 def main():
     print("\n" + "="*80)
-    print("BACKEND AUTH BUG FIX VERIFICATION TEST SUITE")
+    print("BACKEND BULK STOCK-ENTRY ENDPOINTS TEST SUITE")
     print("="*80)
     print(f"Backend URL: {BASE_URL}")
     print(f"Test credentials: {ADMIN_EMAIL} / {ADMIN_PASSWORD}")
     print("="*80)
     
-    results = {}
-    
-    # Test 1: Login with correct credentials
-    access_token, refresh_token = test_login_success()
-    results["login_success"] = (access_token is not None and refresh_token is not None)
-    
-    if not results["login_success"]:
-        print("\n❌ CRITICAL: Login failed, cannot continue with other tests")
+    # Login
+    access_token = login()
+    if not access_token:
+        print("\n❌ CRITICAL: Login failed, cannot continue")
         sys.exit(1)
     
-    # Test 2: Login with wrong password
-    results["login_wrong_password"] = test_login_wrong_password()
+    headers = {"Authorization": f"Bearer {access_token}"}
     
-    # Test 3: Refresh with body flow (new)
-    new_access_token = test_refresh_body_flow(refresh_token)
-    results["refresh_body_flow"] = (new_access_token is not None)
+    # Get or create a style
+    style_id, style_code = get_or_create_style(headers)
+    if not style_id:
+        print("\n❌ CRITICAL: Failed to get/create style, cannot continue")
+        sys.exit(1)
     
-    # Test 4: Refresh with cookie flow (legacy)
-    cookie_access_token = test_refresh_cookie_flow(refresh_token)
-    results["refresh_cookie_flow"] = (cookie_access_token is not None)
+    # Run tests
+    results = {}
     
-    # Test 5: Refresh with missing token
-    results["refresh_missing_token"] = test_refresh_missing_token()
-    
-    # Test 6: Refresh with invalid token
-    results["refresh_invalid_token"] = test_refresh_invalid_token()
-    
-    # Test 7: Refresh with wrong token type
-    results["refresh_wrong_token_type"] = test_refresh_wrong_token_type(access_token)
-    
-    # Test 8: Auth /me with Bearer token
-    results["auth_me"] = test_auth_me(access_token)
-    
-    # Test 9: Phase 2 regression check
-    results["phase2_regression"] = test_phase2_regression(access_token)
-    
-    # Test 10: Rate limit check
-    results["rate_limit"] = test_rate_limit()
+    results["test_1_bulk_happy_path"] = test_bulk_movements_happy_path(headers, style_id)
+    results["test_2_bulk_partial_success"] = test_bulk_movements_partial_success(headers, style_id)
+    results["test_3_bulk_too_large"] = test_bulk_movements_too_large(headers, style_id)
+    results["test_4_bulk_empty_list"] = test_bulk_movements_empty_list(headers)
+    results["test_5_csv_template"] = test_csv_template(headers)
+    results["test_6_csv_dry_run"] = test_csv_import_dry_run(headers, style_code)
+    results["test_7_csv_commit"] = test_csv_import_commit(headers, style_code, style_id)
+    results["test_8_csv_missing_column"] = test_csv_missing_column(headers, style_code)
+    results["test_9_csv_adjustment_field"] = test_csv_adjustment_field_enforcement(headers, style_code)
+    results["test_10_regression_smoke"] = test_regression_smoke(headers, style_id)
     
     # Summary
     print("\n" + "="*80)

@@ -5,9 +5,10 @@ import {
   Input, Select, Badge, StatTile,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
+import AddStockDrawer from "./AddStockDrawer";
 import {
   AlertTriangle, Plus, RefreshCw, Package, History,
-  Boxes, ImageOff, ChevronDown, ChevronRight,
+  Boxes, ImageOff, ChevronDown, ChevronRight, Upload,
 } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────
@@ -337,7 +338,7 @@ function LedgerDrawer({ styleId, styleCode, onClose }) {
 //    Right   = Row totals    (per color, across all sizes)
 //    Corner  = Grand total
 // ═══════════════════════════════════════════════════════════
-function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, onOpenLedger }) {
+function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, onAddStock, onOpenLedger }) {
   const M = METRICS[metric];
 
   // Build (color, size) → row lookup and axes
@@ -430,11 +431,19 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
             </button>
             <button
               onClick={() => onAddMovement({ style_id: style.id })}
-              title="Post a movement for this style"
-              className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-[#C27842] px-2 py-1 flex items-center gap-1 border border-[#0F172A]"
+              title="Post a single movement for this style"
+              className="text-[10px] uppercase tracking-wider font-bold text-slate-700 hover:text-white hover:bg-[#0F172A] border border-slate-300 px-2 py-1 flex items-center gap-1"
               data-testid={`add-mv-${style.code}`}
             >
               <Plus className="w-3 h-3" /> Movement
+            </button>
+            <button
+              onClick={() => onAddStock(style.id)}
+              title="Add stock in bulk (matrix or CSV)"
+              className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#C27842] hover:bg-[#0F172A] border border-[#C27842] hover:border-[#0F172A] px-2 py-1 flex items-center gap-1"
+              data-testid={`add-stock-${style.code}`}
+            >
+              <Upload className="w-3 h-3" /> Add Stock
             </button>
           </div>
         </div>
@@ -600,6 +609,8 @@ export default function ReadyStock() {
   const [metric, setMetric]       = useState("ready");
   const [mvOpen, setMvOpen]       = useState(false);
   const [mvInitial, setMvInitial] = useState(null);
+  const [addStockOpen, setAddStockOpen]       = useState(false);
+  const [addStockStyleId, setAddStockStyleId] = useState("");
   const [ledger, setLedger]       = useState(null);
 
   const load = useCallback(async () => {
@@ -682,8 +693,11 @@ export default function ReadyStock() {
             <BtnSecondary id="btn-open-ledger" onClick={() => setLedger({ style_id: null, style_code: null })}>
               <span className="flex items-center gap-1.5"><History className="w-4 h-4" /> Full Ledger</span>
             </BtnSecondary>
-            <BtnPrimary id="btn-add-movement" onClick={() => { setMvInitial(null); setMvOpen(true); }}>
-              <span className="flex items-center gap-2"><Plus className="w-4 h-4" /> Post Movement</span>
+            <BtnSecondary id="btn-add-movement" onClick={() => { setMvInitial(null); setMvOpen(true); }}>
+              <span className="flex items-center gap-1.5"><Plus className="w-4 h-4" /> Movement</span>
+            </BtnSecondary>
+            <BtnPrimary id="btn-add-stock" onClick={() => { setAddStockStyleId(""); setAddStockOpen(true); }}>
+              <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Add Stock</span>
             </BtnPrimary>
           </div>
         }
@@ -750,11 +764,16 @@ export default function ReadyStock() {
             <Package className="w-10 h-10 text-slate-300 mx-auto mb-3" />
             <div className="text-slate-500 font-semibold mb-1">No finished-goods rows yet.</div>
             <div className="text-xs text-slate-400 mb-4">
-              Rows are auto-created when you post a movement.
+              Seed inventory via the Add Stock drawer (matrix entry or CSV upload), or post a single movement.
             </div>
-            <BtnPrimary onClick={() => { setMvInitial(null); setMvOpen(true); }}>
-              <span className="flex items-center gap-2"><Plus className="w-4 h-4" /> Post first movement</span>
-            </BtnPrimary>
+            <div className="flex gap-2 justify-center">
+              <BtnPrimary onClick={() => { setAddStockStyleId(""); setAddStockOpen(true); }}>
+                <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Add Stock in Bulk</span>
+              </BtnPrimary>
+              <BtnSecondary onClick={() => { setMvInitial(null); setMvOpen(true); }}>
+                <span className="flex items-center gap-2"><Plus className="w-4 h-4" /> Single Movement</span>
+              </BtnSecondary>
+            </div>
           </Card>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5" data-testid="style-cards-grid">
@@ -766,6 +785,7 @@ export default function ReadyStock() {
                 metric={metric}
                 onCellClick={(sel) => { setMvInitial(sel); setMvOpen(true); }}
                 onAddMovement={(sel) => { setMvInitial(sel); setMvOpen(true); }}
+                onAddStock={(sid) => { setAddStockStyleId(sid); setAddStockOpen(true); }}
                 onOpenLedger={(style) => setLedger({ style_id: style.id, style_code: style.code })}
               />
             ))}
@@ -778,6 +798,14 @@ export default function ReadyStock() {
           initial={mvInitial}
           styles={stylesList}
           onClose={() => setMvOpen(false)}
+          onDone={() => load()}
+        />
+      )}
+      {addStockOpen && (
+        <AddStockDrawer
+          styles={stylesList}
+          initialStyleId={addStockStyleId}
+          onClose={() => setAddStockOpen(false)}
           onDone={() => load()}
         />
       )}
