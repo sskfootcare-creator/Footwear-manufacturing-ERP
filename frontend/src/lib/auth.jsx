@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { http, formatApiError } from "./api";
+import { http, friendlyAxiosError } from "./api";
 
 const AuthContext = createContext(null);
 
@@ -27,10 +27,13 @@ export function AuthProvider({ children }) {
       if (data.access_token) {
         localStorage.setItem("token", data.access_token);
       }
+      if (data.refresh_token) {
+        localStorage.setItem("refresh_token", data.refresh_token);
+      }
       setUser(data);
       return true;
     } catch (e) {
-      setError(formatApiError(e.response?.data?.detail) || e.message);
+      setError(friendlyAxiosError(e));
       return false;
     }
   };
@@ -38,6 +41,7 @@ export function AuthProvider({ children }) {
   const logout = async () => {
     try { await http.post("/auth/logout"); } catch {}
     localStorage.removeItem("token");
+    localStorage.removeItem("refresh_token");
     setUser(false);
   };
 

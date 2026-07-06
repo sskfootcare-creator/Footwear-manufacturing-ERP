@@ -105,6 +105,22 @@
 user_problem_statement: "Phase 2 — Finished Goods Inventory + Reservation Engine. Build the Online branch's stock model with explicit states so overselling on Myntra/Flipkart/Nykaa/Website is structurally impossible. Add fg_stock_movements ledger and inventory_reservations collection. Every write to fg_inventory MUST go through a movement row. Add ReadyStock.jsx frontend page with color×size matrix."
 
 backend:
+  - task: "Auth bug fix — CORS/withCredentials compatibility"
+    implemented: true
+    working: true
+    file: "backend/server.py, frontend/src/lib/api.js, frontend/src/lib/auth.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Fixed CORS issue where Emergent ingress adds 'Access-Control-Allow-Origin: *' to every response, causing browsers to block credentialed fetches. Changes: (1) Backend /api/auth/refresh now accepts refresh_token from either httpOnly cookie OR JSON body for cookie-less auth, (2) Frontend axios instance no longer uses withCredentials: true, (3) Login stores refresh_token in localStorage, (4) Refresh interceptor sends refresh_token in body, (5) New friendlyAxiosError() for better error messages."
+        - working: true
+          agent: "testing"
+          comment: "✅ AUTH BUG FIX VERIFIED — 9/10 tests passed. PASSED: (1) POST /api/auth/login with correct credentials → 200 with access_token + refresh_token in body ✓ (2) POST /api/auth/login with wrong password → 401 'Invalid email or password' ✓ (3) POST /api/auth/refresh with body flow (new) → 200 with new access_token ✓ (4) POST /api/auth/refresh with cookie flow (legacy) → 200 with new access_token (backward compatibility maintained) ✓ (5) POST /api/auth/refresh with no cookie and no body → 401 'Missing refresh token' ✓ (6) POST /api/auth/refresh with invalid token → 401 'Invalid refresh token' ✓ (7) POST /api/auth/refresh with wrong token type (access instead of refresh) → 401 'Invalid token type' ✓ (8) GET /api/auth/me with Bearer token (no cookies) → 200 with admin user ✓ (9) Phase 2 regression check: GET /api/fg-inventory, GET /api/fg-inventory/movements, POST /api/fg-inventory/movements all work with Bearer token only (no cookies) ✓. ENVIRONMENTAL LIMITATION (not a bug): (10) Rate limit test failed — expected 429 after 5 failed login attempts, but got 401. Root cause: In Kubernetes load-balanced environment, requests are distributed across multiple backend pods (IPs 10.79.138.194 and 10.79.138.198 seen in logs), and the in-memory rate limiting (per-pod) doesn't accumulate properly. The rate limiting code is correct and unchanged (lines 103-108 in server.py), but doesn't work reliably in distributed environments. This is a known limitation of in-memory rate limiting in load-balanced setups, NOT a bug introduced by the auth fix. Recommendation: If rate limiting is critical for production, implement distributed rate limiting using Redis or similar shared state."
+
+backend:
   - task: "Phase 2 — FG movement engine (single writer)"
     implemented: true
     working: true
@@ -210,8 +226,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "phase-2"
-  test_sequence: 2
+  version: "phase-2-auth-fix"
+  test_sequence: 3
   run_ui: false
 
 test_plan:
@@ -227,3 +243,5 @@ agent_communication:
       message: "✅ Phase 2 backend testing COMPLETE. All 6 backend tasks tested and working correctly. Fixed one bug: stringify() function was not handling nested ObjectIds, causing 500 errors on movement API responses. Updated stringify() to recursively handle ObjectIds in nested dicts and lists. All movement types, ledger views, reservations, legacy endpoints, and low_stock filter working as specified. No issues found with the core implementation."
     - agent: "testing"
       message: "✅ LOGIN FLOW VERIFICATION COMPLETE (user-reported issue: 'credentials not working'). Tested all 7 scenarios: (1) Correct credentials (admin@example.com/admin123) → 200 OK with access_token, refresh_token in body AND cookies ✓ (2) GET /api/auth/me with Bearer token → 200 with admin user object ✓ (3) Wrong password → 401 'Invalid email or password' ✓ (4) Uppercase email (ADMIN@EXAMPLE.COM) → 200 (email normalized to lowercase) ✓ (5) Email with whitespace (' admin@example.com ') → 200 (Pydantic EmailStr auto-strips whitespace) ✓ (6) Database verification: exactly 1 user with email='admin@example.com', role='admin', active=true, password_hash verifies against 'admin123' ✓ (7) Rate limiting: After 5 failed attempts, 6th attempt returns 429 'Too many failed login attempts. Try again in 14 minutes.' Correct credentials also blocked during lockout. Lockout window: 900 seconds (15 minutes). NOTE: Rate limiting works per-backend-pod (in-memory), so on load-balanced public URL it may take more attempts to trigger. On localhost (single instance) it works perfectly. ROOT CAUSE ANALYSIS: The most likely reason user sees 'invalid credentials' is (a) Rate limiting after multiple failed attempts - requires backend restart or 15-min wait to clear, (b) Copy-paste error with password (case-sensitive), or (c) Typing wrong password. Email case and whitespace are NOT issues (backend handles both). RECOMMENDATION: If user still reports issue, ask them to try: (1) Wait 15 minutes or ask admin to restart backend to clear rate limit, (2) Carefully re-type password 'admin123' (case-sensitive, no spaces), (3) Ensure no browser extensions interfering with login."
+    - agent: "testing"
+      message: "✅ AUTH BUG FIX VERIFICATION COMPLETE. Tested the CORS/withCredentials fix where backend /api/auth/refresh now accepts refresh_token from either cookie OR JSON body, and frontend no longer uses withCredentials: true. RESULTS: 9/10 tests passed. All core auth flows working perfectly: login with correct/wrong credentials, refresh via body flow (new), refresh via cookie flow (legacy backward compatibility), missing token handling, invalid token handling, wrong token type handling, /auth/me with Bearer token, and Phase 2 endpoints regression check. The one failed test (rate limiting) is an environmental limitation in Kubernetes load-balanced setup where in-memory rate limiting doesn't work reliably across multiple pods — NOT a bug in the auth fix. The rate limiting code is unchanged and correct. Recommendation: If rate limiting is critical, implement distributed rate limiting using Redis."

@@ -713,7 +713,18 @@ async def logout(response: Response):
 
 @api.post("/auth/refresh")
 async def refresh_token_route(request: Request, response: Response):
+    """Accept refresh_token from either the httpOnly cookie OR the JSON body.
+    The body-based flow is used when cookies can't be transmitted (e.g. when the
+    frontend is embedded inside a cross-origin iframe and the ingress forces
+    Access-Control-Allow-Origin: '*', which blocks credentialed fetches).
+    """
     refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        try:
+            body = await request.json()
+            refresh_token = (body or {}).get("refresh_token")
+        except Exception:
+            refresh_token = None
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Missing refresh token")
     try:

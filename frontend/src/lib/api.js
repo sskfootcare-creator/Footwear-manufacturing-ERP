@@ -2,9 +2,14 @@ import axios from "axios";
 
 export const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// NOTE: withCredentials is intentionally OFF. The Emergent ingress adds
+// `Access-Control-Allow-Origin: *` to every response, and browsers reject any
+// credentialed (`withCredentials: true`) response that has a wildcard origin —
+// axios then sees no `response` object at all and every API call silently
+// fails with "Network Error". We use Bearer tokens (localStorage) exclusively.
 export const http = axios.create({
   baseURL: API,
-  withCredentials: true,
+  withCredentials: false,
 });
 
 http.interceptors.request.use(
@@ -32,13 +37,16 @@ http.interceptors.response.use(
     ) {
       originalRequest._retry = true;
       try {
-        const { data } = await http.post("/auth/refresh");
+        const refreshTok = localStorage.getItem("refresh_token");
+        // Send refresh_token in body so cookies aren't required
+        const { data } = await http.post("/auth/refresh", refreshTok ? { refresh_token: refreshTok } : {});
         if (data.access_token) {
           localStorage.setItem("token", data.access_token);
         }
         return http(originalRequest);
       } catch (refreshError) {
         localStorage.removeItem("token");
+        localStorage.removeItem("refresh_token");
         if (window.location.pathname !== "/login") {
           window.location.href = "/login";
         }
@@ -59,6 +67,29 @@ export function formatApiError(detail) {
       .join(" ");
   if (detail && typeof detail.msg === "string") return detail.msg;
   return String(detail);
+}
+
+/**
+ * Turn an axios error into a human-friendly, informative message.
+ * Falls back cleanly when the browser blocked the response body (CORS) —
+ * critical for diagnosing issues in preview environments.
+ */
+export function friendlyAxiosError(err) {
+  if (!err) return "Something went wrong. Please try again.";
+  // Real HTTP response with a body
+  if (err.response) {
+    const detail = err.response.data && err.response.data.detail;
+    const status = err.response.status;
+    if (detail) return `${formatApiError(detail)} (HTTP ${status})`;
+    return `Request failed with status ${status}.`;
+  }
+  // Request was made but no response was received (network error, CORS block, timeout)
+  if (err.request) {
+    if (err.code === "ECONNABORTED") return "Request timed out. Please retry.";
+    return "The server didn't respond (network error or blocked by the browser). Please retry.";
+  }
+  // Something happened while setting up the request
+  return err.message || "Unknown request error.";
 }
 
 export const inr = (n) =>
