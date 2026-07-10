@@ -1,12 +1,13 @@
 """PDF: Printable Production Card (A4 — fits inside 180mm usable width)."""
-import base64
 import io
 from datetime import datetime
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+from pdf_image import load_image_for_pdf
 
 BLACK = colors.black
 HEAD = colors.HexColor("#0F172A")
@@ -20,25 +21,11 @@ USABLE_MM = 180
 
 
 def _img_from_dataurl(image_url: str, max_h_mm: float = 50, max_w_mm: float = 50):
-    if not image_url or not image_url.startswith("data:image"):
-        return None
-    try:
-        _, b64 = image_url.split(",", 1)
-        raw = base64.b64decode(b64)
-        bio = io.BytesIO(raw)
-        img = Image(bio)
-        ratio = img.imageWidth / img.imageHeight if img.imageHeight else 1
-        target_h_pt = max_h_mm * mm
-        target_w_pt = max_w_mm * mm
-        if ratio > (target_w_pt / target_h_pt):
-            img.drawWidth = target_w_pt
-            img.drawHeight = target_w_pt / ratio
-        else:
-            img.drawHeight = target_h_pt
-            img.drawWidth = target_h_pt * ratio
-        return img
-    except Exception:
-        return None
+    """Backward-compatible thin wrapper — kept for any external caller that
+    still references this symbol.  All real work happens in
+    pdf_image.load_image_for_pdf() so every PDF generator shares one
+    implementation of URL → sized reportlab Image."""
+    return load_image_for_pdf(image_url, max_h_mm=max_h_mm, max_w_mm=max_w_mm)
 
 
 def build_production_card(job_group: dict, style: dict | None) -> bytes:
@@ -81,7 +68,10 @@ def build_production_card(job_group: dict, style: dict | None) -> bytes:
     ]))
 
     # --- Header card (image | info | color/qty) — total 180mm = 50+90+40 ---
-    img_cell = _img_from_dataurl((style or {}).get("image_url", ""), max_h_mm=46, max_w_mm=46)
+    img_cell = load_image_for_pdf(
+        style or {},   # full dict — helper picks the display variant, not the 1600px original
+        max_h_mm=46, max_w_mm=46,
+    )
     if img_cell is None:
         img_cell = Table([[Paragraph("No Image", ParagraphStyle("ni", fontName="Helvetica", fontSize=8, alignment=1))]],
                          colWidths=[46 * mm], rowHeights=[46 * mm])

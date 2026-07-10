@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
-import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck, Menu, X, ArrowLeftRight, ShoppingBag } from "lucide-react";
+import { LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer, Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat, Warehouse, IndianRupee, Settings as SettingsIcon, Receipt, BookOpen, Truck, Menu, X, ArrowLeftRight, ShoppingBag, Package, ClipboardList, PackageOpen } from "lucide-react";
 
 const navGroups = [
   {
@@ -13,8 +13,11 @@ const navGroups = [
       { to: "/styles", label: "Styles", icon: Layers, roles: ["admin", "manager", "sales"] },
       { to: "/materials", label: "Materials", icon: Boxes, roles: ["admin", "manager"] },
       { to: "/inventory", label: "Raw Material Inventory", icon: Warehouse, roles: ["admin", "manager", "production"] },
+      { to: "/components", label: "Component Inventory", icon: Package, roles: ["admin", "manager", "production"] },
       { to: "/workers", label: "Workers", icon: HardHat, roles: ["admin", "manager", "production"] },
       { to: "/payroll", label: "Payroll", icon: IndianRupee, roles: ["admin", "manager"] },
+      { to: "/listing-formats", label: "Listing Formats", icon: FileText, roles: ["admin"] },
+      { to: "/order-import-formats", label: "Order Import Formats", icon: FileText, roles: ["admin"] },
       { to: "/settings", label: "Settings", icon: SettingsIcon, roles: ["admin", "manager"] },
       { to: "/users", label: "Users", icon: Users, roles: ["admin"] },
     ]
@@ -29,9 +32,10 @@ const navGroups = [
       { to: "/vendors", label: "Vendors", icon: Truck, roles: ["admin", "manager"] },
       { to: "/vendor-pos", label: "Vendor POs", icon: FileText, roles: ["admin", "manager"] },
       { to: "/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "manager", "sales"] },
-      { to: "/grns", label: "GRNs", icon: FileText, roles: ["admin", "manager"] },
-      { to: "/payments", label: "Payments", icon: IndianRupee, roles: ["admin", "manager"] },
       { to: "/clients", label: "Clients", icon: BookOpen, roles: ["admin", "manager", "sales"] },
+      { to: "/costing", label: "Costing", icon: Calculator, roles: ["admin", "manager"] },
+      { to: "/defects", label: "Defects", icon: AlertOctagon, roles: ["admin", "manager", "production"] },
+      { to: "/reports", label: "Reports", icon: BarChart3, roles: ["admin", "manager"] },
     ]
   },
   {
@@ -39,13 +43,15 @@ const navGroups = [
     title: "Online Commerce",
     workspaces: ["online", "management"],
     items: [
-      { to: "/sku-map", label: "Online Style Pipeline", icon: ArrowLeftRight, roles: ["admin", "manager"] },
+      { to: "/online-pipeline", label: "Online Style Pipeline", icon: Layers, roles: ["admin", "manager"] },
+      { to: "/sku-map", label: "SKU Mapping", icon: ArrowLeftRight, roles: ["admin", "manager"] },
       { to: "/ready-stock", label: "Ready Stock", icon: Boxes, roles: ["admin", "manager"] },
       { to: "/online-orders", label: "Online Orders", icon: ShoppingBag, roles: ["admin", "manager", "sales"] },
-      { to: "/dispatch", label: "Dispatch", icon: Truck, roles: ["admin", "manager", "production"] },
-      { to: "/returns", label: "Returns", icon: AlertOctagon, roles: ["admin", "manager", "production"] },
-      { to: "/settlements", label: "Settlements", icon: IndianRupee, roles: ["admin", "manager"] },
-      { to: "/liquidation", label: "Liquidation Watchlist", icon: BarChart3, roles: ["admin", "manager"] },
+      { to: "/online-profitability", label: "Profitability", icon: BarChart3, roles: ["admin", "manager"] },
+      { to: "/warehouse", label: "Warehouse", icon: Warehouse, roles: ["admin", "manager", "production"] },
+      { to: "/picklists", label: "Picklists", icon: ClipboardList, roles: ["admin", "manager", "production"] },
+      { to: "/warehouse/reports", label: "Warehouse Reports", icon: BarChart3, roles: ["admin", "manager"] },
+      { to: "/pending-list", label: "Pending Product List", icon: PackageOpen, roles: ["admin", "manager", "production"] },
     ]
   }
 ];

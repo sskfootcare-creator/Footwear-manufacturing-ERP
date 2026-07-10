@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { http } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Loader2 } from "lucide-react";
 
@@ -7,12 +8,39 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotResult, setForgotResult] = useState(null); // {message, dev_reset_url?}
 
   const onSubmit = async (e) => {
     e.preventDefault();
     setBusy(true);
     await login(email, password);
     setBusy(false);
+  };
+
+  const submitForgot = async (e) => {
+    e.preventDefault();
+    setForgotBusy(true);
+    setForgotResult(null);
+    try {
+      const { data } = await http.post("/auth/forgot-password", { email: forgotEmail });
+      setForgotResult({
+        message: data?.message || "If that email matches an account, a reset link has been sent.",
+        dev_reset_url: data?.dev_reset_url || null,
+        email_status: data?.email_status || null,
+      });
+    } catch (err) {
+      setForgotResult({
+        message:
+          err.response?.data?.detail ||
+          err.message ||
+          "Could not send reset link. Please try again.",
+      });
+    } finally {
+      setForgotBusy(false);
+    }
   };
 
   return (
@@ -72,17 +100,28 @@ export default function Login() {
               Sign in
             </button>
 
+            <div className="text-right">
+              <button
+                type="button"
+                data-testid="forgot-password-link"
+                onClick={() => { setForgotOpen(true); setForgotEmail(email); setForgotResult(null); }}
+                className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:text-[#1D4ED8]"
+              >
+                Forgot password?
+              </button>
+            </div>
+
             <div className="mt-6 border-t border-slate-200 pt-4">
               <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold mb-2">Seeded Admin (Dev)</div>
               <div className="flex items-center justify-between gap-2 text-xs text-slate-600 font-mono bg-slate-50 border border-slate-200 px-3 py-2">
                 <div>
-                  <div><span className="text-slate-400">email:</span> admin@example.com</div>
-                  <div><span className="text-slate-400">pass&nbsp;:</span> admin123</div>
+                  <div><span className="text-slate-400">email:</span> admin@ssk.com</div>
+                  <div><span className="text-slate-400">pass&nbsp;:</span> admin1234</div>
                 </div>
                 <button
                   type="button"
                   data-testid="login-autofill"
-                  onClick={() => { setEmail("admin@example.com"); setPassword("admin123"); }}
+                  onClick={() => { setEmail("admin@ssk.com"); setPassword("admin1234"); }}
                   className="text-[10px] uppercase font-bold text-[#2563EB] hover:text-[#1D4ED8] tracking-wider"
                 >
                   Autofill
@@ -112,6 +151,92 @@ export default function Login() {
           </div>
         </div>
       </div>
+
+      {forgotOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          onClick={() => setForgotOpen(false)}
+          data-testid="forgot-password-modal"
+        >
+          <div
+            className="bg-white w-full max-w-md border-2 border-[#0F172A] shadow-ind-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b-2 border-[#0F172A] flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Password Reset</div>
+                <h3 className="text-xl font-black">Forgot your password?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForgotOpen(false)}
+                className="text-slate-500 hover:text-slate-900 text-lg font-bold"
+              >×</button>
+            </div>
+            <form onSubmit={submitForgot} className="p-6 space-y-4">
+              <p className="text-sm text-slate-600">
+                Enter your account email — we&apos;ll email a single-use reset link that expires in 1 hour.
+              </p>
+              <div>
+                <label className="text-xs uppercase tracking-wider font-bold text-slate-600">Email</label>
+                <input
+                  data-testid="forgot-email-input"
+                  type="email"
+                  required
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  className="w-full mt-1 border-2 border-slate-300 bg-white px-4 py-2.5 text-slate-900 focus:border-[#2563EB] focus:outline-none font-mono text-sm"
+                />
+              </div>
+
+              {forgotResult && (
+                <div
+                  className="text-sm bg-slate-50 border-2 border-slate-300 px-3 py-2 space-y-1"
+                  data-testid="forgot-result"
+                >
+                  <div className="font-semibold">{forgotResult.message}</div>
+                  {forgotResult.email_status === "email_not_configured" && forgotResult.dev_reset_url && (
+                    <div className="text-xs text-amber-900 bg-amber-50 border border-amber-300 px-2 py-1.5">
+                      <strong>Email service isn&apos;t configured</strong> — set <code>GMAIL_USER</code> +
+                      {" "}<code>GMAIL_APP_PASSWORD</code> in <code>backend/.env</code>. Meanwhile
+                      the admin can hand-deliver this reset link:
+                      <div className="mt-1 break-all font-mono text-[11px] text-slate-800 bg-white border border-slate-300 px-2 py-1">
+                        <a href={forgotResult.dev_reset_url} target="_blank" rel="noreferrer" className="underline">
+                          {forgotResult.dev_reset_url}
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                  {forgotResult.email_status && forgotResult.email_status !== "email_not_configured" && (
+                    <div className="text-xs text-red-800">
+                      Email delivery failed ({forgotResult.email_status}). Please try again or contact your admin.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setForgotOpen(false)}
+                  className="flex-1 border-2 border-slate-300 text-slate-700 font-bold uppercase tracking-wider text-xs py-2.5 hover:border-slate-500"
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  data-testid="forgot-submit"
+                  disabled={forgotBusy}
+                  className="flex-1 bg-[#0F172A] text-white font-bold uppercase tracking-wider text-xs py-2.5 border-2 border-[#0F172A] hover:shadow-ind disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {forgotBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Send reset link
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

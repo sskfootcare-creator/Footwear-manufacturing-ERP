@@ -21,9 +21,20 @@ import Clients from "@/pages/Clients";
 import Vendors from "@/pages/Vendors";
 import VendorPOs from "@/pages/VendorPOs";
 import SkuMap from "@/pages/SkuMap";
+import OnlineStylePipeline from "@/pages/OnlineStylePipeline";
+import ComponentInventory from "@/pages/ComponentInventory";
 import OnlineOrders from "@/pages/OnlineOrders";
+import OnlineProfitability from "@/pages/OnlineProfitability";
 import ReadyStock from "@/pages/ReadyStock";
+import WarehouseDashboard from "@/pages/WarehouseDashboard";
+import Picklists from "@/pages/Picklists";
+import WarehouseReports from "@/pages/WarehouseReports";
+import WarehouseQRSheet from "@/pages/WarehouseQRSheet";
+import PendingProductList from "@/pages/PendingProductList";
+import ListingFormats from "@/pages/ListingFormats";
+import OrderImportFormats from "@/pages/OrderImportFormats";
 import SelectWorkspace from "@/pages/SelectWorkspace";
+import ResetPassword from "@/pages/ResetPassword";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
@@ -52,6 +63,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/select-workspace" element={<Protected><SelectWorkspace /></Protected>} />
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
@@ -71,8 +83,18 @@ function App() {
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />
             <Route path="sku-map" element={<SkuMap />} />
+            <Route path="online-pipeline" element={<OnlineStylePipeline />} />
+            <Route path="components" element={<ComponentInventory />} />
             <Route path="ready-stock" element={<ReadyStock />} />
             <Route path="online-orders" element={<OnlineOrders />} />
+            <Route path="online-profitability" element={<OnlineProfitability />} />
+            <Route path="warehouse" element={<WarehouseDashboard />} />
+            <Route path="picklists" element={<Picklists />} />
+            <Route path="warehouse/reports" element={<WarehouseReports />} />
+            <Route path="warehouse/qr" element={<WarehouseQRSheet />} />
+            <Route path="pending-list" element={<PendingProductList />} />
+            <Route path="listing-formats" element={<ListingFormats />} />
+            <Route path="order-import-formats" element={<OrderImportFormats />} />
             <Route path="settings" element={<Settings />} />
             <Route path="users" element={<Users />} />
           </Route>

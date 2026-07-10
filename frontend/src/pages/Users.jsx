@@ -11,7 +11,7 @@ import {
   ConfirmDialog,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
-import { Plus, Trash2, Pencil, Save, UserX, UserCheck } from "lucide-react";
+import { Plus, Trash2, Pencil, Save, UserX, UserCheck, KeyRound } from "lucide-react";
 
 const ROLES = ["admin", "manager", "production", "sales"];
 const empty = { email: "", name: "", role: "production", password: "" };
@@ -23,6 +23,37 @@ export default function Users() {
   const [form, setForm] = useState(empty);
   const [confirm, setConfirm] = useState(null);
   const [error, setError] = useState("");
+
+  // Password-reset drawer state (admin sets any user's password directly)
+  const [resetTarget, setResetTarget] = useState(null); // {id, email, name}
+  const [resetPwd, setResetPwd] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetError, setResetError] = useState("");
+  const [resetDone, setResetDone] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+
+  const openReset = (u) => {
+    setResetTarget(u);
+    setResetPwd("");
+    setResetConfirm("");
+    setResetError("");
+    setResetDone(false);
+  };
+  const submitReset = async (e) => {
+    e.preventDefault();
+    setResetError("");
+    if (resetPwd.length < 8) return setResetError("Password must be at least 8 characters long.");
+    if (resetPwd !== resetConfirm) return setResetError("Passwords do not match.");
+    setResetBusy(true);
+    try {
+      await http.patch(`/users/${resetTarget.id}`, { password: resetPwd });
+      setResetDone(true);
+    } catch (e2) {
+      setResetError(formatApiError(e2.response?.data?.detail) || e2.message);
+    } finally {
+      setResetBusy(false);
+    }
+  };
 
   const load = async () => {
     const { data } = await http.get("/users");
@@ -154,8 +185,17 @@ export default function Users() {
                       onClick={() => startEdit(u)}
                       title="Edit User"
                       className="text-slate-600 hover:text-[#2563EB] hover:bg-blue-50 p-1.5 rounded transition-colors duration-150"
+                      data-testid={`edit-user-${u.email}`}
                     >
                       <Pencil className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => openReset(u)}
+                      title="Reset Password"
+                      className="text-slate-600 hover:text-amber-600 hover:bg-amber-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
+                      data-testid={`reset-password-${u.email}`}
+                    >
+                      <KeyRound className="w-4 h-4" />
                     </button>
                     {u.active === false ? (
                       <button
@@ -271,6 +311,57 @@ export default function Users() {
         onConfirm={confirm?.onConfirm}
         onCancel={() => setConfirm(null)}
       />
+
+      {resetTarget && (
+        <Drawer
+          onClose={() => setResetTarget(null)}
+          title={`Reset password — ${resetTarget.name}`}
+        >
+          <div className="space-y-3" data-testid="reset-password-drawer">
+            <div className="p-3 bg-amber-50 border-2 border-amber-300 text-amber-900 text-xs">
+              <div className="font-bold uppercase tracking-wider mb-1">Admin password reset</div>
+              You&apos;re setting a new password directly for{" "}
+              <span className="font-mono font-bold">{resetTarget.email}</span>. Share the new
+              password with them through a secure channel — they can change it themselves after signing in.
+            </div>
+            {resetDone ? (
+              <div className="p-3 border-2 border-emerald-500 bg-emerald-50 text-emerald-900" data-testid="reset-done">
+                <div className="font-bold">Password updated for {resetTarget.email}.</div>
+                <div className="text-xs mt-1">All active sessions may still work until their token expires. Ask the user to sign in with the new password.</div>
+                <BtnSecondary className="mt-3" onClick={() => setResetTarget(null)}>Close</BtnSecondary>
+              </div>
+            ) : (
+              <form onSubmit={submitReset} className="space-y-3">
+                <Input
+                  label="New Password"
+                  type="password"
+                  value={resetPwd}
+                  onChange={(e) => setResetPwd(e.target.value)}
+                  testId="reset-new-password"
+                />
+                <Input
+                  label="Confirm Password"
+                  type="password"
+                  value={resetConfirm}
+                  onChange={(e) => setResetConfirm(e.target.value)}
+                  testId="reset-confirm-password"
+                />
+                {resetError && (
+                  <div className="text-xs text-red-700 bg-red-50 border-2 border-red-300 px-3 py-2" data-testid="reset-error">
+                    {resetError}
+                  </div>
+                )}
+                <div className="flex gap-2 pt-1">
+                  <BtnPrimary onClick={submitReset} disabled={resetBusy} data-testid="reset-submit-btn">
+                    {resetBusy ? "Saving…" : "Set new password"}
+                  </BtnPrimary>
+                  <BtnSecondary onClick={() => setResetTarget(null)}>Cancel</BtnSecondary>
+                </div>
+              </form>
+            )}
+          </div>
+        </Drawer>
+      )}
     </div>
   );
 }

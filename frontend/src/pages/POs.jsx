@@ -28,7 +28,8 @@ import {
 import { API } from "../lib/api";
 
 const emptyLine = {
-  style_code: "",
+  style_code: "",       // Internal SSK style code (SSK_XXXXX). MUST be filled before save.
+  external_sku: "",     // Client's / marketplace's raw code from PO (preserved for sku_map)
   description: "",
   color: "",
   size: "",
@@ -104,10 +105,56 @@ export default function POs() {
       const { data } = await http.post("/pos/extract", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+      const clientName = data.client_name || data.vendor_name || "";
+      const validCodes = new Set(styles.map((s) => s.code.trim().toUpperCase()));
+
+      // Pre-resolve each external code via sku_map so already-mapped items land pre-picked
+      const rawLines =
+        data.line_items && data.line_items.length
+          ? data.line_items
+          : [{ ...emptyLine }];
+      const resolved = await Promise.all(
+        rawLines.map(async (li) => {
+          const ext = String(li.style_code || li.item_code || "").trim();
+          let mappedStyle = "";
+          // If the external code is itself already an SSK code, use it directly.
+          if (ext && validCodes.has(ext.toUpperCase())) {
+            mappedStyle = ext;
+          } else if (ext && clientName) {
+            try {
+              const r = await http.get(
+                `/sku-map/resolve?source_type=b2b_client&source_name=${encodeURIComponent(
+                  clientName,
+                )}&external_sku=${encodeURIComponent(ext)}`,
+              );
+              if (r.data?.matched && r.data.style_code) {
+                mappedStyle = r.data.style_code;
+              }
+            } catch {
+              /* resolver best-effort; leave unmapped */
+            }
+          }
+          return {
+            style_code: mappedStyle,
+            external_sku: ext,
+            description: li.description || "",
+            color: li.color || "",
+            size: String(li.size || ""),
+            hsn_code: li.hsn_code || "",
+            quantity: Number(li.quantity || 0),
+            unit_price: Number(li.unit_price || 0),
+            amount: Number(
+              li.amount ||
+                Number(li.quantity || 0) * Number(li.unit_price || 0),
+            ),
+          };
+        }),
+      );
+
       setForm({
         po_number: data.po_number || "",
         po_date: data.po_date || "",
-        client_name: data.client_name || data.vendor_name || "",
+        client_name: clientName,
         client_address: data.client_address || "",
         billing_address: data.billing_address || "",
         shipping_address: data.shipping_address || "",
@@ -117,21 +164,7 @@ export default function POs() {
         delivery_date: data.delivery_date || "",
         payment_terms: data.payment_terms || "",
         currency: data.currency || "INR",
-        line_items: (data.line_items && data.line_items.length
-          ? data.line_items
-          : [{ ...emptyLine }]
-        ).map((li) => ({
-          style_code: li.style_code || li.item_code || "",
-          description: li.description || "",
-          color: li.color || "",
-          size: String(li.size || ""),
-          hsn_code: li.hsn_code || "",
-          quantity: Number(li.quantity || 0),
-          unit_price: Number(li.unit_price || 0),
-          amount: Number(
-            li.amount || Number(li.quantity || 0) * Number(li.unit_price || 0),
-          ),
-        })),
+        line_items: resolved,
         cgst_rate: Number(data.cgst_rate || 0),
         sgst_rate: Number(data.sgst_rate || 0),
         igst_rate: Number(data.igst_rate || 0),
@@ -193,7 +226,60 @@ export default function POs() {
 
   const save = async () => {
     setFormError("");
+
+    // Guard: every line must have an internal SSK style picked.
+    const unresolved = form.line_items
+      .map((li, i) => ({ li, i }))
+      .filter(
+        ({ li }) =>
+          !li.style_code ||
+          !validStyleCodes.has(li.style_code.trim().toUpperCase()),
+      );
+    if (unresolved.length > 0) {
+      setFormError(
+        `${unresolved.length} line item(s) still need an SSK style mapped. Pick one from the "SSK Style" dropdown for each red row before saving.`,
+      );
+      return;
+    }
+
     try {
+      // Persist new sku_map entries for lines where external_sku differs from mapped style.
+      // Best-effort — swallow 409 (already mapped) and only surface hard failures.
+      if (form.client_name) {
+        await Promise.all(
+          form.line_items
+            .filter(
+              (li) =>
+                li.external_sku &&
+                li.external_sku.trim().toUpperCase() !==
+                  li.style_code.trim().toUpperCase(),
+            )
+            .map(async (li) => {
+              const style = styles.find(
+                (s) =>
+                  s.code.trim().toUpperCase() ===
+                  li.style_code.trim().toUpperCase(),
+              );
+              if (!style) return;
+              try {
+                await http.post("/sku-map", {
+                  style_id: style.id,
+                  source_type: "b2b_client",
+                  source_name: form.client_name,
+                  external_sku: li.external_sku,
+                  external_style_name: li.description || "",
+                  color_map: {},
+                  size_map: {},
+                });
+              } catch (e) {
+                if (e.response?.status !== 409) {
+                  console.warn("sku_map upsert failed:", e);
+                }
+              }
+            }),
+        );
+      }
+
       const body = {
         ...form,
         line_items: form.line_items.map((li) => ({
@@ -546,11 +632,15 @@ export default function POs() {
                 + Add line
               </button>
             </div>
+            <div className="bg-blue-50 border-2 border-blue-200 px-3 py-2 text-[11px] text-blue-900">
+              <strong>SKU mapping is compulsory.</strong> Each PO line must be tied to an internal SSK style. If the client&apos;s external code hasn&apos;t been mapped yet, pick the matching style from the dropdown — we&apos;ll remember it for future POs from this client.
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs border-2 border-slate-200">
                 <thead className="bg-slate-50">
                   <tr className="text-left">
-                    <th className="px-2 py-2 font-bold">Style</th>
+                    <th className="px-2 py-2 font-bold">External SKU</th>
+                    <th className="px-2 py-2 font-bold">SSK Style *</th>
                     <th className="px-2 py-2 font-bold">Description</th>
                     <th className="px-2 py-2 font-bold">Color</th>
                     <th className="px-2 py-2 font-bold">Size</th>
@@ -564,30 +654,64 @@ export default function POs() {
                 <tbody>
                   {form.line_items.map((li, i) => {
                     const isStyleValid =
-                      !li.style_code ||
+                      li.style_code &&
                       validStyleCodes.has(li.style_code.trim().toUpperCase());
+                    const isNewMapping =
+                      isStyleValid &&
+                      li.external_sku &&
+                      li.external_sku.trim().toUpperCase() !==
+                        li.style_code.trim().toUpperCase();
                     return (
-                      <tr key={i} className="border-t border-slate-200">
-                        <td className="px-1 py-1 relative">
+                      <tr
+                        key={i}
+                        className={`border-t border-slate-200 ${
+                          !isStyleValid ? "bg-red-50/40" : ""
+                        }`}
+                        data-testid={`po-line-${i}`}
+                      >
+                        <td className="px-1 py-1">
                           <input
-                            value={li.style_code}
+                            value={li.external_sku || ""}
+                            onChange={(e) =>
+                              updateLine(i, "external_sku", e.target.value)
+                            }
+                            className="w-32 border border-slate-300 px-1 py-0.5 font-mono bg-slate-50"
+                            placeholder="Client code"
+                            title="External SKU from the client's PO / marketplace"
+                            data-testid={`po-line-${i}-ext-sku`}
+                          />
+                        </td>
+                        <td className="px-1 py-1 relative">
+                          <select
+                            value={li.style_code || ""}
                             onChange={(e) =>
                               updateLine(i, "style_code", e.target.value)
                             }
-                            className={`w-28 border px-1 py-0.5 font-mono ${
+                            className={`w-40 border px-1 py-1 font-mono text-xs bg-white ${
                               isStyleValid
                                 ? "border-slate-300"
-                                : "border-red-500 bg-red-50 text-red-900 focus:border-red-500"
+                                : "border-red-500 bg-red-50"
                             }`}
-                            title={
-                              isStyleValid
-                                ? ""
-                                : "Style code does not exist in Style Master"
-                            }
-                          />
+                            data-testid={`po-line-${i}-style-select`}
+                          >
+                            <option value="">— pick SSK style —</option>
+                            {styles.map((s) => (
+                              <option key={s.id} value={s.code}>
+                                {s.code} · {s.name}
+                              </option>
+                            ))}
+                          </select>
                           {!isStyleValid && (
                             <div className="text-[9px] text-red-600 font-bold mt-0.5">
-                              Not in Style Master
+                              Mapping required
+                            </div>
+                          )}
+                          {isNewMapping && (
+                            <div
+                              className="text-[9px] text-blue-700 font-bold mt-0.5"
+                              title={`On save we'll remember: ${li.external_sku} → ${li.style_code} for ${form.client_name || "this client"}`}
+                            >
+                              New mapping will be saved
                             </div>
                           )}
                         </td>

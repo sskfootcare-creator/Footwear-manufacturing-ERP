@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { http, inr } from "../lib/api";
 import { PageHeader, Card, Select, Input } from "../components/ui-kit";
+import { SafeImage } from "../components/ImageUploader";
 import { Calculator as CalcIcon } from "lucide-react";
 
 export default function Costing() {
@@ -62,15 +63,22 @@ export default function Costing() {
 
           {selected && (
             <div className="mt-6 space-y-5">
-              {selected.image_url && (
+              {(selected.image_url ||
+                selected.image_display_url ||
+                selected.image_thumbnail_url) && (
                 <div
                   className="border-2 border-slate-200 overflow-hidden bg-slate-100"
                   data-testid="costing-style-image"
                 >
-                  <img
-                    src={selected.image_url}
+                  <SafeImage
+                    image={{
+                      url: selected.image_url,
+                      display_url: selected.image_display_url,
+                      thumbnail_url: selected.image_thumbnail_url,
+                    }}
                     alt={selected.name}
-                    className="w-full h-56 object-cover"
+                    aspectRatio="16/9"
+                    testId={`costing-image-${selected.code}`}
                   />
                   <div className="bg-white px-4 py-2 border-t-2 border-slate-200 flex items-baseline justify-between">
                     <span className="font-mono text-xs font-bold text-slate-500">
