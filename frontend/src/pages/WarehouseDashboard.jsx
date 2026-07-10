@@ -280,7 +280,8 @@ function CellDetail({ code, onClose, onChanged }) {
       setData(r.data);
     } catch (e) { setErr(friendlyAxiosError(e)); }
   }
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [code]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [code]);
 
   async function toggleBlock() {
     if (!data) return;

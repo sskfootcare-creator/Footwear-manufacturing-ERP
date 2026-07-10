@@ -48,6 +48,7 @@ export default function Picklists() {
     } finally { setLoading(false); }
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [statusFilter, channelFilter]);
 
   const filtered = search
@@ -176,7 +177,8 @@ function PicklistDrawer({ id, onClose, onChanged }) {
       }
     } catch (e) { setErr(friendlyAxiosError(e)); }
   }
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [id]);
 
   // Handle scanner-mode toggle: start on first unpicked item, focus input
   function toggleScanMode() {
