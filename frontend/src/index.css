@@ -104,3 +104,34 @@ h1, h2, h3, h4, h5, h6 {
   * { @apply border-border; }
   body { @apply bg-background text-foreground; }
 }
+
+/* ----- Print styles for Picklists & Pending Product List & QR Sheet ----- */
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+  html, body {
+    background: white !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Hide the whole app shell (sidebar + header) when printing */
+  [data-testid="sidebar"], .no-print, .print\:hidden {
+    display: none !important;
+  }
+  /* Ensure the drawer container becomes full-page */
+  .picklist-drawer {
+    position: static !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+  }
+  /* Avoid awkward page breaks inside item rows */
+  tr, .print-avoid-break {
+    page-break-inside: avoid;
+  }
+}
+

@@ -6,10 +6,12 @@ import {
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import AddStockDrawer from "./AddStockDrawer";
+import { SafeImage } from "../components/ImageUploader";
 import {
   AlertTriangle, Plus, RefreshCw, Package, History,
-  Boxes, ImageOff, ChevronDown, ChevronRight, Upload,
+  Boxes, ImageOff, ChevronDown, ChevronRight, Upload, Hammer,
 } from "lucide-react";
+import AdHocProduceDrawer from "../components/AdHocProduceDrawer";
 
 // ────────────────────────────────────────────────────────────
 //  Metric definitions — the cell value & the color accent
@@ -398,10 +400,18 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
       )}
 
       {/* Header: image, style code, name, action buttons */}
-      {style.image_url ? (
-        <div className="h-28 bg-slate-100 border-b border-slate-200 overflow-hidden">
-          <img src={style.image_url} alt={style.name} className="w-full h-full object-cover" />
-        </div>
+      {style.image_url || style.image_display_url || style.image_thumbnail_url ? (
+        <SafeImage
+          image={{
+            url: style.image_url,
+            display_url: style.image_display_url,
+            thumbnail_url: style.image_thumbnail_url,
+          }}
+          alt={style.name}
+          aspectRatio="16/7"
+          className="border-b border-slate-200"
+          testId={`ready-stock-img-${style.code || style.style_code}`}
+        />
       ) : (
         <div className="h-16 bg-slate-50 border-b border-slate-200 flex items-center justify-center">
           <ImageOff className="w-6 h-6 text-slate-300" />
@@ -611,6 +621,8 @@ export default function ReadyStock() {
   const [mvInitial, setMvInitial] = useState(null);
   const [addStockOpen, setAddStockOpen]       = useState(false);
   const [addStockStyleId, setAddStockStyleId] = useState("");
+  const [produceOpen, setProduceOpen]         = useState(false);
+  const [produceStyle, setProduceStyle]       = useState(null);   // resolved style object
   const [ledger, setLedger]       = useState(null);
 
   const load = useCallback(async () => {
@@ -651,6 +663,8 @@ export default function ReadyStock() {
           code:      g.style_code,
           name:      meta.name      || g.style_code,
           image_url: meta.image_url || "",
+          image_display_url:   meta.image_display_url   || "",
+          image_thumbnail_url: meta.image_thumbnail_url || "",
         },
         rows: g.rows,
       };
@@ -695,6 +709,9 @@ export default function ReadyStock() {
             </BtnSecondary>
             <BtnSecondary id="btn-add-movement" onClick={() => { setMvInitial(null); setMvOpen(true); }}>
               <span className="flex items-center gap-1.5"><Plus className="w-4 h-4" /> Movement</span>
+            </BtnSecondary>
+            <BtnSecondary id="btn-produce-stock" onClick={() => setProduceOpen(true)}>
+              <span className="flex items-center gap-1.5"><Hammer className="w-4 h-4" /> Produce &amp; Add</span>
             </BtnSecondary>
             <BtnPrimary id="btn-add-stock" onClick={() => { setAddStockStyleId(""); setAddStockOpen(true); }}>
               <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Add Stock</span>
@@ -816,6 +833,93 @@ export default function ReadyStock() {
           onClose={() => setLedger(null)}
         />
       )}
+
+      {produceOpen && !produceStyle && (
+        <StylePicker
+          styles={stylesList}
+          title="Pick a style to produce"
+          onPick={(s) => setProduceStyle(s)}
+          onClose={() => setProduceOpen(false)}
+        />
+      )}
+      {produceStyle && (
+        <AdHocProduceDrawer
+          style={produceStyle}
+          hasBom={true}
+          onClose={() => { setProduceStyle(null); setProduceOpen(false); }}
+          onDone={() => { setProduceStyle(null); setProduceOpen(false); load(); }}
+          onEditBom={() => {
+            // No inline BOM editor here — direct the operator to the Styles master.
+            window.alert(
+              "Open the Styles master and click the wrench icon on " +
+              produceStyle.code + " to edit its Production Card, then come back."
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+
+// A minimal, keyboard-friendly style picker. Reused here since Ready Stock's
+// Produce flow is the ONE place where the operator picks the style up front —
+// most other flows already have the style in-context.
+function StylePicker({ styles, title, onPick, onClose }) {
+  const [q, setQ] = useState("");
+  const filtered = (styles || []).filter((s) => {
+    const term = q.trim().toLowerCase();
+    if (!term) return true;
+    return (s.code || "").toLowerCase().includes(term) || (s.name || "").toLowerCase().includes(term);
+  }).slice(0, 60);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose} data-testid="style-picker">
+      <div className="bg-white w-full max-w-lg border-2 border-slate-900 shadow-ind-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b-2 border-slate-900 bg-slate-50 flex items-center justify-between">
+          <div className="font-black">{title}</div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-900">×</button>
+        </div>
+        <div className="p-4 space-y-3">
+          <input
+            autoFocus
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search by code or name…"
+            className="w-full border-2 border-slate-300 px-3 py-2 text-sm"
+            data-testid="style-picker-search"
+          />
+          <div className="max-h-[50vh] overflow-y-auto border-2 border-slate-200 divide-y divide-slate-200">
+            {filtered.length === 0 ? (
+              <div className="p-4 text-center text-slate-400 text-sm">No matching styles.</div>
+            ) : filtered.map((s) => (
+              <button
+                key={s.style_id || s.id}
+                onClick={() => onPick({
+                  id: s.style_id || s.id,
+                  code: s.code || s.style_code || "—",
+                  name: s.name || s.style_name || "",
+                  image_url: s.image_url,
+                  image_display_url: s.image_display_url,
+                  image_thumbnail_url: s.image_thumbnail_url,
+                })}
+                className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center gap-3"
+                data-testid={`style-pick-${s.code || s.style_code}`}
+              >
+                <SafeImage
+                  image={{ url: s.image_url, display_url: s.image_display_url, thumbnail_url: s.image_thumbnail_url }}
+                  alt={s.code}
+                  aspectRatio="1/1"
+                  className="w-10 h-10 flex-shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="font-mono font-bold text-sm">{s.code || s.style_code}</div>
+                  <div className="text-xs text-slate-500 truncate">{s.name || s.style_name}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

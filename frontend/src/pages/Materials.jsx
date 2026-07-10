@@ -10,6 +10,7 @@ import {
   Badge,
   ConfirmDialog,
 } from "../components/ui-kit";
+import ImageUploader, { ImageThumb } from "../components/ImageUploader";
 import { Plus, Trash2, Pencil, X, Save } from "lucide-react";
 
 const CATEGORIES = [
@@ -32,6 +33,9 @@ const emptyForm = {
   reorder_level: 0,
   preferred_vendor_id: "",
   notes: "",
+  image_url: "",
+  image_display_url: "",
+  image_thumbnail_url: "",
 };
 
 export default function Materials() {
@@ -75,6 +79,9 @@ export default function Materials() {
       reorder_level: m.reorder_level || 0,
       preferred_vendor_id: m.preferred_vendor_id || "",
       notes: m.notes || "",
+      image_url: m.image_url || "",
+      image_display_url: m.image_display_url || "",
+      image_thumbnail_url: m.image_thumbnail_url || "",
     });
     setFormError("");
     setOpen(true);
@@ -174,6 +181,7 @@ export default function Materials() {
           <table className="w-full text-sm" data-testid="materials-table">
             <thead className="bg-slate-50 border-b-2 border-slate-200 sticky top-0">
               <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                <th className="px-4 py-3 font-bold w-14"></th>
                 <th className="px-4 py-3 font-bold">Code</th>
                 <th className="px-4 py-3 font-bold">Name</th>
                 <th className="px-4 py-3 font-bold">Category</th>
@@ -186,10 +194,10 @@ export default function Materials() {
               {filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan="6"
+                    colSpan="7"
                     className="px-6 py-10 text-center text-slate-400"
                   >
-                    No materials yet. Click "Add Material" to start.
+                    No materials yet. Click &quot;Add Material&quot; to start.
                   </td>
                 </tr>
               ) : (
@@ -197,7 +205,22 @@ export default function Materials() {
                   <tr
                     key={m.id}
                     className="border-b border-slate-100 hover:bg-slate-50"
+                    data-testid={`material-row-${m.code}`}
                   >
+                    <td className="px-4 py-2">
+                      <ImageThumb
+                        image={{
+                          thumbnail_url: m.image_thumbnail_url,
+                          display_url: m.image_display_url,
+                          url: m.image_url,
+                        }}
+                        size={36}
+                        alt={`${m.code} — ${m.name}`}
+                        className="rounded"
+                        clickable
+                        testId={`material-thumb-${m.code}`}
+                      />
+                    </td>
                     <td className="px-4 py-3 font-mono font-bold">{m.code}</td>
                     <td className="px-4 py-3">{m.name}</td>
                     <td className="px-4 py-3">
@@ -240,6 +263,24 @@ export default function Materials() {
           title={edit ? "Edit Material" : "New Material"}
         >
           <div className="space-y-3">
+            <ImageUploader
+              label="Material Image"
+              maxSizeMB={8}
+              testIdPrefix="material-image"
+              value={{
+                url: form.image_url,
+                display_url: form.image_display_url,
+                thumbnail_url: form.image_thumbnail_url,
+              }}
+              onChange={(imgObj) =>
+                setForm((f) => ({
+                  ...f,
+                  image_url: imgObj.url || "",
+                  image_display_url: imgObj.display_url || "",
+                  image_thumbnail_url: imgObj.thumbnail_url || "",
+                }))
+              }
+            />
             <div>
               <Input
                 label="Code"

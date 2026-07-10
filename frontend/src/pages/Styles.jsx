@@ -11,6 +11,8 @@ import {
   ConfirmDialog,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
+import ImageUploader, { ImageThumb, SafeImage } from "../components/ImageUploader";
+import BomEditorDrawer from "../components/BomEditorDrawer";
 import {
   Plus,
   Trash2,
@@ -18,7 +20,10 @@ import {
   Save,
   Calculator as CalcIcon,
   Upload,
+  Download,
   ArrowLeftRight,
+  Globe2,
+  Wrench,
 } from "lucide-react";
 
 const ONLINE_CHANNELS = ["myntra", "flipkart", "nykaa", "website"];
@@ -42,6 +47,8 @@ const emptyStyle = {
   name: "",
   category: "Footwear",
   image_url: "",
+  image_display_url: "",
+  image_thumbnail_url: "",
   description: "",
   base_size: "7",
   bom: [],
@@ -60,6 +67,7 @@ const emptyStyle = {
 
 export default function Styles() {
   const [styles, setStyles] = useState([]);
+  const [bomStyle, setBomStyle] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -76,6 +84,132 @@ export default function Styles() {
   const [styleMappings, setStyleMappings] = useState([]);
   const [addingMapping, setAddingMapping] = useState(false);
   const [editingMappingId, setEditingMappingId] = useState(null);
+  // Catalogue codes for the currently-open style (group SKU + leaf SKUs)
+  const [catalogueCodes, setCatalogueCodes] = useState(null);
+  const [catalogueLoading, setCatalogueLoading] = useState(false);
+  // Catalogue export modal state (Phase F)
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportPlatform, setExportPlatform] = useState("myntra");
+  const [exportColors, setExportColors] = useState([]);          // selected colour names
+  const [exportSizes, setExportSizes] = useState([]);            // selected size strings
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [exportPreview, setExportPreview] = useState(null);      // response from /catalogue-export/preview
+  const [exportPlatformsAvailable, setExportPlatformsAvailable] = useState([]);
+
+  const loadCatalogueCodes = async (styleId) => {
+    if (!styleId) return;
+    setCatalogueLoading(true);
+    try {
+      const res = await http.get(`/styles/${styleId}/catalogue-codes`);
+      setCatalogueCodes(res.data);
+    } catch (e) {
+      console.error("Failed to load catalogue codes", e);
+      setCatalogueCodes(null);
+    } finally {
+      setCatalogueLoading(false);
+    }
+  };
+
+  // Open the export modal, pre-selecting all colours & sizes and loading
+  // the list of platforms that have an export_template configured.
+  const openExportModal = async (platform) => {
+    if (!catalogueCodes) return;
+    setExportError("");
+    setExportPreview(null);
+    setExportPlatform(platform);
+    setExportColors(catalogueCodes.colors || []);
+    setExportSizes(catalogueCodes.sizes || []);
+    setExportOpen(true);
+    // Fetch available platforms once (cached in state)
+    if (exportPlatformsAvailable.length === 0) {
+      try {
+        const r = await http.get("/listing-format-configs?active=true");
+        setExportPlatformsAvailable(
+          (r.data || []).filter((c) => !!c.export_template),
+        );
+      } catch (e) {
+        console.error("Failed to load listing format configs", e);
+      }
+    }
+  };
+
+  const toggleColor = (c) =>
+    setExportColors((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+  const toggleSize = (s) =>
+    setExportSizes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+
+  const runExportPreview = async () => {
+    setExportBusy(true);
+    setExportError("");
+    setExportPreview(null);
+    try {
+      const res = await http.post("/catalogue-export/preview", {
+        style_id: editId,
+        platform: exportPlatform,
+        colors: exportColors,
+        sizes: exportSizes,
+      });
+      setExportPreview(res.data);
+    } catch (e) {
+      setExportError(e.response?.data?.detail || e.message);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  // Download the .xlsx directly. We keep this separate from preview so the
+  // sku_map provisional rows are only created when the user really commits.
+  const downloadExport = async () => {
+    setExportBusy(true);
+    setExportError("");
+    try {
+      const res = await http.post(
+        "/catalogue-export",
+        {
+          style_id: editId,
+          platform: exportPlatform,
+          colors: exportColors,
+          sizes: exportSizes,
+        },
+        { responseType: "blob" },
+      );
+      // Filename from Content-Disposition
+      const cd = res.headers["content-disposition"] || "";
+      const m = /filename="([^"]+)"/.exec(cd);
+      const fname = m ? m[1] : `${exportPlatform}_listing.xlsx`;
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      // Show quick summary from response headers
+      const rows = res.headers["x-rows-written"];
+      const created = res.headers["x-skumap-created"];
+      const updated = res.headers["x-skumap-updated"];
+      setExportError(
+        `Downloaded ${fname} — ${rows} rows written, ${created || 0} new SKU-map rows (${updated || 0} updated). Provisional status: pending platform confirmation.`,
+      );
+    } catch (e) {
+      // Blob error responses need to be text-decoded
+      if (e.response?.data instanceof Blob) {
+        const txt = await e.response.data.text();
+        try {
+          const j = JSON.parse(txt);
+          setExportError(j.detail || txt);
+        } catch {
+          setExportError(txt);
+        }
+      } else {
+        setExportError(e.response?.data?.detail || e.message);
+      }
+    } finally {
+      setExportBusy(false);
+    }
+  };
   const [newMapping, setNewMapping] = useState({
     source_type: "b2b_client",
     source_name: "",
@@ -195,6 +329,8 @@ export default function Styles() {
           name: styleToEdit.name,
           category: styleToEdit.category,
           image_url: styleToEdit.image_url || "",
+          image_display_url: styleToEdit.image_display_url || "",
+          image_thumbnail_url: styleToEdit.image_thumbnail_url || "",
           description: styleToEdit.description || "",
           base_size: styleToEdit.base_size || "7",
           bom: styleToEdit.bom || [],
@@ -229,6 +365,7 @@ export default function Styles() {
     setStyleMappings([]);
     setAddingMapping(false);
     setEditingMappingId(null);
+    setCatalogueCodes(null);
     setOpen(true);
   };
   const startEdit = (s) => {
@@ -238,6 +375,8 @@ export default function Styles() {
       name: s.name,
       category: s.category,
       image_url: s.image_url || "",
+      image_display_url: s.image_display_url || "",
+      image_thumbnail_url: s.image_thumbnail_url || "",
       description: s.description || "",
       base_size: s.base_size || "7",
       bom: s.bom || [],
@@ -251,8 +390,10 @@ export default function Styles() {
     setStyleMappings([]);
     setAddingMapping(false);
     setEditingMappingId(null);
+    setCatalogueCodes(null);
     setOpen(true);
     loadStyleMappings(s.id);
+    loadCatalogueCodes(s.id);
   };
   const save = async () => {
     setFormError("");
@@ -272,10 +413,27 @@ export default function Styles() {
         })),
         labor: form.labor.map((l) => ({ ...l, rate: Number(l.rate) })),
       };
-      if (editId) await http.patch(`/styles/${editId}`, body);
-      else await http.post("/styles", body);
-      setOpen(false);
-      load();
+      if (editId) {
+        // Never send `code` on update — it's immutable server-side and rejected
+        // if it doesn't match the current value. Strip it here to be safe.
+        // eslint-disable-next-line no-unused-vars
+        const { code: _ignored, ...bodyNoCode } = body;
+        await http.patch(`/styles/${editId}`, bodyNoCode);
+        setOpen(false);
+        load();
+      } else {
+        // Do NOT send a code — backend always generates SSK_XXXXX
+        // eslint-disable-next-line no-unused-vars
+        const { code: _ignored, ...bodyNoCode } = body;
+        const res = await http.post("/styles", bodyNoCode);
+        // Slide into edit-mode for the newly-created style so the user sees
+        // the assigned SSK_XXXXX code and the Catalogue Codes panel.
+        setEditId(res.data.id);
+        setForm((f) => ({ ...f, code: res.data.code }));
+        loadStyleMappings(res.data.id);
+        loadCatalogueCodes(res.data.id);
+        load();
+      }
     } catch (e) {
       setFormError(e.response?.data?.detail || e.message);
     }
@@ -293,35 +451,45 @@ export default function Styles() {
     });
   };
 
-  const onImageFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert(
-        `Image too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Please upload an image under 5MB.`,
-      );
-      e.target.value = "";
-      return;
-    }
-    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
-      alert("Only PNG, JPG, WEBP, or GIF allowed.");
-      e.target.value = "";
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const res = await http.post("/upload/image", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
+  const togglePipeline = (s) => {
+    if (s.in_online_pipeline) {
+      setConfirm({
+        title: "Remove from Online Pipeline",
+        message: `Remove "${s.code}" from the Online Style Pipeline? Its lifecycle stage and any planned components/colors/sizes will be discarded.`,
+        onConfirm: async () => {
+          try {
+            await http.delete(`/styles/${s.id}/pipeline`);
+          } catch (e) {
+            alert(e.response?.data?.detail || e.message);
+          }
+          setConfirm(null);
+          load();
+        },
       });
-      setForm((f) => ({ ...f, image_url: res.data.url }));
-    } catch (err) {
-      console.error(err);
-      alert("Failed to upload image. Please try again.");
+    } else {
+      setConfirm({
+        title: "Send to Online Pipeline",
+        message: `Add "${s.code}" to the Online Style Pipeline as Draft? You can then advance it through Sample → Photoshoot → Catalog → Price → Launch → Live.`,
+        onConfirm: async () => {
+          try {
+            await http.post(`/styles/${s.id}/pipeline`);
+          } catch (e) {
+            alert(e.response?.data?.detail || e.message);
+          }
+          setConfirm(null);
+          load();
+        },
+      });
     }
-    e.target.value = "";
+  };
+
+  const onImageChange = (imgObj) => {
+    setForm((f) => ({
+      ...f,
+      image_url: imgObj.url || "",
+      image_display_url: imgObj.display_url || "",
+      image_thumbnail_url: imgObj.thumbnail_url || "",
+    }));
   };
 
   const addBomRow = (material) => {
@@ -493,34 +661,32 @@ export default function Styles() {
                 className="overflow-hidden hover:border-[#C27842] transition-colors"
                 data-testid={`style-card-${s.code}`}
               >
-                {s.image_url ? (
-                  <div className="h-44 bg-slate-100 border-b-2 border-slate-200 overflow-hidden">
-                    <img
-                      src={s.image_url}
-                      alt={s.name}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                ) : (
-                  <div className="h-44 bg-gradient-to-br from-slate-50 to-slate-100 border-b-2 border-slate-200 grid place-items-center">
-                    <div className="text-center">
-                      <div className="text-3xl mb-1">👟</div>
-                      <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">
-                        No Image
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <SafeImage
+                  image={{
+                    url: s.image_url,
+                    display_url: s.image_display_url,
+                    thumbnail_url: s.image_thumbnail_url,
+                  }}
+                  alt={s.name}
+                  aspectRatio="16/11"
+                  className="border-b-2 border-slate-200"
+                  testId={`style-card-image-${s.code}`}
+                />
                 <div className="p-5">
                   <div className="flex items-baseline justify-between mb-2">
                     <div className="font-mono text-xs font-bold text-slate-500">
                       {s.code}
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap justify-end">
                       <Badge color={s.status === "active" ? "green" : "gray"}>
                         {s.status === "active" ? "Active" : "Inactive"}
                       </Badge>
                       <Badge color="orange">{s.category}</Badge>
+                      {s.in_online_pipeline && (
+                        <Badge color="blue" data-testid={`online-badge-${s.code}`}>
+                          <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <h3 className="text-lg font-bold mb-1">{s.name}</h3>
@@ -553,6 +719,26 @@ export default function Styles() {
                       <Pencil className="w-3 h-3 inline -mt-0.5 mr-1" /> Edit
                     </BtnSecondary>
                     <button
+                      onClick={() => togglePipeline(s)}
+                      title={s.in_online_pipeline ? "Remove from Online Pipeline" : "Send to Online Pipeline"}
+                      data-testid={`pipeline-toggle-${s.code}`}
+                      className={`px-3 py-2 border-2 text-xs font-bold uppercase tracking-wider transition-colors ${
+                        s.in_online_pipeline
+                          ? "border-blue-500 text-blue-700 bg-blue-50 hover:bg-blue-100"
+                          : "border-slate-300 hover:border-blue-500 hover:text-blue-600"
+                      }`}
+                    >
+                      <Globe2 className="w-3.5 h-3.5 inline" />
+                    </button>
+                    <button
+                      onClick={() => setBomStyle(s)}
+                      title="Edit Production Card (BOM)"
+                      data-testid={`bom-edit-${s.code}`}
+                      className="px-3 py-2 border-2 border-slate-300 hover:border-emerald-500 hover:text-emerald-600 text-xs"
+                    >
+                      <Wrench className="w-3.5 h-3.5" />
+                    </button>
+                    <button
                       onClick={() => remove(s.id)}
                       className="px-3 py-2 border-2 border-slate-300 hover:border-red-500 hover:text-red-600 text-xs"
                     >
@@ -579,15 +765,30 @@ export default function Styles() {
             <div className="col-span-1 lg:col-span-2 space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Input
-                    label="Style Code"
-                    value={form.code}
-                    onChange={(e) => {
-                      setFormError("");
-                      setForm({ ...form, code: e.target.value });
-                    }}
-                    testId="form-style-code"
-                  />
+                  {/* Style Code is system-generated (SSK_XXXXX) and immutable —
+                      never accept manual input. Show a pill when known, else
+                      an "auto-assigned on save" hint. */}
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1">
+                    Style Code
+                  </label>
+                  {form.code ? (
+                    <div
+                      className="h-10 px-3 flex items-center gap-2 rounded-md border border-neutral-200 bg-neutral-50 font-mono text-sm text-neutral-900"
+                      data-testid="form-style-code"
+                    >
+                      <span className="font-semibold">{form.code}</span>
+                      <span className="ml-auto text-[10px] uppercase tracking-wider text-neutral-500 bg-white border border-neutral-200 rounded px-1.5 py-0.5">
+                        immutable
+                      </span>
+                    </div>
+                  ) : (
+                    <div
+                      className="h-10 px-3 flex items-center rounded-md border border-dashed border-neutral-300 bg-neutral-50/50 text-xs text-neutral-500 italic"
+                      data-testid="form-style-code-placeholder"
+                    >
+                      Auto-assigned on save (SSK_XXXXX)
+                    </div>
+                  )}
                   {formError && (
                     <p
                       className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2"
@@ -629,70 +830,17 @@ export default function Styles() {
               />
 
               {/* Image upload */}
-              <div>
-                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-                  Style Image (max 5MB)
-                </div>
-                <div className="flex gap-3 items-start">
-                  <div className="w-28 h-28 border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0">
-                    {form.image_url ? (
-                      <img
-                        src={form.image_url}
-                        alt="preview"
-                        className="w-full h-full object-cover"
-                        data-testid="image-preview"
-                      />
-                    ) : (
-                      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold text-center px-2">
-                        No image
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-col justify-center flex-1 min-w-[200px]">
-                    <div className="flex items-center gap-2 mb-2">
-                      <label
-                        className="inline-block bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-slate-300 hover:border-[#0F172A] transition-colors cursor-pointer"
-                        data-testid="image-upload-label"
-                      >
-                        <Upload className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />{" "}
-                        Upload File
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp,image/gif"
-                          className="hidden"
-                          onChange={onImageFile}
-                          data-testid="image-upload-input"
-                        />
-                      </label>
-                      <span className="text-[10px] text-slate-400 font-bold">
-                        OR
-                      </span>
-                      <input
-                        type="text"
-                        placeholder="Paste image URL (e.g. OneDrive)"
-                        className="flex-1 bg-white border-2 border-slate-300 px-2 py-1.5 text-xs outline-none focus:border-slate-500"
-                        value={form.image_url}
-                        onChange={(e) => {
-                          let val = e.target.value;
-                          const srcMatch = val.match(/src=["'](.*?)["']/i);
-                          if (srcMatch && srcMatch[1]) val = srcMatch[1];
-                          setForm({ ...form, image_url: val });
-                        }}
-                      />
-                    </div>
-                    {form.image_url && (
-                      <button
-                        type="button"
-                        onClick={() => setForm({ ...form, image_url: "" })}
-                        className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start"
-                        data-testid="image-clear"
-                      >
-                        Clear Image
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <ImageUploader
+                label="Style Image"
+                maxSizeMB={8}
+                testIdPrefix="style-image"
+                value={{
+                  url: form.image_url,
+                  display_url: form.image_display_url,
+                  thumbnail_url: form.image_thumbnail_url,
+                }}
+                onChange={onImageChange}
+              />
 
               {/* BOM */}
               <div>
@@ -760,12 +908,33 @@ export default function Styles() {
                       const cost =
                         ((Number(b.rate) * Number(b.quantity)) / yld) *
                         (1 + Number(b.waste_pct || 0) / 100);
+                      const material = materials.find(
+                        (m) => m.id === b.material_id,
+                      );
                       return (
                         <tr key={i} className="border-t border-slate-200">
                           <td className="px-2 py-1.5">
-                            <div className="font-mono">{b.material_code}</div>
-                            <div className="text-[10px] text-slate-500">
-                              {b.material_name}
+                            <div className="flex items-center gap-2">
+                              <ImageThumb
+                                image={{
+                                  thumbnail_url:
+                                    material?.image_thumbnail_url || "",
+                                  display_url: material?.image_display_url || "",
+                                  url: material?.image_url || "",
+                                }}
+                                size={32}
+                                alt={`${b.material_code} — ${b.material_name}`}
+                                clickable
+                                testId={`bom-thumb-${i}`}
+                              />
+                              <div>
+                                <div className="font-mono">
+                                  {b.material_code}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {b.material_name}
+                                </div>
+                              </div>
                             </div>
                           </td>
                           <td className="px-2 py-1.5">
@@ -935,6 +1104,119 @@ export default function Styles() {
                   }
                 />
               </div>
+
+              {/* Catalogue Codes — SSK-generated marketplace SKUs */}
+              {editId && (
+                <div className="border-2 border-amber-200 p-4 mt-6 bg-amber-50/50" data-testid="catalogue-codes-panel">
+                  <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                    <h3 className="text-sm font-bold uppercase tracking-wider flex items-center gap-1.5 text-amber-900">
+                      <CalcIcon className="w-4 h-4 text-amber-600" />
+                      Catalogue Codes
+                    </h3>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {["myntra", "flipkart", "ajio"].map((plat) => (
+                        <button
+                          key={plat}
+                          onClick={() => openExportModal(plat)}
+                          disabled={
+                            !catalogueCodes ||
+                            (catalogueCodes.rows || []).length === 0 ||
+                            (catalogueCodes.unmapped_colors || []).length > 0
+                          }
+                          className="text-[11px] uppercase tracking-wider text-white bg-amber-700 hover:bg-amber-800 disabled:bg-amber-300 disabled:cursor-not-allowed font-semibold px-2 py-1 rounded inline-flex items-center gap-1"
+                          data-testid={`catalogue-export-btn-${plat}`}
+                          title={
+                            (catalogueCodes?.unmapped_colors || []).length > 0
+                              ? `Cannot export while unmapped colours exist: ${catalogueCodes.unmapped_colors.join(", ")}`
+                              : `Generate a new-listing upload file for ${plat}`
+                          }
+                        >
+                          <Download className="w-3 h-3" /> {plat} listing
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => loadCatalogueCodes(editId)}
+                        className="text-[11px] uppercase tracking-wider text-amber-700 hover:text-amber-900 font-semibold ml-1"
+                        data-testid="catalogue-codes-refresh"
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-amber-800/80 mb-3 leading-snug">
+                    Generated from <span className="font-mono font-semibold">{form.code || "SSK_XXXXX"}</span> and the planned colour/size matrix.
+                    <span className="mx-1">·</span>
+                    Group SKU = <span className="font-mono">{form.code || "SSK_XXXXX"}-COLOR</span>
+                    <span className="mx-1">·</span>
+                    Leaf SKU = <span className="font-mono">{form.code || "SSK_XXXXX"}-COLOR-SIZE</span>
+                  </p>
+                  {catalogueLoading ? (
+                    <div className="text-xs text-neutral-500 italic">Loading catalogue codes…</div>
+                  ) : !catalogueCodes ? (
+                    <div className="text-xs text-neutral-500 italic">No catalogue data available.</div>
+                  ) : catalogueCodes.rows.length === 0 ? (
+                    <div className="text-xs text-neutral-600 bg-white border border-neutral-200 rounded p-3">
+                      No colours/sizes planned yet — set them on the Style Lifecycle page (planned_colors &amp; planned_sizes) to generate catalogue SKUs.
+                    </div>
+                  ) : (
+                    <>
+                      {catalogueCodes.unmapped_colors.length > 0 && (
+                        <div className="mb-3 text-xs bg-red-50 border border-red-200 rounded px-3 py-2 text-red-800">
+                          <span className="font-semibold">Missing colour codes:</span>{" "}
+                          {catalogueCodes.unmapped_colors.join(", ")}. Add them under Color Master before catalogue export.
+                        </div>
+                      )}
+                      <div className="overflow-x-auto bg-white border border-neutral-200 rounded">
+                        <table className="w-full text-xs">
+                          <thead className="bg-neutral-100 text-[10px] uppercase tracking-wider text-neutral-600">
+                            <tr>
+                              <th className="text-left p-2 border-b border-neutral-200">Colour</th>
+                              <th className="text-left p-2 border-b border-neutral-200">Code</th>
+                              <th className="text-left p-2 border-b border-neutral-200">Group SKU (style · colour)</th>
+                              <th className="text-left p-2 border-b border-neutral-200">Leaf SKUs (style · colour · size)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {catalogueCodes.rows.map((r) => (
+                              <tr key={r.color_name} className="border-b border-neutral-100 last:border-b-0">
+                                <td className="p-2 font-medium">{r.color_name}</td>
+                                <td className="p-2">
+                                  {r.mapped ? (
+                                    <span className="font-mono font-semibold text-neutral-900">{r.color_code}</span>
+                                  ) : (
+                                    <span className="text-red-600 italic text-[11px]">unmapped</span>
+                                  )}
+                                </td>
+                                <td className="p-2">
+                                  {r.group_sku ? (
+                                    <span className="font-mono font-semibold text-amber-900 bg-amber-100 px-2 py-0.5 rounded">
+                                      {r.group_sku}
+                                    </span>
+                                  ) : (
+                                    <span className="text-neutral-400 italic">—</span>
+                                  )}
+                                </td>
+                                <td className="p-2">
+                                  <div className="flex flex-wrap gap-1">
+                                    {r.size_skus.map((s) => (
+                                      <span
+                                        key={s.size}
+                                        className="font-mono text-[11px] bg-neutral-100 border border-neutral-200 px-1.5 py-0.5 rounded"
+                                      >
+                                        {s.leaf_sku || `${s.size} · unmapped`}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* External Codes / mappings */}
               {editId && (
@@ -1180,6 +1462,210 @@ export default function Styles() {
         </Drawer>
       )}
 
+      {exportOpen && (
+        <Drawer
+          onClose={() => setExportOpen(false)}
+          title={`Generate Listing File — ${exportPlatform.toUpperCase()}`}
+          width="max-w-3xl"
+        >
+          <div className="p-4 sm:p-6 space-y-4" data-testid="catalogue-export-modal">
+            <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900 leading-snug">
+              This generates the exact .xlsx a merchandiser uploads to{" "}
+              <span className="font-semibold">{exportPlatform}</span>'s seller panel to catalogue{" "}
+              <span className="font-mono font-semibold">{form.code}</span>. Our SSK codes go straight
+              into the platform's SKU column, so when the platform's own export is re-imported later
+              it matches with zero manual reconciliation. Provisional SKU-map rows are inserted with
+              status <span className="font-mono">pending_platform_confirmation</span>.
+            </div>
+
+            {/* Platform selector — only platforms with an export_template configured */}
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                Platform
+              </label>
+              <div className="flex flex-wrap gap-1.5">
+                {(exportPlatformsAvailable.length > 0
+                  ? exportPlatformsAvailable.map((c) => c.platform)
+                  : ["myntra", "flipkart", "ajio"]
+                ).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => {
+                      setExportPlatform(p);
+                      setExportPreview(null);
+                    }}
+                    className={`text-xs px-2.5 py-1 rounded border font-semibold uppercase ${
+                      exportPlatform === p
+                        ? "bg-amber-700 text-white border-amber-700"
+                        : "bg-white text-slate-700 border-slate-300 hover:border-amber-500"
+                    }`}
+                    data-testid={`export-platform-${p}`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Colour / size selection */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                    Colours ({exportColors.length}/{(catalogueCodes?.colors || []).length})
+                  </label>
+                  <div className="flex gap-2 text-[10px]">
+                    <button
+                      className="text-slate-600 hover:text-slate-900 underline"
+                      onClick={() => setExportColors(catalogueCodes?.colors || [])}
+                    >
+                      all
+                    </button>
+                    <button
+                      className="text-slate-600 hover:text-slate-900 underline"
+                      onClick={() => setExportColors([])}
+                    >
+                      none
+                    </button>
+                  </div>
+                </div>
+                <div className="max-h-48 overflow-y-auto border border-slate-200 bg-white rounded p-2 space-y-1">
+                  {(catalogueCodes?.colors || []).map((c) => (
+                    <label
+                      key={c}
+                      className="flex items-center gap-2 text-xs cursor-pointer hover:bg-slate-50 px-1.5 py-0.5 rounded"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={exportColors.includes(c)}
+                        onChange={() => toggleColor(c)}
+                        data-testid={`export-color-${c}`}
+                      />
+                      <span>{c}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                    Sizes ({exportSizes.length}/{(catalogueCodes?.sizes || []).length})
+                  </label>
+                  <div className="flex gap-2 text-[10px]">
+                    <button
+                      className="text-slate-600 hover:text-slate-900 underline"
+                      onClick={() => setExportSizes(catalogueCodes?.sizes || [])}
+                    >
+                      all
+                    </button>
+                    <button
+                      className="text-slate-600 hover:text-slate-900 underline"
+                      onClick={() => setExportSizes([])}
+                    >
+                      none
+                    </button>
+                  </div>
+                </div>
+                <div className="max-h-48 overflow-y-auto border border-slate-200 bg-white rounded p-2 grid grid-cols-3 gap-1">
+                  {(catalogueCodes?.sizes || []).map((s) => (
+                    <label
+                      key={s}
+                      className="flex items-center gap-2 text-xs cursor-pointer hover:bg-slate-50 px-1.5 py-0.5 rounded"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={exportSizes.includes(s)}
+                        onChange={() => toggleSize(s)}
+                        data-testid={`export-size-${s}`}
+                      />
+                      <span className="font-mono">{s}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-600">
+              Will generate <span className="font-semibold">{exportColors.length * exportSizes.length}</span>{" "}
+              rows ({exportColors.length} colours × {exportSizes.length} sizes).
+            </div>
+
+            {exportError && (
+              <div
+                className={`text-xs px-3 py-2 rounded border ${
+                  exportError.startsWith("Downloaded")
+                    ? "bg-green-50 border-green-200 text-green-800"
+                    : "bg-red-50 border-red-200 text-red-800"
+                }`}
+                data-testid="export-message"
+              >
+                {exportError}
+              </div>
+            )}
+
+            {/* Preview panel */}
+            {exportPreview && (
+              <div className="border border-slate-200 rounded bg-white">
+                <div className="px-3 py-2 border-b border-slate-200 text-[10px] uppercase tracking-wider font-bold text-slate-600 bg-slate-50">
+                  Preview — sheet "{exportPreview.sheet_name}", header row index{" "}
+                  {exportPreview.header_row_index}, {exportPreview.row_count} data rows
+                </div>
+                <div className="overflow-x-auto max-h-64">
+                  <table className="text-[11px] w-full">
+                    <thead className="bg-slate-100 sticky top-0">
+                      <tr>
+                        {exportPreview.header.map((h, i) => (
+                          <th key={i} className="text-left px-2 py-1 border-b border-slate-200 font-mono whitespace-nowrap">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {exportPreview.rows.slice(0, 20).map((row, ri) => (
+                        <tr key={ri} className="border-b border-slate-100">
+                          {row.map((cell, ci) => (
+                            <td key={ci} className="px-2 py-1 whitespace-nowrap">
+                              {cell === null || cell === undefined || cell === ""
+                                ? <span className="text-slate-300">—</span>
+                                : String(cell)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {exportPreview.rows.length > 20 && (
+                  <div className="px-3 py-1.5 text-[11px] text-slate-500 italic bg-slate-50 border-t">
+                    …{exportPreview.rows.length - 20} more rows (download to see full file)
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <BtnSecondary onClick={() => setExportOpen(false)}>Close</BtnSecondary>
+              <BtnSecondary
+                onClick={runExportPreview}
+                disabled={exportBusy || exportColors.length === 0 || exportSizes.length === 0}
+                data-testid="catalogue-export-preview-btn"
+              >
+                {exportBusy && !exportPreview ? "Previewing…" : "Preview"}
+              </BtnSecondary>
+              <BtnPrimary
+                onClick={downloadExport}
+                disabled={exportBusy || exportColors.length === 0 || exportSizes.length === 0}
+                data-testid="catalogue-export-download-btn"
+              >
+                <Download className="w-4 h-4 mr-1.5" />
+                {exportBusy ? "Working…" : "Download .xlsx"}
+              </BtnPrimary>
+            </div>
+          </div>
+        </Drawer>
+      )}
+
       {bulkOpen && (
         <Drawer
           onClose={() => {
@@ -1290,6 +1776,12 @@ export default function Styles() {
         onConfirm={confirm?.onConfirm}
         onCancel={() => setConfirm(null)}
       />
+      {bomStyle && (
+        <BomEditorDrawer
+          style={bomStyle}
+          onClose={() => setBomStyle(null)}
+        />
+      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { http } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
+import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
 import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle } from "lucide-react";
 
@@ -679,10 +680,20 @@ function ColorGroupCard(props) {
           <span>⚠ {consumeError.inventory_consume_error}</span>
         </div>
       )}
-      {style?.image_url && (
-        <div className="h-28 bg-slate-100 border-b border-slate-200 overflow-hidden">
-          <img src={style.image_url} alt={style.name} className="w-full h-full object-cover" data-testid={`card-img-${group.key}`} />
-        </div>
+      {(style?.image_url ||
+        style?.image_display_url ||
+        style?.image_thumbnail_url) && (
+        <SafeImage
+          image={{
+            url: style.image_url,
+            display_url: style.image_display_url,
+            thumbnail_url: style.image_thumbnail_url,
+          }}
+          alt={style.name}
+          aspectRatio="16/7"
+          className="border-b border-slate-200"
+          testId={`card-img-${group.key}`}
+        />
       )}
       <div className="p-3 pb-2 border-b border-slate-100">
         <div className="flex items-baseline justify-between mb-0.5">
@@ -1108,10 +1119,21 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4" data-testid="archive-grid">
           {groups.map(g => (
             <Card key={g.key} className="border-l-4 border-slate-400 hover:border-[#0F172A] transition-colors" data-testid={`archive-card-${g.key}`}>
-              {styleByCode[g.style_code]?.image_url && (
-                <div className="h-32 overflow-hidden bg-slate-100">
-                  <img src={styleByCode[g.style_code].image_url} alt="" className="w-full h-full object-cover" />
-                </div>
+              {(styleByCode[g.style_code]?.image_url ||
+                styleByCode[g.style_code]?.image_display_url ||
+                styleByCode[g.style_code]?.image_thumbnail_url) && (
+                <SafeImage
+                  image={{
+                    url: styleByCode[g.style_code]?.image_url,
+                    display_url:
+                      styleByCode[g.style_code]?.image_display_url,
+                    thumbnail_url:
+                      styleByCode[g.style_code]?.image_thumbnail_url,
+                  }}
+                  alt=""
+                  aspectRatio="16/8"
+                  testId={`archive-img-${g.key}`}
+                />
               )}
               <div className="p-4">
                 <div className="flex items-baseline justify-between mb-2">

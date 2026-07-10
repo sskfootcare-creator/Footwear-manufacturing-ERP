@@ -41,20 +41,17 @@ Write-Host "==========================================================" -Foregro
 Write-Host "[1/2] Launching backend FastAPI job..." -ForegroundColor Yellow
 $BackendJob = Start-Job -ScriptBlock {
     param($path)
-    $env:PATH = "$path/python-portable;" + $env:PATH
-    Set-Location "$path/backend"
+    cd "$path/backend"
     & .venv/Scripts/Activate.ps1
-    uvicorn server:app --port 8000 --reload
+    uvicorn server:app --port 8000
 } -ArgumentList $ScriptDir
 
 # Start Frontend job
 Write-Host "[2/2] Launching frontend React job..." -ForegroundColor Yellow
 $FrontendJob = Start-Job -ScriptBlock {
     param($path)
-    $env:PATH = "$path/node-portable/node-v22.11.0-win-x64;" + $env:PATH
-    Set-Locationnv:BROWSER = "none"
     cd "$path/frontend"
-    npm.cmd start
+    npm start
 } -ArgumentList $ScriptDir
 
 Write-Host "==========================================================" -ForegroundColor Green
