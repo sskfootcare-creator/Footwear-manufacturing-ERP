@@ -86,9 +86,9 @@ async def seed_fg_inventory(db, styles):
     # Reuse existing warehouse_locations if any; otherwise fall back to fixed codes.
     codes = []
     async for w in db.warehouse_locations.find({}).limit(3):
-        codes.append((w["location_code"], w.get("rack"), w.get("row"), w.get("column")))
+        codes.append((w["location_code"], w.get("rack"), w.get("row"), w.get("cell")))
     if not codes:
-        codes = [("R1-A-1", "R1", "A", 1), ("R1-A-2", "R1", "A", 2), ("R1-B-1", "R1", "B", 1)]
+        codes = [("01-1-01", "1", 1, 1), ("01-1-02", "1", 1, 2), ("01-2-01", "2", 1, 1)]
 
     rows = []
     now = now_iso()
@@ -359,9 +359,9 @@ async def seed_picklists(db, styles):
     # Pull the first three warehouse location codes for realism.
     codes = []
     async for w in db.warehouse_locations.find({}).limit(3):
-        codes.append((w["location_code"], w.get("rack"), w.get("row"), w.get("column")))
+        codes.append((w["location_code"], w.get("rack"), w.get("row"), w.get("cell")))
     if not codes:
-        codes = [("R1-A-1", "R1", "A", 1), ("R1-A-2", "R1", "A", 2), ("R1-B-1", "R1", "B", 1)]
+        codes = [("01-1-01", "1", 1, 1), ("01-1-02", "1", 1, 2), ("01-2-01", "2", 1, 1)]
 
     def make_item(style, color, size, qty, loc):
         style_oid, style_code, _sn, _iu, _idu, _itu = style
@@ -373,7 +373,7 @@ async def seed_picklists(db, styles):
             "location_code": loc[0],
             "rack":          loc[1],
             "row":           loc[2],
-            "column":        loc[3],
+            "cell":          loc[3],
             "qty":           qty,
             "picked":        False,
             "picked_at":     None,
