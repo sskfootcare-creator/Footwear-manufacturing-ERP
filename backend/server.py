@@ -1074,9 +1074,9 @@ class PicklistItemIn(BaseModel):
     size: str
     qty: int
     location_code: str
-    rack: Optional[str] = None
+    rack: Optional[int] = None
     row: Optional[int] = None
-    column: Optional[int] = None
+    cell: Optional[int] = None
     picked: bool = False
 
 
@@ -1183,7 +1183,7 @@ def _overdue_hours(deadline_iso: str | None) -> float:
 @api.post("/auth/login")
 async def login(payload: LoginInput, request: Request, response: Response):
     # --- Rate limiting: reject IPs that have too many recent failures ---
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = request.headers.get("x-test-rate-limit-client-ip") or (request.client.host if request.client else "unknown")
     now_ts = datetime.now(timezone.utc).timestamp()
     window_start = now_ts - LOGIN_WINDOW_SECONDS
     # Prune old entries
@@ -11453,39 +11453,40 @@ async def seed_demo(request: Request):
 #   • /online-orders/import auto-generates picklists for covered qty
 # ═══════════════════════════════════════════════════════════════════════
 
-RACKS      = ["A", "B", "C"]     # 3 racks per line
-ROWS_PER   = 10                  # 10 lines top-to-bottom
-COLS_PER   = 8                   # 8 cells per rack
-CAPACITY   = 40                  # pairs per cell
-# → total capacity = 3 × 10 × 8 × 40 = 9,600 pairs across 240 cells.
+WAREHOUSE_ROWS = 10
+RACKS_PER_ROW  = 3
+RACKS          = [1, 2, 3]
+CELLS_PER_RACK = 8
+CAPACITY       = 40                  # pairs per cell
+ROW_PAIRS      = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
 
 
-def _make_location_code(rack: str, row: int, col: int) -> str:
-    # New naming: {line:02d}-{rack}-{cell:02d}  (e.g. "01-A-01" … "10-C-08")
-    # `rack` is the rack-letter A/B/C, `row` is the line 1-10, `col` is the cell 1-8.
-    return f"{row:02d}-{rack}-{col:02d}"
+def _make_location_code(row: int, rack: int, cell: int) -> str:
+    # New naming: f"R{row:02d}-RK{rack}-C{cell:02d}"  (e.g. "R01-RK1-C01" … "R10-RK3-C08")
+    return f"R{row:02d}-RK{rack}-C{cell:02d}"
 
 
 async def _seed_warehouse_locations():
     """Idempotent — inserts any missing cells into warehouse_locations.
 
-    Zones:
-    • main            — default for all cells.
-    • return_holding  — reserved bay for `return_in` movements. Default: last
-                        row of rack C (10-C-01 … 10-C-08 = 320 pair capacity).
+    All cells use zone='main'. No return holding zone.
     """
     to_upsert = []
-    for rack in RACKS:
-        for r in range(1, ROWS_PER + 1):
-            for c in range(1, COLS_PER + 1):
-                code = _make_location_code(rack, r, c)
-                zone = "return_holding" if (rack == "C" and r == ROWS_PER) else "main"
+    for r in range(1, WAREHOUSE_ROWS + 1):
+        for rack in range(1, RACKS_PER_ROW + 1):
+            for c in range(1, CELLS_PER_RACK + 1):
+                code = _make_location_code(r, rack, c)
+                zone = "main"
+                pair_group = (r - 1) // 2 + 1
+                aisle_before = (r % 2 == 1 and r != 1)
                 to_upsert.append({
                     "location_code":   code,
                     "rack":            rack,
                     "row":             r,
-                    "column":          c,
+                    "cell":            c,
                     "zone":            zone,
+                    "pair_group":      pair_group,
+                    "aisle_before":    aisle_before,
                     "capacity_pairs":  CAPACITY,
                     "occupied_pairs":  0,
                     "available_pairs": CAPACITY,
@@ -11496,11 +11497,15 @@ async def _seed_warehouse_locations():
                 })
     inserted = 0
     for doc in to_upsert:
+        doc_on_insert = {k: v for k, v in doc.items() if k not in ("pair_group", "aisle_before", "zone")}
         res = await db.warehouse_locations.update_one(
             {"location_code": doc["location_code"]},
-            {"$setOnInsert": doc,
-             # Backfill zone on legacy cells that never had it
-             "$set": {} if False else {}},
+            {"$setOnInsert": doc_on_insert,
+             "$set": {
+                 "pair_group":   doc["pair_group"],
+                 "aisle_before": doc["aisle_before"],
+                 "zone":         doc["zone"],
+             }},
             upsert=True,
         )
         if res.upserted_id:
@@ -11509,10 +11514,7 @@ async def _seed_warehouse_locations():
     # deployments; new-layout cells always have zone set on insert).
     await db.warehouse_locations.update_many(
         {"zone": {"$exists": False}},
-        [{"$set": {"zone": {"$cond": [
-            {"$and": [{"$eq": ["$rack", "C"]}, {"$eq": ["$row", ROWS_PER]}]},
-            "return_holding", "main"
-        ]}}}]
+        [{"$set": {"zone": "main"}}]
     )
     return inserted
 
@@ -11529,10 +11531,8 @@ async def _allocate_to_locations(style_id, style_code, color, size, qty, user_em
                                   reference_type="", reference_id="", zone="main",
                                   prefer_existing_sku_cells=False):
     """Sequentially fill cells (by location_code ASC) until qty placed.
-    zone: 'main' (default) or 'return_holding'.
-    prefer_existing_sku_cells: when True (used for return_restocked), first fill any
-       existing cells that already hold this SKU (with room to spare) before opening
-       a fresh empty cell. This keeps the SKU consolidated at its original location(s).
+    prefer_existing_sku_cells: when True, first fill existing cells that already hold
+       this SKU (with room to spare) before opening a fresh empty cell.
     """
     remaining = int(qty)
     placements = []
@@ -11571,7 +11571,7 @@ async def _allocate_to_locations(style_id, style_code, color, size, qty, user_em
                  "$set": {"style_code": style_code, "updated_at": now_iso()}},
             )
             placements.append({"location_code": code, "qty": place_qty,
-                                "rack": wloc["rack"], "row": wloc["row"], "column": wloc["column"],
+                                "rack": wloc["rack"], "row": wloc["row"], "cell": wloc["cell"],
                                 "zone": zone, "consolidated": True})
             remaining -= place_qty
 
@@ -11611,7 +11611,7 @@ async def _allocate_to_locations(style_id, style_code, color, size, qty, user_em
             upsert=True,
         )
         placements.append({"location_code": loc["location_code"], "qty": place_qty,
-                            "rack": loc["rack"], "row": loc["row"], "column": loc["column"],
+                            "rack": loc["rack"], "row": loc["row"], "cell": loc["cell"],
                             "zone": zone})
         remaining -= place_qty
     return {"placed_qty": int(qty) - remaining, "unplaced_qty": remaining, "placements": placements}
@@ -11620,7 +11620,7 @@ async def _allocate_to_locations(style_id, style_code, color, size, qty, user_em
 async def _deduct_from_locations(style_id, color, size, qty, user_email,
                                   reference_type="", reference_id="", zone=None):
     """FIFO deduction: oldest fg_location_inventory doc first (by created_at, then location_code).
-    Optionally restrict to a specific zone ('main' | 'return_holding')."""
+    Optionally restrict to a specific zone."""
     remaining = int(qty)
     removals = []
     guard = 0
@@ -11719,23 +11719,16 @@ async def _sync_warehouse_locations(payload, user_email):
             return await _allocate_to_locations(style_id, style_code, color, size, qty,
                                                  user_email, ref, ref_id, zone="main")
     elif mt == "return_restocked":
-        # Returns cleared inspection — put back into main zone, preferring cells that
-        # already hold this SKU so the pairs consolidate at their original location.
+        # Returns go into main zone, preferring cells that already hold this SKU.
         if qty > 0:
-            # Deduct from return_holding zone first (best-effort)
-            try:
-                await _deduct_from_locations(style_id, color, size, qty,
-                                              user_email, ref, ref_id)
-            except Exception:
-                pass
             return await _allocate_to_locations(style_id, style_code, color, size, qty,
                                                  user_email, ref, ref_id, zone="main",
                                                  prefer_existing_sku_cells=True)
     elif mt == "return_in":
-        # Fresh return — quarantine in return_holding zone
+        # Fresh return — put directly in main zone since no cells are reserved for returns
         if qty > 0:
             return await _allocate_to_locations(style_id, style_code, color, size, qty,
-                                                 user_email, ref, ref_id, zone="return_holding")
+                                                 user_email, ref, ref_id, zone="main")
     elif mt in ("dispatched", "liquidation_out", "return_damaged"):
         if qty > 0:
             return await _deduct_from_locations(style_id, color, size, qty,
@@ -11763,7 +11756,11 @@ async def wms_list_locations(
     """List all warehouse cells with capacity/occupied stats. Filterable."""
     await get_current_user(request)
     q = {}
-    if rack: q["rack"] = rack.upper()
+    if rack:
+        try:
+            q["rack"] = int(rack)
+        except ValueError:
+            q["rack"] = rack.upper()
     if status: q["status"] = status
     if zone:   q["zone"] = zone
     if search: q["location_code"] = {"$regex": search, "$options": "i"}
@@ -11853,7 +11850,7 @@ async def wms_rebuild_layout(request: Request):
         if home and fill.get(home, 0) + qty_needed <= CAPACITY:
             return home
         # Otherwise pick the next empty (or partially-filled) main cell
-        async for w in db.warehouse_locations.find({"zone": "main"}).sort([("row", 1), ("rack", 1), ("column", 1)]):
+        async for w in db.warehouse_locations.find({"zone": "main"}).sort([("row", 1), ("rack", 1), ("cell", 1)]):
             code = w["location_code"]
             if fill.get(code, 0) + qty_needed <= CAPACITY:
                 style_home[style_id] = code
@@ -11879,7 +11876,7 @@ async def wms_rebuild_layout(request: Request):
                 "location_code": new_code,
                 "rack":          cell.get("rack"),
                 "row":           cell.get("row"),
-                "column":        cell.get("column"),
+                "cell":          cell.get("cell"),
                 "updated_at":    now,
             }},
         )
@@ -11972,21 +11969,13 @@ async def wms_dashboard(request: Request):
 
     utilization_pct = round((total_occupied / total_capacity * 100), 2) if total_capacity else 0
 
-    # Zone breakdown
-    main_locs = [l for l in locs if l.get("zone", "main") == "main"]
-    ret_locs  = [l for l in locs if l.get("zone") == "return_holding"]
+    # Zone breakdown (single main zone)
     by_zone = {
         "main": {
-            "cells":           len(main_locs),
-            "capacity_pairs":  sum(int(l.get("capacity_pairs", 0)) for l in main_locs),
-            "occupied_pairs":  sum(int(l.get("occupied_pairs", 0)) for l in main_locs),
-            "available_pairs": sum(int(l.get("available_pairs", 0)) for l in main_locs),
-        },
-        "return_holding": {
-            "cells":           len(ret_locs),
-            "capacity_pairs":  sum(int(l.get("capacity_pairs", 0)) for l in ret_locs),
-            "occupied_pairs":  sum(int(l.get("occupied_pairs", 0)) for l in ret_locs),
-            "available_pairs": sum(int(l.get("available_pairs", 0)) for l in ret_locs),
+            "cells":           len(locs),
+            "capacity_pairs":  total_capacity,
+            "occupied_pairs":  total_occupied,
+            "available_pairs": total_available,
         },
     }
 
@@ -12082,7 +12071,7 @@ async def _generate_picklist_for_order(order_id: str, channel: str, order_lines:
                 "color":         p["color"],    "size":       p["size"],
                 "location_code": p["location_code"], "qty":    p["qty"],
                 "rack":          w.get("rack"), "row":        w.get("row"),
-                "column":        w.get("column"),
+                "cell":          w.get("cell"),
                 "picked":        False, "picked_at": None,
             }
             items.append(item)
@@ -12365,7 +12354,7 @@ async def report_location_utilization(request: Request):
             "location_code":   l["location_code"],
             "rack":            l.get("rack"),
             "row":             l.get("row"),
-            "column":          l.get("column"),
+            "cell":            l.get("cell"),
             "capacity_pairs":  cap,
             "occupied_pairs":  occ,
             "available_pairs": cap - occ,
@@ -12504,9 +12493,59 @@ async def pending_product_list(request: Request):
         jd["image_thumbnail_url"] = s_meta.get("image_thumbnail_url", "")
         jd["style_name"]          = s_meta.get("style_name", "")
         out.append(jd)
-    # Sort: components available first, then by created_at
     out.sort(key=lambda x: (not x.get("components_available"), x.get("created_at", "")))
     return out
+
+
+# ---------- Pending List Snapshots ----------
+
+@api.post("/production/pending-list/snapshot")
+async def create_pending_list_snapshot(request: Request, payload: Optional[dict] = None):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    filter_used = (payload or {}).get("filter_used", "all")
+    
+    # Call the existing logic internally
+    jobs = await pending_product_list(request)
+    
+    # Compute totals
+    pending = len(jobs)
+    ready = sum(1 for j in jobs if j.get("components_available"))
+    shortage = sum(1 for j in jobs if not j.get("components_available"))
+    total_pairs = sum(int(j.get("quantity", 0)) for j in jobs)
+    
+    doc = {
+        "saved_at": now_iso(),
+        "saved_by": u["email"],
+        "filter_used": filter_used,
+        "totals": {
+            "pending": pending,
+            "ready": ready,
+            "shortage": shortage,
+            "total_pairs": total_pairs
+        },
+        "jobs": jobs
+    }
+    
+    res = await db.pending_list_snapshots.insert_one(doc)
+    doc["id"] = str(res.inserted_id)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/production/pending-list/snapshots")
+async def list_pending_list_snapshots(request: Request):
+    await get_current_user(request)
+    docs = await db.pending_list_snapshots.find({}, {"jobs": 0}).sort("saved_at", -1).to_list(1000)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/production/pending-list/snapshots/{id}")
+async def get_pending_list_snapshot(id: str, request: Request):
+    await get_current_user(request)
+    doc = await db.pending_list_snapshots.find_one({"_id": oid(id)})
+    if not doc:
+        raise HTTPException(404, "Snapshot not found")
+    return stringify(doc)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -12552,7 +12591,7 @@ async def _pick_new_cell_for_style(style_id: str) -> Optional[str]:
         return home
     async for w in db.warehouse_locations.find(
         {"zone": "main", "status": "empty"}
-    ).sort([("row", 1), ("rack", 1), ("column", 1)]).limit(1):
+    ).sort([("row", 1), ("rack", 1), ("cell", 1)]).limit(1):
         return w["location_code"]
     return None
 
@@ -12744,7 +12783,7 @@ async def produce_cell(request: Request, payload: ProduceCellIn):
                  "$setOnInsert": {"style_code": style_code, "created_at": now_iso(),
                                   "rack": cell.get("rack") if cell else None,
                                   "row":  cell.get("row")  if cell else None,
-                                  "column": cell.get("column") if cell else None},
+                                  "cell": cell.get("cell") if cell else None},
                  "$set": {"updated_at": now_iso()}},
                 upsert=True,
             )

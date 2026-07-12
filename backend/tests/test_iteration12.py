@@ -21,7 +21,7 @@ def _read_env():
         for line in open(p):
             if line.startswith("REACT_APP_BACKEND_URL="):
                 return line.split("=", 1)[1].strip()
-    return os.environ.get("REACT_APP_BACKEND_URL", "")
+    return os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8000")
 
 
 BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or _read_env()).rstrip("/")

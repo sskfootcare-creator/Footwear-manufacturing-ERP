@@ -115,7 +115,7 @@ function LocationUtilizationReport() {
       <div className="flex gap-2 justify-end">
         <BtnSecondary onClick={() => setTab("fullest")}  className={tab === "fullest"  ? "bg-slate-900 text-white border-slate-900" : ""}>Top 20 Fullest</BtnSecondary>
         <BtnSecondary onClick={() => setTab("emptiest")} className={tab === "emptiest" ? "bg-slate-900 text-white border-slate-900" : ""}>Top 20 Emptiest</BtnSecondary>
-        <BtnSecondary onClick={() => setTab("all")}      className={tab === "all"      ? "bg-slate-900 text-white border-slate-900" : ""}>All 320</BtnSecondary>
+        <BtnSecondary onClick={() => setTab("all")}      className={tab === "all"      ? "bg-slate-900 text-white border-slate-900" : ""}>All 240</BtnSecondary>
       </div>
       <Card>
         <div className="overflow-auto max-h-[70vh]">
@@ -125,7 +125,7 @@ function LocationUtilizationReport() {
                 <th className="text-left px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Location</th>
                 <th className="text-left px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Rack</th>
                 <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Row</th>
-                <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Col</th>
+                <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Cell</th>
                 <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Capacity</th>
                 <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Occupied</th>
                 <th className="text-right px-4 py-3 font-bold text-[10px] uppercase tracking-wider">Available</th>
@@ -139,7 +139,7 @@ function LocationUtilizationReport() {
                   <td className="px-4 py-3 font-mono font-bold">{r.location_code}</td>
                   <td className="px-4 py-3">{r.rack}</td>
                   <td className="px-4 py-3 text-right">{r.row}</td>
-                  <td className="px-4 py-3 text-right">{r.column}</td>
+                  <td className="px-4 py-3 text-right">{r.cell}</td>
                   <td className="px-4 py-3 text-right">{r.capacity_pairs}</td>
                   <td className="px-4 py-3 text-right font-bold">{r.occupied_pairs}</td>
                   <td className="px-4 py-3 text-right">{r.available_pairs}</td>

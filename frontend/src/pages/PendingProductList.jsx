@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary, Badge, Input } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
-import { Printer, RefreshCw, AlertTriangle, CheckCircle2, X, Wrench, Loader2 } from "lucide-react";
+import { Printer, RefreshCw, AlertTriangle, CheckCircle2, X, Wrench, Loader2, Layers } from "lucide-react";
 
 /**
  * Groups pending production jobs into a (style_code, color) matrix so that
@@ -79,8 +79,25 @@ export default function PendingProductList() {
   const [err, setErr]       = useState("");
   const [filter, setFilter] = useState("all"); // all | available | shortage
 
+  // Snapshots states
+  const [snapshots, setSnapshots]   = useState([]);
+  const [activeSnapshotId, setActiveSnapshotId] = useState("");
+  const [activeSnapshot, setActiveSnapshot] = useState(null);
+  const [savingSnapshot, setSavingSnapshot] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate]     = useState("");
+
   // Produce-cell drawer state (opened when operator taps a size cell)
   const [produceCtx, setProduceCtx] = useState(null); // {style_id, style_code, style_name, color, size, pending, image}
+
+  async function loadSnapshots() {
+    try {
+      const r = await http.get("/production/pending-list/snapshots");
+      setSnapshots(r.data);
+    } catch (e) {
+      console.error("Failed to load snapshots history", e);
+    }
+  }
 
   async function load() {
     setLoad(true); setErr("");
@@ -90,19 +107,69 @@ export default function PendingProductList() {
     } catch (e) { setErr(friendlyAxiosError(e)); }
     finally { setLoad(false); }
   }
-  useEffect(() => { load(); }, []);
 
-  const filtered = rows.filter((r) => {
+  useEffect(() => {
+    load();
+    loadSnapshots();
+  }, []);
+
+  async function handleSelectSnapshot(id) {
+    setActiveSnapshotId(id);
+    if (!id) {
+      setActiveSnapshot(null);
+      return;
+    }
+    setLoad(true); setErr("");
+    try {
+      const r = await http.get(`/production/pending-list/snapshots/${id}`);
+      setActiveSnapshot(r.data);
+    } catch (e) {
+      setErr(friendlyAxiosError(e));
+      setActiveSnapshotId("");
+      setActiveSnapshot(null);
+    } finally {
+      setLoad(false);
+    }
+  }
+
+  async function saveSnapshot() {
+    setSavingSnapshot(true); setErr("");
+    try {
+      await http.post("/production/pending-list/snapshot", {
+        filter_used: filter,
+      });
+      alert("Snapshot saved successfully!");
+      loadSnapshots();
+    } catch (e) {
+      setErr(friendlyAxiosError(e));
+    } finally {
+      setSavingSnapshot(false);
+    }
+  }
+
+  const filteredSnapshots = useMemo(() => {
+    if (!startDate && !endDate) return snapshots;
+    return snapshots.filter((s) => {
+      const dateStr = s.saved_at.split("T")[0]; // YYYY-MM-DD
+      if (startDate && dateStr < startDate) return false;
+      if (endDate && dateStr > endDate) return false;
+      return true;
+    });
+  }, [snapshots, startDate, endDate]);
+
+  const displayRows = activeSnapshot ? activeSnapshot.jobs : rows;
+
+  const filtered = displayRows.filter((r) => {
     if (filter === "available") return r.components_available;
     if (filter === "shortage")  return !r.components_available;
     return true;
   });
 
   const totals = {
-    total:     rows.length,
-    available: rows.filter((r) => r.components_available).length,
-    shortage:  rows.filter((r) => !r.components_available).length,
-    pairs:     rows.reduce((s, r) => s + (r.quantity || 0), 0),
+    total:     displayRows.length,
+    available: displayRows.filter((r) => r.components_available).length,
+    shortage:  displayRows.filter((r) => !r.components_available).length,
+    pairs:     displayRows.reduce((s, r) => s + (r.quantity || 0), 0),
   };
 
   const { groups, allSizes } = useMatrix(filtered);
@@ -117,6 +184,10 @@ export default function PendingProductList() {
           testId="pending-list-header"
           action={
             <div className="flex gap-2">
+              <BtnSecondary onClick={saveSnapshot} disabled={loading || savingSnapshot || !!activeSnapshot} data-testid="pending-snapshot-btn">
+                {savingSnapshot ? <Loader2 className="w-3.5 h-3.5 inline mr-1 animate-spin" /> : <Layers className="w-3.5 h-3.5 inline mr-1" />}
+                Save for Reference
+              </BtnSecondary>
               <BtnSecondary onClick={load} disabled={loading} data-testid="pending-refresh-btn">
                 <RefreshCw className={`w-3.5 h-3.5 inline mr-1 ${loading ? "animate-spin" : ""}`} />Refresh
               </BtnSecondary>
@@ -133,10 +204,17 @@ export default function PendingProductList() {
         <div className="flex items-start justify-between">
           <div>
             <div className="text-xs uppercase tracking-widest text-slate-500">SSK Footcare · Production</div>
-            <h1 className="text-2xl font-black">Pending Product List</h1>
+            <h1 className="text-2xl font-black">
+              {activeSnapshot ? "Pending Product List (Snapshot)" : "Pending Product List"}
+            </h1>
+            {activeSnapshot && (
+              <div className="text-[10px] text-slate-600 mt-0.5">
+                Saved at: {new Date(activeSnapshot.saved_at).toLocaleString()} by {activeSnapshot.saved_by}
+              </div>
+            )}
           </div>
           <div className="text-right text-xs text-slate-600">
-            <div>Generated: <strong>{new Date().toLocaleString()}</strong></div>
+            <div>Printed: <strong>{new Date().toLocaleString()}</strong></div>
             <div>Total groups: <strong>{groups.length}</strong> · Total pairs: <strong>{totals.pairs.toLocaleString()}</strong></div>
           </div>
         </div>
@@ -144,6 +222,24 @@ export default function PendingProductList() {
 
       <div className="p-4 sm:p-6 space-y-4 print:p-6 print:space-y-3">
         {err && <div className="p-3 bg-red-50 border-2 border-red-300 text-red-800 text-sm print:hidden">{err}</div>}
+
+        {activeSnapshot && (
+          <div className="p-3 bg-amber-50 border-2 border-amber-300 text-amber-900 text-sm flex items-center justify-between rounded shadow-sm print:hidden" data-testid="snapshot-view-banner">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600" />
+              <span>
+                Viewing snapshot saved on <strong>{new Date(activeSnapshot.saved_at).toLocaleString()}</strong> by <strong>{activeSnapshot.saved_by}</strong>.
+              </span>
+            </div>
+            <button
+              onClick={() => handleSelectSnapshot("")}
+              className="px-3 py-1 bg-amber-200 hover:bg-amber-300 text-amber-950 font-black text-xs rounded transition-colors"
+              data-testid="snapshot-back-live-btn"
+            >
+              Back to Live
+            </button>
+          </div>
+        )}
 
         {/* Summary tiles (screen only) */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 print:hidden">
@@ -169,11 +265,62 @@ export default function PendingProductList() {
           </Card>
         </div>
 
-        {/* Filter tabs (screen only) */}
-        <div className="flex gap-2 print:hidden">
-          <BtnSecondary onClick={() => setFilter("all")}       className={filter === "all"       ? "bg-slate-900 text-white border-slate-900" : ""} data-testid="filter-all">All ({totals.total})</BtnSecondary>
-          <BtnSecondary onClick={() => setFilter("available")} className={filter === "available" ? "bg-green-700 text-white border-green-700" : ""} data-testid="filter-available">Ready ({totals.available})</BtnSecondary>
-          <BtnSecondary onClick={() => setFilter("shortage")}  className={filter === "shortage"  ? "bg-red-700 text-white border-red-700"    : ""} data-testid="filter-shortage">Shortage ({totals.shortage})</BtnSecondary>
+        {/* Filter tabs & History Date Range Filter (screen only) */}
+        <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
+          <div className="flex gap-2">
+            <BtnSecondary onClick={() => setFilter("all")}       className={filter === "all"       ? "bg-slate-900 text-white border-slate-900" : ""} data-testid="filter-all">All ({totals.total})</BtnSecondary>
+            <BtnSecondary onClick={() => setFilter("available")} className={filter === "available" ? "bg-green-700 text-white border-green-700" : ""} data-testid="filter-available">Ready ({totals.available})</BtnSecondary>
+            <BtnSecondary onClick={() => setFilter("shortage")}  className={filter === "shortage"  ? "bg-red-700 text-white border-red-700"    : ""} data-testid="filter-shortage">Shortage ({totals.shortage})</BtnSecondary>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">History Range:</span>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="border-2 border-slate-300 px-3 py-1 text-xs bg-white focus:outline-none rounded font-bold"
+              data-testid="snapshot-start-date"
+            />
+            <span className="text-xs font-bold text-slate-400">—</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="border-2 border-slate-300 px-3 py-1 text-xs bg-white focus:outline-none rounded font-bold"
+              data-testid="snapshot-end-date"
+            />
+            {(startDate || endDate) && (
+              <button
+                onClick={() => { setStartDate(""); setEndDate(""); }}
+                className="text-xs text-slate-500 hover:text-slate-950 underline font-bold"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Snapshots matching range list */}
+        <div className="flex flex-wrap gap-2 items-center bg-slate-50 p-2.5 border-2 border-slate-200 rounded print:hidden" data-testid="snapshot-history-list">
+          <span className="text-xs font-black text-slate-500 uppercase tracking-wider">Saved Snapshots:</span>
+          {filteredSnapshots.length === 0 ? (
+            <span className="text-xs text-slate-400 italic">No snapshots in range</span>
+          ) : (
+            filteredSnapshots.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => handleSelectSnapshot(s.id)}
+                className={`px-3 py-1 text-[11px] font-mono border-2 transition-all rounded ${
+                  activeSnapshotId === s.id
+                    ? "bg-slate-900 text-white border-slate-900 font-bold"
+                    : "bg-white hover:bg-slate-100 border-slate-300 text-slate-700"
+                }`}
+                data-testid={`snapshot-item-${s.id}`}
+              >
+                {new Date(s.saved_at).toLocaleString()} ({s.totals?.total_pairs} pairs)
+              </button>
+            ))
+          )}
         </div>
 
         {groups.length === 0 && (
@@ -273,25 +420,29 @@ export default function PendingProductList() {
                           return (
                             <td key={sz} className="border border-slate-400 px-1 py-1 text-center">
                               {cell ? (
-                                <button
-                                  type="button"
-                                  data-testid={`made-cell-${g.style_code}-${g.color}-${sz}`}
-                                  onClick={() => setProduceCtx({
-                                    style_id:   g.style_id,
-                                    style_code: g.style_code,
-                                    style_name: g.style_name,
-                                    color:      g.color,
-                                    size:       sz,
-                                    pending:    cell.qty,
-                                    image:      {
-                                      url: g.image_url,
-                                      display_url: g.image_display_url,
-                                      thumbnail_url: g.image_thumbnail_url,
-                                    },
-                                  })}
-                                  className="border-2 border-slate-500 w-6 h-6 hover:bg-emerald-100 hover:border-emerald-600 active:bg-emerald-200 transition-colors mx-auto flex items-center justify-center print:cursor-default print:hover:bg-transparent"
-                                  title={`Record production for ${g.style_code} · ${g.color} · Size ${sz}`}
-                                />
+                                activeSnapshot ? (
+                                  <div className="border border-dashed border-slate-300 w-6 h-6 mx-auto bg-slate-50 flex items-center justify-center text-[10px] text-slate-400 select-none font-bold" title="Read-only snapshot">-</div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    data-testid={`made-cell-${g.style_code}-${g.color}-${sz}`}
+                                    onClick={() => setProduceCtx({
+                                      style_id:   g.style_id,
+                                      style_code: g.style_code,
+                                      style_name: g.style_name,
+                                      color:      g.color,
+                                      size:       sz,
+                                      pending:    cell.qty,
+                                      image:      {
+                                        url: g.image_url,
+                                        display_url: g.image_display_url,
+                                        thumbnail_url: g.image_thumbnail_url,
+                                      },
+                                    })}
+                                    className="border-2 border-slate-500 w-6 h-6 hover:bg-emerald-100 hover:border-emerald-600 active:bg-emerald-200 transition-colors mx-auto flex items-center justify-center print:cursor-default print:hover:bg-transparent"
+                                    title={`Record production for ${g.style_code} · ${g.color} · Size ${sz}`}
+                                  />
+                                )
                               ) : (
                                 <div className="border border-slate-200 w-5 h-5 mx-auto" />
                               )}
@@ -531,7 +682,7 @@ function ProduceCellDrawer({ ctx, onClose, onDone }) {
 
             <div className="flex gap-2 pt-1">
               <BtnSecondary onClick={onClose} className="flex-1">Cancel</BtnSecondary>
-              <BtnPrimary onClick={submit} disabled={busy || producedQty <= 0} className="flex-1" data-testid="produce-submit">
+              <BtnPrimary onClick={() => submit()} disabled={busy || producedQty <= 0} className="flex-1" data-testid="produce-submit">
                 {busy && <Loader2 className="w-3.5 h-3.5 inline mr-1 animate-spin" />}
                 Confirm Production
               </BtnPrimary>

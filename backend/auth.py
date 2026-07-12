@@ -121,6 +121,8 @@ def require_roles(*allowed_roles: str):
 async def seed_admin(db):
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    
+    # 1. Seed primary admin from env
     existing = await db.users.find_one({"email": admin_email})
     if existing is None:
         await db.users.insert_one({
@@ -136,3 +138,43 @@ async def seed_admin(db):
             {"email": admin_email},
             {"$set": {"password_hash": hash_password(admin_password)}},
         )
+
+    # 2. Seed test admin used by pytest suite
+    test_email = "admin@sskfootcare.com"
+    test_password = "Admin@123"
+    existing_test = await db.users.find_one({"email": test_email})
+    if existing_test is None:
+        await db.users.insert_one({
+            "email": test_email,
+            "password_hash": hash_password(test_password),
+            "name": "Test Admin",
+            "role": "admin",
+            "active": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    elif not verify_password(test_password, existing_test["password_hash"]):
+        await db.users.update_one(
+            {"email": test_email},
+            {"$set": {"password_hash": hash_password(test_password)}},
+        )
+
+    # 3. Seed default example admin (if different from env admin)
+    example_email = "admin@example.com"
+    example_password = "admin123"
+    if admin_email != example_email:
+        existing_example = await db.users.find_one({"email": example_email})
+        if existing_example is None:
+            await db.users.insert_one({
+                "email": example_email,
+                "password_hash": hash_password(example_password),
+                "name": "Example Admin",
+                "role": "admin",
+                "active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        elif not verify_password(example_password, existing_example["password_hash"]):
+            await db.users.update_one(
+                {"email": example_email},
+                {"$set": {"password_hash": hash_password(example_password)}},
+            )
+

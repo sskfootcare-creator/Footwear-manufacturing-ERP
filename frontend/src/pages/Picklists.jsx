@@ -512,7 +512,7 @@ function PicklistDrawer({ id, onClose, onChanged }) {
                             )}
                             <div className="text-xs text-slate-500 mt-0.5 font-mono">
                               Loc <span className="bg-slate-100 px-1.5 py-0.5 border border-slate-300">{it.location_code}</span>
-                              <span className="ml-2">Rack {it.rack} · Row {it.row} · Col {it.column}</span>
+                              <span className="ml-2">Row {it.row} · Rack {it.rack} · Cell {it.cell}</span>
                             </div>
                             <div className="text-2xl font-black mt-1">{it.qty} <span className="text-xs font-normal text-slate-500">pairs</span></div>
                           </div>
