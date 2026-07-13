@@ -127,21 +127,45 @@ export default function Production() {
   const [cartonPackFor, setCartonPackFor] = useState(null); // job group
   const [dispatchFor, setDispatchFor] = useState(null);     // group to dispatch
   const [savedPackingLists, setSavedPackingLists] = useState([]);
+  const [dispatchRecords, setDispatchRecords] = useState([]);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
   const load = async () => {
-    const [j, w, s, ar, pl] = await Promise.all([
+    const [j, w, s, ar, pl, dr] = await Promise.all([
       http.get("/production/jobs"),
       http.get("/workers"),
       http.get("/styles"),
       http.get("/production/archive"),
       http.get("/packing-lists"),
+      http.get("/dispatch-records?limit=1000"),
     ]);
     setJobs(j.data); setWorkers(w.data); setStyles(s.data);
     setArchivedJobs(ar.data); setSavedPackingLists(pl.data || []);
+    setDispatchRecords(dr.data || []);
   };
   useEffect(() => { load(); }, []);
+
+  const dispatchRecordByJobId = useMemo(() => {
+    const m = {};
+    for (const dr of dispatchRecords) {
+      if (dr.job_ids) {
+        for (const jid of dr.job_ids) {
+          m[jid] = dr;
+        }
+      }
+    }
+    return m;
+  }, [dispatchRecords]);
+
+  const downloadDispatchFile = async (drId, type, filename, mimeType) => {
+    try {
+      const res = await http.get(`/dispatch-records/${drId}/${type}`, { responseType: "blob" });
+      triggerDownload(res.data, filename, mimeType);
+    } catch (e) {
+      alert("Download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
 
   const styleByCode = useMemo(() => {
     const m = {};
@@ -455,6 +479,8 @@ export default function Production() {
             onViewDetails={(g) => setDetailFor(g)}
             savedPackingLists={savedPackingLists}
             onReDownloadPacking={reDownloadSavedPacking}
+            dispatchRecordByJobId={dispatchRecordByJobId}
+            onDownloadDispatchFile={downloadDispatchFile}
           />
         ) : (
         <div className="overflow-x-auto pb-4">
@@ -1137,7 +1163,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
 
 /* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking }) {
+function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile }) {
   const groups = groupJobsByColor(jobs);
   return (
     <div className="space-y-5" data-testid="archive-list">
@@ -1159,56 +1185,89 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4" data-testid="archive-grid">
-          {groups.map(g => (
-            <Card key={g.key} className="border-l-4 border-slate-400 hover:border-[#0F172A] transition-colors" data-testid={`archive-card-${g.key}`}>
-              {(styleByCode[g.style_code]?.image_url ||
-                styleByCode[g.style_code]?.image_display_url ||
-                styleByCode[g.style_code]?.image_thumbnail_url) && (
-                <SafeImage
-                  image={{
-                    url: styleByCode[g.style_code]?.image_url,
-                    display_url:
-                      styleByCode[g.style_code]?.image_display_url,
-                    thumbnail_url:
-                      styleByCode[g.style_code]?.image_thumbnail_url,
-                  }}
-                  alt=""
-                  aspectRatio="16/8"
-                  testId={`archive-img-${g.key}`}
-                />
-              )}
-              <div className="p-4">
-                <div className="flex items-baseline justify-between mb-2">
-                  <div>
-                    <div className="font-mono text-xs text-slate-500">PO {g.po_number}</div>
-                    <div className="font-bold text-base">{g.style_code}</div>
+          {groups.map(g => {
+            let drec = null;
+            if (dispatchRecordByJobId) {
+              for (const row of g.rows || []) {
+                if (dispatchRecordByJobId[row.id]) {
+                  drec = dispatchRecordByJobId[row.id];
+                  break;
+                }
+              }
+            }
+            return (
+              <Card key={g.key} className="border-l-4 border-slate-400 hover:border-[#0F172A] transition-colors" data-testid={`archive-card-${g.key}`}>
+                {(styleByCode[g.style_code]?.image_url ||
+                  styleByCode[g.style_code]?.image_display_url ||
+                  styleByCode[g.style_code]?.image_thumbnail_url) && (
+                  <SafeImage
+                    image={{
+                      url: styleByCode[g.style_code]?.image_url,
+                      display_url:
+                        styleByCode[g.style_code]?.image_display_url,
+                      thumbnail_url:
+                        styleByCode[g.style_code]?.image_thumbnail_url,
+                    }}
+                    alt=""
+                    aspectRatio="16/8"
+                    testId={`archive-img-${g.key}`}
+                  />
+                )}
+                <div className="p-4">
+                  <div className="flex items-baseline justify-between mb-2">
+                    <div>
+                      <div className="font-mono text-xs text-slate-500">PO {g.po_number}</div>
+                      <div className="font-bold text-base">{g.style_code}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{g.color}</div>
+                      <div className="font-mono font-bold text-lg text-[#C27842]">{g.totalQty}</div>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{g.color}</div>
-                    <div className="font-mono font-bold text-lg text-[#C27842]">{g.totalQty}</div>
+                  <div className="text-xs text-slate-600 mb-1">
+                    <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {g.client_name}
+                  </div>
+                  <div className="text-xs text-slate-600 mb-3">
+                    <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Sizes:</span>{" "}
+                    <span className="font-mono">{g.sizes.join(" · ")}</span>
+                  </div>
+                  <div className="flex gap-1 flex-wrap pt-2 border-t border-slate-200">
+                    <button onClick={() => onViewDetails(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1" data-testid={`archive-details-${g.key}`}>
+                      <Eye className="w-3 h-3" /> View details
+                    </button>
+                    <button onClick={() => onPrint(g)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1">
+                      <Printer className="w-3 h-3" /> Card PDF
+                    </button>
+                    <button onClick={() => onPacking(g)} className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1">
+                      <Package className="w-3 h-3" /> Packing List (New)
+                    </button>
+                    {drec && (
+                      <>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Invoice
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Packing List
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Labels
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
-                <div className="text-xs text-slate-600 mb-1">
-                  <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {g.client_name}
-                </div>
-                <div className="text-xs text-slate-600 mb-3">
-                  <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Sizes:</span>{" "}
-                  <span className="font-mono">{g.sizes.join(" · ")}</span>
-                </div>
-                <div className="flex gap-1 flex-wrap pt-2 border-t border-slate-200">
-                  <button onClick={() => onViewDetails(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1" data-testid={`archive-details-${g.key}`}>
-                    <Eye className="w-3 h-3" /> View details
-                  </button>
-                  <button onClick={() => onPrint(g)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1">
-                    <Printer className="w-3 h-3" /> Card PDF
-                  </button>
-                  <button onClick={() => onPacking(g)} className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1">
-                    <Package className="w-3 h-3" /> Packing
-                  </button>
-                </div>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       )}
 
@@ -1720,7 +1779,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
           if (completed <= 0) {
             rowsMap[sz] = [];
           } else {
-            let defaultQty = 20; // fallback default
+            let defaultQty = null;
             if (style?.default_pairs_per_carton) {
               if (style.default_pairs_per_carton[sz]) {
                 defaultQty = style.default_pairs_per_carton[sz];
@@ -1728,15 +1787,19 @@ function PackCartonDialog({ group, style, onClose, load }) {
                 defaultQty = style.default_pairs_per_carton.default;
               }
             }
-            // Populate rows
-            const rows = [];
-            let rem = completed;
-            while (rem > 0) {
-              const take = Math.min(rem, defaultQty);
-              rows.push(take);
-              rem -= take;
+            if (defaultQty) {
+              // Populate rows
+              const rows = [];
+              let rem = completed;
+              while (rem > 0) {
+                const take = Math.min(rem, defaultQty);
+                rows.push(take);
+                rem -= take;
+              }
+              rowsMap[sz] = rows.length > 0 ? rows : [""];
+            } else {
+              rowsMap[sz] = [""];
             }
-            rowsMap[sz] = rows.length > 0 ? rows : [""];
           }
         }
       }
@@ -1754,7 +1817,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
   }, [loadData]);
 
   const addCartonRow = (sz) => {
-    let defaultQty = 20;
+    let defaultQty = "";
     if (style?.default_pairs_per_carton) {
       if (style.default_pairs_per_carton[sz]) {
         defaultQty = style.default_pairs_per_carton[sz];
@@ -2021,6 +2084,21 @@ function DispatchDialog({ group, onClose, load }) {
   const [done, setDone] = useState(null);
   const [err, setErr] = useState(null);
 
+  const downloadFile = async (type, filename, mimeType) => {
+    if (!done?.dispatch_record_id) return;
+    try {
+      const res = await http.get(`/dispatch-records/${done.dispatch_record_id}/${type}`, { responseType: "blob" });
+      const blob = new Blob([res.data], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename.replace(/[\/\\]/g, "-");
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const totalPairs = group.rows?.reduce((s, r) => s + (r.completed_qty || 0), 0) || 0;
@@ -2102,9 +2180,34 @@ function DispatchDialog({ group, onClose, load }) {
 
           {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded">{err}</div>}
           {done && (
-            <div className="bg-teal-50 border border-teal-200 text-teal-800 text-sm px-4 py-3 rounded">
-              <div className="font-bold">✅ Dispatched — Invoice {done.invoice_no}</div>
-              <div className="text-xs text-teal-700 mt-1">ZIP downloaded. Invoice, Packing List and Carton Labels saved to Dispatch Records for future reprinting.</div>
+            <div className="bg-teal-50 border border-teal-200 text-teal-800 text-sm px-4 py-4 rounded space-y-3">
+              <div>
+                <div className="font-bold">✅ Dispatched — Invoice {done.invoice_no}</div>
+                <div className="text-xs text-teal-700 mt-1">ZIP downloaded. Re-download individual documents:</div>
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => downloadFile("invoice", `Invoice-${done.invoice_no}.pdf`, "application/pdf")}
+                  className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
+                >
+                  Invoice PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadFile("packing-list", `PackingList-${done.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                  className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
+                >
+                  Packing List XLSX
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadFile("carton-labels", `CartonLabels-${done.invoice_no}.pdf`, "application/pdf")}
+                  className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
+                >
+                  Carton Labels PDF
+                </button>
+              </div>
             </div>
           )}
         </div>
