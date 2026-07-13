@@ -30,6 +30,49 @@ def admin_session():
     return s
 
 
+def _ensure_b2b_jobs(session):
+    jr = session.get(f"{BASE_URL}/api/production/jobs", timeout=15)
+    assert jr.status_code == 200
+    jobs = jr.json()
+    if len(jobs) == 0:
+        style_payload = {
+            "name": "Iter10 Style",
+            "category": "Footwear",
+            "base_size": "8",
+            "bom": [],
+            "labor": [],
+        }
+        r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
+        assert r_style.status_code == 200
+        style_code = r_style.json()["code"]
+        
+        import uuid
+        po_payload = {
+            "po_number": f"PO-ITER10-{uuid.uuid4().hex[:8]}",
+            "client_name": "Iter10 Client",
+            "po_date": "2026-07-13",
+            "delivery_date": "2026-08-13",
+            "payment_terms": "30 Days Credit",
+            "line_items": [
+                {
+                    "style_code": style_code,
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 50,
+                    "unit_price": 400.0,
+                    "amount": 20000.0
+                }
+            ]
+        }
+        r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
+        assert r_po.status_code == 200
+        
+        jr = session.get(f"{BASE_URL}/api/production/jobs", timeout=15)
+        assert jr.status_code == 200
+        jobs = jr.json()
+    return jobs
+
+
 # ---------- AUTH SMOKE ----------
 class TestAuth:
     def test_login(self, admin_session):
@@ -45,7 +88,17 @@ class TestPaymentBugFix:
         wr = admin_session.get(f"{BASE_URL}/api/workers", timeout=15)
         assert wr.status_code == 200
         workers = wr.json()
-        assert len(workers) > 0, "No workers seeded"
+        if len(workers) == 0:
+            payload = {
+                "name": "Seeded Worker",
+                "phone": "9876543210",
+                "role": "finishing",
+                "rate_per_pair": 10.0,
+                "notes": "Test worker"
+            }
+            wr = admin_session.post(f"{BASE_URL}/api/workers", json=payload, timeout=15)
+            assert wr.status_code == 200
+            workers = [wr.json()]
         wid = workers[0].get("id") or workers[0].get("_id")
         assert wid
 
@@ -166,10 +219,7 @@ class TestReports:
 class TestProductionCardPDF:
     def test_card_pdf_with_tally(self, admin_session):
         # need a job_id
-        jr = admin_session.get(f"{BASE_URL}/api/production/jobs", timeout=15)
-        assert jr.status_code == 200
-        jobs = jr.json()
-        assert len(jobs) > 0, "no jobs seeded for production card"
+        jobs = _ensure_b2b_jobs(admin_session)
         jid = jobs[0].get("id") or jobs[0].get("_id")
 
         r = admin_session.post(
@@ -187,10 +237,7 @@ class TestProductionCardPDF:
 # ---------- PRODUCTION STAGE UPDATE -> deadline ----------
 class TestJobStageDeadline:
     def test_stage_update_sets_deadline(self, admin_session):
-        jr = admin_session.get(f"{BASE_URL}/api/production/jobs", timeout=15)
-        assert jr.status_code == 200
-        jobs = jr.json()
-        assert len(jobs) > 0
+        jobs = _ensure_b2b_jobs(admin_session)
         # pick a non-dispatched job
         job = next((j for j in jobs if j.get("stage") != "dispatched"), jobs[0])
         jid = job.get("id") or job.get("_id")

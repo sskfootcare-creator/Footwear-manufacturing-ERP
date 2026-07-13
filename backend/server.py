@@ -34,6 +34,7 @@ from pdf_docs import generate_dispatch_challan_pdf, build_invoice
 from packing_list import build_default_packing_list, build_from_template
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card
+from pdf_carton_label import build_carton_labels
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from io import BytesIO
@@ -540,6 +541,7 @@ class StyleIn(BaseModel):
     margin_pct: float = 25
     gst_pct: float = 5
     status: Optional[str] = "inactive"
+    default_pairs_per_carton: Optional[Dict[str, int]] = {}
 
 class POLineItem(BaseModel):
     style_code: str
@@ -579,12 +581,12 @@ class POIn(BaseModel):
 
 PRODUCTION_STAGES = [
     "procurement", "cutting", "folding", "attachment",
-    "stitching", "lasting", "sole_pasting", "finishing", "dispatched",
+    "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched",
 ]
 
 class ProductionStageUpdate(BaseModel):
     stage: Literal["procurement", "cutting", "folding", "attachment",
-                   "stitching", "lasting", "sole_pasting", "finishing", "dispatched"]
+                   "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched"]
     completed_qty: Optional[int] = None
     rejected_qty: Optional[int] = None
     qc_pass: Optional[bool] = None
@@ -662,6 +664,27 @@ class InvoiceGenerate(BaseModel):
     transport_mode: Optional[str] = ""
     vehicle_no: Optional[str] = ""
     supply_date: Optional[str] = ""
+
+
+class DispatchCreate(BaseModel):
+    """Unified dispatch: generates invoice + packing list + carton labels as a ZIP."""
+    job_ids: List[str]
+    po_id: str                                   # primary PO (invoice header)
+    transport_mode: Optional[str] = ""
+    vehicle_no: Optional[str] = ""
+    supply_date: Optional[str] = ""
+    transporter: Optional[str] = ""
+    dispatch_date: Optional[str] = ""
+    carton_dim: Optional[str] = "60x50x30 CMS"
+    net_wt_per_carton: Optional[float] = None
+    gross_wt_per_carton: Optional[float] = None
+    template_id: Optional[str] = None           # packing list template override
+    driver_name: Optional[str] = ""
+    driver_phone: Optional[str] = ""
+    site_code: Optional[str] = ""
+    destination: Optional[str] = ""
+    port: Optional[str] = ""
+    notes: Optional[str] = ""
 
 
 class PackingListGenerate(BaseModel):
@@ -1137,7 +1160,7 @@ class UnresolvedMapIn(BaseModel):
 DEFAULT_STAGE_HOURS = {
     "procurement": 24, "cutting": 24, "folding": 8, "attachment": 8,
     "stitching": 48, "lasting": 24, "sole_pasting": 12, "finishing": 12,
-    "dispatched": 0,
+    "qc_pack": 12, "dispatched": 0,
 }
 
 
@@ -8202,6 +8225,7 @@ async def create_po(payload: POIn, request: Request):
             match_status = "unmatched"   # not found anywhere
 
         jobs.append({
+            "source_type": "b2b_client",
             "po_id": doc["id"],
             "po_number": doc["po_number"],
             "client_name": doc["client_name"],
@@ -8562,6 +8586,17 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         "merged": False,
     }
     res = await db.invoices.insert_one(inv_doc)
+    # Map packed cartons to dispatch
+    cartons = await db.packing_cartons.find({"job_id": {"$in": payload.job_ids or []}, "status": "packed"}).to_list(10000)
+    for idx, carton in enumerate(cartons):
+        await db.packing_cartons.update_one(
+            {"_id": carton["_id"]},
+            {"$set": {
+                "status": "dispatched",
+                "invoice_id": str(res.inserted_id),
+                "box_number": idx + 1
+            }}
+        )
     # Flag jobs as invoiced; auto-archive if packing list already generated.
     await _flag_jobs(payload.job_ids or [], "invoice_generated_at")
     return StreamingResponse(
@@ -8582,10 +8617,30 @@ async def delete_invoice(id: str, request: Request):
     # Revert jobs
     job_ids = inv.get("job_ids", [])
     if job_ids:
-        await db.jobs.update_many(
-            {"_id": {"$in": [oid(j) for j in job_ids]}},
-            {"$unset": {"invoice_generated_at": ""}}
+        obj_ids = [oid(j) for j in job_ids]
+        await db.production_jobs.update_many(
+            {"_id": {"$in": obj_ids}},
+            {"$set": {"stage": "qc_pack"}, "$unset": {"invoice_generated_at": ""}}
         )
+        for o_id in obj_ids:
+            await db.production_jobs.update_one(
+                {"_id": o_id},
+                {"$push": {"history": {
+                    "stage": "qc_pack", "at": now_iso(), "by": u["email"],
+                    "notes": f"Invoice {inv.get('invoice_no')} deleted; stage reverted to QC & Pack",
+                    "qc_pass": None, "rejected_qty": 0
+                }}}
+            )
+    
+    # Revert cartons
+    await db.packing_cartons.update_many(
+        {"invoice_id": id},
+        {"$set": {
+            "status": "packed",
+            "invoice_id": None,
+            "box_number": None
+        }}
+    )
     
     # Delete payments for this invoice
     await db.payments.delete_many({"invoice_id": id})
@@ -8656,6 +8711,17 @@ async def merged_invoice(payload: dict, request: Request):
         "file_b64": _b64m.b64encode(pdf_bytes).decode("ascii"),
     }
     res_m = await db.invoices.insert_one(inv_doc_m)
+    # Map packed cartons to dispatch
+    cartons_m = await db.packing_cartons.find({"job_id": {"$in": job_ids_all}, "status": "packed"}).to_list(10000)
+    for idx, carton in enumerate(cartons_m):
+        await db.packing_cartons.update_one(
+            {"_id": carton["_id"]},
+            {"$set": {
+                "status": "dispatched",
+                "invoice_id": str(res_m.inserted_id),
+                "box_number": idx + 1
+            }}
+        )
     await _flag_jobs(job_ids_all, "invoice_generated_at")
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
@@ -9378,6 +9444,552 @@ async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: 
         tpl_bytes = b64.b64decode(tdoc["file_b64"])
         return build_from_template(tpl_bytes, payload_po, options)
     return build_default_packing_list(payload_po, options)
+
+
+# ═══ EAN CODES & CARTON PACKING ═══
+
+@api.get("/packing/ean-codes")
+async def get_ean_codes(style_id: str, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    codes = await db.sku_ean_codes.find({"style_id": style_id}).to_list(1000)
+    print("DEBUG CODES TYPE:", type(codes), codes)
+    return [stringify(c) for c in codes]
+
+class EanCodeIn(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    ean_code: str
+
+@api.post("/packing/ean-codes")
+async def create_ean_code(payload: EanCodeIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    q = {"style_id": payload.style_id, "color": payload.color, "size": payload.size}
+    existing = await db.sku_ean_codes.find_one(q)
+    if existing:
+        await db.sku_ean_codes.update_one(q, {"$set": {"ean_code": payload.ean_code, "updated_at": now_iso()}})
+        return {"ok": True, "id": str(existing["_id"])}
+    else:
+        doc = {**q, "ean_code": payload.ean_code, "created_at": now_iso()}
+        res = await db.sku_ean_codes.insert_one(doc)
+        return {"ok": True, "id": str(res.inserted_id)}
+
+@api.get("/packing/cartons")
+async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: Optional[str] = None):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    q = {}
+    if job_ids:
+        q["job_id"] = {"$in": job_ids.split(",")}
+    elif job_id:
+        q["job_id"] = job_id
+    cartons = await db.packing_cartons.find(q).to_list(1000)
+    return [stringify(c) for c in cartons]
+
+class CartonIn(BaseModel):
+    job_id: str
+    size: str
+    qty: int
+
+@api.post("/packing/cartons")
+async def pack_carton(payload: CartonIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    job = await db.production_jobs.find_one({"_id": oid(payload.job_id)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+    
+    # Resolve EAN code if exists
+    ean_doc = await db.sku_ean_codes.find_one({
+        "style_id": job["style_id"],
+        "color": job.get("color"),
+        "size": payload.size
+    })
+    ean_code = ean_doc["ean_code"] if ean_doc else ""
+    
+    doc = {
+        "job_id": payload.job_id,
+        "po_id": job.get("po_id"),
+        "style_id": job.get("style_id"),
+        "style_code": job.get("style_code"),
+        "color": job.get("color"),
+        "size": payload.size,
+        "ean_code": ean_code,
+        "qty": payload.qty,
+        "box_number": None,
+        "invoice_id": None,
+        "packed_at": now_iso(),
+        "packed_by": u["email"],
+        "status": "packed"
+    }
+    res = await db.packing_cartons.insert_one(doc)
+    return {"ok": True, "id": str(res.inserted_id)}
+
+@api.delete("/packing/cartons/{cid}")
+async def delete_carton(cid: str, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    await db.packing_cartons.delete_one({"_id": oid(cid)})
+    return {"ok": True}
+
+
+class EanCodeSimple(BaseModel):
+    size: str
+    ean_code: str
+
+class CartonRowSimple(BaseModel):
+    size: str
+    qty: int
+
+class QcPackConfirmIn(BaseModel):
+    job_ids: list[str]
+    eans: list[EanCodeSimple]
+    cartons: list[CartonRowSimple]
+
+@api.post("/packing/confirm-qc-pack")
+async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
+    if not payload.job_ids:
+        raise HTTPException(400, "No job IDs provided")
+        
+    job_objs = []
+    for jid in payload.job_ids:
+        job = await db.production_jobs.find_one({"_id": oid(jid)})
+        if not job:
+            raise HTTPException(404, f"Job {jid} not found")
+        job_objs.append(job)
+        
+    style_id = job_objs[0].get("style_id")
+    style_code = job_objs[0].get("style_code")
+    po_id = job_objs[0].get("po_id")
+    color = job_objs[0].get("color")
+    
+    for job in job_objs:
+        if job.get("style_id") != style_id or job.get("color") != color:
+            raise HTTPException(400, "All jobs must share the same style and color")
+
+    for item in payload.eans:
+        if not item.ean_code.strip():
+            continue
+        q = {"style_id": str(style_id), "color": color, "size": item.size}
+        existing = await db.sku_ean_codes.find_one(q)
+        if existing:
+            await db.sku_ean_codes.update_one(q, {"$set": {"ean_code": item.ean_code.strip(), "updated_at": now_iso()}})
+        else:
+            doc = {**q, "ean_code": item.ean_code.strip(), "created_at": now_iso()}
+            await db.sku_ean_codes.insert_one(doc)
+
+    await db.packing_cartons.delete_many({"job_id": {"$in": payload.job_ids}})
+
+    carton_docs = []
+    ean_map = {}
+    async for e in db.sku_ean_codes.find({"style_id": str(style_id), "color": color}):
+        ean_map[e["size"]] = e["ean_code"]
+
+    job_by_size = {job.get("size"): str(job["_id"]) for job in job_objs}
+
+    for c in payload.cartons:
+        size = c.size
+        qty = c.qty
+        job_id = job_by_size.get(size)
+        if not job_id:
+            raise HTTPException(400, f"Size {size} not found in color group jobs")
+        ean_code = ean_map.get(size, "")
+        
+        carton_docs.append({
+            "job_id": job_id,
+            "po_id": str(po_id),
+            "style_id": str(style_id),
+            "style_code": style_code,
+            "color": color,
+            "size": size,
+            "ean_code": ean_code,
+            "qty": qty,
+            "box_number": None,
+            "invoice_id": None,
+            "packed_at": now_iso(),
+            "packed_by": u["email"],
+            "status": "packed"
+        })
+
+    if carton_docs:
+        await db.packing_cartons.insert_many(carton_docs)
+
+    durations = await _get_stage_durations()
+    entered = now_iso()
+    hours = float(durations.get("qc_pack", 12))
+    deadline = _compute_deadline(entered, hours)
+    
+    for job in job_objs:
+        stage_changing = job.get("stage") != "qc_pack"
+        update = {
+            "stage": "qc_pack",
+            "stage_entered_at": entered,
+            "stage_deadline": deadline,
+            "updated_at": now_iso()
+        }
+        if stage_changing:
+            history_entry = {
+                "stage": "qc_pack", "at": entered, "by": u["email"],
+                "notes": "QC & Pack Carton packing confirmed",
+                "qc_pass": None, "rejected_qty": 0
+            }
+            await db.production_jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": update, "$push": {"history": history_entry}}
+            )
+        else:
+            await db.production_jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": update}
+            )
+
+    return {"ok": True, "count": len(carton_docs)}
+
+
+# ═══ UNIFIED DISPATCH ═══
+
+@api.post("/dispatch")
+async def create_dispatch(payload: DispatchCreate, request: Request):
+    """
+    Unified dispatch action for one or more qc_pack jobs.
+
+    Steps:
+      1. Load packed cartons for the given jobs.
+      2. Assign box_number 1..N (sorted by size then _id) — reset per invoice.
+      3. Build line items from actual packed quantities (not PO qty).
+      4. Generate invoice PDF, packing list XLSX, and carton labels PDF.
+      5. Bundle all three into a ZIP.
+      6. Persist dispatch_record with full file snapshots.
+      7. Update carton status → dispatched, advance job stages → dispatched.
+      8. Return ZIP stream with X-Dispatch-Record-Id header.
+    """
+    import base64 as _b64
+    import zipfile
+
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "sales")(u)
+
+    if not payload.job_ids:
+        raise HTTPException(400, "job_ids required")
+
+    # ── 1. Load PO ───────────────────────────────────────────────────────────
+    po_doc = await db.pos.find_one({"_id": oid(payload.po_id)})
+    if not po_doc:
+        raise HTTPException(404, "PO not found")
+    po = stringify(po_doc)
+
+    # ── 2. Load packed cartons ───────────────────────────────────────────────
+    carton_docs = await db.packing_cartons.find(
+        {"job_id": {"$in": payload.job_ids}, "status": "packed"}
+    ).sort([("size", 1), ("_id", 1)]).to_list(50000)
+
+    if not carton_docs:
+        raise HTTPException(400, "No packed cartons found for these jobs — run QC Pack first")
+
+    cartons = [stringify(c) for c in carton_docs]
+
+    # ── 3. Assign box_number 1..N (in-memory; persist after files generated) ─
+    for idx, c in enumerate(cartons):
+        c["box_number"] = idx + 1
+
+    # ── 4. Build line items from actual packed qty (SUM per style/color/size) ─
+    po_items = po.get("line_items", [])
+    po_price_idx = {}
+    for li in po_items:
+        key = (li.get("style_code"), li.get("color"), str(li.get("size", "")))
+        po_price_idx[key] = li
+
+    qty_agg: dict = {}   # (style_code, color, size) → aggregated dict
+    for c in cartons:
+        key = (c.get("style_code", ""), c.get("color", ""), str(c.get("size", "")))
+        if key not in qty_agg:
+            li_src = po_price_idx.get(key, {})
+            qty_agg[key] = {
+                "style_code": c.get("style_code", ""),
+                "color": c.get("color", ""),
+                "size": str(c.get("size", "")),
+                "ean_code": c.get("ean_code", ""),
+                "qty": 0,
+                "unit_price": li_src.get("unit_price", 0),
+                "description": li_src.get("description", ""),
+                "hsn_code": li_src.get("hsn_code", "") or "64029990",
+                "mrp": li_src.get("mrp", ""),
+            }
+        qty_agg[key]["qty"] += (c.get("qty") or 0)
+
+    line_items = [
+        {
+            "style_code": v["style_code"],
+            "description": v["description"],
+            "color": v["color"],
+            "size": v["size"],
+            "hsn_code": v["hsn_code"],
+            "quantity": v["qty"],
+            "unit_price": v["unit_price"],
+            "amount": round(v["qty"] * v["unit_price"], 2),
+            "mrp": v["mrp"],
+        }
+        for v in qty_agg.values()
+        if v["qty"] > 0
+    ]
+
+    if not line_items:
+        raise HTTPException(400, "No packed quantities found — carton rows may have 0 qty")
+
+    # ── 5. Invoice PDF ───────────────────────────────────────────────────────
+    invoice_no = await next_invoice_no()
+    invoice_date = datetime.now().strftime("%d/%m/%Y")
+    invoice_pdf = build_invoice(
+        po, invoice_no, invoice_date,
+        transport_mode=payload.transport_mode or "",
+        vehicle_no=payload.vehicle_no or "",
+        supply_date=payload.supply_date or "",
+        line_items=line_items,
+    )
+
+    # ── 6. Packing list XLSX (fed with actual carton data) ───────────────────
+    # Build a packing-list-compatible payload_po: inject real line_items + totals
+    total_qty = sum(li["quantity"] for li in line_items)
+    total_cartons = len(cartons)
+    payload_po = dict(po)
+    payload_po["line_items"] = line_items
+    payload_po["total_quantity"] = total_qty
+    payload_po["total_cartons"] = total_cartons
+    payload_po["po_number"] = po.get("po_number", "")
+
+    # Inject shipping metadata so the template can render it
+    pl_options = {
+        "carton_dim": payload.carton_dim or "60x50x30 CMS",
+        "pcs_per_box": None,           # actual rows are in line_items
+        "net_wt_per_carton": payload.net_wt_per_carton or "",
+        "gross_wt_per_carton": payload.gross_wt_per_carton or "",
+        "dispatch_date": payload.dispatch_date or "",
+        "transporter": payload.transporter or "",
+        "vehicle_no": payload.vehicle_no or "",
+        "driver_name": payload.driver_name or "",
+        "driver_phone": payload.driver_phone or "",
+        "site_code": payload.site_code or "",
+        "destination": payload.destination or "",
+        "port": payload.port or "",
+        "notes": payload.notes or "",
+    }
+    packing_xlsx = await _generate_packing_bytes(payload_po, pl_options, payload.template_id)
+
+    # ── 7. Carton Labels PDF ─────────────────────────────────────────────────
+    labels_pdf = build_carton_labels(cartons, po.get("po_number", ""), invoice_no)
+
+    # ── 8. Store invoice record ──────────────────────────────────────────────
+    totals = _compute_invoice_totals(po, line_items)
+    credit_days = _extract_credit_days(po.get("payment_terms", ""))
+    inv_doc = {
+        "invoice_no": invoice_no,
+        "invoice_date": invoice_date,
+        "invoice_iso_date": _invoice_iso_date(invoice_date),
+        "due_date": _due_iso(invoice_date, credit_days),
+        "payment_terms_days": credit_days,
+        "po_id": payload.po_id,
+        "po_number": po.get("po_number"),
+        "po_numbers": [po.get("po_number")],
+        "client_name": po.get("client_name"),
+        "job_ids": payload.job_ids,
+        "line_items_snapshot": line_items,
+        **totals,
+        "transport_mode": payload.transport_mode,
+        "vehicle_no": payload.vehicle_no,
+        "supply_date": payload.supply_date,
+        "by": u["email"],
+        "created_at": now_iso(),
+        "file_b64": _b64.b64encode(invoice_pdf).decode("ascii"),
+        "merged": False,
+    }
+    inv_res = await db.invoices.insert_one(inv_doc)
+    invoice_id = str(inv_res.inserted_id)
+
+    # ── 9. Persist carton updates ─────────────────────────────────────────────
+    for c in cartons:
+        await db.packing_cartons.update_one(
+            {"_id": oid(c["id"])},
+            {"$set": {
+                "status": "dispatched",
+                "invoice_id": invoice_id,
+                "box_number": c["box_number"],
+            }},
+        )
+
+    # ── 10. Persist dispatch_record ───────────────────────────────────────────
+    snapshot = [
+        {
+            "box_number": c["box_number"],
+            "ean_code": c.get("ean_code"),
+            "qty": c.get("qty"),
+            "size": c.get("size"),
+            "color": c.get("color"),
+            "style_code": c.get("style_code"),
+            "style_id": c.get("style_id"),
+            "job_id": c.get("job_id"),
+        }
+        for c in cartons
+    ]
+    dispatch_doc = {
+        "invoice_id": invoice_id,
+        "invoice_no": invoice_no,
+        "dispatched_at": now_iso(),
+        "dispatched_by": u["email"],
+        "client_name": po.get("client_name"),
+        "po_ids": [payload.po_id],
+        "po_numbers": [po.get("po_number", "")],
+        "job_ids": payload.job_ids,
+        "packing_cartons_snapshot": snapshot,
+        "total_cartons": total_cartons,
+        "total_qty": total_qty,
+        "invoice_file_b64": _b64.b64encode(invoice_pdf).decode("ascii"),
+        "packing_list_file_b64": _b64.b64encode(packing_xlsx).decode("ascii"),
+        "carton_labels_file_b64": _b64.b64encode(labels_pdf).decode("ascii"),
+    }
+    dr_res = await db.dispatch_records.insert_one(dispatch_doc)
+    dispatch_record_id = str(dr_res.inserted_id)
+
+    # ── 11. Advance job stages ────────────────────────────────────────────────
+    await _flag_jobs(payload.job_ids, "invoice_generated_at")
+
+    # ── 12. ZIP all three documents ───────────────────────────────────────────
+    date_tag = datetime.now().strftime("%Y%m%d-%H%M")
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"Invoice-{invoice_no}.pdf", invoice_pdf)
+        zf.writestr(f"PackingList-{invoice_no}-{date_tag}.xlsx", packing_xlsx)
+        zf.writestr(f"CartonLabels-{invoice_no}.pdf", labels_pdf)
+    zip_buf.seek(0)
+
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="Dispatch-{invoice_no}-{date_tag}.zip"',
+            "X-Dispatch-Record-Id": dispatch_record_id,
+            "X-Invoice-No": invoice_no,
+        },
+    )
+
+
+# ═══ DISPATCH RECORDS ═══
+
+@api.get("/dispatch-records")
+async def list_dispatch_records(
+    request: Request,
+    client: Optional[str] = None,
+    po_number: Optional[str] = None,
+    limit: int = 200,
+):
+    """List all dispatch records (file bytes excluded for size)."""
+    await get_current_user(request)
+    q: dict = {}
+    if client:
+        q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
+    if po_number:
+        q["po_numbers"] = {"$elemMatch": {"$regex": re.escape(po_number), "$options": "i"}}
+    proj = {
+        "invoice_file_b64": 0,
+        "packing_list_file_b64": 0,
+        "carton_labels_file_b64": 0,
+    }
+    docs = await db.dispatch_records.find(q, proj).sort("dispatched_at", -1).to_list(limit)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/dispatch-records/{dr_id}")
+async def get_dispatch_record(dr_id: str, request: Request):
+    """Full dispatch record detail — includes snapshot but excludes file bytes (use /file routes)."""
+    await get_current_user(request)
+    doc = await db.dispatch_records.find_one(
+        {"_id": oid(dr_id)},
+        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0},
+    )
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    return stringify(doc)
+
+
+@api.get("/dispatch-records/{dr_id}/invoice")
+async def download_dispatch_invoice(dr_id: str, request: Request):
+    """Re-download the invoice PDF exactly as generated at dispatch time."""
+    await get_current_user(request)
+    import base64 as _b64
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"invoice_file_b64": 1, "invoice_no": 1})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    raw = _b64.b64decode(doc.get("invoice_file_b64") or "")
+    if not raw:
+        raise HTTPException(404, "Invoice file not stored for this record")
+    inv_no = doc.get("invoice_no", "invoice")
+    return StreamingResponse(
+        BytesIO(raw), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Invoice-{inv_no}.pdf"'},
+    )
+
+
+@api.get("/dispatch-records/{dr_id}/packing-list")
+async def download_dispatch_packing_list(dr_id: str, request: Request):
+    """Re-download the packing list XLSX as generated at dispatch time."""
+    await get_current_user(request)
+    import base64 as _b64
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"packing_list_file_b64": 1, "invoice_no": 1})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    raw = _b64.b64decode(doc.get("packing_list_file_b64") or "")
+    if not raw:
+        raise HTTPException(404, "Packing list file not stored for this record")
+    inv_no = doc.get("invoice_no", "dispatch")
+    return StreamingResponse(
+        BytesIO(raw),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="PackingList-{inv_no}.xlsx"'},
+    )
+
+
+@api.get("/dispatch-records/{dr_id}/carton-labels")
+async def download_dispatch_carton_labels(dr_id: str, request: Request):
+    """Re-download the carton labels PDF as generated at dispatch time."""
+    await get_current_user(request)
+    import base64 as _b64
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"carton_labels_file_b64": 1, "invoice_no": 1})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    raw = _b64.b64decode(doc.get("carton_labels_file_b64") or "")
+    if not raw:
+        raise HTTPException(404, "Carton labels file not stored for this record")
+    inv_no = doc.get("invoice_no", "dispatch")
+    return StreamingResponse(
+        BytesIO(raw), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="CartonLabels-{inv_no}.pdf"'},
+    )
+
+
+@api.post("/dispatch-records/{dr_id}/reprint")
+async def reprint_dispatch_zip(dr_id: str, request: Request):
+    """Re-download all three dispatch documents as a ZIP (for reprinting)."""
+    await get_current_user(request)
+    import base64 as _b64
+    import zipfile
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    inv_no = doc.get("invoice_no", "dispatch")
+    invoice_pdf = _b64.b64decode(doc.get("invoice_file_b64") or "")
+    packing_xlsx = _b64.b64decode(doc.get("packing_list_file_b64") or "")
+    labels_pdf = _b64.b64decode(doc.get("carton_labels_file_b64") or "")
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if invoice_pdf:
+            zf.writestr(f"Invoice-{inv_no}.pdf", invoice_pdf)
+        if packing_xlsx:
+            zf.writestr(f"PackingList-{inv_no}.xlsx", packing_xlsx)
+        if labels_pdf:
+            zf.writestr(f"CartonLabels-{inv_no}.pdf", labels_pdf)
+    zip_buf.seek(0)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="Reprint-{inv_no}.zip"'},
+    )
 
 
 @api.post("/packing-lists/job")
@@ -10201,7 +10813,10 @@ async def list_jobs(request: Request, include_archived: bool = False, source_typ
     if not include_archived:
         q = {"archived": {"$ne": True}}
     if source_type and source_type != "all":
-        q["source_type"] = source_type
+        if source_type == "b2b_client":
+            q["source_type"] = {"$in": ["b2b_client", None]}
+        else:
+            q["source_type"] = source_type
     docs = await db.production_jobs.find(q).sort("created_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
 
@@ -10235,10 +10850,28 @@ async def _flag_jobs(job_ids: list, field: str) -> None:
             continue
     now = now_iso()
     # Bulk update – set the timestamp
+    update_fields = {field: now}
+    if field == "invoice_generated_at":
+        update_fields["stage"] = "dispatched"
+        update_fields["stage_entered_at"] = now
+        update_fields["stage_deadline"] = None
+
     await db.production_jobs.update_many(
         {"_id": {"$in": obj_ids}},
-        {"$set": {field: now}},
+        {"$set": update_fields},
     )
+    
+    if field == "invoice_generated_at":
+        for o_id in obj_ids:
+            await db.production_jobs.update_one(
+                {"_id": o_id},
+                {"$push": {"history": {
+                    "stage": "dispatched", "at": now, "by": "system",
+                    "notes": "Invoice generated and job dispatched",
+                    "qc_pass": None, "rejected_qty": 0
+                }}}
+            )
+
     # Then for each job, check if both flags are now set → archive
     docs = await db.production_jobs.find({"_id": {"$in": obj_ids}}).to_list(2000)
     archive_ids = [d["_id"] for d in docs if d.get("invoice_generated_at") and d.get("packing_generated_at")]

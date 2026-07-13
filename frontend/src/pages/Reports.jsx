@@ -43,6 +43,7 @@ const STAGE_LABEL = {
   lasting: "Lasting",
   sole_pasting: "Sole Pasting",
   finishing: "Finishing",
+  qc_pack: "QC & Pack",
   dispatched: "Dispatched",
 };
 

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { http } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus } from "lucide-react";
 
 const STAGES = [
   { key: "procurement", label: "Procurement", color: "#64748B" },
@@ -14,7 +14,8 @@ const STAGES = [
   { key: "stitching", label: "Stitching", color: "#C27842" },
   { key: "lasting", label: "Lasting", color: "#A65D24" },
   { key: "sole_pasting", label: "Sole Pasting", color: "#F59E0B" },
-  { key: "finishing", label: "Finish / QC / Pack", color: "#16A34A" },
+  { key: "finishing", label: "Finishing", color: "#16A34A" },
+  { key: "qc_pack", label: "QC & Pack", color: "#0D9488" },
   { key: "dispatched", label: "Dispatched", color: "#F97316" },
 ];
 
@@ -32,6 +33,7 @@ const ASSIGNMENT_ROLES = [
   { key: "lasting", label: "Lasting" },
   { key: "sole_pasting", label: "Sole Pasting" },
   { key: "finishing", label: "Finishing" },
+  { key: "qc_pack", label: "QC & Pack" },
 ];
 
 // Stage → most likely role mapping for bulk-drag assignment
@@ -43,6 +45,7 @@ const STAGE_TO_ROLE = {
   lasting: "lasting",
   sole_pasting: "sole_pasting",
   finishing: "finishing",
+  qc_pack: "qc_pack",
 };
 
 const sortSizes = (a, b) => {
@@ -121,6 +124,8 @@ export default function Production() {
   const [archivedJobs, setArchivedJobs] = useState([]);
   const [detailFor, setDetailFor] = useState(null);
   const [packingFor, setPackingFor] = useState(null); // {kind:'single'|'merged', group?, jobs?}
+  const [cartonPackFor, setCartonPackFor] = useState(null); // job group
+  const [dispatchFor, setDispatchFor] = useState(null);     // group to dispatch
   const [savedPackingLists, setSavedPackingLists] = useState([]);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
@@ -185,13 +190,14 @@ export default function Production() {
     }
   };
 
-  const triggerDownload = (blobData, filename) => {
+  const triggerDownload = (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+    const safeFilename = filename.replace(/[\/\\]/g, "-");
     const blob = new Blob([blobData], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      type: mimeType,
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = filename;
+    a.href = url; a.download = safeFilename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   };
@@ -220,7 +226,8 @@ export default function Production() {
       // trigger download with a descriptive filename
       const a = document.createElement("a");
       a.href = url;
-      a.download = `ProductionCard_${group.po_number}_${group.style_code}_${(group.color || "color").replace(/\s+/g, "")}.pdf`;
+      const safePo = (group.po_number || "").replace(/[\/\\]/g, "-");
+      a.download = `ProductionCard_${safePo}_${group.style_code}_${(group.color || "color").replace(/\s+/g, "")}.pdf`;
       document.body.appendChild(a); a.click(); a.remove();
       // build message
       const sizeBreak = group.sizes.map(sz => {
@@ -258,6 +265,13 @@ export default function Production() {
       load();
     } catch (e) {
       alert("Stage transition failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+  const handleMoveGroup = (group, nextStage) => {
+    if (nextStage === "qc_pack") {
+      setCartonPackFor(group);
+    } else {
+      moveGroup(group, nextStage);
     }
   };
   const toggleComponent = async (group, key, val) => {
@@ -486,13 +500,15 @@ export default function Production() {
                         stageColor={s.color}
                         stageIdx={STAGES.findIndex(x => x.key === s.key)}
                         canEdit={canEdit}
-                        onMove={moveGroup}
+                        onMove={handleMoveGroup}
                         onToggleComponent={toggleComponent}
                         onOpenAssign={(role) => setAssignFor({ group: g, role })}
                         onOpenQty={(rowId) => setQtyFor({ group: g, rowId })}
                         onPrint={() => printCard(g)}
                         onWhatsApp={() => setWaFor({ group: g })}
                         onPacking={() => openPackingForGroup(g)}
+                        onPackCartons={() => setCartonPackFor(g)}
+                        onDispatch={() => setDispatchFor(g)}
                         isProc={isProc}
                         isDispatched={isDisp}
                         onMatReq={() => downloadMaterialRequirement([g], `${g.style_code} · ${g.color}`)}
@@ -585,6 +601,22 @@ export default function Production() {
           onSubmit={submitPacking}
         />
       )}
+      {cartonPackFor && (
+        <PackCartonDialog
+          group={cartonPackFor}
+          style={styleByCode[cartonPackFor.style_code]}
+          onClose={() => setCartonPackFor(null)}
+          load={load}
+        />
+      )}
+
+      {dispatchFor && (
+        <DispatchDialog
+          group={dispatchFor}
+          onClose={() => setDispatchFor(null)}
+          load={load}
+        />
+      )}
 
       {bulkConfirm && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="bulk-assign-dialog">
@@ -629,7 +661,7 @@ export default function Production() {
 function ColorGroupCard(props) {
   const { group, style, stageColor, stageIdx, canEdit, onMove, onToggleComponent,
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isProc, isDispatched, onMatReq,
-    procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice } = props;
+    procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch } = props;
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -832,10 +864,20 @@ function ColorGroupCard(props) {
               <Package className="w-3 h-3" /> Packing List
             </button>
           )}
+          {group.stage === "qc_pack" && (
+            <button onClick={onPackCartons} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#7C3AED] hover:bg-[#6D28D9] px-3 py-1 flex items-center gap-1" data-testid={`pack-carton-btn-${group.key}`}>
+              <Package className="w-3 h-3" /> Pack Carton
+            </button>
+          )}
+          {group.stage === "qc_pack" && (
+            <button onClick={onDispatch} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-3 py-1 flex items-center gap-1" data-testid={`dispatch-btn-${group.key}`}>
+              <FileDown className="w-3 h-3" /> Dispatch Docs
+            </button>
+          )}
           {canEdit && prevStage && (
             <button disabled={!effectiveCanEdit} onClick={() => onMove(group, prevStage.key)} className={`text-[10px] uppercase tracking-wider font-bold border px-2 py-1 ${effectiveCanEdit ? 'text-slate-500 hover:text-slate-900 border-slate-300' : 'text-slate-300 border-slate-200 cursor-not-allowed'}`}>← {prevStage.label}</button>
           )}
-          {canEdit && nextStage && (
+          {canEdit && nextStage && group.stage !== "qc_pack" && (
             <button disabled={!effectiveCanEdit} onClick={() => onMove(group, nextStage.key)} className={`text-[10px] uppercase tracking-wider font-bold text-white px-3 py-1 ${effectiveCanEdit ? 'bg-[#0F172A] hover:bg-[#C27842]' : 'bg-slate-300 cursor-not-allowed'}`} data-testid={`move-next-${group.key}`}>{nextStage.label} →</button>
           )}
         </div>
@@ -1619,6 +1661,466 @@ function ShortageModal({ state, onClose, navigate }) {
 
         <div className="shrink-0 border-t-2 border-slate-200 px-6 py-4 flex justify-end bg-slate-50">
           <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* -------------------- CARTON PACKING DIALOG -------------------- */
+function PackCartonDialog({ group, style, onClose, load }) {
+  const [cartons, setCartons] = useState([]);
+  const [eanCodes, setEanCodes] = useState({});
+  const [eanInputs, setEanInputs] = useState({});
+  const [cartonRows, setCartonRows] = useState({}); // size -> array of carton quantities
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const jobIds = useMemo(() => group.rows.map(r => r.id).join(","), [group]);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [cartonsRes, eanRes] = await Promise.all([
+        http.get(`/packing/cartons?job_ids=${jobIds}`),
+        http.get(`/packing/ean-codes?style_id=${group.style_id}`),
+      ]);
+      const existingCartons = cartonsRes.data || [];
+      setCartons(existingCartons);
+      
+      const eans = {};
+      for (const item of eanRes.data || []) {
+        eans[item.size] = item.ean_code;
+      }
+      setEanCodes(eans);
+      
+      // Initialize EAN inputs
+      setEanInputs(prev => {
+        const next = { ...prev };
+        for (const sz of group.sizes) {
+          if (next[sz] === undefined) {
+            next[sz] = eans[sz] || "";
+          }
+        }
+        return next;
+      });
+
+      // Initialize carton rows
+      const rowsMap = {};
+      for (const sz of group.sizes) {
+        const szCartons = existingCartons.filter(c => c.size === sz);
+        if (szCartons.length > 0) {
+          rowsMap[sz] = szCartons.map(c => c.qty);
+        } else {
+          // Pre-fill using defaults
+          const row = group.rows.find(r => String(r.size || "—") === sz);
+          const completed = row?.completed_qty || 0;
+          if (completed <= 0) {
+            rowsMap[sz] = [];
+          } else {
+            let defaultQty = 20; // fallback default
+            if (style?.default_pairs_per_carton) {
+              if (style.default_pairs_per_carton[sz]) {
+                defaultQty = style.default_pairs_per_carton[sz];
+              } else if (style.default_pairs_per_carton.default) {
+                defaultQty = style.default_pairs_per_carton.default;
+              }
+            }
+            // Populate rows
+            const rows = [];
+            let rem = completed;
+            while (rem > 0) {
+              const take = Math.min(rem, defaultQty);
+              rows.push(take);
+              rem -= take;
+            }
+            rowsMap[sz] = rows.length > 0 ? rows : [""];
+          }
+        }
+      }
+      setCartonRows(rowsMap);
+
+    } catch (e) {
+      setError("Failed to load packing data: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setLoading(false);
+    }
+  }, [group, jobIds, style]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const addCartonRow = (sz) => {
+    let defaultQty = 20;
+    if (style?.default_pairs_per_carton) {
+      if (style.default_pairs_per_carton[sz]) {
+        defaultQty = style.default_pairs_per_carton[sz];
+      } else if (style.default_pairs_per_carton.default) {
+        defaultQty = style.default_pairs_per_carton.default;
+      }
+    }
+    setCartonRows(prev => ({
+      ...prev,
+      [sz]: [...(prev[sz] || []), defaultQty]
+    }));
+  };
+
+  const updateCartonRow = (sz, index, val) => {
+    setCartonRows(prev => {
+      const arr = [...(prev[sz] || [])];
+      arr[index] = val === "" ? "" : parseInt(val, 10) || 0;
+      return { ...prev, [sz]: arr };
+    });
+  };
+
+  const removeCartonRow = (sz, index) => {
+    setCartonRows(prev => {
+      const arr = (prev[sz] || []).filter((_, idx) => idx !== index);
+      return { ...prev, [sz]: arr };
+    });
+  };
+
+  const handleConfirm = async () => {
+    setError("");
+    const missingEanSizes = [];
+    const eanList = [];
+    const cartonList = [];
+
+    for (const sz of group.sizes) {
+      const row = group.rows.find(r => String(r.size || "—") === sz);
+      const completed = row?.completed_qty || 0;
+      
+      if (completed > 0) {
+        const ean = (eanInputs[sz] || "").trim();
+        if (!ean) {
+          missingEanSizes.push(sz);
+        } else {
+          eanList.push({ size: sz, ean_code: ean });
+        }
+        
+        const rows = cartonRows[sz] || [];
+        const sum = rows.reduce((s, r) => s + (parseInt(r, 10) || 0), 0);
+        if (sum !== completed) {
+          setError(`Size ${sz} sum of cartons (${sum}) must match completed qty (${completed}) exactly.`);
+          return;
+        }
+        
+        if (rows.some(r => r === "" || parseInt(r, 10) <= 0)) {
+          setError(`Size ${sz} has invalid carton quantities. Each carton must have a qty > 0.`);
+          return;
+        }
+
+        for (const qty of rows) {
+          cartonList.push({ size: sz, qty: parseInt(qty, 10) });
+        }
+      }
+    }
+
+    if (missingEanSizes.length > 0) {
+      setError(`Please enter EAN codes for size(s): ${missingEanSizes.join(", ")}`);
+      return;
+    }
+
+    try {
+      await http.post("/packing/confirm-qc-pack", {
+        job_ids: group.rows.map(r => r.id),
+        eans: eanList,
+        cartons: cartonList
+      });
+      onClose();
+      load();
+    } catch (e) {
+      setError("Failed to confirm: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const isAlreadyInQcPack = group.stage === "qc_pack";
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="carton-pack-dialog">
+      <div className="bg-white w-full max-w-5xl max-h-[92vh] border-2 border-slate-900 shadow-2xl flex flex-col rounded-none overflow-hidden">
+        
+        {/* Header */}
+        <div className="bg-[#0D9488] text-white px-6 py-4 flex items-center justify-between shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">
+              {isAlreadyInQcPack ? "Carton Packing Configuration (QC & Pack Stage)" : "QC & Pack — Setup & Confirm"}
+            </div>
+            <div className="text-lg font-bold">{group.style_code} · {group.color} · PO {group.po_number}</div>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-white/20 transition-colors" data-testid="pack-dialog-close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          {error && <div className="text-red-600 text-sm p-3 border border-red-300 bg-red-50 font-bold">{error}</div>}
+
+          {loading ? (
+            <div className="p-12 text-center text-slate-400">Loading packing details...</div>
+          ) : (
+            <div className="space-y-6">
+              
+              {/* Main Matrix Form */}
+              <Card className="p-4 border-2 border-slate-200 overflow-hidden">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700 mb-3">Sizes, Completed Quantities & Cartons split</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr className="text-left text-[9px] uppercase tracking-wider text-slate-600 font-bold">
+                        <th className="px-3 py-2 w-16">Size</th>
+                        <th className="px-3 py-2 text-right w-24">Completed Qty</th>
+                        <th className="px-3 py-2 w-44">EAN Code</th>
+                        <th className="px-3 py-2">Cartons Configuration (Row values)</th>
+                        <th className="px-3 py-2 text-right w-36">Cartons Sum</th>
+                        <th className="px-3 py-2 text-center w-24">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.sizes.map(sz => {
+                        const row = group.rows.find(r => String(r.size || "—") === sz);
+                        const completed = row?.completed_qty || 0;
+                        const eanInput = eanInputs[sz] || "";
+                        const rows = cartonRows[sz] || [];
+                        const sum = rows.reduce((s, r) => s + (parseInt(r, 10) || 0), 0);
+                        const isMatch = sum === completed;
+                        const isEanMissing = completed > 0 && !eanInput.trim();
+
+                        return (
+                          <tr key={sz} className="border-b border-slate-100 hover:bg-slate-50">
+                            {/* Size */}
+                            <td className="px-3 py-3 font-mono font-bold text-slate-800">Sz {sz}</td>
+                            
+                            {/* Completed Qty */}
+                            <td className="px-3 py-3 text-right font-mono font-bold text-slate-900">{completed}</td>
+                            
+                            {/* EAN Code */}
+                            <td className="px-3 py-3">
+                              {completed > 0 ? (
+                                <div className="space-y-1">
+                                  <input
+                                    value={eanInput}
+                                    onChange={e => setEanInputs(prev => ({ ...prev, [sz]: e.target.value }))}
+                                    placeholder="Enter/Scan EAN..."
+                                    className={`w-full border px-2 py-1 text-[11px] font-mono outline-none focus:border-teal-500 ${isEanMissing ? 'border-red-400 bg-red-50/30' : 'border-slate-300'}`}
+                                  />
+                                  {isEanMissing && <span className="text-[9px] text-red-500 font-bold block">* EAN required</span>}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 italic">No items completed</span>
+                              )}
+                            </td>
+                            
+                            {/* Cartons Configuration */}
+                            <td className="px-3 py-3">
+                              {completed > 0 ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {rows.map((qty, idx) => (
+                                    <div key={idx} className="flex items-center border border-slate-200 bg-slate-50 px-1 py-0.5 gap-1">
+                                      <span className="text-[10px] text-slate-400 font-mono">B{idx+1}:</span>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        value={qty}
+                                        onChange={e => updateCartonRow(sz, idx, e.target.value)}
+                                        className="w-12 border border-slate-300 px-1 py-0.5 text-center text-[11px] font-mono focus:border-teal-500 outline-none"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => removeCartonRow(sz, idx)}
+                                        className="text-slate-400 hover:text-red-600 p-0.5"
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  ))}
+                                  <button
+                                    type="button"
+                                    onClick={() => addCartonRow(sz)}
+                                    className="px-2 py-1 border border-dashed border-teal-500 text-teal-600 hover:bg-teal-50 font-bold text-[10px] uppercase flex items-center gap-0.5"
+                                  >
+                                    <Plus className="w-3 h-3" /> Add Box
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            
+                            {/* Cartons Sum */}
+                            <td className="px-3 py-3 text-right font-mono font-bold text-slate-700">
+                              {completed > 0 ? `${sum} prs` : "0 prs"}
+                            </td>
+                            
+                            {/* Status */}
+                            <td className="px-3 py-3 text-center">
+                              {completed > 0 ? (
+                                isMatch ? (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800 border border-green-200">
+                                    <Check className="w-3 h-3 mr-0.5" /> OK
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
+                                    Mismatch ({sum - completed > 0 ? `+${sum - completed}` : sum - completed})
+                                  </span>
+                                )
+                              ) : (
+                                <span className="text-slate-400 font-mono">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-between shrink-0">
+          <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={handleConfirm}
+            className="px-6 py-2 bg-[#0D9488] hover:bg-[#0B7A70] text-white font-bold uppercase tracking-wider text-xs shadow-md disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
+          >
+            {isAlreadyInQcPack ? "Save Configuration" : "Confirm Packing & Move to QC & Pack"}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DispatchDialog — invoice + packing list + carton labels
+// ═══════════════════════════════════════════════════════════
+function DispatchDialog({ group, onClose, load }) {
+  const [form, setForm] = useState({
+    transport_mode: "",
+    vehicle_no: "",
+    supply_date: new Date().toISOString().slice(0, 10),
+    transporter: "",
+    dispatch_date: new Date().toISOString().slice(0, 10),
+    carton_dim: "60x50x30 CMS",
+    net_wt_per_carton: "",
+    gross_wt_per_carton: "",
+    notes: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [done, setDone] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const totalPairs = group.rows?.reduce((s, r) => s + (r.completed_qty || 0), 0) || 0;
+  const sizes = group.rows?.map(r => r.size).join(", ") || "";
+  const poId = group.po_id || group.rows?.[0]?.po_id || "";
+  const jobIds = useMemo(() => group.rows?.map(r => r.id).filter(Boolean) || [], [group.rows]);
+
+  const handleDispatch = useCallback(async () => {
+    if (!poId) { setErr("Cannot find PO for this group — contact admin."); return; }
+    if (!jobIds.length) { setErr("No job IDs available."); return; }
+    setLoading(true); setErr(null);
+    try {
+      const payload = {
+        job_ids: jobIds, po_id: poId, ...form,
+        net_wt_per_carton: form.net_wt_per_carton ? parseFloat(form.net_wt_per_carton) : null,
+        gross_wt_per_carton: form.gross_wt_per_carton ? parseFloat(form.gross_wt_per_carton) : null,
+      };
+      const resp = await http.post("/dispatch", payload, { responseType: "blob" });
+      const blob = new Blob([resp.data], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const invoiceNo = resp.headers?.["x-invoice-no"] || "dispatch";
+      const safeInvoiceNo = invoiceNo.replace(/[\/\\]/g, "-");
+      const drId = resp.headers?.["x-dispatch-record-id"] || "";
+      a.href = url; a.download = `Dispatch-${safeInvoiceNo}.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      setDone({ dispatch_record_id: drId, invoice_no: invoiceNo });
+      await load();
+    } catch (e) {
+      let msg = "Dispatch failed — check server logs.";
+      try { const txt = await e?.response?.data?.text(); if (txt) msg = JSON.parse(txt)?.detail || txt; } catch {}
+      setErr(msg);
+    } finally { setLoading(false); }
+  }, [form, poId, jobIds, load]);
+
+  const Field = ({ label, children }) => (
+    <div className="space-y-1">
+      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-500">{label}</label>
+      {children}
+    </div>
+  );
+  const ic = "w-full border border-slate-300 px-2.5 py-1.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="bg-[#0D9488] px-6 py-4 shrink-0">
+          <div className="text-[10px] uppercase tracking-widest text-teal-100 font-bold">Generate Dispatch Documents</div>
+          <div className="text-white font-bold text-lg mt-0.5">{group.style_code} · {group.color}</div>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-6 space-y-5">
+          {/* Summary strip */}
+          <div className="bg-slate-50 border border-slate-200 p-4 rounded">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Dispatch Summary</div>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div><div className="text-2xl font-black text-[#0F172A]">{totalPairs}</div><div className="text-[10px] text-slate-400 uppercase">Total Pairs</div></div>
+              <div><div className="text-2xl font-black text-[#0F172A]">{jobIds.length}</div><div className="text-[10px] text-slate-400 uppercase">Job Lines</div></div>
+              <div><div className="text-sm font-bold text-[#0F172A]">{sizes || "—"}</div><div className="text-[10px] text-slate-400 uppercase">Sizes</div></div>
+            </div>
+            <p className="mt-3 pt-3 border-t border-slate-200 text-[11px] text-slate-500">
+              Box numbers assigned 1..N (sorted by size). Invoice uses actual packed qty from carton rows.
+            </p>
+          </div>
+
+          {/* Shipping fields */}
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Transport Mode"><input className={ic} value={form.transport_mode} placeholder="By Road" onChange={e => set("transport_mode", e.target.value)} /></Field>
+            <Field label="Vehicle No."><input className={ic} value={form.vehicle_no} placeholder="MH-01-AB-1234" onChange={e => set("vehicle_no", e.target.value)} /></Field>
+            <Field label="Transporter"><input className={ic} value={form.transporter} placeholder="Transporter name" onChange={e => set("transporter", e.target.value)} /></Field>
+            <Field label="Supply / Dispatch Date"><input type="date" className={ic} value={form.supply_date} onChange={e => set("supply_date", e.target.value)} /></Field>
+            <Field label="Carton Dimensions"><input className={ic} value={form.carton_dim} placeholder="60x50x30 CMS" onChange={e => set("carton_dim", e.target.value)} /></Field>
+            <Field label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" onChange={e => set("net_wt_per_carton", e.target.value)} /></Field>
+            <Field label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" onChange={e => set("gross_wt_per_carton", e.target.value)} /></Field>
+            <Field label="Notes"><input className={ic} value={form.notes} placeholder="Optional" onChange={e => set("notes", e.target.value)} /></Field>
+          </div>
+
+          {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded">{err}</div>}
+          {done && (
+            <div className="bg-teal-50 border border-teal-200 text-teal-800 text-sm px-4 py-3 rounded">
+              <div className="font-bold">✅ Dispatched — Invoice {done.invoice_no}</div>
+              <div className="text-xs text-teal-700 mt-1">ZIP downloaded. Invoice, Packing List and Carton Labels saved to Dispatch Records for future reprinting.</div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-between shrink-0">
+          <button onClick={onClose} className="text-sm text-slate-600 hover:text-slate-900 font-medium">{done ? "Close" : "Cancel"}</button>
+          {!done && (
+            <button type="button" disabled={loading || !poId} onClick={handleDispatch} data-testid="dispatch-confirm-btn"
+              className="px-6 py-2.5 bg-[#0D9488] hover:bg-[#0B7A70] text-white font-bold uppercase tracking-wider text-xs shadow-md disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2">
+              {loading
+                ? <><svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Generating…</>
+                : <><FileDown className="w-4 h-4" /> Generate &amp; Download ZIP</>
+              }
+            </button>
+          )}
         </div>
       </div>
     </div>

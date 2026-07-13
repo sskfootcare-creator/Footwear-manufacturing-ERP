@@ -20,7 +20,8 @@ const SKILLS = [
   { key: "stitching", label: "Stitching" },
   { key: "lasting", label: "Lasting" },
   { key: "sole_pasting", label: "Sole Pasting" },
-  { key: "finishing", label: "Finishing / QC / Pack" },
+  { key: "finishing", label: "Finishing" },
+  { key: "qc_pack", label: "QC & Pack" },
   { key: "general", label: "General" },
 ];
 
@@ -32,6 +33,7 @@ const SKILL_COLOR = {
   lasting: "slate",
   sole_pasting: "orange",
   finishing: "green",
+  qc_pack: "indigo",
   general: "slate",
 };
 
