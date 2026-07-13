@@ -32,6 +32,7 @@ const ROLE_LABEL = {
   lasting: "Lasting",
   sole_pasting: "Sole Pasting",
   finishing: "Finishing",
+  qc_pack: "QC & Pack",
 };
 
 export default function Payroll() {

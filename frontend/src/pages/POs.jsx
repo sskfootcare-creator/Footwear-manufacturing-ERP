@@ -334,7 +334,8 @@ export default function POs() {
       );
       const a = document.createElement("a");
       a.href = url;
-      a.download = `PackingList-${po.po_number}.xlsx`;
+      const safePo = (po.po_number || "").replace(/[\/\\]/g, "-");
+      a.download = `PackingList-${safePo}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();

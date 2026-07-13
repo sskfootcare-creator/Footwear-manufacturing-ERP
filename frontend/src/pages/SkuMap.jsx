@@ -79,7 +79,8 @@ function UnmappedTab({ styles, onDone }) {
   const [selectedStyleId, setSelectedStyleId] = useState("");
   const [newStyleForm, setNewStyleForm]   = useState({
     code: "", name: "", category: "Footwear", description: "",
-    base_size: "7", overhead_pct: 8, packing_cost: 12, margin_pct: 25, gst_pct: 5
+    base_size: "7", overhead_pct: 8, packing_cost: 12, margin_pct: 25, gst_pct: 5,
+    default_pairs_per_carton: {}
   });
   const [styleSearch, setStyleSearch]     = useState("");
   const [submitError, setSubmitError]     = useState("");
@@ -106,7 +107,8 @@ function UnmappedTab({ styles, onDone }) {
         overhead_pct: 8,
         packing_cost: 12,
         margin_pct: 25,
-        gst_pct: 5
+        gst_pct: 5,
+        default_pairs_per_carton: {}
       });
       setSubmitError("");
       setSelectedStyleId("");
@@ -145,6 +147,7 @@ function UnmappedTab({ styles, onDone }) {
           packing_cost: Number(newStyleForm.packing_cost),
           margin_pct: Number(newStyleForm.margin_pct),
           gst_pct: Number(newStyleForm.gst_pct),
+          default_pairs_per_carton: newStyleForm.default_pairs_per_carton || {}
         });
         styleId = styleRes.data.id;
       }

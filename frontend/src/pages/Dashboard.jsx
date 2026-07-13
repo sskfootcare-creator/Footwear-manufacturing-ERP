@@ -11,13 +11,13 @@ import {
 const STAGE_COLORS = {
   procurement: "#64748B", cutting: "#2563EB", folding: "#0284C7",
   attachment: "#7C3AED", stitching: "#C27842", lasting: "#A65D24",
-  sole_pasting: "#F59E0B", finishing: "#16A34A", dispatched: "#F97316",
+  sole_pasting: "#F59E0B", finishing: "#16A34A", qc_pack: "#0D9488", dispatched: "#F97316",
 };
 
 const STAGE_LABEL = {
   procurement: "Procurement", cutting: "Cutting", folding: "Folding",
   attachment: "Attachment", stitching: "Stitching", lasting: "Lasting",
-  sole_pasting: "Sole Pasting", finishing: "Finishing", dispatched: "Dispatched",
+  sole_pasting: "Sole Pasting", finishing: "Finishing", qc_pack: "QC & Pack", dispatched: "Dispatched",
 };
 
 export default function Dashboard() {

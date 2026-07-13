@@ -63,6 +63,7 @@ const emptyStyle = {
   packing_cost: 12,
   margin_pct: 25,
   gst_pct: 5,
+  default_pairs_per_carton: {},
 };
 
 export default function Styles() {
@@ -70,6 +71,8 @@ export default function Styles() {
   const [bomStyle, setBomStyle] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(false);
+  const [newSizeKey, setNewSizeKey] = useState("");
+  const [newSizeQty, setNewSizeQty] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkFile, setBulkFile] = useState(null);
@@ -181,7 +184,7 @@ export default function Styles() {
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const a = document.createElement("a");
       a.href = url;
-      a.download = fname;
+      a.download = fname.replace(/[\/\\]/g, "-");
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -334,11 +337,11 @@ export default function Styles() {
           description: styleToEdit.description || "",
           base_size: styleToEdit.base_size || "7",
           bom: styleToEdit.bom || [],
-          labor: styleToEdit.labor || [],
-          overhead_pct: styleToEdit.overhead_pct,
+          labor: styleToEdit.labor || [],          overhead_pct: styleToEdit.overhead_pct,
           packing_cost: styleToEdit.packing_cost,
           margin_pct: styleToEdit.margin_pct,
           gst_pct: styleToEdit.gst_pct,
+          default_pairs_per_carton: styleToEdit.default_pairs_per_carton || {},
         });
         setOpen(true);
         // Clear the query parameter so it doesn't reopen on refresh
@@ -357,7 +360,7 @@ export default function Styles() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, searchQuery]);
-
+ 
   const startNew = () => {
     setEditId(null);
     setForm(emptyStyle);
@@ -385,6 +388,7 @@ export default function Styles() {
       packing_cost: s.packing_cost,
       margin_pct: s.margin_pct,
       gst_pct: s.gst_pct,
+      default_pairs_per_carton: s.default_pairs_per_carton || {},
     });
     setFormError("");
     setStyleMappings([]);
@@ -404,6 +408,7 @@ export default function Styles() {
         packing_cost: Number(form.packing_cost),
         margin_pct: Number(form.margin_pct),
         gst_pct: Number(form.gst_pct),
+        default_pairs_per_carton: form.default_pairs_per_carton || {},
         bom: form.bom.map((b) => ({
           ...b,
           quantity: Number(b.quantity),
@@ -438,6 +443,24 @@ export default function Styles() {
       setFormError(e.response?.data?.detail || e.message);
     }
   };
+
+  const addSizeCarton = () => {
+    if (!newSizeKey || !newSizeQty) return;
+    const qtyVal = parseInt(newSizeQty, 10);
+    if (isNaN(qtyVal) || qtyVal <= 0) return;
+    const cur = { ...(form.default_pairs_per_carton || {}) };
+    cur[newSizeKey.trim()] = qtyVal;
+    setForm({ ...form, default_pairs_per_carton: cur });
+    setNewSizeKey("");
+    setNewSizeQty("");
+  };
+
+  const removeSizeCarton = (sz) => {
+    const cur = { ...(form.default_pairs_per_carton || {}) };
+    delete cur[sz];
+    setForm({ ...form, default_pairs_per_carton: cur });
+  };
+
   const remove = (id) => {
     setConfirm({
       title: "Delete Style",
@@ -1103,6 +1126,68 @@ export default function Styles() {
                     setForm({ ...form, gst_pct: e.target.value })
                   }
                 />
+                <Input
+                  label="Default pairs / carton"
+                  type="number"
+                  value={form.default_pairs_per_carton?.default || ""}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    const cur = { ...(form.default_pairs_per_carton || {}) };
+                    if (isNaN(val)) {
+                      delete cur.default;
+                    } else {
+                      cur.default = val;
+                    }
+                    setForm({ ...form, default_pairs_per_carton: cur });
+                  }}
+                  placeholder="e.g. 50"
+                />
+              </div>
+
+              <div className="border-t border-slate-200 pt-4 mt-4">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
+                  Size-Specific Carton Capacity Overrides
+                </h4>
+                <div className="flex gap-2 items-end mb-3 flex-wrap">
+                  <div className="w-24">
+                    <Input
+                      label="Size"
+                      value={newSizeKey}
+                      onChange={(e) => setNewSizeKey(e.target.value)}
+                      placeholder="e.g. 37"
+                    />
+                  </div>
+                  <div className="w-28">
+                    <Input
+                      label="Carton Qty"
+                      type="number"
+                      value={newSizeQty}
+                      onChange={(e) => setNewSizeQty(e.target.value)}
+                      placeholder="e.g. 35"
+                    />
+                  </div>
+                  <BtnSecondary type="button" onClick={addSizeCarton} className="h-10 px-4">
+                    Add Override
+                  </BtnSecondary>
+                </div>
+                
+                <div className="flex gap-2 flex-wrap">
+                  {Object.entries(form.default_pairs_per_carton || {}).filter(([sz]) => sz !== "default").map(([sz, qty]) => (
+                    <Badge key={sz} color="slate" className="flex items-center gap-1.5 py-1 px-2 border-2 border-slate-300">
+                      <span className="font-mono">Sz {sz}: {qty} pairs</span>
+                      <button
+                        type="button"
+                        onClick={() => removeSizeCarton(sz)}
+                        className="text-red-500 hover:text-red-700 font-bold ml-1 text-sm focus:outline-none"
+                      >
+                        ×
+                      </button>
+                    </Badge>
+                  ))}
+                  {Object.keys(form.default_pairs_per_carton || {}).filter(k => k !== "default").length === 0 && (
+                    <div className="text-xs italic text-slate-400">No size overrides defined.</div>
+                  )}
+                </div>
               </div>
 
               {/* Catalogue Codes — SSK-generated marketplace SKUs */}

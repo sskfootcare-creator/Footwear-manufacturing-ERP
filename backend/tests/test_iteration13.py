@@ -58,26 +58,59 @@ def dispatched_job(session):
     if not cand and rows:
         # Fallback: first row from archive (already dispatched)
         cand = rows[0]
-    assert cand, "No dispatched jobs available to invoice"
+    
+    if not cand:
+        import time
+        style_payload = {
+            "name": "Fixture Style",
+            "category": "Footwear",
+            "base_size": "8",
+            "bom": [],
+            "labor": [],
+        }
+        r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
+        assert r_style.status_code == 200, r_style.text
+        style_code = r_style.json()["code"]
+        
+        po_payload = {
+            "po_number": f"PO-FIXTURE-{int(time.time())}",
+            "client_name": "Fixture Client",
+            "po_date": "2026-07-13",
+            "delivery_date": "2026-08-13",
+            "payment_terms": "30 Days Credit",
+            "line_items": [
+                {
+                    "style_code": style_code,
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 50,
+                    "unit_price": 400.0,
+                    "amount": 20000.0
+                }
+            ]
+        }
+        r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
+        assert r_po.status_code == 200, r_po.text
+        po_id = r_po.json()["id"]
+        
+        r_jobs = session.get(f"{BASE_URL}/api/production/jobs?source_type=all", timeout=15)
+        assert r_jobs.status_code == 200
+        job = next((j for j in r_jobs.json() if j.get("po_id") == po_id), None)
+        assert job, "Job not auto-created"
+        
+        r_patch = session.patch(f"{BASE_URL}/api/production/jobs/{job['id']}", json={"stage": "dispatched", "completed_qty": 50}, timeout=15)
+        assert r_patch.status_code == 200, r_patch.text
+        cand = r_patch.json()
+        cand["id"] = str(cand.get("id") or cand.get("_id"))
+        cand["po_id"] = po_id
+
     return cand
 
 
 @pytest.fixture(scope="session")
-def fresh_invoice(session):
+def fresh_invoice(session, dispatched_job):
     """Create a fresh invoice from a dispatched job for tests below."""
-    # archive returns dispatched/archived production rows with id and po_id
-    r = session.get(f"{API}/production/archive", timeout=30)
-    assert r.status_code == 200
-    rows = r.json()
-    # Prefer a SIYARAM dispatched row not yet invoiced? Use first dispatched row.
-    job = None
-    for row in rows:
-        if (row.get("stage") or "").lower() == "dispatched":
-            job = row
-            break
-    if not job and rows:
-        job = rows[0]
-    assert job, "no dispatched jobs"
+    job = dispatched_job
     pid = job["po_id"]
     jid = job["id"]
     # Trigger invoice job (must pass job_ids list)

@@ -4,7 +4,7 @@ import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, Confi
 import { Drawer } from "./Materials";
 import { Plus, Trash2, Pencil, Save, AlertOctagon } from "lucide-react";
 
-const STAGES = ["procurement", "cutting", "folding", "attachment", "stitching", "lasting", "sole_pasting", "finishing"];
+const STAGES = ["procurement", "cutting", "folding", "attachment", "stitching", "lasting", "sole_pasting", "finishing", "qc_pack"];
 const DEFECT_TYPES = ["Material", "Workmanship", "Machine", "Design", "Operator Error", "Other"];
 const STATUSES = ["open", "in_progress", "closed"];
 

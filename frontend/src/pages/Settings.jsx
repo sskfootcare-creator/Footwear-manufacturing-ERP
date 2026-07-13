@@ -29,7 +29,8 @@ const STAGE_LABEL = {
   stitching: "Stitching",
   lasting: "Lasting",
   sole_pasting: "Sole Pasting",
-  finishing: "Finish / QC / Pack",
+  finishing: "Finishing",
+  qc_pack: "QC & Pack",
 };
 
 const STAGE_ORDER = [
@@ -41,6 +42,7 @@ const STAGE_ORDER = [
   "lasting",
   "sole_pasting",
   "finishing",
+  "qc_pack",
 ];
 
 export default function Settings() {
