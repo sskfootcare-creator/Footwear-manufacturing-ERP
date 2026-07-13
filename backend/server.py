@@ -31,7 +31,7 @@ from auth import (
 from collections import defaultdict
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
-from packing_list import build_default_packing_list, build_from_template
+from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card
 from pdf_carton_label import build_carton_labels
@@ -9431,7 +9431,7 @@ async def _auto_pick_template(client_name: str) -> Optional[str]:
     return best
 
 
-async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: Optional[str]) -> bytes:
+async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: Optional[str], cartons: Optional[list] = None, invoice_no: str = "") -> bytes:
     """Resolve template (explicit or auto) and produce the xlsx bytes."""
     tpl_id = template_id
     if not tpl_id:
@@ -9443,6 +9443,8 @@ async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: 
         import base64 as b64
         tpl_bytes = b64.b64decode(tdoc["file_b64"])
         return build_from_template(tpl_bytes, payload_po, options)
+    if cartons is not None:
+        return build_dispatch_packing_list(cartons, payload_po, invoice_no, options)
     return build_default_packing_list(payload_po, options)
 
 
@@ -9771,7 +9773,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "port": payload.port or "",
         "notes": payload.notes or "",
     }
-    packing_xlsx = await _generate_packing_bytes(payload_po, pl_options, payload.template_id)
+    packing_xlsx = await _generate_packing_bytes(payload_po, pl_options, payload.template_id, cartons=cartons, invoice_no=invoice_no)
 
     # ── 7. Carton Labels PDF ─────────────────────────────────────────────────
     labels_pdf = build_carton_labels(cartons, po.get("po_number", ""), invoice_no)
@@ -9877,6 +9879,7 @@ async def list_dispatch_records(
     request: Request,
     client: Optional[str] = None,
     po_number: Optional[str] = None,
+    job_id: Optional[str] = None,
     limit: int = 200,
 ):
     """List all dispatch records (file bytes excluded for size)."""
@@ -9886,6 +9889,8 @@ async def list_dispatch_records(
         q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
     if po_number:
         q["po_numbers"] = {"$elemMatch": {"$regex": re.escape(po_number), "$options": "i"}}
+    if job_id:
+        q["job_ids"] = job_id
     proj = {
         "invoice_file_b64": 0,
         "packing_list_file_b64": 0,

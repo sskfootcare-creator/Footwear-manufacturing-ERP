@@ -62,7 +62,7 @@ VENDOR = {
 def _set(ws, coord: str, val, *, bold=False, fill=None, color=None, size=10, align="left", border=False):
     cell = ws[coord]
     cell.value = val
-    font_kwargs = {"name": "Helvetica", "size": size, "bold": bold}
+    font_kwargs = {"name": "Calibri", "size": size, "bold": bold}
     if color:
         font_kwargs["color"] = color
     cell.font = Font(**font_kwargs)
@@ -473,3 +473,241 @@ def _expand_lines(ws, po: dict, options: dict | None = None) -> None:
         }
         for c, field in header_map.items():
             ws.cell(target_row, c).value = field_values.get(field)
+
+
+def build_dispatch_packing_list(cartons: list[dict], po: dict, invoice_no: str, options: dict | None = None) -> bytes:
+    """Generate a packing list xlsx matching the SSK template from actual carton data.
+    """
+    options = options or {}
+    net_wt = float(options.get("net_wt_per_carton") or 10.8)
+    gross_wt = float(options.get("gross_wt_per_carton") or 12.0)
+    carton_dim = options.get("carton_dim") or "60x50x30 CMS"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Packing list"
+
+    # Determine unique sizes across all cartons (sorted)
+    sizes: list[str] = []
+    for c in cartons:
+        sz = str(c.get("size", "")).strip()
+        if sz and sz not in sizes:
+            sizes.append(sz)
+    sizes.sort(key=lambda s: (len(s), s))
+    if not sizes:
+        sizes = ["—"]
+
+    # ---- Title (A1:Q1) ----
+    ws.merge_cells("A1:Q1")
+    _set(ws, "A1", "PACKING LIST", bold=True, size=18, align="center", fill=_DARK, color="FFFFFF")
+    ws.row_dimensions[1].height = 30
+
+    # ---- Vendor block A2:F6 ----
+    _set(ws, "A2", "VENDOR NAME :", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B2:F2"); _set(ws, "B2", VENDOR["name"], bold=True, size=11)
+    ws.merge_cells("B3:F3"); _set(ws, "B3", VENDOR["address"], size=9)
+    ws.merge_cells("B4:F4")
+    _set(ws, "A6", "GSTIN:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B6:F6"); _set(ws, "B6", VENDOR["gstin"], size=10, bold=True)
+
+    # ---- Destination block G2:Q6 ----
+    ws.merge_cells("G2:Q2")
+    _set(ws, "G2", "DESTINATION HUB", bold=True, size=10, color=_ACCENT, align="left")
+    ws.merge_cells("G3:Q3"); _set(ws, "G3", po.get("client_name", ""), bold=True, size=11)
+    ws.merge_cells("G4:Q4"); _set(ws, "G4", po.get("client_address") or po.get("shipping_address", ""), size=9)
+    ws.merge_cells("G5:Q5"); _set(ws, "G5", "", size=9)
+    ws.merge_cells("G6:Q6"); _set(ws, "G6", f"GSTIN:- {po.get('client_gstin', '')}", size=10)
+
+    # ---- Configuration row ----
+    ws.merge_cells("A13:B13")
+    _set(ws, "A13", "PO NO", bold=True, size=10, fill=_LIGHT, color=_ACCENT, align="left", border=True)
+    ws.merge_cells("C13:E13")
+    _set(ws, "C13", po.get("po_number", ""), bold=True, size=11, border=True)
+
+    total_qty = sum(c.get("qty", 0) for c in cartons)
+    total_cartons = len(cartons)
+
+    _set(ws, "F13", total_qty, bold=True, size=10, border=True, align="center")
+    _set(ws, "G13", "PCS", bold=True, size=10, border=True, align="center", color=_ACCENT)
+    _set(ws, "H13", "BOX", bold=True, size=10, border=True, align="center", color=_ACCENT)
+    _set(ws, "I13", total_cartons, bold=True, size=10, border=True, align="center")
+
+    ws.merge_cells("A14:B14")
+    _set(ws, "A14", "PO DATE", bold=True, size=10, fill=_LIGHT, color=_ACCENT, border=True)
+    ws.merge_cells("C14:E14")
+    _set(ws, "C14", po.get("po_date", ""), bold=True, size=11, border=True)
+    ws.merge_cells("F14:K14")
+    _set(ws, "F14", f"INVOICE NO: {invoice_no}", border=True, bold=True, size=10, align="center")
+    ws.merge_cells("L14:O14")
+    _set(ws, "L14", "CARTON DIMENSION", bold=True, size=10, fill=_LIGHT, color=_ACCENT, align="center", border=True)
+    ws.merge_cells("P14:Q14")
+    _set(ws, "P14", carton_dim, bold=True, size=10, border=True, align="center")
+
+    # ---- Optional shipping / dispatch metadata ----
+    shipping_pairs = [
+        ("DISPATCH DATE", options.get("dispatch_date") or ""),
+        ("TRANSPORTER", options.get("transporter") or ""),
+        ("VEHICLE NO", options.get("vehicle_no") or ""),
+        ("DRIVER", options.get("driver_name") or ""),
+        ("DRIVER PH", options.get("driver_phone") or ""),
+        ("DESTINATION", options.get("destination") or ""),
+    ]
+    show_shipping = any(v for _, v in shipping_pairs)
+    if show_shipping:
+        col_idx = 1
+        for label, val in shipping_pairs:
+            if not val:
+                continue
+            lab_col = get_column_letter(col_idx)
+            val_col = get_column_letter(col_idx + 1)
+            _set(ws, f"{lab_col}15", label, bold=True, size=8, fill=_LIGHT, color=_ACCENT, align="left", border=True)
+            _set(ws, f"{val_col}15", val, bold=True, size=9, border=True, align="left")
+            col_idx += 2
+            if col_idx > 16:
+                break
+        ws.row_dimensions[15].height = 22
+
+    # ---- Line-item header row ----
+    headers = ["SITE CODE", "STYLE", "COLOUR", "CTN .NO"] + sizes + ["PCS/CTN", "PER CARTON", "TTL CTN", "TOTAL PCS", "NET WT", "GROSS WT"]
+    max_cols = max(len(headers), 17)
+    for i, h in enumerate(headers, start=1):
+        col = get_column_letter(i)
+        _set(ws, f"{col}16", h, bold=True, size=9, fill=_DARK, color="FFFFFF", align="center", border=True)
+    ws.row_dimensions[16].height = 28
+
+    # Group cartons by style, color, size, qty
+    sorted_cartons = sorted(cartons, key=lambda c: c.get("box_number") or 0)
+    groups = []
+    current_group = None
+    for c in sorted_cartons:
+        key = (c.get("style_code"), c.get("color"), c.get("size"), c.get("qty"))
+        box_num = c.get("box_number")
+        if current_group and current_group["key"] == key:
+            current_group["cartons"].append(c)
+            current_group["box_numbers"].append(box_num)
+        else:
+            if current_group:
+                groups.append(current_group)
+            current_group = {
+                "key": key,
+                "style_code": c.get("style_code"),
+                "color": c.get("color"),
+                "size": c.get("size"),
+                "qty": c.get("qty"),
+                "cartons": [c],
+                "box_numbers": [box_num]
+            }
+    if current_group:
+        groups.append(current_group)
+
+    n_size_cols = len(sizes)
+    size_start_col_idx = 5  # column E
+    pcs_ctn_col = size_start_col_idx + n_size_cols                                   # PCS/CTN
+    per_ctn_col = pcs_ctn_col + 1                                                    # PER CARTON
+    ttl_ctn_col = per_ctn_col + 1                                                    # TTL CTN
+    total_pcs_col = ttl_ctn_col + 1                                                  # TOTAL PCS
+    net_wt_col = total_pcs_col + 1                                                   # NET WT
+    gross_wt_col = net_wt_col + 1                                                    # GROSS WT
+
+    row_idx = 17
+    site_code = options.get("site_code") or po.get("site_code", "")
+    for g in groups:
+        box_nums = [b for b in g["box_numbers"] if b is not None]
+        if box_nums:
+            min_b, max_b = min(box_nums), max(box_nums)
+            box_range = f"{min_b} - {max_b}" if min_b != max_b else str(min_b)
+        else:
+            box_range = "—"
+
+        carton_count = len(g["cartons"])
+        row_total_qty = carton_count * g["qty"]
+        row_net_wt = round(carton_count * net_wt, 2)
+        row_gross_wt = round(carton_count * gross_wt, 2)
+
+        _set(ws, f"A{row_idx}", site_code or "—", size=9, align="center", border=True)
+        _set(ws, f"B{row_idx}", g["style_code"] or "—", size=9, bold=True, align="left", border=True)
+        _set(ws, f"C{row_idx}", g["color"] or "—", size=9, align="left", border=True)
+        _set(ws, f"D{row_idx}", box_range, size=9, align="center", border=True)
+
+        for i, sz in enumerate(sizes):
+            col = get_column_letter(size_start_col_idx + i)
+            val = row_total_qty if str(g["size"]).strip() == sz else ""
+            _set(ws, f"{col}{row_idx}", val, size=9, align="center", border=True)
+
+        _set(ws, f"{get_column_letter(pcs_ctn_col)}{row_idx}", row_total_qty, size=9, align="center", bold=True, border=True)
+        _set(ws, f"{get_column_letter(per_ctn_col)}{row_idx}", g["qty"], size=9, align="center", border=True)
+        _set(ws, f"{get_column_letter(ttl_ctn_col)}{row_idx}", carton_count, size=9, align="center", border=True)
+        _set(ws, f"{get_column_letter(total_pcs_col)}{row_idx}", row_total_qty, size=9, align="center", bold=True, border=True)
+        _set(ws, f"{get_column_letter(net_wt_col)}{row_idx}", row_net_wt, size=9, align="center", border=True)
+        _set(ws, f"{get_column_letter(gross_wt_col)}{row_idx}", row_gross_wt, size=9, align="center", border=True)
+        row_idx += 1
+
+    # ---- Grand total row ----
+    gt_row = row_idx
+    _set(ws, f"A{gt_row}", "", border=True)
+    _set(ws, f"B{gt_row}", "GRAND TOTAL", bold=True, size=10, fill=_DARK, color="FFFFFF", align="right", border=True)
+    _set(ws, f"C{gt_row}", "", fill=_DARK, border=True)
+    _set(ws, f"D{gt_row}", "", fill=_DARK, border=True)
+    for i in range(n_size_cols):
+        col_letter = get_column_letter(size_start_col_idx + i)
+        _set(ws, f"{col_letter}{gt_row}", f"=SUM({col_letter}17:{col_letter}{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"{get_column_letter(pcs_ctn_col)}{gt_row}", f"=SUM({get_column_letter(pcs_ctn_col)}17:{get_column_letter(pcs_ctn_col)}{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"{get_column_letter(per_ctn_col)}{gt_row}", "", border=True, fill=_LIGHT)
+    _set(ws, f"{get_column_letter(ttl_ctn_col)}{gt_row}", f"=SUM({get_column_letter(ttl_ctn_col)}17:{get_column_letter(ttl_ctn_col)}{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"{get_column_letter(total_pcs_col)}{gt_row}", f"=SUM({get_column_letter(total_pcs_col)}17:{get_column_letter(total_pcs_col)}{gt_row-1})", bold=True, size=11, fill=_ACCENT, color="FFFFFF", align="center", border=True)
+    _set(ws, f"{get_column_letter(net_wt_col)}{gt_row}", f"=SUM({get_column_letter(net_wt_col)}17:{get_column_letter(net_wt_col)}{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"{get_column_letter(gross_wt_col)}{gt_row}", f"=SUM({get_column_letter(gross_wt_col)}17:{get_column_letter(gross_wt_col)}{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+
+    # ---- Order summary recap ----
+    s_row = gt_row + 4
+    ws.merge_cells(f"B{s_row}:B{s_row+3}")
+    _set(ws, f"B{s_row}", "ORDER SUMMARY", bold=True, size=12, fill=_DARK, color="FFFFFF", align="center", border=True)
+    _set(ws, f"D{s_row}", "Size", bold=True, size=10, fill=_LIGHT, color=_ACCENT, align="center", border=True)
+    for i, sz in enumerate(sizes):
+        col = get_column_letter(size_start_col_idx + i)
+        _set(ws, f"{col}{s_row}", sz, bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"{get_column_letter(size_start_col_idx + n_size_cols)}{s_row}", "TOTAL", bold=True, size=10, fill=_DARK, color="FFFFFF", align="center", border=True)
+
+    for label_row, label in enumerate(["Order Qty", "Pack Qty", "Excess / Short"], start=1):
+        r = s_row + label_row
+        _set(ws, f"D{r}", label, bold=True, size=9, align="right", border=True)
+        for i in range(n_size_cols):
+            col = get_column_letter(size_start_col_idx + i)
+            if label == "Order Qty":
+                val = f"={col}{gt_row}"
+            elif label == "Pack Qty":
+                val = f"={col}{gt_row}"
+            else:
+                val = f"={col}{s_row+2}-{col}{s_row+1}"
+            _set(ws, f"{col}{r}", val, size=9, align="center", border=True)
+        tot_col = get_column_letter(size_start_col_idx + n_size_cols)
+        _set(ws, f"{tot_col}{r}", f"=SUM({get_column_letter(size_start_col_idx)}{r}:{get_column_letter(size_start_col_idx + n_size_cols - 1)}{r})", bold=True, size=9, fill=_LIGHT, align="center", border=True)
+
+    # ---- Notes / Port footer ----
+    notes = options.get("notes") or ""
+    port = options.get("port") or ""
+    if notes or port:
+        notes_row = s_row + 6
+        end_col = get_column_letter(min(max_cols, 17))
+        if port:
+            _set(ws, f"A{notes_row}", "PORT:", bold=True, size=9, fill=_LIGHT, color=_ACCENT, border=True)
+            ws.merge_cells(f"B{notes_row}:D{notes_row}")
+            _set(ws, f"B{notes_row}", port, bold=True, size=10, border=True)
+            notes_row += 1
+        if notes:
+            _set(ws, f"A{notes_row}", "NOTES:", bold=True, size=9, fill=_LIGHT, color=_ACCENT, border=True, align="left")
+            ws.merge_cells(f"B{notes_row}:{end_col}{notes_row + 2}")
+            _set(ws, f"B{notes_row}", notes, size=9, border=True, align="left")
+            ws.row_dimensions[notes_row].height = 24
+            ws.row_dimensions[notes_row + 1].height = 24
+            ws.row_dimensions[notes_row + 2].height = 24
+
+    # Column widths
+    for col_idx in range(1, max_cols + 1):
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = 12 if col_idx in (1, 2, 3) else 9
+
+    # Save & return bytes
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
