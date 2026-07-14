@@ -412,13 +412,14 @@ def test_dispatch_documents_flow(session):
     assert dispatch_record_id, "X-Dispatch-Record-Id header missing"
     assert invoice_no, "X-Invoice-No header missing"
 
-    # ── 8. Verify ZIP contains 3 files ────────────────────────────────────────
+    # ── 8. Verify ZIP contains all files ──────────────────────────────────────
     zf_data = io.BytesIO(r.content)
     with zipfile.ZipFile(zf_data) as zf:
         names = zf.namelist()
         assert any("Invoice" in n and n.endswith(".pdf") for n in names), f"Invoice PDF missing: {names}"
         assert any("PackingList" in n and n.endswith(".xlsx") for n in names), f"Packing XLSX missing: {names}"
         assert any("CartonLabels" in n and n.endswith(".pdf") for n in names), f"Labels PDF missing: {names}"
+        assert any("CartonList" in n and n.endswith(".xlsx") for n in names), f"Carton List XLSX missing: {names}"
 
     # ── 9. Verify dispatch_record in database ─────────────────────────────────
     r2 = session.get(f"{BASE_URL}/api/dispatch-records")
@@ -468,7 +469,14 @@ def test_dispatch_documents_flow(session):
     assert rl.headers.get("content-type", "").startswith("application/pdf")
     assert len(rl.content) > 500, "labels PDF too small"
 
+    rc = session.get(f"{BASE_URL}/api/dispatch-records/{dispatch_record_id}/carton-list")
+    assert rc.status_code == 200
+    assert "spreadsheetml" in rc.headers.get("content-type", "")
+
     # ── 14. Reprint ZIP endpoint ──────────────────────────────────────────────
     rr = session.post(f"{BASE_URL}/api/dispatch-records/{dispatch_record_id}/reprint")
     assert rr.status_code == 200
     assert rr.headers.get("content-type", "").startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(rr.content)) as reprint_zf:
+        reprint_names = reprint_zf.namelist()
+        assert any("CartonList" in n for n in reprint_names), f"CartonList missing in reprint: {reprint_names}"

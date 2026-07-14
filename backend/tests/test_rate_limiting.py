@@ -9,7 +9,7 @@ ADMIN_PASS = "Admin@123"
 def test_login_rate_limiting():
     # We will use a unique dummy IP for this test to avoid interfering with other runs or tests
     import random
-    dummy_ip = f"10.0.99.{random.randint(1, 254)}"
+    dummy_ip = f"10.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
     headers = {"X-Test-Rate-Limit-Client-IP": dummy_ip}
 
     # 1. First 5 failed login attempts should return 401 (Unauthorized)
@@ -36,7 +36,7 @@ def test_login_rate_limiting():
     assert "Retry-After" in r.headers
     
     # 3. A request from a different IP should not be blocked
-    other_headers = {"X-Test-Rate-Limit-Client-IP": f"10.1.99.{random.randint(1, 254)}"}
+    other_headers = {"X-Test-Rate-Limit-Client-IP": f"11.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"}
     r = requests.post(
         f"{API_URL}/auth/login",
         json={"email": ADMIN_EMAIL, "password": ADMIN_PASS},
@@ -48,7 +48,7 @@ def test_login_rate_limiting():
 
 def test_rate_limiting_reset_on_success():
     import random
-    dummy_ip = f"10.0.98.{random.randint(1, 254)}"
+    dummy_ip = f"12.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
     headers = {"X-Test-Rate-Limit-Client-IP": dummy_ip}
 
     # 1. Perform 3 failed attempts

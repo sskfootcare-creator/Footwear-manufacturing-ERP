@@ -231,16 +231,44 @@ def _parse_meta(text: str) -> dict:
                     vendor_name = cand
                     break
 
-    # GSTIN extraction
+    # GSTIN extraction (Indian GSTINs are exactly 15 characters)
     client_gstin = ""
-    m_gst = re.search(r"(?:Bill\s*To|Buyer|Customer|Consignee|Destination|Receiver|Billed\s*To)[\s\S]{1,300}?\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{3})\b", text, flags=re.I)
-    if m_gst:
-        client_gstin = m_gst.group(1).upper()
-    else:
-        all_gstins = re.findall(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{3})\b", text, flags=re.I)
-        if all_gstins:
-            client_gstin = all_gstins[0].upper()
-            
+    vendor_gstin = ""
+    
+    # 1. Extract all 15-character GSTINs in the text
+    gstins = re.findall(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4})\b", text, flags=re.I)
+    gstins = [g.upper() for g in gstins]
+
+    # 2. Try explicit labeled searches first
+    client_gst_match = re.search(r"(?:Our\s*GST|Buyer\s*(?:'s)?\s*GST|Client\s*(?:'s)?\s*GST|Bill\s*To\s*GST|Consignee\s*GST)[\s\S]{0,100}?\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4})\b", text, flags=re.I)
+    if client_gst_match:
+        client_gstin = client_gst_match.group(1).upper()
+
+    vendor_gst_match = re.search(r"(?:Vendor\s*(?:'s)?\s*GST|Seller\s*(?:'s)?\s*GST|Supplier\s*(?:'s)?\s*GST)[\s\S]{0,100}?\b(\d{2}[A-Z]{5}\d{4}[A-Z0-9]{4})\b", text, flags=re.I)
+    if vendor_gst_match:
+        vendor_gstin = vendor_gst_match.group(1).upper()
+
+    # SSK Maharashtra state GSTIN is 27AFKFS4410F1Z2
+    SSK_GSTIN = "27AFKFS4410F1Z2"
+
+    # 3. Assign from the list of all found GSTINs if not resolved by label
+    for g in gstins:
+        if g == SSK_GSTIN:
+            if not vendor_gstin:
+                vendor_gstin = g
+        else:
+            if not client_gstin:
+                client_gstin = g
+
+    # Fallback assignment
+    if not client_gstin and gstins:
+        for g in gstins:
+            if g != vendor_gstin:
+                client_gstin = g
+                break
+        if not client_gstin:
+            client_gstin = gstins[0]
+
     client_state_code = client_gstin[:2] if client_gstin else ""
     client_state = STATE_CODE_MAP.get(client_state_code, "")
 
@@ -626,17 +654,57 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
 
 
 
+def _snap_gst_rate(rate: float) -> float:
+    # Snap to the nearest 0.5% (standard GST rates in India)
+    snapped = round(rate * 2) / 2
+    if abs(rate - snapped) <= 0.3:
+        return snapped
+    return round(rate, 2)
+
+
 def _finalise_totals(data: dict, full_text: str) -> None:
     items = data.get("line_items", [])
     subtotal = sum(li.get("amount", 0) for li in items)
     total_qty = sum(li.get("quantity", 0) for li in items)
 
-    # Try to detect explicit tax info
-    cgst_amt = _to_number(_find_first(r"CGST[^\d-]*([0-9.,]+)", full_text))
-    sgst_amt = _to_number(_find_first(r"SGST[^\d-]*([0-9.,]+)", full_text))
-    igst_amt = _to_number(_find_first(r"\bTOTAL\s*IGST[\s:\-|]+(?:INR|Rs\.?)?[\s]*([0-9][0-9.,]+)", full_text))
-    if not igst_amt:
-        igst_amt = _to_number(_find_first(r"\bIGST[^\d-]*([0-9.,]+)", full_text))
+    # 1. Try Siyaram net total pattern:
+    # "NET TOTAL 2,088 16,672 0 333,440" -> Qty, Tax1, Tax2, Taxable Subtotal
+    siyaram_net_total = re.search(r"(?im)^\s*NET\s*TOTAL\s*([\d,]+)\s*([\d,]+)\s*([\d,]+)\s*([\d,]+)", full_text)
+    
+    cgst_amt = 0.0
+    sgst_amt = 0.0
+    igst_amt = 0.0
+
+    if siyaram_net_total:
+        tax1 = _to_number(siyaram_net_total.group(2))
+        tax2 = _to_number(siyaram_net_total.group(3))
+        subtotal_val = _to_number(siyaram_net_total.group(4))
+        if subtotal_val > 0:
+            subtotal = subtotal_val
+
+        # Check if interstate
+        is_interstate = False
+        vendor_state = "27"  # Maharashtra (SSK)
+        client_state = data.get("client_state_code", "")
+        if client_state and client_state != vendor_state:
+            is_interstate = True
+
+        if is_interstate:
+            igst_amt = tax1
+            cgst_amt = 0.0
+            sgst_amt = 0.0
+        else:
+            cgst_amt = tax1
+            sgst_amt = tax2
+            igst_amt = 0.0
+    else:
+        # Fall back to explicit tax info with tighter regexes
+        # CGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?) ensures we don't skip letters (like CGST/IGST % headers)
+        cgst_amt = _to_number(_find_first(r"CGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?)", full_text))
+        sgst_amt = _to_number(_find_first(r"SGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?)", full_text))
+        igst_amt = _to_number(_find_first(r"\bTOTAL\s*IGST[\s:\-|]+(?:INR|Rs\.?)?[\s]*([0-9][0-9.,]+)", full_text))
+        if not igst_amt:
+            igst_amt = _to_number(_find_first(r"\bIGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?)", full_text))
 
     # Grand-total — try several variants in order of specificity
     grand = 0.0
@@ -644,8 +712,6 @@ def _finalise_totals(data: dict, full_text: str) -> None:
         r"Total\s*Order\s*Value\s*[:\-]?\s*(?:INR|Rs\.?)?\s*([0-9][0-9,]+(?:\.\d+)?)",
         r"TOTAL\s*BASIC\s*VALUE\s*(?:INR|Rs\.?)?\s*([0-9][0-9,]+(?:\.\d+)?)",
         r"(?:Grand\s*Total|Net\s*Payable|Total\s*Amount|Net\s*Value)\s*[:\-]?\s*(?:INR|Rs\.?)?\s*([0-9][0-9,]+(?:\.\d+)?)",
-        # Siyaram footer: ``NET TOTAL 2,088 16,672 0 333,440`` — grab the last
-        # number on the line (largest = grand total)
         r"(?im)^\s*NET\s*TOTAL[^\n]*?([0-9][0-9,]+(?:\.\d+)?)\s*$",
     ]:
         m = re.search(pat, full_text, flags=re.I)
@@ -653,11 +719,23 @@ def _finalise_totals(data: dict, full_text: str) -> None:
             grand = _to_number(m.group(1))
             break
 
+    # Compute rates based on amounts and subtotal
+    cgst_rate = 0.0
+    sgst_rate = 0.0
+    igst_rate = 0.0
+    if subtotal > 0:
+        if cgst_amt > 0:
+            cgst_rate = _snap_gst_rate((cgst_amt / subtotal) * 100)
+        if sgst_amt > 0:
+            sgst_rate = _snap_gst_rate((sgst_amt / subtotal) * 100)
+        if igst_amt > 0:
+            igst_rate = _snap_gst_rate((igst_amt / subtotal) * 100)
+
     data["subtotal"] = round(subtotal, 2)
     data["total_quantity"] = total_qty
-    data["cgst_rate"] = 0
-    data["sgst_rate"] = 0
-    data["igst_rate"] = 0
+    data["cgst_rate"] = cgst_rate
+    data["sgst_rate"] = sgst_rate
+    data["igst_rate"] = igst_rate
     data["cgst_amount"] = round(cgst_amt, 2)
     data["sgst_amount"] = round(sgst_amt, 2)
     data["igst_amount"] = round(igst_amt, 2)
