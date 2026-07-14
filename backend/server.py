@@ -9411,6 +9411,7 @@ def _packing_options_from_payload(p) -> dict:
     }
 
 
+
 async def _auto_pick_template(client_name: str) -> Optional[str]:
     """Return template_id whose alias matches client_name; case-insensitive
     substring match. Returns None if no template configured."""
