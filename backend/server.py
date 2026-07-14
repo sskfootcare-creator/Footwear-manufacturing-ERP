@@ -8231,6 +8231,7 @@ async def create_po(payload: POIn, request: Request):
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
             "style_id": style_id,
+            "source_type": "b2b_client",
             "style_match_status": match_status,
             **(({"mapped_from_sku": sku_meta["mapped_from_sku"], "sku_mapping_id": sku_meta["mapping_id"]}) if sku_meta else {}),
             "description": li.get("description", ""),
@@ -13268,7 +13269,7 @@ async def produce_cell(request: Request, payload: ProduceCellIn):
     if payload.channel_filter == "online_channel":
         q["source_type"] = "online_channel"
     elif payload.channel_filter == "b2b_client":
-        q["source_type"] = "b2b_client"
+        q["source_type"] = {"$in": ["b2b_client", None]}
 
     jobs = await db.production_jobs.find(q).sort("created_at", 1).to_list(500)
     pending_total = sum(int(j.get("quantity", 0)) - int(j.get("completed_qty", 0) or 0) for j in jobs)
