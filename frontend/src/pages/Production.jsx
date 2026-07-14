@@ -61,7 +61,7 @@ function groupJobsByColor(jobs) {
     const key = `${j.po_number}::${j.style_code}::${color}`;
     if (!groups[key]) {
       groups[key] = {
-        key, po_number: j.po_number, po_id: j.po_id, style_code: j.style_code,
+        key, po_number: j.po_number, po_id: j.po_id, style_id: j.style_id, style_code: j.style_code,
         client_name: j.client_name, description: j.description, delivery_date: j.delivery_date,
         color, rows: [], sizes: new Set(),
       };
@@ -543,6 +543,8 @@ export default function Production() {
                         onDownloadInvoice={downloadGroupInvoice}
                         isSelected={!!selected[g.key]}
                         onToggleSelect={toggleSelect}
+                        dispatchRecordByJobId={dispatchRecordByJobId}
+                        onDownloadDispatchFile={downloadDispatchFile}
                       />
                     ))}
                   </div>
@@ -687,7 +689,8 @@ export default function Production() {
 function ColorGroupCard(props) {
   const { group, style, stageColor, stageIdx, canEdit, onMove, onToggleComponent,
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isProc, isDispatched, onMatReq,
-    procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch } = props;
+    procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
+    dispatchRecordByJobId, onDownloadDispatchFile } = props;
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -707,6 +710,16 @@ function ColorGroupCard(props) {
   const a = group.assignments || {};
   const overdue = (group.overdueHours || 0) > 0;
   
+  let drec = null;
+  if (dispatchRecordByJobId && group.rows) {
+    for (const row of group.rows) {
+      if (dispatchRecordByJobId[row.id]) {
+        drec = dispatchRecordByJobId[row.id];
+        break;
+      }
+    }
+  }
+
   const isInactive = style?.status === "inactive";
   const effectiveCanEdit = canEdit && !isInactive;
 
@@ -889,6 +902,24 @@ function ColorGroupCard(props) {
             <button onClick={onPacking} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#16A34A] hover:bg-[#0F7A36] px-3 py-1 flex items-center gap-1" data-testid={`packing-btn-${group.key}`}>
               <Package className="w-3 h-3" /> Packing List
             </button>
+          )}
+          {isDispatched && drec && (
+            <>
+              <button
+                onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-3 py-1 flex items-center gap-1"
+                data-testid={`labels-btn-${group.key}`}
+              >
+                <FileDown className="w-3 h-3" /> Carton Labels
+              </button>
+              <button
+                onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-3 py-1 flex items-center gap-1"
+                data-testid={`carton-list-btn-${group.key}`}
+              >
+                <FileDown className="w-3 h-3" /> Carton List
+              </button>
+            </>
           )}
           {group.stage === "qc_pack" && (
             <button onClick={onPackCartons} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#7C3AED] hover:bg-[#6D28D9] px-3 py-1 flex items-center gap-1" data-testid={`pack-carton-btn-${group.key}`}>
@@ -1261,6 +1292,12 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                         >
                           <FileDown className="w-3 h-3" /> Labels
                         </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Carton List
+                        </button>
                       </>
                     )}
                   </div>
@@ -1470,6 +1507,20 @@ function PackingListDialog({ payload, onClose, onSubmit }) {
   });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (isMerged || !payload.group?.rows) return;
+    const jobIds = payload.group.rows.map(r => r.id).join(",");
+    http.get(`/packing/cartons?job_ids=${jobIds}`).then(res => {
+      const cartons = res.data || [];
+      if (cartons.length > 0) {
+        const firstQty = cartons[0].qty;
+        if (firstQty) {
+          setForm(f => ({ ...f, pcs_per_box: firstQty }));
+        }
+      }
+    }).catch(err => console.log("Failed to load cartons:", err));
+  }, [payload.group, isMerged]);
 
   const submit = async () => {
     setSubmitting(true);
@@ -1744,7 +1795,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
     try {
       const [cartonsRes, eanRes] = await Promise.all([
         http.get(`/packing/cartons?job_ids=${jobIds}`),
-        http.get(`/packing/ean-codes?style_id=${group.style_id}`),
+        http.get(`/packing/ean-codes?style_id=${group.style_id}&color=${encodeURIComponent(group.color)}`),
       ]);
       const existingCartons = cartonsRes.data || [];
       setCartons(existingCartons);
@@ -1773,7 +1824,6 @@ function PackCartonDialog({ group, style, onClose, load }) {
         if (szCartons.length > 0) {
           rowsMap[sz] = szCartons.map(c => c.qty);
         } else {
-          // Pre-fill using defaults
           const row = group.rows.find(r => String(r.size || "—") === sz);
           const completed = row?.completed_qty || 0;
           if (completed <= 0) {
@@ -1788,13 +1838,12 @@ function PackCartonDialog({ group, style, onClose, load }) {
               }
             }
             if (defaultQty) {
-              // Populate rows
+              // Populate the expected number of rows but leave them empty for the user to explicitly input
               const rows = [];
               let rem = completed;
               while (rem > 0) {
-                const take = Math.min(rem, defaultQty);
-                rows.push(take);
-                rem -= take;
+                rows.push("");
+                rem -= defaultQty;
               }
               rowsMap[sz] = rows.length > 0 ? rows : [""];
             } else {
@@ -1817,17 +1866,9 @@ function PackCartonDialog({ group, style, onClose, load }) {
   }, [loadData]);
 
   const addCartonRow = (sz) => {
-    let defaultQty = "";
-    if (style?.default_pairs_per_carton) {
-      if (style.default_pairs_per_carton[sz]) {
-        defaultQty = style.default_pairs_per_carton[sz];
-      } else if (style.default_pairs_per_carton.default) {
-        defaultQty = style.default_pairs_per_carton.default;
-      }
-    }
     setCartonRows(prev => ({
       ...prev,
-      [sz]: [...(prev[sz] || []), defaultQty]
+      [sz]: [...(prev[sz] || []), ""]
     }));
   };
 
@@ -2206,6 +2247,13 @@ function DispatchDialog({ group, onClose, load }) {
                   className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
                 >
                   Carton Labels PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadFile("carton-list", `CartonList-${done.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                  className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
+                >
+                  Carton List XLSX
                 </button>
               </div>
             </div>

@@ -31,7 +31,7 @@ from auth import (
 from collections import defaultdict
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
-from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list
+from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list, build_carton_list_xlsx
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card
 from pdf_carton_label import build_carton_labels
@@ -9443,7 +9443,7 @@ async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: 
             raise HTTPException(404, "Packing template not found")
         import base64 as b64
         tpl_bytes = b64.b64decode(tdoc["file_b64"])
-        return build_from_template(tpl_bytes, payload_po, options)
+        return build_from_template(tpl_bytes, payload_po, options, cartons=cartons)
     if cartons is not None:
         return build_dispatch_packing_list(cartons, payload_po, invoice_no, options)
     return build_default_packing_list(payload_po, options)
@@ -9452,9 +9452,12 @@ async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: 
 # ═══ EAN CODES & CARTON PACKING ═══
 
 @api.get("/packing/ean-codes")
-async def get_ean_codes(style_id: str, request: Request):
+async def get_ean_codes(style_id: str, request: Request, color: str | None = None):
     u = await get_current_user(request); require_roles("admin", "manager", "production")(u)
-    codes = await db.sku_ean_codes.find({"style_id": style_id}).to_list(1000)
+    q = {"style_id": style_id}
+    if color:
+        q["color"] = color
+    codes = await db.sku_ean_codes.find(q).to_list(1000)
     print("DEBUG CODES TYPE:", type(codes), codes)
     return [stringify(c) for c in codes]
 
@@ -9779,6 +9782,9 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     # ── 7. Carton Labels PDF ─────────────────────────────────────────────────
     labels_pdf = build_carton_labels(cartons, po.get("po_number", ""), invoice_no)
 
+    # ── 7a. Carton List Excel ────────────────────────────────────────────────
+    carton_list_xlsx = build_carton_list_xlsx(cartons, po, invoice_no, pl_options)
+
     # ── 8. Store invoice record ──────────────────────────────────────────────
     totals = _compute_invoice_totals(po, line_items)
     credit_days = _extract_credit_days(po.get("payment_terms", ""))
@@ -9846,6 +9852,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "invoice_file_b64": _b64.b64encode(invoice_pdf).decode("ascii"),
         "packing_list_file_b64": _b64.b64encode(packing_xlsx).decode("ascii"),
         "carton_labels_file_b64": _b64.b64encode(labels_pdf).decode("ascii"),
+        "carton_list_file_b64": _b64.b64encode(carton_list_xlsx).decode("ascii"),
     }
     dr_res = await db.dispatch_records.insert_one(dispatch_doc)
     dispatch_record_id = str(dr_res.inserted_id)
@@ -9853,13 +9860,14 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     # ── 11. Advance job stages ────────────────────────────────────────────────
     await _flag_jobs(payload.job_ids, "invoice_generated_at")
 
-    # ── 12. ZIP all three documents ───────────────────────────────────────────
+    # ── 12. ZIP all documents ─────────────────────────────────────────────────
     date_tag = datetime.now().strftime("%Y%m%d-%H%M")
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"Invoice-{invoice_no}.pdf", invoice_pdf)
         zf.writestr(f"PackingList-{invoice_no}-{date_tag}.xlsx", packing_xlsx)
         zf.writestr(f"CartonLabels-{invoice_no}.pdf", labels_pdf)
+        zf.writestr(f"CartonList-{invoice_no}-{date_tag}.xlsx", carton_list_xlsx)
     zip_buf.seek(0)
 
     return StreamingResponse(
@@ -9896,6 +9904,7 @@ async def list_dispatch_records(
         "invoice_file_b64": 0,
         "packing_list_file_b64": 0,
         "carton_labels_file_b64": 0,
+        "carton_list_file_b64": 0,
     }
     docs = await db.dispatch_records.find(q, proj).sort("dispatched_at", -1).to_list(limit)
     return [stringify(d) for d in docs]
@@ -9907,7 +9916,7 @@ async def get_dispatch_record(dr_id: str, request: Request):
     await get_current_user(request)
     doc = await db.dispatch_records.find_one(
         {"_id": oid(dr_id)},
-        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0},
+        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0},
     )
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -9969,9 +9978,28 @@ async def download_dispatch_carton_labels(dr_id: str, request: Request):
     )
 
 
+@api.get("/dispatch-records/{dr_id}/carton-list")
+async def download_dispatch_carton_list(dr_id: str, request: Request):
+    """Re-download the carton list XLSX as generated at dispatch time."""
+    await get_current_user(request)
+    import base64 as _b64
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"carton_list_file_b64": 1, "invoice_no": 1})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    raw = _b64.b64decode(doc.get("carton_list_file_b64") or "")
+    if not raw:
+        raise HTTPException(404, "Carton list file not stored for this record")
+    inv_no = doc.get("invoice_no", "dispatch")
+    return StreamingResponse(
+        BytesIO(raw),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="CartonList-{inv_no}.xlsx"'},
+    )
+
+
 @api.post("/dispatch-records/{dr_id}/reprint")
 async def reprint_dispatch_zip(dr_id: str, request: Request):
-    """Re-download all three dispatch documents as a ZIP (for reprinting)."""
+    """Re-download all dispatch documents as a ZIP (for reprinting)."""
     await get_current_user(request)
     import base64 as _b64
     import zipfile
@@ -9982,6 +10010,7 @@ async def reprint_dispatch_zip(dr_id: str, request: Request):
     invoice_pdf = _b64.b64decode(doc.get("invoice_file_b64") or "")
     packing_xlsx = _b64.b64decode(doc.get("packing_list_file_b64") or "")
     labels_pdf = _b64.b64decode(doc.get("carton_labels_file_b64") or "")
+    carton_list_xlsx = _b64.b64decode(doc.get("carton_list_file_b64") or "")
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if invoice_pdf:
@@ -9990,6 +10019,8 @@ async def reprint_dispatch_zip(dr_id: str, request: Request):
             zf.writestr(f"PackingList-{inv_no}.xlsx", packing_xlsx)
         if labels_pdf:
             zf.writestr(f"CartonLabels-{inv_no}.pdf", labels_pdf)
+        if carton_list_xlsx:
+            zf.writestr(f"CartonList-{inv_no}.xlsx", carton_list_xlsx)
     zip_buf.seek(0)
     return StreamingResponse(
         zip_buf,

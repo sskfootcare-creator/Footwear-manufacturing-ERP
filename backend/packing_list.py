@@ -227,10 +227,11 @@ def build_default_packing_list(po: dict, options: dict | None = None) -> bytes:
             ws.row_dimensions[row_idx].height = 20
             row_idx += 1
         cartons_here = max(1, (rec["total"] + pcs_per_box - 1) // pcs_per_box)
+        box_range = f"{ctn_seq} - {ctn_seq + cartons_here - 1}" if cartons_here > 1 else str(ctn_seq)
         _set(ws, f"A{row_idx}", site_code or "—", size=9, align="center", border=True)
         _set(ws, f"B{row_idx}", rec["style"], size=9, bold=True, align="left", border=True)
         _set(ws, f"C{row_idx}", rec["color"], size=9, align="left", border=True)
-        _set(ws, f"D{row_idx}", str(ctn_seq), size=9, align="center", border=True)
+        _set(ws, f"D{row_idx}", box_range, size=9, align="center", border=True)
         for i, sz in enumerate(sizes):
             col = get_column_letter(size_start_col_idx + i)
             _set(ws, f"{col}{row_idx}", rec["by_size"].get(sz, 0) or "", size=9, align="center", border=True)
@@ -321,7 +322,7 @@ def build_default_packing_list(po: dict, options: dict | None = None) -> bytes:
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_]+)\s*\}\}")
 
 
-def build_from_template(template_bytes: bytes, po: dict, options: dict | None = None) -> bytes:
+def build_from_template(template_bytes: bytes, po: dict, options: dict | None = None, cartons: list[dict] | None = None) -> bytes:
     """Fill an uploaded template file. The template must contain placeholders
     such as ``{{po_number}}``. The special placeholder ``{{lines}}`` (alone in
     a cell) marks the first line-item row; that row gets cloned downwards for
@@ -333,7 +334,11 @@ def build_from_template(template_bytes: bytes, po: dict, options: dict | None = 
     today = datetime.now().strftime("%d.%m.%Y")
     total_qty = int(po.get("total_quantity") or sum(int(li.get("quantity") or 0) for li in po.get("line_items", [])))
     pcs_per_box = int(options.get("pcs_per_box") or 20)
-    total_cartons = max(1, (total_qty + pcs_per_box - 1) // pcs_per_box)
+    
+    if cartons is not None:
+        total_cartons = len(cartons)
+    else:
+        total_cartons = max(1, (total_qty + pcs_per_box - 1) // pcs_per_box)
 
     scalars = {
         "po_number": po.get("po_number", ""),
@@ -362,7 +367,7 @@ def build_from_template(template_bytes: bytes, po: dict, options: dict | None = 
 
     for ws in wb.worksheets:
         _substitute_scalars(ws, scalars)
-        _expand_lines(ws, po, options)
+        _expand_lines(ws, po, options, cartons)
 
     out = io.BytesIO()
     wb.save(out)
@@ -390,13 +395,14 @@ def _find_lines_marker(ws) -> Optional[tuple[int, int]]:
 def _classify_header_simple(s: str) -> Optional[str]:
     if not s:
         return None
-    s = re.sub(r"\s+", " ", str(s).strip().lower())
+    s_orig = str(s).strip()
+    s = re.sub(r"\s+", " ", s_orig.lower())
     table = {
-        "style": ["style", "article", "model"],
+        "style": ["style", "article", "model", "style code", "style no"],
         "description": ["description", "particulars", "product"],
         "color": ["color", "colour"],
         "size": ["size"],
-        "quantity": ["qty", "quantity", "pcs", "pairs", "total pcs"],
+        "quantity": ["qty", "quantity", "pcs", "pairs", "total pcs", "total quantity"],
         "unit_price": ["rate", "price", "unit price"],
         "amount": ["amount", "total"],
         "net_wt": ["net wt", "net weight"],
@@ -407,10 +413,15 @@ def _classify_header_simple(s: str) -> Optional[str]:
         for c in choices:
             if c == s or (len(s) <= 20 and c in s):
                 return key
+
+    # Detect numeric size columns like 3, 4, 5, 6, 7, 8, 9, 10 or 36, 37, 38, 39, 40, 41, 42
+    if re.match(r"^\d+(?:\.5)?$", s_orig) or s in ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]:
+        return f"size_col:{s_orig}"
+
     return None
 
 
-def _expand_lines(ws, po: dict, options: dict | None = None) -> None:
+def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict] | None = None) -> None:
     options = options or {}
     pcs_per_box = int(options.get("pcs_per_box") or 20)
     marker = _find_lines_marker(ws)
@@ -425,15 +436,116 @@ def _expand_lines(ws, po: dict, options: dict | None = None) -> None:
             break
         header_row -= 1
     header_map: dict[int, str] = {}
+    has_size_cols = False
     for c in range(1, ws.max_column + 1):
         cls = _classify_header_simple(ws.cell(header_row, c).value)
         if cls:
             header_map[c] = cls
+            if cls.startswith("size_col:"):
+                has_size_cols = True
 
-    # Aggregate PO line items per (style, color) and pull line records
     items = po.get("line_items", [])
-    if not items:
+    if not items and not cartons:
         return
+
+    expanded_rows = []
+    if cartons:
+        # Group cartons by style, color, size, qty per carton
+        sorted_cartons = sorted(cartons, key=lambda x: x.get("box_number") or 0)
+        groups = []
+        current_group = None
+        for c in sorted_cartons:
+            key = (c.get("style_code"), c.get("color"), c.get("size"), c.get("qty"))
+            box_num = c.get("box_number")
+            if current_group and current_group["key"] == key:
+                current_group["cartons"].append(c)
+                current_group["box_numbers"].append(box_num)
+            else:
+                if current_group:
+                    groups.append(current_group)
+                current_group = {
+                    "key": key,
+                    "style_code": c.get("style_code"),
+                    "color": c.get("color"),
+                    "size": c.get("size"),
+                    "qty": c.get("qty"),
+                    "cartons": [c],
+                    "box_numbers": [box_num]
+                }
+        if current_group:
+            groups.append(current_group)
+
+        for idx, g in enumerate(groups):
+            box_nums = [b for b in g["box_numbers"] if b is not None]
+            if box_nums:
+                min_b, max_b = min(box_nums), max(box_nums)
+                box_range = f"{min_b} - {max_b}" if min_b != max_b else str(min_b)
+            else:
+                box_range = "—"
+            carton_count = len(g["cartons"])
+            row_total_qty = carton_count * g["qty"]
+            
+            # Find unit price and description from PO items
+            unit_price = 0.0
+            description = po.get("description", "")
+            for li in items:
+                if li.get("style_code") == g["style_code"] and li.get("color") == g["color"]:
+                    unit_price = float(li.get("unit_price") or 0)
+                    description = li.get("description") or description
+                    break
+            
+            rec = {
+                "style_code": g["style_code"],
+                "color": g["color"],
+                "size": g["size"],
+                "description": description,
+                "quantity": row_total_qty,
+                "unit_price": unit_price,
+                "amount": round(row_total_qty * unit_price, 2),
+                "carton_count": carton_count,
+                "box_range": box_range,
+                "sizes": {str(g["size"]).strip(): row_total_qty}
+            }
+            expanded_rows.append(rec)
+    else:
+        # Standard PO line-items mode (without actual carton layout)
+        if has_size_cols:
+            # Group by (style, color)
+            agg = {}
+            for li in items:
+                key = (li.get("style_code", ""), li.get("color", ""))
+                if key not in agg:
+                    agg[key] = {
+                        "style_code": key[0],
+                        "color": key[1],
+                        "description": li.get("description", ""),
+                        "unit_price": li.get("unit_price", 0),
+                        "amount": 0,
+                        "quantity": 0,
+                        "sizes": {}
+                    }
+                sz = str(li.get("size", "")).strip()
+                qty = int(li.get("quantity") or 0)
+                agg[key]["sizes"][sz] = agg[key]["sizes"].get(sz, 0) + qty
+                agg[key]["quantity"] += qty
+                agg[key]["amount"] += li.get("amount", round(qty * float(li.get("unit_price") or 0), 2))
+                
+            for idx, (key, rec) in enumerate(agg.items()):
+                expanded_rows.append(rec)
+        else:
+            # Flat: one row per line-item
+            for idx, li in enumerate(items):
+                qty = int(li.get("quantity") or 0)
+                rec = {
+                    "style_code": li.get("style_code", ""),
+                    "color": li.get("color", ""),
+                    "size": li.get("size", ""),
+                    "description": li.get("description", ""),
+                    "quantity": qty,
+                    "unit_price": li.get("unit_price", 0),
+                    "amount": li.get("amount", round(qty * float(li.get("unit_price") or 0), 2)),
+                }
+                expanded_rows.append(rec)
 
     # Wipe the marker row first
     template_row_height = ws.row_dimensions[marker_row].height
@@ -441,7 +553,8 @@ def _expand_lines(ws, po: dict, options: dict | None = None) -> None:
         ws.cell(marker_row, c).value = None
 
     # Write each line item into a row, starting from marker_row
-    for offset, li in enumerate(items):
+    ctn_seq = 1
+    for offset, row_data in enumerate(expanded_rows):
         target_row = marker_row + offset
         if offset > 0:
             ws.insert_rows(target_row)
@@ -457,22 +570,39 @@ def _expand_lines(ws, po: dict, options: dict | None = None) -> None:
                     dst.border = copy(src.border)
                     dst.number_format = src.number_format
 
-        qty = int(li.get("quantity") or 0)
-        cartons = max(1, (qty + pcs_per_box - 1) // pcs_per_box)
-        field_values = {
-            "style": li.get("style_code", ""),
-            "description": li.get("description", ""),
-            "color": li.get("color", ""),
-            "size": li.get("size", ""),
-            "quantity": qty,
-            "unit_price": li.get("unit_price", 0),
-            "amount": li.get("amount", round(qty * float(li.get("unit_price") or 0), 2)),
-            "net_wt": float(options.get("net_wt_per_carton") or 10.8) * cartons,
-            "gross_wt": float(options.get("gross_wt_per_carton") or 12.0) * cartons,
-            "ctn_no": offset + 1,
-        }
+        qty = row_data["quantity"]
+        if cartons:
+            carton_count = row_data["carton_count"]
+            box_range = row_data["box_range"]
+        else:
+            carton_count = max(1, (qty + pcs_per_box - 1) // pcs_per_box)
+            box_range = f"{ctn_seq} - {ctn_seq + carton_count - 1}" if carton_count > 1 else str(ctn_seq)
+            ctn_seq += carton_count
+        
         for c, field in header_map.items():
-            ws.cell(target_row, c).value = field_values.get(field)
+            if field == "style":
+                ws.cell(target_row, c).value = row_data["style_code"]
+            elif field == "description":
+                ws.cell(target_row, c).value = row_data["description"]
+            elif field == "color":
+                ws.cell(target_row, c).value = row_data["color"]
+            elif field == "size":
+                ws.cell(target_row, c).value = row_data.get("size", "")
+            elif field == "quantity":
+                ws.cell(target_row, c).value = qty
+            elif field == "unit_price":
+                ws.cell(target_row, c).value = row_data["unit_price"]
+            elif field == "amount":
+                ws.cell(target_row, c).value = row_data["amount"]
+            elif field == "net_wt":
+                ws.cell(target_row, c).value = float(options.get("net_wt_per_carton") or 10.8) * carton_count
+            elif field == "gross_wt":
+                ws.cell(target_row, c).value = float(options.get("gross_wt_per_carton") or 12.0) * carton_count
+            elif field == "ctn_no":
+                ws.cell(target_row, c).value = box_range
+            elif field.startswith("size_col:"):
+                target_size = field.split(":", 1)[1]
+                ws.cell(target_row, c).value = row_data.get("sizes", {}).get(target_size, "")
 
 
 def build_dispatch_packing_list(cartons: list[dict], po: dict, invoice_no: str, options: dict | None = None) -> bytes:
@@ -708,6 +838,129 @@ def build_dispatch_packing_list(cartons: list[dict], po: dict, invoice_no: str, 
         ws.column_dimensions[letter].width = 12 if col_idx in (1, 2, 3) else 9
 
     # Save & return bytes
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str, options: dict) -> bytes:
+    """Generate a detailed carton-wise packing list Excel file."""
+    options = options or {}
+    carton_dim = options.get("carton_dim") or "60x50x30 CMS"
+    net_wt = float(options.get("net_wt_per_carton") or 10.8)
+    gross_wt = float(options.get("gross_wt_per_carton") or 12.0)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Carton List"
+
+    # Header styling constants
+    _DARK = "0F172A"
+    _ACCENT = "C27842"
+    _LIGHT = "F1F5F9"
+
+    # ---- Title ----
+    ws.merge_cells("A1:I1")
+    _set(ws, "A1", "CARTON PACKING LIST", bold=True, size=16, align="center", fill=_DARK, color="FFFFFF")
+    ws.row_dimensions[1].height = 30
+
+    # ---- Meta Information ----
+    _set(ws, "A3", "VENDOR NAME:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B3:D3")
+    _set(ws, "B3", VENDOR["name"], bold=True, size=10)
+    
+    _set(ws, "F3", "CLIENT NAME:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("G3:I3")
+    _set(ws, "G3", po.get("client_name", ""), bold=True, size=10)
+
+    _set(ws, "A4", "VENDOR GSTIN:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B4:D4")
+    _set(ws, "B4", VENDOR["gstin"], size=9)
+
+    _set(ws, "F4", "CLIENT GSTIN:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("G4:I4")
+    _set(ws, "G4", po.get("client_gstin", ""), size=9)
+
+    _set(ws, "A5", "PO NUMBER:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B5:D5")
+    _set(ws, "B5", po.get("po_number", ""), bold=True, size=10)
+
+    _set(ws, "F5", "INVOICE NUMBER:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("G5:I5")
+    _set(ws, "G5", invoice_no, bold=True, size=10)
+
+    _set(ws, "A6", "PO DATE:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("B6:D6")
+    _set(ws, "B6", po.get("po_date", ""), size=9)
+
+    _set(ws, "F6", "CARTON DIMENSION:", bold=True, size=9, color=_ACCENT)
+    ws.merge_cells("G6:I6")
+    _set(ws, "G6", carton_dim, size=9)
+
+    # ---- Column Headers (row 8) ----
+    headers = [
+        "Box No.", "Style Code", "Description", "Color", 
+        "Size", "Qty (Pairs)", "EAN / Barcode", 
+        "Net Wt (kg)", "Gross Wt (kg)"
+    ]
+    for i, h in enumerate(headers, start=1):
+        col = get_column_letter(i)
+        _set(ws, f"{col}8", h, bold=True, size=10, fill=_DARK, color="FFFFFF", align="center", border=True)
+    ws.row_dimensions[8].height = 25
+
+    # ---- Data rows (row 9+) ----
+    sorted_cartons = sorted(cartons, key=lambda c: c.get("box_number") or 0)
+    row_idx = 9
+    
+    total_qty = 0
+    total_net_wt = 0.0
+    total_gross_wt = 0.0
+    
+    for c in sorted_cartons:
+        qty = c.get("qty") or 0
+        box_num = c.get("box_number") or (row_idx - 8)
+        
+        c_net_wt = round(net_wt, 2)
+        c_gross_wt = round(gross_wt, 2)
+        
+        total_qty += qty
+        total_net_wt += c_net_wt
+        total_gross_wt += c_gross_wt
+
+        _set(ws, f"A{row_idx}", box_num, size=9, align="center", border=True)
+        _set(ws, f"B{row_idx}", c.get("style_code", ""), size=9, bold=True, align="left", border=True)
+        _set(ws, f"C{row_idx}", c.get("description", "") or po.get("description", ""), size=9, align="left", border=True)
+        _set(ws, f"D{row_idx}", c.get("color", ""), size=9, align="left", border=True)
+        _set(ws, f"E{row_idx}", c.get("size", ""), size=9, align="center", border=True)
+        _set(ws, f"F{row_idx}", qty, size=9, align="center", bold=True, border=True)
+        _set(ws, f"G{row_idx}", c.get("ean_code", "") or "—", size=9, align="center", border=True)
+        _set(ws, f"H{row_idx}", c_net_wt, size=9, align="center", border=True)
+        _set(ws, f"I{row_idx}", c_gross_wt, size=9, align="center", border=True)
+        
+        ws.row_dimensions[row_idx].height = 20
+        row_idx += 1
+
+    # ---- Grand Total Row ----
+    gt_row = row_idx
+    _set(ws, f"A{gt_row}", "", border=True)
+    _set(ws, f"B{gt_row}", "TOTAL", bold=True, size=10, fill=_DARK, color="FFFFFF", align="right", border=True)
+    _set(ws, f"C{gt_row}", "", fill=_DARK, border=True)
+    _set(ws, f"D{gt_row}", "", fill=_DARK, border=True)
+    _set(ws, f"E{gt_row}", "", fill=_DARK, border=True)
+    
+    _set(ws, f"F{gt_row}", f"=SUM(F9:F{gt_row-1})", bold=True, size=11, fill=_ACCENT, color="FFFFFF", align="center", border=True)
+    _set(ws, f"G{gt_row}", f"{len(sorted_cartons)} Cartons", bold=True, size=9, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"H{gt_row}", f"=SUM(H9:H{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    _set(ws, f"I{gt_row}", f"=SUM(I9:I{gt_row-1})", bold=True, size=10, fill=_LIGHT, align="center", border=True)
+    
+    ws.row_dimensions[gt_row].height = 24
+
+    # Column widths
+    widths = [8, 15, 25, 12, 8, 12, 18, 12, 12]
+    for col_idx, w in enumerate(widths, start=1):
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = w
+
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
