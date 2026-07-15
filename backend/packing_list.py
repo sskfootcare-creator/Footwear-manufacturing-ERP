@@ -899,7 +899,7 @@ def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str, optio
 
     # ---- Column Headers (row 8) ----
     headers = [
-        "Box No.", "Style Code", "Description", "Color", 
+        "Carton No.", "Style Code", "Description", "Color", 
         "Size", "Qty (Pairs)", "EAN / Barcode", 
         "Net Wt (kg)", "Gross Wt (kg)"
     ]
@@ -918,7 +918,9 @@ def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str, optio
     
     for c in sorted_cartons:
         qty = c.get("qty") or 0
+        total_cartons = len(sorted_cartons)
         box_num = c.get("box_number") or (row_idx - 8)
+        box_num_text = f"{box_num}/{total_cartons}"
         
         c_net_wt = round(net_wt, 2)
         c_gross_wt = round(gross_wt, 2)
@@ -927,7 +929,7 @@ def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str, optio
         total_net_wt += c_net_wt
         total_gross_wt += c_gross_wt
 
-        _set(ws, f"A{row_idx}", box_num, size=9, align="center", border=True)
+        _set(ws, f"A{row_idx}", box_num_text, size=9, align="center", border=True)
         _set(ws, f"B{row_idx}", c.get("style_code", ""), size=9, bold=True, align="left", border=True)
         _set(ws, f"C{row_idx}", c.get("description", "") or po.get("description", ""), size=9, align="left", border=True)
         _set(ws, f"D{row_idx}", c.get("color", ""), size=9, align="left", border=True)
