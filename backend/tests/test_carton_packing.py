@@ -7,6 +7,7 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 
+
 @pytest.fixture(scope="session")
 def session():
     s = requests.Session()
