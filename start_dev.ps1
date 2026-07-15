@@ -41,8 +41,11 @@ Write-Host "==========================================================" -Foregro
 Write-Host "[1/3] Launching local MongoDB..." -ForegroundColor Yellow
 $MongoJob = Start-Job -ScriptBlock {
     param($path)
-    Set-Location "$path/mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin"
-    .\mongod.exe --dbpath "$path/mongodb-portable/data"
+    $exe = "$path/mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/mongod.exe"
+    if (!(Test-Path $exe)) {
+        $exe = "C:\Program Files\MongoDB\Server\8.0\bin\mongod.exe"
+    }
+    & $exe --dbpath "$path/mongodb-portable/data"
 } -ArgumentList $ScriptDir
 
 # Start Backend job
