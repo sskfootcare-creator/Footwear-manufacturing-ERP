@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")
 
+
+
 import os
 import re
 import logging
