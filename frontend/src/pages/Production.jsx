@@ -104,6 +104,31 @@ function aggregateOverdue(rows) {
   return Math.round(worst * 10) / 10;
 }
 
+const triggerDownload = (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+  const safeFilename = filename.replace(/[\/\\]/g, "-");
+  const blob = new Blob([blobData], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = safeFilename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+};
+
+const formatError = (err) => {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  if (Array.isArray(err)) {
+    return err.map(e => {
+      const field = e.loc ? e.loc.filter(l => l !== "body" && l !== "query").join(".") : "";
+      return (field ? `[${field}] ` : "") + (e.msg || JSON.stringify(e));
+    }).join(", ");
+  }
+  if (typeof err === "object") {
+    return err.message || err.detail || JSON.stringify(err);
+  }
+  return String(err);
+};
+
 export default function Production() {
   const navigate = useNavigate();
   const [jobs, setJobs] = useState([]);
@@ -210,20 +235,8 @@ export default function Production() {
       setPackingFor(null);
       load();
     } catch (e) {
-      alert("Packing list failed: " + (e.response?.data?.detail || e.message));
+      alert("Packing list failed: " + formatError(e.response?.data?.detail || e.message));
     }
-  };
-
-  const triggerDownload = (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
-    const safeFilename = filename.replace(/[\/\\]/g, "-");
-    const blob = new Blob([blobData], {
-      type: mimeType,
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = safeFilename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
   };
 
   const reDownloadSavedPacking = async (pl) => {
@@ -320,7 +333,21 @@ export default function Production() {
 
   // Dispatched merge invoice
   const toggleSelect = (group) => setSelected(s => {
-    const next = { ...s }; if (next[group.key]) delete next[group.key]; else next[group.key] = group; return next;
+    const next = { ...s };
+    if (next[group.key]) {
+      delete next[group.key];
+    } else {
+      const values = Object.values(next);
+      if (values.length > 0) {
+        const first = values[0];
+        if (first.po_id !== group.po_id || first.style_code !== group.style_code) {
+          alert("Cannot merge cards from different POs or styles together.");
+          return s;
+        }
+      }
+      next[group.key] = group;
+    }
+    return next;
   });
   const downloadGroupInvoice = async (group) => {
     try {
@@ -342,6 +369,43 @@ export default function Production() {
       setSelected({});
     } catch (e) { alert("Merged failed: " + (e.response?.data?.detail || e.message)); }
     finally { setMerging(false); }
+  };
+
+  const downloadMergedLabels = async () => {
+    const groups = Object.values(selected); if (!groups.length) return;
+    const jobIds = groups.flatMap(g => g.rows.map(r => r.id)).join(",");
+    try {
+      setMerging(true);
+      const res = await http.get(`/production/jobs/carton-labels?job_ids=${jobIds}`, { responseType: "blob" });
+      const first = groups[0];
+      const safePo = (first.po_number || "merged").replace(/[\/\\]/g, "-");
+      triggerDownload(res.data, `MergedLabels-${safePo}-${first.style_code}.pdf`, "application/pdf");
+      setSelected({});
+    } catch (e) {
+      alert("Merged Labels download failed: " + formatError(e.response?.data?.detail || e.message));
+    } finally { setMerging(false); }
+  };
+
+  const downloadMergedCartonList = async () => {
+    const groups = Object.values(selected); if (!groups.length) return;
+    const jobIds = groups.flatMap(g => g.rows.map(r => r.id)).join(",");
+    try {
+      setMerging(true);
+      const res = await http.get(`/production/jobs/carton-list?job_ids=${jobIds}`, { responseType: "blob" });
+      const first = groups[0];
+      const safePo = (first.po_number || "merged").replace(/[\/\\]/g, "-");
+      triggerDownload(res.data, `MergedCartonList-${safePo}-${first.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      setSelected({});
+    } catch (e) {
+      alert("Merged Carton List download failed: " + formatError(e.response?.data?.detail || e.message));
+    } finally { setMerging(false); }
+  };
+
+  const isSelectionDisabled = (group) => {
+    const values = Object.values(selected);
+    if (values.length === 0) return false;
+    const first = values[0];
+    return first.po_id !== group.po_id || first.style_code !== group.style_code;
   };
 
   // Procurement: select cards & generate material requirement
@@ -465,6 +529,22 @@ export default function Production() {
                 <span className="inline sm:hidden">({dispatchedCount})</span>
               </BtnPrimary>
             )}
+            {dispatchedCount > 0 && (
+              <BtnPrimary onClick={downloadMergedLabels} disabled={merging} data-testid="merged-labels-btn"
+                className="bg-[#0D9488] border-[#0D9488] hover:bg-[#0B7A70] px-3 sm:px-4 flex items-center gap-1">
+                <FileDown className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">{merging ? "..." : `Merge Labels (${dispatchedCount})`}</span>
+                <span className="inline sm:hidden">({dispatchedCount})</span>
+              </BtnPrimary>
+            )}
+            {dispatchedCount > 0 && (
+              <BtnPrimary onClick={downloadMergedCartonList} disabled={merging} data-testid="merged-carton-list-btn"
+                className="bg-[#EAB308] border-[#EAB308] hover:bg-[#CA8A04] text-white px-3 sm:px-4 flex items-center gap-1">
+                <FileDown className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">{merging ? "..." : `Merge Carton List (${dispatchedCount})`}</span>
+                <span className="inline sm:hidden">({dispatchedCount})</span>
+              </BtnPrimary>
+            )}
           </div>
         }
       />
@@ -481,6 +561,7 @@ export default function Production() {
             onReDownloadPacking={reDownloadSavedPacking}
             dispatchRecordByJobId={dispatchRecordByJobId}
             onDownloadDispatchFile={downloadDispatchFile}
+            onDownloadInvoice={downloadGroupInvoice}
           />
         ) : (
         <div className="overflow-x-auto pb-4">
@@ -543,6 +624,7 @@ export default function Production() {
                         onDownloadInvoice={downloadGroupInvoice}
                         isSelected={!!selected[g.key]}
                         onToggleSelect={toggleSelect}
+                        isSelectDisabled={isSelectionDisabled(g)}
                         dispatchRecordByJobId={dispatchRecordByJobId}
                         onDownloadDispatchFile={downloadDispatchFile}
                       />
@@ -690,7 +772,7 @@ function ColorGroupCard(props) {
   const { group, style, stageColor, stageIdx, canEdit, onMove, onToggleComponent,
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isProc, isDispatched, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
-    dispatchRecordByJobId, onDownloadDispatchFile } = props;
+    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled } = props;
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -788,7 +870,7 @@ function ColorGroupCard(props) {
           </div>
           {isDispatched && (
             <label className="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="checkbox" checked={isSelected} onChange={() => onToggleSelect(group)} className="w-4 h-4 accent-[#C27842]" data-testid={`select-${group.key}`} />
+              <input type="checkbox" checked={isSelected} disabled={isSelectDisabled && !isSelected} onChange={() => onToggleSelect(group)} className={`w-4 h-4 accent-[#C27842] ${isSelectDisabled && !isSelected ? "cursor-not-allowed opacity-50" : ""}`} data-testid={`select-${group.key}`} />
               <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Merge</span>
             </label>
           )}
@@ -903,17 +985,39 @@ function ColorGroupCard(props) {
               <Package className="w-3 h-3" /> Packing List
             </button>
           )}
-          {isDispatched && drec && (
+          {isDispatched && (
             <>
               <button
-                onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                onClick={async () => {
+                  if (drec) {
+                    onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf");
+                  } else {
+                    try {
+                      const res = await http.get(`/production/jobs/carton-labels?job_ids=${group.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                      triggerDownload(res.data, `CartonLabels-${(group.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${group.style_code}.pdf`, "application/pdf");
+                    } catch (e) {
+                      alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
+                    }
+                  }
+                }}
                 className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-3 py-1 flex items-center gap-1"
                 data-testid={`labels-btn-${group.key}`}
               >
                 <FileDown className="w-3 h-3" /> Carton Labels
               </button>
               <button
-                onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                onClick={async () => {
+                  if (drec) {
+                    onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                  } else {
+                    try {
+                      const res = await http.get(`/production/jobs/carton-list?job_ids=${group.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                      triggerDownload(res.data, `CartonList-${(group.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${group.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    } catch (e) {
+                      alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
+                    }
+                  }
+                }}
                 className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-3 py-1 flex items-center gap-1"
                 data-testid={`carton-list-btn-${group.key}`}
               >
@@ -1194,7 +1298,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
 
 /* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile }) {
+function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice }) {
   const groups = groupJobsByColor(jobs);
   return (
     <div className="space-y-5" data-testid="archive-list">
@@ -1272,7 +1376,7 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                     <button onClick={() => onPacking(g)} className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1">
                       <Package className="w-3 h-3" /> Packing List (New)
                     </button>
-                    {drec && (
+                    {drec ? (
                       <>
                         <button
                           onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
@@ -1294,6 +1398,47 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                         </button>
                         <button
                           onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Carton List
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => onDownloadInvoice(g)}
+                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Invoice
+                        </button>
+                        <button
+                          onClick={() => { onPacking(g); }}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Packing List
+                        </button>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const res = await http.get(`/production/jobs/carton-labels?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                              triggerDownload(res.data, `CartonLabels-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.pdf`, "application/pdf");
+                            } catch (e) {
+                              alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
+                            }
+                          }}
+                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Labels
+                        </button>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const res = await http.get(`/production/jobs/carton-list?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                              triggerDownload(res.data, `CartonList-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                            } catch (e) {
+                              alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
+                            }
+                          }}
                           className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
                         >
                           <FileDown className="w-3 h-3" /> Carton List
@@ -1508,19 +1653,24 @@ function PackingListDialog({ payload, onClose, onSubmit }) {
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [submitting, setSubmitting] = useState(false);
 
+  const [hasCartons, setHasCartons] = useState(false);
+
   useEffect(() => {
-    if (isMerged || !payload.group?.rows) return;
-    const jobIds = payload.group.rows.map(r => r.id).join(",");
+    const jobIds = isMerged
+      ? payload.jobs?.map(j => j.id).join(",")
+      : payload.group?.rows?.map(r => r.id).join(",");
+    if (!jobIds) return;
     http.get(`/packing/cartons?job_ids=${jobIds}`).then(res => {
       const cartons = res.data || [];
       if (cartons.length > 0) {
+        setHasCartons(true);
         const firstQty = cartons[0].qty;
         if (firstQty) {
           setForm(f => ({ ...f, pcs_per_box: firstQty }));
         }
       }
     }).catch(err => console.log("Failed to load cartons:", err));
-  }, [payload.group, isMerged]);
+  }, [payload, isMerged]);
 
   const submit = async () => {
     setSubmitting(true);
@@ -1553,10 +1703,12 @@ function PackingListDialog({ payload, onClose, onSubmit }) {
 
           {/* Carton */}
           <Section title="Carton specification">
-            <Field label="Pcs / Carton">
-              <input type="number" min="1" value={form.pcs_per_box} onChange={e => set("pcs_per_box", Number(e.target.value))}
-                data-testid="pl-pcs-per-box" className="w-full border-2 border-slate-300 px-3 py-2 font-mono text-sm focus:border-[#16A34A] outline-none" />
-            </Field>
+            {!hasCartons && (
+              <Field label="Pcs / Carton">
+                <input type="number" min="1" value={form.pcs_per_box} onChange={e => set("pcs_per_box", Number(e.target.value))}
+                  data-testid="pl-pcs-per-box" className="w-full border-2 border-slate-300 px-3 py-2 font-mono text-sm focus:border-[#16A34A] outline-none" />
+              </Field>
+            )}
             <Field label="Carton dimension">
               <input value={form.carton_dim} onChange={e => set("carton_dim", e.target.value)}
                 data-testid="pl-carton-dim" className="w-full border-2 border-slate-300 px-3 py-2 font-mono text-sm focus:border-[#16A34A] outline-none" />
@@ -1937,7 +2089,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
       onClose();
       load();
     } catch (e) {
-      setError("Failed to confirm: " + (e.response?.data?.detail || e.message));
+      setError("Failed to confirm: " + formatError(e.response?.data?.detail || e.message));
     }
   };
 
@@ -2171,7 +2323,13 @@ function DispatchDialog({ group, onClose, load }) {
       await load();
     } catch (e) {
       let msg = "Dispatch failed — check server logs.";
-      try { const txt = await e?.response?.data?.text(); if (txt) msg = JSON.parse(txt)?.detail || txt; } catch {}
+      try {
+        const txt = await e?.response?.data?.text();
+        if (txt) {
+          const parsed = JSON.parse(txt);
+          msg = formatError(parsed?.detail || parsed);
+        }
+      } catch {}
       setErr(msg);
     } finally { setLoading(false); }
   }, [form, poId, jobIds, load]);

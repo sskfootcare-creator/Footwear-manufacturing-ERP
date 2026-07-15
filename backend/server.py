@@ -9492,6 +9492,90 @@ async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: O
     cartons = await db.packing_cartons.find(q).to_list(1000)
     return [stringify(c) for c in cartons]
 
+
+@api.get("/production/jobs/carton-labels")
+async def get_direct_carton_labels(job_ids: str, request: Request):
+    """Generate carton labels directly for the given job IDs, even if no dispatch record exists."""
+    await get_current_user(request)
+    jids = job_ids.split(",")
+    # Find packing cartons
+    carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
+    if not carton_docs:
+        raise HTTPException(400, "No cartons packed for these jobs")
+        
+    cartons = [stringify(c) for c in carton_docs]
+    # Set box numbers if not set
+    for idx, c in enumerate(cartons):
+        if not c.get("box_number"):
+            c["box_number"] = idx + 1
+            
+    # Load first job to find PO and invoice info
+    job = await db.production_jobs.find_one({"_id": oid(jids[0])})
+    po_number = job.get("po_number", "DRAFT") if job else "DRAFT"
+    
+    # Try to find invoice number from cartons
+    invoice_no = "DRAFT"
+    invoice_id = next((c.get("invoice_id") for c in cartons if c.get("invoice_id")), None)
+    if invoice_id:
+        invoice = await db.invoices.find_one({"_id": oid(invoice_id)})
+        if invoice:
+            invoice_no = invoice.get("invoice_no", "DRAFT")
+            
+    pdf_bytes = build_carton_labels(cartons, po_number, invoice_no)
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="CartonLabels-{invoice_no}.pdf"'},
+    )
+
+
+@api.get("/production/jobs/carton-list")
+async def get_direct_carton_list(job_ids: str, request: Request):
+    """Generate carton list directly for the given job IDs, even if no dispatch record exists."""
+    await get_current_user(request)
+    jids = job_ids.split(",")
+    carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
+    if not carton_docs:
+        raise HTTPException(400, "No cartons packed for these jobs")
+        
+    cartons = [stringify(c) for c in carton_docs]
+    for idx, c in enumerate(cartons):
+        if not c.get("box_number"):
+            c["box_number"] = idx + 1
+            
+    job = await db.production_jobs.find_one({"_id": oid(jids[0])})
+    po_doc = await db.pos.find_one({"_id": oid(job["po_id"])}) if (job and job.get("po_id")) else None
+    po = stringify(po_doc) if po_doc else {"po_number": "DRAFT"}
+    
+    invoice_no = "DRAFT"
+    invoice_id = next((c.get("invoice_id") for c in cartons if c.get("invoice_id")), None)
+    if invoice_id:
+        invoice = await db.invoices.find_one({"_id": oid(invoice_id)})
+        if invoice:
+            invoice_no = invoice.get("invoice_no", "DRAFT")
+            
+    pl_options = {
+        "carton_dim": "60x50x30 CMS",
+        "net_wt_per_carton": "",
+        "gross_wt_per_carton": "",
+        "dispatch_date": "",
+        "transporter": "",
+        "vehicle_no": "",
+        "driver_name": "",
+        "driver_phone": "",
+        "site_code": "",
+        "destination": "",
+        "port": "",
+        "notes": "",
+    }
+    excel_bytes = build_carton_list_xlsx(cartons, po, invoice_no, pl_options)
+    return StreamingResponse(
+        BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="CartonList-{invoice_no}.xlsx"'},
+    )
+
+
 class CartonIn(BaseModel):
     job_id: str
     size: str
