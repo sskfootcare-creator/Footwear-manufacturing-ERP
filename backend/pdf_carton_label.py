@@ -67,7 +67,10 @@ def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
         c.drawCentredString(cx, row1_y + 3.5 * mm, val_text)
 
     _cell(x + col / 2,       po_number or "—",             "PO NUMBER")
-    _cell(x + col + col / 2, str(carton.get("box_number", "—")), "BOX No.", big=True)
+    box_num = carton.get("box_number") or "—"
+    total = carton.get("total_cartons")
+    box_label = f"{box_num}/{total}" if total else str(box_num)
+    _cell(x + col + col / 2, box_label, "CARTON No.", big=True)
     _cell(x + 2*col + col/2, invoice_no or "—",            "INVOICE No.")
 
     # ── EAN ROW (next 16mm) ──────────────────────────────────────────────────
@@ -114,6 +117,10 @@ def build_carton_labels(cartons: list[dict], po_number: str, invoice_no: str) ->
     """
     # Sort by box_number
     cartons = sorted(cartons, key=lambda c: c.get("box_number") or 0)
+    total_cartons = len(cartons)
+    for c in cartons:
+        if c.get("total_cartons") is None:
+            c["total_cartons"] = total_cartons
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)

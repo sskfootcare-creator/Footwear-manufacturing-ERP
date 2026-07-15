@@ -211,6 +211,11 @@ export default function Production() {
   const openPackingMerged = () => {
     const groupsArr = Object.values(selected);
     if (!groupsArr.length) return;
+    const firstPo = groupsArr[0].po_number;
+    if (groupsArr.some((g) => g.po_number !== firstPo)) {
+      alert("Cannot merge cards from different POs.");
+      return;
+    }
     const jobIds = new Set(groupsArr.flatMap(g => g.rows.map(r => r.id)));
     const jobsFlat = jobs.filter(j => jobIds.has(j.id));
     setPackingFor({ kind: "merged", jobs: jobsFlat });
@@ -340,8 +345,8 @@ export default function Production() {
       const values = Object.values(next);
       if (values.length > 0) {
         const first = values[0];
-        if (first.po_id !== group.po_id || first.style_code !== group.style_code) {
-          alert("Cannot merge cards from different POs or styles together.");
+        if (first.po_number !== group.po_number) {
+          alert("Cannot merge cards from different POs.");
           return s;
         }
       }
@@ -357,6 +362,11 @@ export default function Production() {
   };
   const downloadMergedInvoice = async () => {
     const groups = Object.values(selected); if (!groups.length) return;
+    const firstPo = groups[0].po_number;
+    if (groups.some((g) => g.po_number !== firstPo)) {
+      alert("Cannot merge items from different POs.");
+      return;
+    }
     const byPo = {};
     for (const g of groups) {
       if (!byPo[g.po_id]) byPo[g.po_id] = { po_id: g.po_id, job_ids: [] };
@@ -373,6 +383,11 @@ export default function Production() {
 
   const downloadMergedLabels = async () => {
     const groups = Object.values(selected); if (!groups.length) return;
+    const firstPo = groups[0].po_number;
+    if (groups.some((g) => g.po_number !== firstPo)) {
+      alert("Cannot merge items from different POs.");
+      return;
+    }
     const jobIds = groups.flatMap(g => g.rows.map(r => r.id)).join(",");
     try {
       setMerging(true);
@@ -388,6 +403,11 @@ export default function Production() {
 
   const downloadMergedCartonList = async () => {
     const groups = Object.values(selected); if (!groups.length) return;
+    const firstPo = groups[0].po_number;
+    if (groups.some((g) => g.po_number !== firstPo)) {
+      alert("Cannot merge items from different POs.");
+      return;
+    }
     const jobIds = groups.flatMap(g => g.rows.map(r => r.id)).join(",");
     try {
       setMerging(true);
@@ -405,7 +425,7 @@ export default function Production() {
     const values = Object.values(selected);
     if (values.length === 0) return false;
     const first = values[0];
-    return first.po_id !== group.po_id || first.style_code !== group.style_code;
+    return first.po_number !== group.po_number;
   };
 
   // Procurement: select cards & generate material requirement

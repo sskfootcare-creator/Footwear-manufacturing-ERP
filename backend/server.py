@@ -8683,6 +8683,9 @@ async def merged_invoice(payload: dict, request: Request):
         all_items.extend(lis)
         job_ids_all.extend(e.get("job_ids") or [])
 
+    if len(set([p for p in po_numbers if p])) > 1:
+        raise HTTPException(400, "Cannot merge invoices across different POs")
+
     if not all_items:
         raise HTTPException(400, "No line items found across entries")
 
@@ -9504,17 +9507,23 @@ async def get_direct_carton_labels(job_ids: str, request: Request):
     carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
     if not carton_docs:
         raise HTTPException(400, "No cartons packed for these jobs")
-        
+
+    job_docs = await db.production_jobs.find({"_id": {"$in": [oid(jid) for jid in jids]}}).to_list(1000)
+    po_numbers = {job.get("po_number") for job in job_docs if job and job.get("po_number")}
+    if len(po_numbers) > 1:
+        raise HTTPException(400, "Cannot merge carton labels for multiple PO numbers")
+
     cartons = [stringify(c) for c in carton_docs]
-    # Set box numbers if not set
+    total_cartons = len(cartons)
+    # Assign continuous box numbers across merged cartons
     for idx, c in enumerate(cartons):
-        if not c.get("box_number"):
-            c["box_number"] = idx + 1
-            
+        c["box_number"] = idx + 1
+        c["total_cartons"] = total_cartons
+
     # Load first job to find PO and invoice info
     job = await db.production_jobs.find_one({"_id": oid(jids[0])})
     po_number = job.get("po_number", "DRAFT") if job else "DRAFT"
-    
+
     # Try to find invoice number from cartons
     invoice_no = "DRAFT"
     invoice_id = next((c.get("invoice_id") for c in cartons if c.get("invoice_id")), None)
@@ -9522,7 +9531,7 @@ async def get_direct_carton_labels(job_ids: str, request: Request):
         invoice = await db.invoices.find_one({"_id": oid(invoice_id)})
         if invoice:
             invoice_no = invoice.get("invoice_no", "DRAFT")
-            
+
     pdf_bytes = build_carton_labels(cartons, po_number, invoice_no)
     return StreamingResponse(
         BytesIO(pdf_bytes),
@@ -9539,23 +9548,29 @@ async def get_direct_carton_list(job_ids: str, request: Request):
     carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
     if not carton_docs:
         raise HTTPException(400, "No cartons packed for these jobs")
-        
+
+    job_docs = await db.production_jobs.find({"_id": {"$in": [oid(jid) for jid in jids]}}).to_list(1000)
+    po_numbers = {job.get("po_number") for job in job_docs if job and job.get("po_number")}
+    if len(po_numbers) > 1:
+        raise HTTPException(400, "Cannot merge carton lists for multiple PO numbers")
+
     cartons = [stringify(c) for c in carton_docs]
+    total_cartons = len(cartons)
     for idx, c in enumerate(cartons):
-        if not c.get("box_number"):
-            c["box_number"] = idx + 1
-            
+        c["box_number"] = idx + 1
+        c["total_cartons"] = total_cartons
+
     job = await db.production_jobs.find_one({"_id": oid(jids[0])})
     po_doc = await db.pos.find_one({"_id": oid(job["po_id"])}) if (job and job.get("po_id")) else None
     po = stringify(po_doc) if po_doc else {"po_number": "DRAFT"}
-    
+
     invoice_no = "DRAFT"
     invoice_id = next((c.get("invoice_id") for c in cartons if c.get("invoice_id")), None)
     if invoice_id:
         invoice = await db.invoices.find_one({"_id": oid(invoice_id)})
         if invoice:
             invoice_no = invoice.get("invoice_no", "DRAFT")
-            
+
     pl_options = {
         "carton_dim": "60x50x30 CMS",
         "net_wt_per_carton": "",
@@ -9866,6 +9881,10 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     }
     packing_xlsx = await _generate_packing_bytes(payload_po, pl_options, payload.template_id, cartons=cartons, invoice_no=invoice_no)
 
+    total_cartons = len(cartons)
+    for c in cartons:
+        c["total_cartons"] = total_cartons
+
     # ── 7. Carton Labels PDF ─────────────────────────────────────────────────
     labels_pdf = build_carton_labels(cartons, po.get("po_number", ""), invoice_no)
 
@@ -10127,7 +10146,9 @@ async def generate_packing_list(payload: PackingListGenerate, request: Request):
     po = stringify(po_doc)
     payload_po = await _build_packing_payload(po, payload.job_ids)
     options = _packing_options_from_payload(payload)
-    xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id)
+    cartons = await db.packing_cartons.find({"job_id": {"$in": [oid(j) for j in payload.job_ids or []]}}).sort([("box_number", 1), ("_id", 1)]).to_list(1000)
+    cartons = [stringify(c) for c in cartons] if cartons else None
+    xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id, cartons=cartons)
 
     import base64 as b64
     rec = {
@@ -10170,12 +10191,11 @@ async def generate_merged_packing_list(payload: MergedPackingListGenerate, reque
         raise HTTPException(404, "No POs found for these jobs")
     po_docs = [stringify(p) for p in po_docs]
 
-    # All POs must share the same client for a coherent packing list.
-    clients = {p.get("client_name", "").strip() for p in po_docs}
-    if len(clients) > 1:
-        raise HTTPException(400, f"Cannot merge POs of different clients: {clients}")
-    parent = po_docs[0]
+    # All merged jobs must belong to the same PO.
     po_numbers = [p.get("po_number", "") for p in po_docs]
+    if len(set([p for p in po_numbers if p])) > 1:
+        raise HTTPException(400, "Cannot merge packing lists across different POs")
+    parent = po_docs[0]
 
     # Build aggregated line items
     job_ids_str = [str(j["_id"]) for j in jobs]
@@ -10194,7 +10214,9 @@ async def generate_merged_packing_list(payload: MergedPackingListGenerate, reque
     payload_po["po_number"] = " + ".join(po_numbers)
 
     options = _packing_options_from_payload(payload)
-    xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id)
+    cartons = await db.packing_cartons.find({"job_id": {"$in": [oid(j) for j in job_ids_str]}}).sort([("box_number", 1), ("_id", 1)]).to_list(1000)
+    cartons = [stringify(c) for c in cartons] if cartons else None
+    xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id, cartons=cartons)
 
     import base64 as b64
     rec = {
