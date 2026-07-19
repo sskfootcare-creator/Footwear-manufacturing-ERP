@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Html5Qrcode } from "html5-qrcode";
-import { Camera, X, RotateCw, AlertTriangle } from "lucide-react";
+import { Camera, X, RotateCw, AlertTriangle, Keyboard } from "lucide-react";
 
 /**
  * CameraScanner — mobile-first barcode/QR scanner overlay.
- * Uses the phone's rear camera by default; falls back to any available camera.
+ * Uses the phone's rear camera (`facingMode: "environment"`) by default.
  * Continuously reads until either `onScan(text)` returns truthy (success) or
  * the user closes the modal. Supports both QR codes and standard 1D barcodes.
+ * Includes a manual input fallback if camera permission is denied or camera fails.
  *
  * Props:
  *   onScan(text)  — required. Called with the decoded string. Return `true` to
@@ -15,59 +16,49 @@ import { Camera, X, RotateCw, AlertTriangle } from "lucide-react";
  *   onClose()     — required.
  *   expected      — optional. If provided, the overlay highlights the
  *                   expected code so pickers know what they're looking for.
- *
- * Under the hood we drive `Html5Qrcode` directly (not the wrapper `Html5QrcodeScanner`)
- * because we want a custom UI. `fps: 10` keeps CPU usage low; `qrbox` is
- * responsive.
  */
 export default function CameraScanner({ onScan, onClose, expected }) {
   const containerRef = useRef(null);
   const scannerRef   = useRef(null);
   const onScanRef    = useRef(onScan);
   useEffect(() => { onScanRef.current = onScan; }, [onScan]);
-  const [cameraId, setCameraId]   = useState(null);
-  const [cameras, setCameras]     = useState([]);
-  const [error, setError]         = useState("");
-  const [scanning, setScanning]   = useState(false);
-  const [lastHit, setLastHit]     = useState("");
 
-  // Enumerate cameras once — prefer rear-facing.
+  // cameraTarget can be a device ID string OR constraint object { facingMode: "environment" }
+  const [cameraTarget, setCameraTarget] = useState({ facingMode: "environment" });
+  const [cameras, setCameras]           = useState([]);
+  const [error, setError]               = useState("");
+  const [scanning, setScanning]         = useState(false);
+  const [lastHit, setLastHit]           = useState("");
+  const [manualInput, setManualInput]   = useState(expected || "");
+
+  // Enumerate cameras if permitted to support explicit switching between front/rear.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const devices = await Html5Qrcode.getCameras();
         if (cancelled) return;
-        if (!devices || devices.length === 0) {
-          setError("No camera found on this device.");
-          return;
+        if (devices && devices.length > 0) {
+          setCameras(devices);
+          const rear = devices.find((d) =>
+            /back|rear|environment/i.test(d.label || "")
+          );
+          if (rear) {
+            setCameraTarget(rear.id);
+          }
         }
-        setCameras(devices);
-        // Try to auto-select the rear camera (contains "back" or "environment")
-        const rear = devices.find((d) =>
-          /back|rear|environment/i.test(d.label || "")
-        ) || devices[devices.length - 1];
-        setCameraId(rear.id);
       } catch (e) {
-        setError(
-          e?.message?.includes("Permission") || e?.name === "NotAllowedError"
-            ? "Camera permission denied. Enable it in your browser settings and reload."
-            : `Camera error: ${e?.message || e}`
-        );
+        // Ignored here — startScanner will capture and surface any camera initialization error
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  // Start / restart scanning whenever the chosen camera changes.
-  // We create a dedicated child div for Html5Qrcode inside the wrapper ref so
-  // React never owns the DOM Html5Qrcode mutates — this avoids the classic
-  // "removeChild ... not a child of this node" crash when React unmounts.
+  // Start / restart scanning whenever the chosen camera target changes.
   useEffect(() => {
-    if (!cameraId || !containerRef.current) return;
+    if (!containerRef.current) return;
     let cancelled = false;
     const wrapper = containerRef.current;
-    // Dedicated div React does NOT own. Html5Qrcode is free to inject children.
     const targetId = `ssk-cam-target-${Math.random().toString(36).slice(2)}`;
     const target   = document.createElement("div");
     target.id      = targetId;
@@ -86,7 +77,7 @@ export default function CameraScanner({ onScan, onClose, expected }) {
         setScanning(true);
         setError("");
         await html5.start(
-          cameraId,
+          cameraTarget,
           {
             fps: 10,
             qrbox: (viewfinderWidth, viewfinderHeight) => {
@@ -111,8 +102,8 @@ export default function CameraScanner({ onScan, onClose, expected }) {
         if (cancelled) return;
         setError(
           e?.message?.includes("Permission") || e?.name === "NotAllowedError"
-            ? "Camera permission denied. Please allow camera access and try again."
-            : `Could not start camera: ${e?.message || e}`
+            ? "Camera permission denied. Allow camera access in your browser or type the code manually below."
+            : `Could not start camera (${e?.message || e}). Type code manually below.`
         );
         setScanning(false);
       }
@@ -124,14 +115,11 @@ export default function CameraScanner({ onScan, onClose, expected }) {
       const sc = html5;
       scannerRef.current = null;
       const cleanup = () => {
-        // Remove our dedicated div (with all Html5Qrcode's injected children)
-        // from the wrapper — safe because it's OUR node, not React's.
         try {
           if (target.parentNode === wrapper) wrapper.removeChild(target);
         } catch { /* ignore */ }
       };
       if (sc) {
-        // getState() === 2 means SCANNING; anything else means we shouldn't stop.
         try {
           const state = typeof sc.getState === "function" ? sc.getState() : null;
           if (state === 2) {
@@ -144,24 +132,37 @@ export default function CameraScanner({ onScan, onClose, expected }) {
         cleanup();
       }
     };
-  }, [cameraId]);
+  }, [cameraTarget]);
 
   const switchCamera = () => {
     if (cameras.length < 2) return;
-    const idx = cameras.findIndex((c) => c.id === cameraId);
-    setCameraId(cameras[(idx + 1) % cameras.length].id);
+    const currentId = typeof cameraTarget === "string" ? cameraTarget : "";
+    const idx = cameras.findIndex((c) => c.id === currentId);
+    const nextCam = cameras[(idx + 1) % cameras.length];
+    setCameraTarget(nextCam.id);
+  };
+
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    const val = manualInput.trim();
+    if (!val) return;
+    setLastHit(val);
+    Promise.resolve(onScanRef.current(val)).then((stop) => {
+      if (stop) onClose();
+    });
   };
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/90 flex items-center justify-center p-2 sm:p-6" data-testid="camera-scanner">
-      <div className="w-full max-w-md bg-black border-2 border-slate-700 overflow-hidden">
-        <div className="px-3 py-2 bg-slate-900 text-white flex items-center justify-between">
+    <div className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-2 sm:p-6 max-h-[100dvh] overflow-y-auto" data-testid="camera-scanner">
+      <div className="w-full max-w-md bg-black border-2 border-slate-700 overflow-hidden shadow-2xl my-auto">
+        {/* Header */}
+        <div className="px-3 py-2.5 bg-slate-900 text-white flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
-            <Camera className="w-4 h-4 flex-shrink-0" />
+            <Camera className="w-4 h-4 flex-shrink-0 text-amber-400" />
             <div className="min-w-0">
-              <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Camera Scan</div>
+              <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Barcode / QR Scanner</div>
               {expected && (
-                <div className="text-xs font-mono truncate">Expecting: <strong>{expected}</strong></div>
+                <div className="text-xs font-mono truncate text-amber-300">Expecting: <strong>{expected}</strong></div>
               )}
             </div>
           </div>
@@ -169,7 +170,7 @@ export default function CameraScanner({ onScan, onClose, expected }) {
             {cameras.length > 1 && (
               <button
                 onClick={switchCamera}
-                className="p-1.5 text-white hover:bg-slate-800"
+                className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-white hover:bg-slate-800 touch-manipulation"
                 title="Switch camera"
                 data-testid="cam-switch"
               >
@@ -178,7 +179,7 @@ export default function CameraScanner({ onScan, onClose, expected }) {
             )}
             <button
               onClick={onClose}
-              className="p-1.5 text-white hover:bg-slate-800"
+              className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-white hover:bg-slate-800 touch-manipulation"
               title="Close"
               data-testid="cam-close"
             >
@@ -187,29 +188,53 @@ export default function CameraScanner({ onScan, onClose, expected }) {
           </div>
         </div>
 
-        {/* Wrapper is React-owned. Html5Qrcode's target div is injected
-            dynamically inside it so React never touches the scanner's DOM. */}
+        {/* Camera Feed Container */}
         <div ref={containerRef} className="w-full aspect-square bg-black relative">
           {!scanning && !error && (
             <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-xs">
-              Starting camera…
+              Starting rear camera…
             </div>
           )}
         </div>
 
-        {/* Status strip */}
-        <div className="px-3 py-2 bg-slate-900 text-xs text-slate-300">
+        {/* Status Strip */}
+        <div className="px-3 py-2 bg-slate-900 text-xs text-slate-300 border-t border-slate-800">
           {error ? (
-            <div className="flex items-start gap-2 text-red-300" data-testid="cam-error">
-              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <div className="flex items-start gap-2 text-amber-300" data-testid="cam-error">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-400" />
               <span>{error}</span>
             </div>
           ) : lastHit ? (
-            <div>Last scan: <span className="font-mono text-emerald-300">{lastHit}</span></div>
+            <div>Last scan: <span className="font-mono font-bold text-emerald-400">{lastHit}</span></div>
           ) : (
-            <div>Align the code inside the frame. QR + 1D barcodes both supported.</div>
+            <div>Point camera at barcode or QR code. Rear camera active by default.</div>
           )}
         </div>
+
+        {/* Manual Fallback Entry Form */}
+        <form onSubmit={handleManualSubmit} className="p-3 bg-slate-950 border-t border-slate-800 space-y-1.5" data-testid="cam-manual-form">
+          <div className="text-[10px] uppercase font-bold text-slate-400 flex items-center gap-1">
+            <Keyboard className="w-3 h-3 text-slate-400" /> Manual Code Entry
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder={expected || "Type or paste barcode"}
+              className="flex-1 bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white font-mono min-h-[44px] focus:outline-none focus:border-amber-500"
+              data-testid="cam-manual-input"
+            />
+            <button
+              type="submit"
+              disabled={!manualInput.trim()}
+              className="px-4 py-2 bg-[#C27842] hover:bg-[#A65D24] text-white font-bold text-xs uppercase tracking-wider min-h-[44px] disabled:opacity-50 touch-manipulation"
+              data-testid="cam-manual-submit"
+            >
+              Submit
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

@@ -171,7 +171,7 @@ export default function ImageUploader({
         </span>
       </div>
       <div className="flex gap-3 items-start">
-        <div className="w-28 h-28 border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0">
+        <div className="w-28 min-h-[100px] border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0">
           {hasImage && !fallbackToPlaceholder ? (
             <img
               src={previewSrc}
@@ -195,7 +195,7 @@ export default function ImageUploader({
         <div className="flex flex-col justify-center flex-1 min-w-[200px]">
           <div className="flex items-center gap-2 mb-2">
             <label
-              className={`inline-block bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${
+              className={`inline-flex items-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${
                 uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
               }`}
               data-testid={`${testIdPrefix}-upload-label`}
@@ -224,7 +224,7 @@ export default function ImageUploader({
             <input
               type="text"
               placeholder="Paste image URL"
-              className="flex-1 bg-white border-2 border-slate-300 px-2 py-1.5 text-xs outline-none focus:border-slate-500"
+              className="flex-1 bg-white border-2 border-slate-300 px-2 py-2.5 text-xs outline-none focus:border-slate-500 min-h-[44px]"
               value={asObj.url || ""}
               onChange={pasteUrl}
               data-testid={`${testIdPrefix}-url-input`}
@@ -234,7 +234,7 @@ export default function ImageUploader({
             <button
               type="button"
               onClick={clear}
-              className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start inline-flex items-center gap-1"
+            className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start inline-flex items-center gap-1 p-2 -ml-2 min-h-[44px] touch-manipulation"
               data-testid={`${testIdPrefix}-clear`}
             >
               <X className="w-3 h-3" /> Clear Image

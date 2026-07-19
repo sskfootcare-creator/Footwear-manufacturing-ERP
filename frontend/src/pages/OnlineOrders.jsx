@@ -10,6 +10,7 @@ import {
   ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import ResponsiveTable from "../components/ResponsiveTable";
 
 const CHANNEL_COLORS = {
   myntra:   "pink",
@@ -25,6 +26,79 @@ const STATUS_COLORS = {
   mapped:  "blue",
   unmatched: "red",
 };
+
+// Column config for the main online orders list (shared by ResponsiveTable)
+const ONLINE_ORDERS_COLUMNS = [
+  {
+    key: "channel",
+    header: "Channel",
+    primary: true,
+    render: (j) => <Badge color={CHANNEL_COLORS[j.channel] || "slate"}>{j.channel}</Badge>,
+  },
+  {
+    key: "style_code",
+    header: "Internal Style",
+    primary: true,
+    render: (j) => (
+      <div>
+        <div className="font-mono font-bold text-slate-900">{j.style_code}</div>
+        {j.mapped_from_sku && (
+          <div className="text-[10px] text-slate-400 font-mono">← {j.mapped_from_sku}</div>
+        )}
+      </div>
+    ),
+  },
+  {
+    key: "po_number",
+    header: "Order ID",
+    className: "font-mono text-xs text-slate-700",
+    render: (j) => j.po_number,
+  },
+  {
+    key: "color",
+    header: "Color",
+    className: "text-xs text-slate-600",
+    render: (j) => j.color || "—",
+  },
+  {
+    key: "size",
+    header: "Size",
+    className: "text-xs text-slate-600",
+    render: (j) => j.size || "—",
+  },
+  {
+    key: "quantity",
+    header: "Qty",
+    className: "font-mono font-bold",
+    render: (j) => j.quantity,
+  },
+  {
+    key: "unit_price",
+    header: "Unit ₹",
+    className: "font-mono text-xs",
+    render: (j) => j.unit_price ? `₹${j.unit_price.toLocaleString("en-IN")}` : "—",
+  },
+  {
+    key: "stage",
+    header: "Stage",
+    render: (j) => <Badge color="slate">{j.stage}</Badge>,
+  },
+  {
+    key: "style_match_status",
+    header: "Match Status",
+    render: (j) => (
+      <Badge color={STATUS_COLORS[j.style_match_status] || "slate"}>
+        {j.style_match_status}
+      </Badge>
+    ),
+  },
+  {
+    key: "order_date",
+    header: "Order Date",
+    className: "text-xs text-slate-500 whitespace-nowrap",
+    render: (j) => j.order_date || j.created_at?.slice(0, 10) || "—",
+  },
+];
 
 // ═══════════════════════════════════════════════════════════════════════
 // Import Drawer — config-driven (Phase G)
@@ -1440,7 +1514,14 @@ export default function OnlineOrders() {
       {/* Table */}
       <div className="px-4 sm:px-8 py-6">
         {loading ? (
-          <div className="text-center py-20 text-slate-400">Loading orders…</div>
+          <Card className="overflow-hidden">
+            <ResponsiveTable
+              columns={ONLINE_ORDERS_COLUMNS}
+              rows={[]}
+              loading={true}
+              testId="online-orders-table"
+            />
+          </Card>
         ) : jobs.length === 0 ? (
           <Card className="p-10 text-center">
             <ShoppingBag className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -1451,47 +1532,14 @@ export default function OnlineOrders() {
             </BtnPrimary>
           </Card>
         ) : (
-          <Card className="overflow-x-auto">
-            <table className="w-full text-sm" id="online-orders-table">
-              <thead>
-                <tr className="border-b-2 border-slate-200 bg-slate-50 text-left">
-                  {["Channel", "Order ID", "Internal Style", "Color", "Size", "Qty", "Unit ₹", "Stage", "Match Status", "Order Date"].map((h) => (
-                    <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-wider font-bold text-slate-500 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {jobs.map((j) => (
-                  <tr key={j.id} className={`hover:bg-slate-50 transition-colors ${j.style_match_status === "unmatched" ? "bg-red-50/40" : ""}`}>
-                    <td className="px-4 py-3">
-                      <Badge color={CHANNEL_COLORS[j.channel] || "slate"}>
-                        {j.channel}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">{j.po_number}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-mono font-bold text-slate-900">{j.style_code}</div>
-                      {j.mapped_from_sku && (
-                        <div className="text-[10px] text-slate-400 font-mono">← {j.mapped_from_sku}</div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{j.color || "—"}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{j.size  || "—"}</td>
-                    <td className="px-4 py-3 font-mono font-bold">{j.quantity}</td>
-                    <td className="px-4 py-3 font-mono text-xs">{j.unit_price ? `₹${j.unit_price.toLocaleString("en-IN")}` : "—"}</td>
-                    <td className="px-4 py-3"><Badge color="slate">{j.stage}</Badge></td>
-                    <td className="px-4 py-3">
-                      <Badge color={STATUS_COLORS[j.style_match_status] || "slate"}>
-                        {j.style_match_status}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
-                      {j.order_date || j.created_at?.slice(0, 10)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <Card className="overflow-hidden">
+            <ResponsiveTable
+              columns={ONLINE_ORDERS_COLUMNS}
+              rows={jobs}
+              rowKey={(j) => j.id}
+              rowClassName={(j) => j.style_match_status === "unmatched" ? "bg-red-50/40" : ""}
+              testId="online-orders-table"
+            />
           </Card>
         )}
       </div>

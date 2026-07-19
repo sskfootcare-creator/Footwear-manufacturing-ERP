@@ -24,6 +24,7 @@ import {
   Truck,
   Package,
 } from "lucide-react";
+import SearchableSelect from "../components/SearchableSelect";
 
 import { API } from "../lib/api";
 
@@ -461,7 +462,7 @@ export default function POs() {
                           href={`${API}/pos/${p.id}/invoice.pdf`}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-slate-600 hover:text-[#C27842] p-1.5 inline-block"
+                          className="text-slate-600 hover:text-[#C27842] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation"
                           title="Download Tax Invoice"
                           data-testid={`invoice-${p.po_number}`}
                         >
@@ -471,7 +472,7 @@ export default function POs() {
                           href={`${API}/pos/${p.id}/challan.pdf`}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-slate-600 hover:text-[#F97316] p-1.5 inline-block ml-1"
+                          className="text-slate-600 hover:text-[#F97316] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                           title="Dispatch Challan"
                           data-testid={`challan-${p.po_number}`}
                         >
@@ -479,7 +480,7 @@ export default function POs() {
                         </a>
                         <button
                           onClick={() => downloadPacking(p)}
-                          className="text-slate-600 hover:text-[#16A34A] p-1.5 ml-1"
+                          className="text-slate-600 hover:text-[#16A34A] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                           title="Generate Packing List"
                           data-testid={`packing-${p.po_number}`}
                         >
@@ -487,14 +488,14 @@ export default function POs() {
                         </button>
                         <button
                           onClick={() => setView(p)}
-                          className="text-slate-600 hover:text-[#2563EB] p-1.5 ml-1"
+                          className="text-slate-600 hover:text-[#2563EB] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                           data-testid={`view-po-${p.po_number}`}
                         >
                           <Eye className="w-4 h-4" />
                         </button>
                         <button
                           onClick={() => remove(p.id)}
-                          className="text-slate-600 hover:text-red-600 p-1.5 ml-1"
+                          className="text-slate-600 hover:text-red-600 p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -626,8 +627,9 @@ export default function POs() {
                 Line Items
               </h3>
               <button
+                type="button"
                 onClick={addLine}
-                className="text-xs font-bold uppercase tracking-wider text-[#2563EB]"
+                className="text-xs font-bold uppercase tracking-wider text-[#2563EB] py-2 px-3 min-h-[44px] touch-manipulation"
                 data-testid="add-line-btn"
               >
                 + Add line
@@ -682,26 +684,16 @@ export default function POs() {
                             data-testid={`po-line-${i}-ext-sku`}
                           />
                         </td>
-                        <td className="px-1 py-1 relative">
-                          <select
+                        <td className="px-1 py-1 min-w-[160px] relative">
+                          <SearchableSelect
+                            options={styles}
                             value={li.style_code || ""}
-                            onChange={(e) =>
-                              updateLine(i, "style_code", e.target.value)
-                            }
-                            className={`w-40 border px-1 py-1 font-mono text-xs bg-white ${
-                              isStyleValid
-                                ? "border-slate-300"
-                                : "border-red-500 bg-red-50"
-                            }`}
-                            data-testid={`po-line-${i}-style-select`}
-                          >
-                            <option value="">— pick SSK style —</option>
-                            {styles.map((s) => (
-                              <option key={s.id} value={s.code}>
-                                {s.code} · {s.name}
-                              </option>
-                            ))}
-                          </select>
+                            onChange={(code) => updateLine(i, "style_code", code)}
+                            getKey={(s) => s.code}
+                            getLabel={(s) => `${s.code} · ${s.name}`}
+                            placeholder="— pick SSK style —"
+                            testId={`po-line-${i}-style-select`}
+                          />
                           {!isStyleValid && (
                             <div className="text-[9px] text-red-600 font-bold mt-0.5">
                               Mapping required
@@ -759,7 +751,8 @@ export default function POs() {
                             onChange={(e) =>
                               updateLine(i, "quantity", e.target.value)
                             }
-                            className="w-16 border border-slate-300 px-1 py-0.5 text-right font-mono"
+                            inputMode="numeric"
+                            className="w-16 border border-slate-300 px-1 py-2 text-right font-mono text-xs min-h-[44px]"
                           />
                         </td>
                         <td className="px-1 py-1">
@@ -770,7 +763,8 @@ export default function POs() {
                             onChange={(e) =>
                               updateLine(i, "unit_price", e.target.value)
                             }
-                            className="w-20 border border-slate-300 px-1 py-0.5 text-right font-mono"
+                            inputMode="decimal"
+                            className="w-20 border border-slate-300 px-1 py-2 text-right font-mono text-xs min-h-[44px]"
                           />
                         </td>
                         <td className="px-2 py-1 text-right font-mono font-bold">

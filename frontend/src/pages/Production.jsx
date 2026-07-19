@@ -5,6 +5,7 @@ import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
 import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus } from "lucide-react";
+import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
   { key: "procurement", label: "Procurement", color: "#64748B" },
@@ -104,14 +105,36 @@ function aggregateOverdue(rows) {
   return Math.round(worst * 10) / 10;
 }
 
-const triggerDownload = (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+const triggerDownload = async (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
   const safeFilename = filename.replace(/[\/\\]/g, "-");
   const blob = new Blob([blobData], { type: mimeType });
+  const file = new File([blob], safeFilename, { type: mimeType });
+
+  // Web Share API support (e.g. mobile Chrome/Safari share to WhatsApp / Files)
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({
+        files: [file],
+        title: safeFilename,
+      });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = safeFilename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  if (mimeType === "application/pdf" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+    window.open(url, "_blank");
+  } else {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeFilename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 };
 
 const formatError = (err) => {
@@ -1104,13 +1127,13 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
   };
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="assign-dialog">
-      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md">
+      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Assign Karigar</div>
             <div className="font-bold text-base">{group.style_code} · {group.color} · {roleObj?.label}</div>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 touch-manipulation"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 max-h-[55vh] overflow-y-auto">
           {sorted.length === 0 ? (
@@ -1120,7 +1143,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
               <button
                 onClick={() => onSave(null, null)}
                 data-testid="assign-clear"
-                className="w-full text-left px-3 py-2 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider"
+                className="w-full text-left px-3 py-3 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider min-h-[44px] touch-manipulation"
               >
                 ✕ Unassign
               </button>
@@ -1129,7 +1152,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
                   key={w.id}
                   onClick={() => onPickWorker(w)}
                   data-testid={`assign-worker-${w.id}`}
-                  className={`w-full text-left px-3 py-2 border ${selectedWid === w.id ? "border-[#C27842] bg-orange-50" : "border-slate-200"} hover:border-[#0F172A] flex items-center justify-between`}
+                  className={`w-full text-left px-3 py-3 border ${selectedWid === w.id ? "border-[#C27842] bg-orange-50" : "border-slate-200"} hover:border-[#0F172A] flex items-center justify-between min-h-[44px] touch-manipulation`}
                 >
                   <div>
                     <div className="font-bold text-sm">{w.name}</div>
@@ -1152,17 +1175,18 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
                 onChange={(e) => setRate(e.target.value)}
                 placeholder={`Default ₹${selectedWorker?.rate_per_pair || 0}/pair`}
                 data-testid="assign-rate-input"
-                className="w-full mt-1 border-2 border-slate-300 px-3 py-2 font-mono text-lg focus:border-[#C27842] focus:outline-none"
+                inputMode="decimal"
+                className="w-full mt-1 border-2 border-slate-300 px-3 py-3 font-mono text-lg focus:border-[#C27842] focus:outline-none min-h-[44px]"
               />
               <div className="text-[10px] text-slate-500 mt-1">
                 Different styles can have different rates per role. This is the negotiated rate for this card.
               </div>
             </div>
             <div className="flex gap-2">
-              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate)} data-testid="assign-save">
+              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate)} className="min-h-[44px]" data-testid="assign-save">
                 <Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Assign at ₹{rate || selectedWorker?.rate_per_pair || 0}/pair
               </BtnPrimary>
-              <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+              <BtnSecondary onClick={onClose} className="min-h-[44px]">Cancel</BtnSecondary>
             </div>
           </div>
         )}
@@ -1188,42 +1212,45 @@ function QuantityDialog({ group, row, onSave, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="qty-dialog">
-      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md">
+      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Edit Quantity</div>
             <div className="font-bold text-base">{group.style_code} · {group.color} · Size {row?.size}</div>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider mt-0.5">Stage: {row?.stage}</div>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 touch-manipulation"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-3">
           <div>
             <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Planned Qty (pairs)</label>
             <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} data-testid="qty-input-planned"
-              className="w-full border-2 border-slate-300 px-3 py-2 font-mono text-lg focus:border-[#2563EB] focus:outline-none" />
+              inputMode="numeric"
+              className="w-full border-2 border-slate-300 px-3 py-3 font-mono text-lg focus:border-[#2563EB] focus:outline-none min-h-[44px]" />
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Completed</label>
               <input type="number" value={completed} onChange={(e) => setCompleted(e.target.value)} data-testid="qty-input-completed"
-                className="w-full border-2 border-slate-300 px-3 py-2 font-mono focus:border-[#16A34A] focus:outline-none" />
+                inputMode="numeric"
+                className="w-full border-2 border-slate-300 px-3 py-3 font-mono focus:border-[#16A34A] focus:outline-none min-h-[44px]" />
             </div>
             <div>
               <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Rejected</label>
               <input type="number" value={rejected} onChange={(e) => setRejected(e.target.value)} data-testid="qty-input-rejected"
-                className="w-full border-2 border-slate-300 px-3 py-2 font-mono focus:border-red-500 focus:outline-none" />
+                inputMode="numeric"
+                className="w-full border-2 border-slate-300 px-3 py-3 font-mono focus:border-red-500 focus:outline-none min-h-[44px]" />
             </div>
           </div>
           <div>
             <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Reason (optional)</label>
             <input type="text" value={reason} onChange={(e) => setReason(e.target.value)}
               placeholder="e.g., 5 pairs damaged in cutting"
-              className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none" />
+              className="w-full border-2 border-slate-300 px-3 py-3 text-sm focus:border-[#2563EB] focus:outline-none min-h-[44px]" />
           </div>
           <div className="flex gap-2 pt-3 border-t border-slate-200">
-            <BtnPrimary onClick={save} data-testid="qty-save"><Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save</BtnPrimary>
-            <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+            <BtnPrimary onClick={save} className="min-h-[44px]" data-testid="qty-save"><Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save</BtnPrimary>
+            <BtnSecondary onClick={onClose} className="min-h-[44px]">Cancel</BtnSecondary>
           </div>
         </div>
       </div>
@@ -1246,13 +1273,13 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="whatsapp-dialog">
-      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-lg">
+      <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-lg max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between" style={{ background: "#25D366", color: "white" }}>
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">Share via WhatsApp</div>
             <div className="font-bold text-base">{group.style_code} · {group.color} · {group.totalQty} pairs</div>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-white/20"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className="p-2 hover:bg-white/20 touch-manipulation"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-4">
           <div className="text-xs text-slate-600 leading-relaxed bg-amber-50 border border-amber-200 px-3 py-2">
@@ -1265,7 +1292,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
               <div className="space-y-1 mt-1">
                 {candidates.map(w => (
                   <button key={w.id} onClick={() => pick(w)} data-testid={`wa-pick-${w.id}`}
-                    className={`w-full flex items-center justify-between px-3 py-2 border-2 text-left ${picked === w.id ? "border-[#25D366] bg-green-50" : "border-slate-200 hover:border-slate-400"}`}>
+                    className={`w-full flex items-center justify-between px-3 py-3 border-2 text-left min-h-[44px] touch-manipulation ${picked === w.id ? "border-[#25D366] bg-green-50" : "border-slate-200 hover:border-slate-400"}`}>
                     <div>
                       <div className="font-bold text-sm">{w.name}</div>
                       <div className="text-[10px] uppercase tracking-wider text-slate-500">{w.skill}</div>
@@ -1484,44 +1511,67 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
         {!savedPackingLists?.length ? (
           <div className="p-10 text-center text-slate-400 text-sm">No packing lists generated yet.</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 border-b border-slate-200">
-              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                <th className="px-4 py-2 font-bold">When</th>
-                <th className="px-4 py-2 font-bold">PO #(s)</th>
-                <th className="px-4 py-2 font-bold">Client</th>
-                <th className="px-4 py-2 font-bold">Type</th>
-                <th className="px-4 py-2 font-bold">Notes</th>
-                <th className="px-4 py-2 font-bold text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {savedPackingLists.map(pl => (
-                <tr key={pl.id} className="border-b border-slate-100 hover:bg-slate-50" data-testid={`saved-pl-${pl.id}`}>
-                  <td className="px-4 py-2 font-mono text-[11px] text-slate-700 whitespace-nowrap">
-                    {pl.created_at ? new Date(pl.created_at).toLocaleString("en-IN", { hour12: false }) : "—"}
-                  </td>
-                  <td className="px-4 py-2 font-mono font-bold">
-                    {pl.merged ? (pl.po_numbers || []).join(" + ") : pl.po_number}
-                  </td>
-                  <td className="px-4 py-2 text-xs">{pl.client_name || "—"}</td>
-                  <td className="px-4 py-2">
-                    <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 ${pl.merged ? "bg-[#0F172A] text-white" : "bg-slate-100 text-slate-700"}`}>
-                      {pl.merged ? "MERGED" : "SINGLE"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 text-xs text-slate-600 max-w-md truncate">
-                    {pl.options?.notes || pl.options?.transporter || "—"}
-                  </td>
-                  <td className="px-4 py-2 text-right">
-                    <button onClick={() => onReDownloadPacking(pl)} className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1" data-testid={`redownload-pl-${pl.id}`}>
-                      <FileDown className="w-3 h-3 inline -mt-0.5 mr-1" /> Re-download
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <ResponsiveTable
+            columns={[
+              {
+                key: "created_at",
+                header: "When",
+                primary: true,
+                className: "font-mono text-[11px] text-slate-700 whitespace-nowrap",
+                render: (pl) => pl.created_at
+                  ? new Date(pl.created_at).toLocaleString("en-IN", { hour12: false })
+                  : "—",
+              },
+              {
+                key: "po_number",
+                header: "PO #(s)",
+                primary: true,
+                className: "font-mono font-bold",
+                render: (pl) => pl.merged ? (pl.po_numbers || []).join(" + ") : pl.po_number,
+              },
+              {
+                key: "client_name",
+                header: "Client",
+                className: "text-xs",
+                render: (pl) => pl.client_name || "—",
+              },
+              {
+                key: "type",
+                header: "Type",
+                render: (pl) => (
+                  <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 ${
+                    pl.merged ? "bg-[#0F172A] text-white" : "bg-slate-100 text-slate-700"
+                  }`}>
+                    {pl.merged ? "MERGED" : "SINGLE"}
+                  </span>
+                ),
+              },
+              {
+                key: "notes",
+                header: "Notes",
+                className: "text-xs text-slate-600 max-w-md truncate",
+                render: (pl) => pl.options?.notes || pl.options?.transporter || "—",
+              },
+              {
+                key: "action",
+                header: "",
+                action: true,
+                render: (pl) => (
+                  <button
+                    onClick={() => onReDownloadPacking(pl)}
+                    className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-3 py-2 flex items-center gap-1 transition-colors"
+                    data-testid={`redownload-pl-${pl.id}`}
+                    style={{ minHeight: 44 }}
+                  >
+                    <FileDown className="w-3 h-3" /> Re-download
+                  </button>
+                ),
+              },
+            ]}
+            rows={savedPackingLists}
+            rowKey={(pl) => pl.id}
+            testId="saved-packing-lists-table"
+          />
         )}
       </Card>
     </div>
@@ -1704,8 +1754,8 @@ function PackingListDialog({ payload, onClose, onSubmit }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="packing-dialog">
-      <div className="bg-white w-full max-w-3xl max-h-[92vh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-0 sm:p-4" data-testid="packing-dialog">
+      <div className="bg-white w-full sm:max-w-3xl max-h-[100dvh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
         <div className="bg-[#16A34A] text-white px-6 py-4 flex items-baseline justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">
@@ -1813,7 +1863,7 @@ function Section({ title, children }) {
   return (
     <div>
       <div className="text-[11px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-2 border-b border-slate-200 pb-1">{title}</div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">{children}</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">{children}</div>
     </div>
   );
 }
@@ -2360,15 +2410,24 @@ function DispatchDialog({ group, onClose, load }) {
       {children}
     </div>
   );
-  const ic = "w-full border border-slate-300 px-2.5 py-1.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none";
+  const ic = "w-full border border-slate-300 px-2.5 py-2.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none min-h-[44px]";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4">
+      <div className="bg-white shadow-2xl w-full sm:max-w-xl flex flex-col max-h-[100dvh]">
         {/* Header */}
-        <div className="bg-[#0D9488] px-6 py-4 shrink-0">
-          <div className="text-[10px] uppercase tracking-widest text-teal-100 font-bold">Generate Dispatch Documents</div>
-          <div className="text-white font-bold text-lg mt-0.5">{group.style_code} · {group.color}</div>
+        <div className="bg-[#0D9488] px-6 py-4 shrink-0 flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-widest text-teal-100 font-bold">Generate Dispatch Documents</div>
+            <div className="text-white font-bold text-lg mt-0.5">{group.style_code} · {group.color}</div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-white/20 touch-manipulation flex-shrink-0"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5 text-white" />
+          </button>
         </div>
 
         <div className="overflow-y-auto flex-1 p-6 space-y-5">
@@ -2386,14 +2445,14 @@ function DispatchDialog({ group, onClose, load }) {
           </div>
 
           {/* Shipping fields */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Transport Mode"><input className={ic} value={form.transport_mode} placeholder="By Road" onChange={e => set("transport_mode", e.target.value)} /></Field>
             <Field label="Vehicle No."><input className={ic} value={form.vehicle_no} placeholder="MH-01-AB-1234" onChange={e => set("vehicle_no", e.target.value)} /></Field>
             <Field label="Transporter"><input className={ic} value={form.transporter} placeholder="Transporter name" onChange={e => set("transporter", e.target.value)} /></Field>
             <Field label="Supply / Dispatch Date"><input type="date" className={ic} value={form.supply_date} onChange={e => set("supply_date", e.target.value)} /></Field>
             <Field label="Carton Dimensions"><input className={ic} value={form.carton_dim} placeholder="60x50x30 CMS" onChange={e => set("carton_dim", e.target.value)} /></Field>
-            <Field label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" onChange={e => set("net_wt_per_carton", e.target.value)} /></Field>
-            <Field label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" onChange={e => set("gross_wt_per_carton", e.target.value)} /></Field>
+            <Field label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" inputMode="decimal" onChange={e => set("net_wt_per_carton", e.target.value)} /></Field>
+            <Field label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" inputMode="decimal" onChange={e => set("gross_wt_per_carton", e.target.value)} /></Field>
             <Field label="Notes"><input className={ic} value={form.notes} placeholder="Optional" onChange={e => set("notes", e.target.value)} /></Field>
           </div>
 
