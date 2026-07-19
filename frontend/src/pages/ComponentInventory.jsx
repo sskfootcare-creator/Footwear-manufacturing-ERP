@@ -93,7 +93,7 @@ function MovementDrawer({ initial, components, onClose, onDone }) {
 
   return (
     <Drawer onClose={onClose} title="Post Component Movement" width="max-w-xl">
-      <div className="space-y-4 pb-24">
+      <div className="space-y-4 pb-6">
         <Select
           label="Component"
           value={form.component_id}
@@ -315,7 +315,7 @@ function EditMetadataDrawer({ row, onClose, onDone }) {
   }
   return (
     <Drawer onClose={onClose} title={`Edit — ${row.component_code} · ${row.color || "—"}/${row.size || "—"}`}>
-      <div className="space-y-3 pb-24">
+      <div className="space-y-3 pb-6">
         <Input label="Component Name" value={form.component_name}
           onChange={(e) => setForm((f) => ({ ...f, component_name: e.target.value }))} />
         <Select label="Category" value={form.component_category}
@@ -591,7 +591,7 @@ export default function ComponentInventory() {
   }, [rows, groups.length]);
 
   return (
-    <div className="min-h-screen bg-[#F7F7F5]">
+    <div className="bg-[#F7F7F5]">
       <PageHeader
         title="Component Inventory"
         subtitle="Global components — shared across styles. Every stock change is a ledger entry."

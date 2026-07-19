@@ -1372,7 +1372,7 @@ export default function OnlineOrders() {
   );
 
   return (
-    <div className="min-h-screen bg-[#F7F7F5]">
+    <div className="bg-[#F7F7F5]">
       <PageHeader
         title="Online Orders"
         subtitle={tab === "orders"

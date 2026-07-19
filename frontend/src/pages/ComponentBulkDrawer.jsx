@@ -137,7 +137,7 @@ export default function ComponentBulkDrawer({ prefill, existingCodes, onClose, o
     <Drawer onClose={onClose}
       title={isExtend ? `Add Stock in Bulk — ${prefill.component_code}` : "Add Components in Bulk"}
       width="max-w-3xl">
-      <div className="space-y-4 pb-24">
+      <div className="space-y-4 pb-6">
         {/* Metadata */}
         <div className="grid grid-cols-2 gap-3">
           <Input label="Component Code *" value={meta.component_code} disabled={isExtend}

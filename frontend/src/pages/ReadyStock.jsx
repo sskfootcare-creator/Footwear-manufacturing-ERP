@@ -730,7 +730,7 @@ export default function ReadyStock() {
   const stylesList = useMemo(() => Object.values(stylesMeta), [stylesMeta]);
 
   return (
-    <div className="min-h-screen bg-[#F7F7F5]">
+    <div className="bg-[#F7F7F5]">
       <PageHeader
         title="Ready Stock"
         subtitle="Finished Goods Inventory — style-wise color × size matrix"

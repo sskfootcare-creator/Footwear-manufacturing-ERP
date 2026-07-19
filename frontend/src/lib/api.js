@@ -1,6 +1,21 @@
 import axios from "axios";
 
-export const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const getBackendUrl = () => {
+  if (typeof window !== "undefined" && window.location && window.location.hostname) {
+    const host = window.location.hostname;
+    const protocol = window.location.protocol;
+    // When accessed via LAN IP or custom domain, dynamically target port 8000 on that same host
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      return `${protocol}//${host}:8000`;
+    }
+  }
+  if (process.env.REACT_APP_BACKEND_URL && !process.env.REACT_APP_BACKEND_URL.includes("localhost")) {
+    return process.env.REACT_APP_BACKEND_URL;
+  }
+  return "http://localhost:8000";
+};
+
+export const API = `${getBackendUrl()}/api`;
 
 // NOTE: withCredentials is intentionally OFF. The Emergent ingress adds
 // `Access-Control-Allow-Origin: *` to every response, and browsers reject any

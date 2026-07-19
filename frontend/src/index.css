@@ -36,11 +36,33 @@
 
 html, body {
   margin: 0;
+  padding: 0;
   background: var(--bg-page);
   color: var(--text-primary);
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+/* Prevent iOS Mobile Safari auto-zoom on input focus */
+@media (max-width: 767px) {
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  input[type="tel"],
+  input[type="url"],
+  input[type="date"],
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }
 
 h1, h2, h3, h4, h5, h6 {
