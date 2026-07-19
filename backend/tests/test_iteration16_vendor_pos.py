@@ -1,8 +1,9 @@
-﻿"""Iteration 16 — Vendor Purchase Orders CRUD + Shortage PO tests.
+"""Iteration 16 — Vendor Purchase Orders CRUD + Shortage PO tests.
 
 Run with:
     cd backend && .venv/Scripts/pytest tests/test_iteration16_vendor_pos.py -v
 """
+import os
 import pytest
 import httpx
 
@@ -10,8 +11,8 @@ BASE = "http://localhost:8000/api"
 TIMEOUT = 15
 
 # Use seeded admin credentials
-ADMIN_EMAIL = "admin@sskfootcare.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+ADMIN_PASS  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 
 def admin_cookies() -> dict:

@@ -1,5 +1,24 @@
-"""Auth helpers: password hashing, JWT, current user dependency, admin seed."""
+"""Auth helpers: password hashing, JWT, current user dependency, admin seed.
+
+Environment-gated admin seeding
+================================
+The ``ENVIRONMENT`` env var (values: ``development`` | ``test`` | ``production``,
+default ``development``) controls which admin accounts are seeded at startup:
+
++---------------------------+-------------+------+---------------+
+| Account                   | development | test | production    |
++===========================+=============+======+===============+
+| env-driven admin          | ✓           | ✓    | ✓ (required!) |
+| admin@sskfootcare.com     | ✓           | ✓    | ✗  (skipped)  |
+| admin@example.com         | ✓           | ✗    | ✗  (skipped)  |
++---------------------------+-------------+------+===============+
+
+Production startup will raise ``RuntimeError`` if ``ADMIN_PASSWORD`` is unset,
+preventing the server from booting with the insecure default credential.
+"""
 import os
+import sys
+import logging
 import re
 import bcrypt
 import jwt
@@ -7,9 +26,32 @@ from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, Request
 from bson import ObjectId
 
+log = logging.getLogger(__name__)
+
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_HOURS = 12
 REFRESH_TOKEN_DAYS = 7
+
+# ── Valid values for ENVIRONMENT ──────────────────────────────────────────────
+_VALID_ENVIRONMENTS = {"development", "test", "production"}
+
+# ── Hardcoded test/dev seed accounts (never used in production) ───────────────
+_SSK_SEED_EMAIL    = "admin@sskfootcare.com"
+_SSK_SEED_PASSWORD = "Admin@123"
+_EXAMPLE_SEED_EMAIL    = "admin@example.com"
+_EXAMPLE_SEED_PASSWORD = "admin123"
+
+
+def get_environment() -> str:
+    """Return the normalised ENVIRONMENT value, defaulting to 'development'."""
+    env = os.environ.get("ENVIRONMENT", "development").strip().lower()
+    if env not in _VALID_ENVIRONMENTS:
+        log.warning(
+            f"ENVIRONMENT='{env}' is not a recognised value "
+            f"({', '.join(sorted(_VALID_ENVIRONMENTS))}). Defaulting to 'development'."
+        )
+        return "development"
+    return env
 
 
 def get_jwt_secret() -> str:
@@ -118,63 +160,97 @@ def require_roles(*allowed_roles: str):
     return checker
 
 
-async def seed_admin(db):
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
-    
-    # 1. Seed primary admin from env
-    existing = await db.users.find_one({"email": admin_email})
+async def _upsert_admin(db, email: str, password: str, name: str, label: str) -> str:
+    """Insert or re-sync one admin account. Returns 'seeded', 'updated', or 'exists'."""
+    existing = await db.users.find_one({"email": email})
     if existing is None:
         await db.users.insert_one({
-            "email": admin_email,
-            "password_hash": hash_password(admin_password),
-            "name": "Admin",
+            "email": email,
+            "password_hash": hash_password(password),
+            "name": name,
             "role": "admin",
             "active": True,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
-    elif not verify_password(admin_password, existing["password_hash"]):
+        log.info(f"[seed_admin] Seeded {label} ({email})")
+        return "seeded"
+    elif not verify_password(password, existing["password_hash"]):
         await db.users.update_one(
-            {"email": admin_email},
-            {"$set": {"password_hash": hash_password(admin_password)}},
+            {"email": email},
+            {"$set": {"password_hash": hash_password(password)}},
         )
+        log.info(f"[seed_admin] Updated password for {label} ({email})")
+        return "updated"
+    else:
+        log.debug(f"[seed_admin] {label} ({email}) already exists — skipped")
+        return "exists"
 
-    # 2. Seed test admin used by pytest suite
-    test_email = "admin@sskfootcare.com"
-    test_password = "Admin@123"
-    existing_test = await db.users.find_one({"email": test_email})
-    if existing_test is None:
-        await db.users.insert_one({
-            "email": test_email,
-            "password_hash": hash_password(test_password),
-            "name": "Test Admin",
-            "role": "admin",
-            "active": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-    elif not verify_password(test_password, existing_test["password_hash"]):
-        await db.users.update_one(
-            {"email": test_email},
-            {"$set": {"password_hash": hash_password(test_password)}},
-        )
 
-    # 3. Seed default example admin (if different from env admin)
-    example_email = "admin@example.com"
-    example_password = "admin123"
-    if admin_email != example_email:
-        existing_example = await db.users.find_one({"email": example_email})
-        if existing_example is None:
-            await db.users.insert_one({
-                "email": example_email,
-                "password_hash": hash_password(example_password),
-                "name": "Example Admin",
-                "role": "admin",
-                "active": True,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-        elif not verify_password(example_password, existing_example["password_hash"]):
-            await db.users.update_one(
-                {"email": example_email},
-                {"$set": {"password_hash": hash_password(example_password)}},
+async def seed_admin(db) -> None:
+    """Environment-gated admin seeding.
+
+    Reads ENVIRONMENT (development | test | production, default development).
+
+    production
+    ----------
+    - ADMIN_PASSWORD *must* be set; if missing the process aborts with
+      RuntimeError (boot-fail-fast rather than silently use a weak default).
+    - Only the env-configured admin is seeded.
+    - The two hardcoded dev/test accounts are never touched.
+
+    test
+    ----
+    - Env-configured admin + admin@sskfootcare.com are seeded.
+    - admin@example.com is skipped.
+
+    development  (default)
+    ----------------------
+    - All three accounts are seeded (preserves previous behaviour).
+    """
+    environment = get_environment()
+    log.info(f"[seed_admin] ENVIRONMENT={environment}")
+
+    # ── Validate env-admin config ─────────────────────────────────────────────
+    admin_email    = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower().strip()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    if environment == "production":
+        if not admin_password:
+            # Hard abort — do NOT start with a weak or missing password in prod.
+            raise RuntimeError(
+                "FATAL: ADMIN_PASSWORD environment variable is not set. "
+                "The server refuses to start in production without an explicit "
+                "admin password. Set ADMIN_PASSWORD in your deployment secrets."
+            )
+        if admin_password == _EXAMPLE_SEED_PASSWORD:
+            log.warning(
+                "[seed_admin] ADMIN_PASSWORD is set to the insecure default 'admin123'. "
+                "Change it immediately."
             )
 
+    # Fall back to insecure default only in non-production environments
+    if not admin_password:
+        admin_password = _EXAMPLE_SEED_PASSWORD   # "admin123" — dev/test only
+
+    # ── 1. Env-driven admin (all environments) ────────────────────────────────
+    await _upsert_admin(db, admin_email, admin_password, "Admin", "env-admin")
+
+    # ── 2. SSK pytest admin (development + test only) ─────────────────────────
+    if environment in ("development", "test"):
+        await _upsert_admin(
+            db, _SSK_SEED_EMAIL, _SSK_SEED_PASSWORD,
+            "Test Admin", "ssk-test-admin"
+        )
+    else:
+        log.info(f"[seed_admin] SKIPPED ssk-test-admin ({_SSK_SEED_EMAIL}) — environment={environment}")
+
+    # ── 3. Example/fallback admin (development only) ──────────────────────────
+    if environment == "development" and admin_email != _EXAMPLE_SEED_EMAIL:
+        await _upsert_admin(
+            db, _EXAMPLE_SEED_EMAIL, _EXAMPLE_SEED_PASSWORD,
+            "Example Admin", "example-admin"
+        )
+    elif environment != "development":
+        log.info(f"[seed_admin] SKIPPED example-admin ({_EXAMPLE_SEED_EMAIL}) — environment={environment}")
+
+    log.info(f"[seed_admin] Done for environment={environment}")

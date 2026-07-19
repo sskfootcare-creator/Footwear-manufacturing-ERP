@@ -25,8 +25,8 @@ def _read_env():
 
 
 BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or _read_env()).rstrip("/")
-ADMIN_EMAIL = "admin@sskfootcare.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL",    "admin@sskfootcare.com")
+ADMIN_PASS  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 SHEIN_PDF = "/tmp/newpo.pdf"
 TEST_XLSX = "/tmp/test_po.xlsx"

@@ -29,8 +29,8 @@ def _load_frontend_url():
 BASE_URL = _load_frontend_url().rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@sskfootcare.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL",    "admin@sskfootcare.com")
+ADMIN_PASS  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 
 # ---------------- Fixtures ----------------
