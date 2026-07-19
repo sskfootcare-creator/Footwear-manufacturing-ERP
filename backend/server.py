@@ -44,6 +44,7 @@ from io import BytesIO
 import uuid
 import boto3
 from models import *
+from rate_limiter import upload_rate_limiter, pdf_rate_limiter, bulk_import_rate_limiter
 
 # ---------- DB & app ----------
 mongo_url = os.environ["MONGO_URL"]
@@ -75,7 +76,7 @@ if S3_BUCKET:
 else:
     s3_client = None
 
-@api.post("/upload/image")
+@api.post("/upload/image", dependencies=[Depends(upload_rate_limiter)])
 async def upload_image(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
@@ -1075,7 +1076,7 @@ async def delete_sku_map(mid: str, request: Request):
     return {"ok": True}
 
 
-@api.post("/sku-map/bulk")
+@api.post("/sku-map/bulk", dependencies=[Depends(upload_rate_limiter)])
 async def bulk_create_sku_map(
     file: UploadFile = File(...),
     source_type: str = "b2b_client",
@@ -2733,7 +2734,7 @@ async def bulk_fg_movements(request: Request, payload: dict):
     }
 
 
-@api.post("/fg-inventory/import-csv")
+@api.post("/fg-inventory/import-csv", dependencies=[Depends(upload_rate_limiter)])
 async def import_fg_stock_csv(
     request: Request,
     file: UploadFile = File(...),
@@ -3346,7 +3347,7 @@ async def get_styles_template():
         headers={"Content-Disposition": 'attachment; filename="style_master_template.xlsx"'}
     )
 
-@api.post("/styles/bulk/preview")
+@api.post("/styles/bulk/preview", dependencies=[Depends(upload_rate_limiter)])
 async def bulk_upload_preview(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
     import pandas as pd
@@ -5460,7 +5461,7 @@ class OrderImportConfiguredRequest(BaseModel):
     pass
 
 
-@api.post("/online-orders/import-configured")
+@api.post("/online-orders/import-configured", dependencies=[Depends(upload_rate_limiter)])
 async def import_online_orders_configured(
     file: UploadFile = File(...),
     platform: str = "flipkart",
@@ -5869,7 +5870,7 @@ async def _dispatch_one_unit(
     return outcome
 
 
-@api.post("/online-orders/dispatch-import")
+@api.post("/online-orders/dispatch-import", dependencies=[Depends(bulk_import_rate_limiter)])
 async def import_dispatch_configured(
     request: Request,
     file: UploadFile = File(...),
@@ -6427,7 +6428,7 @@ async def _record_monthly_return(
     return {"skipped": False, "close_type": close_type}
 
 
-@api.post("/online-orders/monthly-report-import")
+@api.post("/online-orders/monthly-report-import", dependencies=[Depends(bulk_import_rate_limiter)])
 async def import_monthly_report(
     request: Request,
     file: UploadFile = File(...),
@@ -8087,7 +8088,7 @@ async def delete_po(pid: str, request: Request):
     await db.production_jobs.delete_many({"po_id": pid})
     return {"ok": True}
 
-@api.post("/pos/extract")
+@api.post("/pos/extract", dependencies=[Depends(upload_rate_limiter)])
 async def extract_po(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -8334,7 +8335,7 @@ async def _generate_invoice_payload(po: dict, job_ids: list[str] | None) -> tupl
     return po, line_items
 
 
-@api.get("/pos/{pid}/invoice.pdf")
+@api.get("/pos/{pid}/invoice.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def po_invoice(pid: str, request: Request):
     await get_current_user(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
@@ -8357,7 +8358,7 @@ async def po_invoice(pid: str, request: Request):
     )
 
 
-@api.post("/invoices/job")
+@api.post("/invoices/job", dependencies=[Depends(pdf_rate_limiter)])
 async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
     """Generate an invoice for a subset of production jobs (dispatched). Supports merging."""
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
@@ -8466,7 +8467,7 @@ async def delete_invoice(id: str, request: Request):
     return {"ok": True}
 
 
-@api.post("/invoices/merged")
+@api.post("/invoices/merged", dependencies=[Depends(pdf_rate_limiter)])
 async def merged_invoice(payload: dict, request: Request):
     """Generate a single merged invoice across multiple POs/jobs.
     payload: { entries: [{po_id, job_ids:[...]}] , transport_mode, vehicle_no, supply_date }
@@ -8551,7 +8552,7 @@ async def merged_invoice(payload: dict, request: Request):
     )
 
 
-@api.get("/pos/{pid}/challan.pdf")
+@api.get("/pos/{pid}/challan.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def po_challan(pid: str, request: Request, dispatch_qty: Optional[int] = None,
                      transporter: str = "", vehicle: str = ""):
     await get_current_user(request)
@@ -8618,7 +8619,7 @@ async def get_invoice(iid: str, request: Request):
     return inv
 
 
-@api.get("/invoices/{iid}/file")
+@api.get("/invoices/{iid}/file", dependencies=[Depends(pdf_rate_limiter)])
 async def download_invoice_file(iid: str, request: Request):
     await get_current_user(request)
     doc = await db.invoices.find_one({"_id": oid(iid)})
@@ -9311,7 +9312,7 @@ async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: O
     return [stringify(c) for c in cartons]
 
 
-@api.get("/production/jobs/carton-labels")
+@api.get("/production/jobs/carton-labels", dependencies=[Depends(pdf_rate_limiter)])
 async def get_direct_carton_labels(job_ids: str, request: Request):
     """Generate carton labels directly for the given job IDs, even if no dispatch record exists."""
     await get_current_user(request)
@@ -9353,7 +9354,7 @@ async def get_direct_carton_labels(job_ids: str, request: Request):
     )
 
 
-@api.get("/production/jobs/carton-list")
+@api.get("/production/jobs/carton-list", dependencies=[Depends(pdf_rate_limiter)])
 async def get_direct_carton_list(job_ids: str, request: Request):
     """Generate carton list directly for the given job IDs, even if no dispatch record exists."""
     await get_current_user(request)
@@ -9567,7 +9568,7 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
 
 # ═══ UNIFIED DISPATCH ═══
 
-@api.post("/dispatch")
+@api.post("/dispatch", dependencies=[Depends(pdf_rate_limiter)])
 async def create_dispatch(payload: DispatchCreate, request: Request):
     """
     Unified dispatch action for one or more qc_pack jobs.
@@ -9842,7 +9843,7 @@ async def get_dispatch_record(dr_id: str, request: Request):
     return stringify(doc)
 
 
-@api.get("/dispatch-records/{dr_id}/invoice")
+@api.get("/dispatch-records/{dr_id}/invoice", dependencies=[Depends(pdf_rate_limiter)])
 async def download_dispatch_invoice(dr_id: str, request: Request):
     """Re-download the invoice PDF exactly as generated at dispatch time."""
     await get_current_user(request)
@@ -9860,7 +9861,7 @@ async def download_dispatch_invoice(dr_id: str, request: Request):
     )
 
 
-@api.get("/dispatch-records/{dr_id}/packing-list")
+@api.get("/dispatch-records/{dr_id}/packing-list", dependencies=[Depends(pdf_rate_limiter)])
 async def download_dispatch_packing_list(dr_id: str, request: Request):
     """Re-download the packing list XLSX as generated at dispatch time."""
     await get_current_user(request)
@@ -9879,7 +9880,7 @@ async def download_dispatch_packing_list(dr_id: str, request: Request):
     )
 
 
-@api.get("/dispatch-records/{dr_id}/carton-labels")
+@api.get("/dispatch-records/{dr_id}/carton-labels", dependencies=[Depends(pdf_rate_limiter)])
 async def download_dispatch_carton_labels(dr_id: str, request: Request):
     """Re-download the carton labels PDF as generated at dispatch time."""
     await get_current_user(request)
@@ -9897,7 +9898,7 @@ async def download_dispatch_carton_labels(dr_id: str, request: Request):
     )
 
 
-@api.get("/dispatch-records/{dr_id}/carton-list")
+@api.get("/dispatch-records/{dr_id}/carton-list", dependencies=[Depends(pdf_rate_limiter)])
 async def download_dispatch_carton_list(dr_id: str, request: Request):
     """Re-download the carton list XLSX as generated at dispatch time."""
     await get_current_user(request)
@@ -9916,7 +9917,7 @@ async def download_dispatch_carton_list(dr_id: str, request: Request):
     )
 
 
-@api.post("/dispatch-records/{dr_id}/reprint")
+@api.post("/dispatch-records/{dr_id}/reprint", dependencies=[Depends(pdf_rate_limiter)])
 async def reprint_dispatch_zip(dr_id: str, request: Request):
     """Re-download all dispatch documents as a ZIP (for reprinting)."""
     await get_current_user(request)
@@ -9948,7 +9949,7 @@ async def reprint_dispatch_zip(dr_id: str, request: Request):
     )
 
 
-@api.post("/packing-lists/job")
+@api.post("/packing-lists/job", dependencies=[Depends(pdf_rate_limiter)])
 async def generate_packing_list(payload: PackingListGenerate, request: Request):
     """Generate a packing-list xlsx for a single PO (optionally filtered by jobs).
     Stores the bytes so the user can re-download from Archive later."""
@@ -9988,7 +9989,7 @@ async def generate_packing_list(payload: PackingListGenerate, request: Request):
     )
 
 
-@api.post("/packing-lists/merged")
+@api.post("/packing-lists/merged", dependencies=[Depends(pdf_rate_limiter)])
 async def generate_merged_packing_list(payload: MergedPackingListGenerate, request: Request):
     """Generate ONE packing list covering jobs from multiple POs of the same
     client (mirrors merged-invoice flow)."""
@@ -10066,7 +10067,7 @@ async def list_packing_lists(request: Request, po_id: Optional[str] = None,
     return [stringify(d) for d in docs]
 
 
-@api.get("/packing-lists/{plid}/file")
+@api.get("/packing-lists/{plid}/file", dependencies=[Depends(pdf_rate_limiter)])
 async def download_packing_list(plid: str, request: Request):
     await get_current_user(request)
     doc = await db.packing_lists.find_one({"_id": oid(plid)})
@@ -10461,7 +10462,7 @@ class OnlineOrderImportResult(BaseModel):
     unresolved: int
     errors: List[dict]
 
-@api.post("/online-orders/import")
+@api.post("/online-orders/import", dependencies=[Depends(bulk_import_rate_limiter)])
 async def import_online_orders(
     file: UploadFile = File(...),
     channel: str = "myntra",          # form field: myntra|flipkart|nykaa|website
@@ -11840,7 +11841,7 @@ async def inventory_alerts(request: Request):
 
 
 
-@api.post("/production/card.pdf")
+@api.post("/production/card.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def production_card_pdf(payload: dict, request: Request):
     """Generate a printable production card PDF for a (style+color+po) group.
     Accepts {job_ids:[...]} of all jobs belonging to the same style+color+PO.
