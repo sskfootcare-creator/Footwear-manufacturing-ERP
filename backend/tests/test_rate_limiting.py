@@ -80,3 +80,69 @@ def test_rate_limiting_reset_on_success():
             timeout=10
         )
         assert r.status_code == 401, f"Should return 401 after reset, got {r.status_code}"
+
+
+def test_file_upload_rate_limiting():
+    import random
+    dummy_ip = f"13.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+    headers = {
+        "X-Test-Rate-Limit-Client-IP": dummy_ip,
+        "X-Test-Rate-Limit-Window": "300"
+    }
+    files = {"file": ("test.pdf", b"dummy pdf content", "application/pdf")}
+
+    # 1. First 20 requests to an upload endpoint (e.g. /pos/extract) should return non-429
+    for i in range(20):
+        r = requests.post(
+            f"{API_URL}/pos/extract",
+            headers=headers,
+            files=files,
+            timeout=10
+        )
+        assert r.status_code != 429, f"Attempt {i+1} was rate limited prematurely: {r.status_code}"
+
+    # 2. The 21st request must be rate limited with 429
+    r = requests.post(
+        f"{API_URL}/pos/extract",
+        headers=headers,
+        files=files,
+        timeout=10
+    )
+    assert r.status_code == 429, f"21st attempt should be blocked, got {r.status_code}: {r.text}"
+    detail = r.json().get("detail", "")
+    assert "Too many file upload requests" in detail
+    assert "Retry-After" in r.headers
+
+
+def test_pdf_generation_rate_limiting():
+    import random
+    dummy_ip = f"14.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
+    headers = {
+        "X-Test-Rate-Limit-Client-IP": dummy_ip,
+        "X-Test-Rate-Limit-Window": "300"
+    }
+    json_data = {"job_ids": []}
+
+    # 1. First 30 requests to a PDF generation endpoint (e.g. /production/card.pdf) should return non-429
+    for i in range(30):
+        r = requests.post(
+            f"{API_URL}/production/card.pdf",
+            headers=headers,
+            json=json_data,
+            timeout=10
+        )
+        assert r.status_code != 429, f"Attempt {i+1} was rate limited prematurely: {r.status_code}"
+
+    # 2. The 31st request must be rate limited with 429
+    r = requests.post(
+        f"{API_URL}/production/card.pdf",
+        headers=headers,
+        json=json_data,
+        timeout=10
+    )
+    assert r.status_code == 429, f"31st attempt should be blocked, got {r.status_code}: {r.text}"
+    detail = r.json().get("detail", "")
+    assert "Too many PDF generation requests" in detail
+    assert "Retry-After" in r.headers
+
+
