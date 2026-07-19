@@ -11,6 +11,7 @@ import logging
 import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
+from enum import Enum
 from typing import List, Optional, Literal, Dict, Any, Tuple
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Query
@@ -457,6 +458,16 @@ async def resolve_color_code(color_name: str) -> Optional[str]:
 # ---------- Pydantic models ----------
 Role = Literal["admin", "manager", "production", "sales", "operator"]
 
+
+# ── Style master status enum ──────────────────────────────────────────────────
+# Replaces the bare Optional[str] on StyleIn so invalid values are caught at
+# parse time (Pydantic 422) rather than persisted silently.
+class StyleStatus(str, Enum):
+    """Enum of all valid style master status values."""
+    active       = "active"
+    inactive     = "inactive"
+    discontinued = "discontinued"
+
 class LoginInput(BaseModel):
     email: EmailStr
     password: str
@@ -542,7 +553,7 @@ class StyleIn(BaseModel):
     packing_cost: float = 0
     margin_pct: float = 25
     gst_pct: float = 5
-    status: Optional[str] = "inactive"
+    status: Optional[StyleStatus] = StyleStatus.inactive
     default_pairs_per_carton: Optional[Dict[str, int]] = {}
 
 class POLineItem(BaseModel):
@@ -870,11 +881,30 @@ class SkuMapUpdate(BaseModel):
 
 
 # ---------- Style Lifecycle (Online branch) models ----------
+# Kept for internal type annotations and backwards compat — the Enum below
+# is the authoritative source for Pydantic validation.
 OnlineStatus = Literal[
     "draft", "sample_approved", "photoshoot_completed", "catalog_completed",
     "price_finalized", "ready_for_launch", "live",
     "liquidation_candidate", "archived",
 ]
+
+
+# ── Online lifecycle status enum ───────────────────────────────────────────────
+# Strict Enum used by OnlineStatusPatchIn.to_status so invalid status values
+# are rejected at the API boundary with a Pydantic 422 rather than falling
+# through to _validate_online_status_transition with an opaque 400.
+class OnlineStatusEnum(str, Enum):
+    """All valid online lifecycle statuses. Mirrors ONLINE_STATUS_SEQUENCE + side-branches."""
+    draft                 = "draft"
+    sample_approved       = "sample_approved"
+    photoshoot_completed  = "photoshoot_completed"
+    catalog_completed     = "catalog_completed"
+    price_finalized       = "price_finalized"
+    ready_for_launch      = "ready_for_launch"
+    live                  = "live"
+    liquidation_candidate = "liquidation_candidate"
+    archived              = "archived"
 
 # Ordered pipeline; used to enforce forward-only transitions.
 ONLINE_STATUS_SEQUENCE = [
@@ -911,7 +941,9 @@ class StyleLifecycleUpsert(BaseModel):
 
 
 class OnlineStatusPatchIn(BaseModel):
-    to_status: OnlineStatus
+    # Use the strict Enum — Pydantic rejects any value not in OnlineStatusEnum
+    # before control reaches _validate_online_status_transition.
+    to_status: OnlineStatusEnum
     notes:     Optional[str] = ""
 
 
@@ -935,6 +967,24 @@ COMPONENT_MOVEMENT_TYPES = [
     "production_reserve", "online_reserve", "unreserve",
     "production_issue", "online_issue",
 ]
+
+# ── Standard footwear size range (EU) ──────────────────────────────────────────
+# Indian ladies' footwear standard range: EU 36–41.
+# Used by the size-matrix endpoints and the pivot helper to ensure all six
+# size columns are always present (zero-filled when no stock exists yet).
+STANDARD_SIZES: List[str] = ["36", "37", "38", "39", "40", "41"]
+
+
+class SizeMatrixCell(BaseModel):
+    """A single cell in the color × size inventory matrix.
+
+    Represents the stock position for one (color, size) combination.
+    Used as the value type in the size_matrix sub-document returned by
+    GET /components/size-matrix/{component_code} and
+    GET /fg-inventory/by-style/{style_id}?matrix=true.
+    """
+    qty:      int = 0   # current_stock for components; ready_stock_qty for FG
+    reserved: int = 0   # reserved_stock for components; reserved_qty for FG
 
 
 class ComponentIn(BaseModel):
@@ -2176,6 +2226,12 @@ async def upsert_style_lifecycle(style_id: str, payload: StyleLifecycleUpsert, r
             for name in PLANNED_COMPONENTS
         ]
 
+    # ── Guard: never allow a direct online_status override via this endpoint ──
+    # Status transitions MUST go through PATCH /styles/{sid}/online-status which
+    # runs the full _validate_online_status_transition sequence guard. Stripping
+    # it here prevents a crafted PUT payload from bypassing that logic.
+    payload_dict.pop("online_status", None)
+
     for k, v in payload_dict.items():
         update[k] = v
 
@@ -2371,10 +2427,57 @@ def _serialize_component(doc: dict) -> dict:
     return out
 
 
+def _build_size_matrix_pivot(
+    rows: List[dict],
+    qty_field:      str = "current_stock",
+    reserved_field: str = "reserved_stock",
+    sizes: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, dict]]:
+    """Build a {color: {size: {qty, reserved}}} nested pivot from a flat list of rows.
+
+    Guarantees that every color present in `rows` has an entry for each size in
+    `sizes` (defaults to STANDARD_SIZES), zero-filled when no row exists for that
+    (color, size) pair. Clients can render the matrix without any additional
+    grouping logic.
+
+    Args:
+        rows:           Flat component_master or fg_inventory row dicts.
+        qty_field:      Field to use as the cell's ``qty`` value.
+        reserved_field: Field to use as the cell's ``reserved`` value.
+        sizes:          Explicit size list; falls back to STANDARD_SIZES.
+
+    Returns:
+        Dict keyed by color, then by size string (always present for every
+        size in ``sizes``).
+    """
+    target_sizes = sizes or STANDARD_SIZES
+    matrix: Dict[str, Dict[str, dict]] = {}
+
+    for row in rows:
+        color = str(row.get("color") or "").strip() or "—"
+        size  = str(row.get("size")  or "").strip() or "—"
+        if color not in matrix:
+            # Seed the full size range at zero so the pivot is always complete
+            matrix[color] = {
+                sz: {"qty": 0, "reserved": 0} for sz in target_sizes
+            }
+        matrix[color][size] = {
+            "qty":      int(row.get(qty_field,      0) or 0),
+            "reserved": int(row.get(reserved_field, 0) or 0),
+        }
+
+    return matrix
+
+
+
+
 def _apply_component_movement(mov_type: str, quantity: int,
                               adjustment_dir: Optional[str]) -> Dict[str, int]:
     """Return the {current_delta, reserved_delta} that this movement should
-    apply to the component_master row. Signed integers."""
+    apply to the component_master row. Signed integers.
+
+    Pure-functional: no I/O, fully testable in isolation.
+    """
     q = int(quantity)
     if q <= 0:
         raise HTTPException(400, "quantity must be a positive integer")
@@ -2398,70 +2501,128 @@ def _apply_component_movement(mov_type: str, quantity: int,
     raise HTTPException(400, f"Unsupported movement_type '{mov_type}'")
 
 
-async def _record_component_movement(component: dict, payload: ComponentMovementIn,
+async def _record_component_movement(component: dict, payload: "ComponentMovementIn",
                                      user_email: str) -> dict:
-    """Atomically apply a movement to a component row and write a ledger entry.
-    Rejects the movement if it would produce a negative current_stock or reserved_stock."""
-    delta = _apply_component_movement(payload.movement_type, payload.quantity,
-                                      payload.adjustment_dir)
-    new_current  = int(component.get("current_stock",  0)) + delta["current_delta"]
-    new_reserved = int(component.get("reserved_stock", 0)) + delta["reserved_delta"]
+    """Atomically apply a movement to a component_master row and write a ledger entry.
 
-    if new_current < 0:
-        raise HTTPException(400,
-            f"Movement would take current_stock negative ({component.get('current_stock', 0)} → {new_current})")
-    if new_reserved < 0:
-        raise HTTPException(400,
-            f"Movement would take reserved_stock negative ({component.get('reserved_stock', 0)} → {new_reserved})")
-    if new_reserved > new_current:
-        raise HTTPException(400,
-            f"Movement would over-reserve: reserved_stock ({new_reserved}) > current_stock ({new_current})")
+    Strategy: read current values → compute deltas → write with $inc using an
+    optimistic-concurrency guard (match on current_stock + reserved_stock).
+    If a concurrent write has already changed the row, modified_count==0 and
+    we re-read and retry up to MAX_RETRIES times before raising HTTP 409.
 
-    now = now_iso()
-    await db.component_master.update_one(
-        {"_id": component["_id"]},
-        {"$set": {
-            "current_stock":  new_current,
-            "reserved_stock": new_reserved,
-            "updated_at":     now,
-        }}
-    )
+    This eliminates the TOCTOU race condition that existed in the old
+    read → compute → $set pattern, where two concurrent movements could both
+    read the same stale value and both persist, corrupting stock counts.
+    """
+    MAX_RETRIES = 3
 
-    ledger = {
-        "component_id":   component["_id"],
-        "component_code": component.get("component_code", ""),
-        "component_name": component.get("component_name", ""),
-        "color":          component.get("color", ""),
-        "size":           component.get("size", ""),
-        "movement_type":  payload.movement_type,
-        "quantity":       int(payload.quantity),
-        "current_delta":  delta["current_delta"],
-        "reserved_delta": delta["reserved_delta"],
-        "current_before": int(component.get("current_stock",  0)),
-        "current_after":  new_current,
-        "reserved_before":int(component.get("reserved_stock", 0)),
-        "reserved_after": new_reserved,
-        "reference_type": payload.reference_type or "manual",
-        "reference_id":   payload.reference_id or "",
-        "style_id":       oid(payload.style_id) if payload.style_id else None,
-        "notes":          (payload.notes or "").strip(),
-        "created_at":     now,
-        "by":             user_email,
-    }
-    res = await db.component_stock_movements.insert_one(ledger)
-    ledger["_id"] = res.inserted_id
+    for attempt in range(MAX_RETRIES):
+        # ── Re-read on every retry to get the latest values ──────────────────
+        if attempt > 0:
+            component = await db.component_master.find_one({"_id": component["_id"]})
+            if not component:
+                raise HTTPException(404, "Component row disappeared during movement — abort")
 
-    await log_activity(
-        "MOVEMENT", "component",
-        f"{component.get('component_code')} ({component.get('color','') or '—'}/{component.get('size','') or '—'}): "
-        f"{payload.movement_type} x {payload.quantity} → stock={new_current}, reserved={new_reserved}",
-        user_email,
-    )
-    return {"ledger": stringify(ledger), "component": _serialize_component({**component,
-        "current_stock":  new_current,
-        "reserved_stock": new_reserved,
-        "updated_at":     now,
-    })}
+        delta = _apply_component_movement(payload.movement_type, payload.quantity,
+                                          payload.adjustment_dir)
+        before_current  = int(component.get("current_stock",  0))
+        before_reserved = int(component.get("reserved_stock", 0))
+        new_current     = before_current  + delta["current_delta"]
+        new_reserved    = before_reserved + delta["reserved_delta"]
+
+        # ── Pre-flight validation (based on anticipated post-write values) ────
+        if new_current < 0:
+            raise HTTPException(400,
+                f"Movement would take current_stock negative "
+                f"({before_current} → {new_current})")
+        if new_reserved < 0:
+            raise HTTPException(400,
+                f"Movement would take reserved_stock negative "
+                f"({before_reserved} → {new_reserved})")
+        if new_reserved > new_current:
+            raise HTTPException(400,
+                f"Movement would over-reserve: reserved_stock ({new_reserved}) "
+                f"> current_stock ({new_current})")
+
+        now = now_iso()
+
+        # ── Atomic $inc with concurrency guard ────────────────────────────────
+        # The match filter pins current_stock and reserved_stock to exactly the
+        # values we read. If a concurrent writer has already modified them,
+        # MongoDB won't match the document → modified_count == 0 → retry.
+        match_filter = {
+            "_id":            component["_id"],
+            "current_stock":  before_current,
+            "reserved_stock": before_reserved,
+        }
+        inc_doc: dict = {}
+        if delta["current_delta"]  != 0: inc_doc["current_stock"]  = delta["current_delta"]
+        if delta["reserved_delta"] != 0: inc_doc["reserved_stock"] = delta["reserved_delta"]
+
+        res = await db.component_master.update_one(
+            match_filter,
+            {
+                "$inc": inc_doc,
+                "$set": {"updated_at": now},
+            } if inc_doc else {"$set": {"updated_at": now}},
+        )
+
+        if res.modified_count == 0:
+            if attempt < MAX_RETRIES - 1:
+                # Contention detected — brief yield then re-read and retry
+                await asyncio.sleep(0.05 * (attempt + 1))
+                continue
+            raise HTTPException(
+                409,
+                "Concurrent modification detected on component_master after "
+                f"{MAX_RETRIES} retries. Please retry the movement."
+            )
+
+        # ── Success: write the audit ledger row ───────────────────────────────
+        ledger = {
+            "component_id":    component["_id"],
+            "component_code":  component.get("component_code", ""),
+            "component_name":  component.get("component_name", ""),
+            "color":           component.get("color", ""),
+            "size":            component.get("size", ""),
+            "movement_type":   payload.movement_type,
+            "quantity":        int(payload.quantity),
+            "current_delta":   delta["current_delta"],
+            "reserved_delta":  delta["reserved_delta"],
+            "current_before":  before_current,
+            "current_after":   new_current,
+            "reserved_before": before_reserved,
+            "reserved_after":  new_reserved,
+            "reference_type":  payload.reference_type or "manual",
+            "reference_id":    payload.reference_id or "",
+            "style_id":        oid(payload.style_id) if payload.style_id else None,
+            "notes":           (payload.notes or "").strip(),
+            "created_at":      now,
+            "by":              user_email,
+        }
+        res_l = await db.component_stock_movements.insert_one(ledger)
+        ledger["_id"] = res_l.inserted_id
+
+        await log_activity(
+            "MOVEMENT", "component",
+            f"{component.get('component_code')} "
+            f"({component.get('color','') or '—'}/{component.get('size','') or '—'}): "
+            f"{payload.movement_type} x {payload.quantity} "
+            f"→ stock={new_current}, reserved={new_reserved}",
+            user_email,
+        )
+        return {
+            "ledger":    stringify(ledger),
+            "component": _serialize_component({
+                **component,
+                "current_stock":  new_current,
+                "reserved_stock": new_reserved,
+                "updated_at":     now,
+            }),
+        }
+
+    # Unreachable — the loop always either returns or raises above.
+    raise HTTPException(409, "Component movement failed after retries")
 
 
 # ── Endpoints ──────────────────────────────────────────────────────
@@ -2498,6 +2659,63 @@ async def list_components(
                   if int(r.get("minimum_stock", 0)) > 0
                   and int(r.get("available_stock", 0)) <= int(r.get("minimum_stock", 0))]
     return result
+
+
+@api.get("/components/size-matrix/{component_code}")
+async def get_component_size_matrix(component_code: str, request: Request):
+    """Return a unified color × size matrix sub-document for a single component code.
+
+    Every color that has at least one stock row is included. All STANDARD_SIZES
+    (36–41) are guaranteed present in each color column, zero-filled when no
+    row exists for that (color, size) pair. This is the canonical representation
+    for the matrix UI and for B2B / online BOM allocation screens.
+
+    Response shape:
+    {
+      "component_code": "...",
+      "component_name": "...",
+      "standard_sizes": ["36","37","38","39","40","41"],
+      "colors":         ["Black", "Tan", ...],
+      "matrix": {
+        "Black": { "36": {"qty": 12, "reserved": 2}, "37": {...}, ... },
+        "Tan":   { "36": {"qty":  0, "reserved": 0}, ... },
+      },
+      "flat_rows": [ ... ],
+    }
+    """
+    await get_current_user(request)
+    rows = await db.component_master.find(
+        {"component_code": component_code}
+    ).sort([("color", 1), ("size", 1)]).to_list(10000)
+
+    if not rows:
+        raise HTTPException(404, f"No components found with code '{component_code}'")
+
+    serialized = [_serialize_component(r) for r in rows]
+    matrix = _build_size_matrix_pivot(
+        serialized,
+        qty_field="current_stock",
+        reserved_field="reserved_stock",
+    )
+
+    # Collect all distinct sizes that appear in the data, merged with STANDARD_SIZES
+    all_sizes = sorted(
+        set(STANDARD_SIZES) | {str(r.get("size") or "") for r in serialized if r.get("size")},
+        key=lambda x: (int(x) if x.isdigit() else 9999, x),
+    )
+
+    sample = rows[0]
+    return {
+        "component_code":     component_code,
+        "component_name":     sample.get("component_name", ""),
+        "component_category": sample.get("component_category", ""),
+        "unit":               sample.get("unit", "pair"),
+        "standard_sizes":     STANDARD_SIZES,
+        "all_sizes":          all_sizes,
+        "colors":             sorted(matrix.keys()),
+        "matrix":             matrix,
+        "flat_rows":          serialized,
+    }
 
 
 @api.post("/components")
@@ -2565,21 +2783,76 @@ async def update_component(cid: str, payload: ComponentMasterUpdate, request: Re
 
 @api.delete("/components/{cid}")
 async def deactivate_component(cid: str, request: Request):
-    """Soft-delete: set active=false. Refuses if the row has non-zero stock or open reservations."""
+    """Soft-delete a component master row.
+
+    Refuses if the row has non-zero stock (zero out via adjustment first) or if
+    there are active style_component_mapping (BOM) rows referencing this component
+    — those would become orphaned and corrupt downstream costing / planning.
+
+    On success:
+      • Sets component_master.active = False
+      • Sets active=False on all style_component_mapping rows for this component
+        (cascade deactivation of the BOM links)
+      • Writes an audit log entry
+    """
     u = await get_current_user(request); require_roles("admin", "manager")(u)
     doc = await db.component_master.find_one({"_id": oid(cid)})
     if not doc:
         raise HTTPException(404, "Component not found")
+
+    # ── Block 1: refuse if non-zero stock ─────────────────────────────────────
     if int(doc.get("current_stock", 0)) > 0 or int(doc.get("reserved_stock", 0)) > 0:
         raise HTTPException(400,
             "Cannot delete: component has non-zero stock. Zero out via an adjustment movement first.")
-    await db.component_master.update_one(
-        {"_id": doc["_id"]}, {"$set": {"active": False, "updated_at": now_iso()}}
+
+    # ── Block 2: refuse if active BOM (style_component_mapping) links exist ───
+    # These would become orphaned once the component is deactivated and would
+    # produce silent cost errors on any style that references this component.
+    active_bom_links = await db.style_component_mapping.find(
+        {"component_id": cid, "active": True}
+    ).to_list(200)
+
+    if active_bom_links:
+        # Collect the style codes for a helpful error message
+        style_codes = []
+        for link in active_bom_links:
+            style_doc = await db.styles.find_one({"_id": ObjectId(link["style_id"])}, {"code": 1})
+            style_codes.append((style_doc or {}).get("code", link["style_id"]))
+        raise HTTPException(
+            409,
+            f"Cannot deactivate component '{doc['component_code']}': "
+            f"it is referenced in active BOM links for {len(active_bom_links)} style(s): "
+            f"{', '.join(style_codes)}. Remove the BOM links first."
+        )
+
+    now = now_iso()
+
+    # ── Cascade: deactivate all BOM mapping rows for this component ───────────
+    cascade_result = await db.style_component_mapping.update_many(
+        {"component_id": cid},
+        {"$set": {"active": False, "updated_at": now}},
     )
-    await log_activity("DELETE", "component",
-        f"{doc['component_code']} ({doc.get('color','')}/{doc.get('size','')}) deactivated",
-        u["email"])
-    return {"ok": True, "id": cid}
+
+    # ── Soft-delete the master row ────────────────────────────────────────────
+    await db.component_master.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {
+            "active":     False,
+            "deleted_at": now,
+            "updated_at": now,
+        }}
+    )
+    await log_activity(
+        "DELETE", "component",
+        f"{doc['component_code']} ({doc.get('color','')}/{doc.get('size','')}) deactivated; "
+        f"{cascade_result.modified_count} BOM mapping(s) also deactivated.",
+        u["email"],
+    )
+    return {
+        "ok":                     True,
+        "id":                     cid,
+        "bom_links_deactivated":  cascade_result.modified_count,
+    }
 
 
 @api.post("/components/bulk-matrix")
@@ -3423,6 +3696,13 @@ async def get_fg_inventory_by_style(request: Request, style_id: str):
     }).to_list(500)
     active_reservations = [stringify(a) for a in active]
 
+    # Build a nested size-matrix pivot for quick UI rendering
+    size_matrix = _build_size_matrix_pivot(
+        out_rows,
+        qty_field="ready_stock_qty",
+        reserved_field="reserved_qty",
+    )
+
     return {
         "style": {
             "id":    str(style["_id"]),
@@ -3432,11 +3712,109 @@ async def get_fg_inventory_by_style(request: Request, style_id: str):
             "image_display_url":   style.get("image_display_url", ""),
             "image_thumbnail_url": style.get("image_thumbnail_url", ""),
         },
-        "rows":               out_rows,
-        "colors":             sorted(colors),
-        "sizes":              sorted(sizes),
+        "rows":                out_rows,
+        "colors":              sorted(colors),
+        "sizes":               sorted(sizes),
+        "standard_sizes":      STANDARD_SIZES,
+        "size_matrix":         size_matrix,   # {color: {36: {qty, reserved}, 37: ...}}
         "active_reservations": active_reservations,
     }
+
+
+@api.put("/fg-inventory/size-matrix")
+async def put_fg_inventory_size_matrix(request: Request, payload: dict):
+    """Bulk-seed FG ready stock via a color × size matrix in a single call.
+
+    Accepts a matrix body and fans it out to individual production_in movements
+    through _apply_movement so every write is atomic and a full ledger trail is
+    created automatically.
+
+    Body shape:
+    {
+      "style_id": "<ObjectId>",
+      "color":    "Black",
+      "movement_type": "production_in",    # optional, default production_in
+      "reference_id":  "LOT-001",          # optional
+      "notes":         "First lot",        # optional
+      "size_matrix": {
+        "36": 10,
+        "37": 20,
+        "38": 30,
+        "39": 20,
+        "40": 10,
+        "41":  5
+      }
+    }
+
+    Rows with quantity == 0 are silently skipped. Each successful size write
+    returns its delta; failures are reported per-size without aborting the batch.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+
+    style_id     = (payload or {}).get("style_id", "")
+    color        = (payload or {}).get("color", "").strip()
+    size_matrix  = (payload or {}).get("size_matrix") or {}
+    mv_type      = (payload or {}).get("movement_type", "production_in").strip()
+    reference_id = (payload or {}).get("reference_id", "")
+    notes        = (payload or {}).get("notes", "")
+
+    if not style_id:
+        raise HTTPException(400, "style_id is required")
+    if not color:
+        raise HTTPException(400, "color is required")
+    if not size_matrix:
+        raise HTTPException(400, "size_matrix must be a non-empty {size: qty} dict")
+
+    results = []
+    ok_count  = 0
+    err_count = 0
+
+    for size_str, qty_raw in size_matrix.items():
+        try:
+            qty = int(float(str(qty_raw or 0)))
+        except Exception:
+            results.append({"size": size_str, "ok": False, "error": "quantity is not a valid number"})
+            err_count += 1
+            continue
+
+        if qty == 0:
+            continue  # silently skip zero-quantity cells
+
+        try:
+            mv = FgStockMovementIn(
+                style_id       = style_id,
+                color          = color,
+                size           = str(size_str).strip(),
+                movement_type  = mv_type,
+                quantity       = qty,
+                reference_type = "manual",
+                reference_id   = reference_id or "",
+                notes          = notes or f"Size-matrix bulk entry for {color}/{size_str}",
+            )
+            out = await _apply_movement(mv, u["email"])
+            results.append({
+                "size":  size_str,
+                "qty":   qty,
+                "ok":    True,
+                "delta": out["movement"].get("delta"),
+            })
+            ok_count += 1
+        except HTTPException as he:
+            results.append({"size": size_str, "qty": qty, "ok": False, "error": str(he.detail)})
+            err_count += 1
+        except Exception as e:
+            results.append({"size": size_str, "qty": qty, "ok": False, "error": str(e)})
+            err_count += 1
+
+    return {
+        "style_id": style_id,
+        "color":    color,
+        "success":  ok_count,
+        "failed":   err_count,
+        "results":  results,
+    }
+
 
 
 @api.get("/inventory-reservations")
@@ -3606,9 +3984,23 @@ async def release_stock(request: Request, payload: StockRelease):
 # ---------- STYLES ----------
 
 @api.get("/styles")
-async def list_styles(request: Request, status: Optional[str] = None, search: Optional[str] = None):
+async def list_styles(
+    request: Request,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    include_deleted: bool  = False,   # set ?include_deleted=true to see soft-deleted styles
+):
     await get_current_user(request)
-    query = {}
+    query: dict = {}
+    # ── Exclude soft-deleted styles unless explicitly requested ───────────────
+    # Styles soft-deleted via DELETE /styles/{sid} have active=False + deleted_at set.
+    # Normal API consumers should never see them; the include_deleted flag is an
+    # admin-only audit tool.
+    if not include_deleted:
+        query["$or"] = [
+            {"active": {"$ne": False}},   # never had active set, or active=True
+            {"deleted_at": {"$exists": False}},  # old rows without soft-delete fields
+        ]
     if status:
         query["status"] = status
     if search:
@@ -3880,9 +4272,136 @@ async def update_style(sid: str, payload: StyleIn, request: Request):
 
 @api.delete("/styles/{sid}")
 async def delete_style(sid: str, request: Request):
-    u = await get_current_user(request); require_roles("admin", "manager")(u)
-    await db.styles.delete_one({"_id": oid(sid)})
-    return {"ok": True}
+    """Cascade-aware soft-delete for a Style Master record.
+
+    Safety checks (HTTP 409 blockers — must be resolved before deletion):
+      1. Active PO line items referencing this style_code.
+      2. Production jobs in states other than 'dispatched' / 'cancelled'.
+      3. FG inventory rows with non-zero ready_stock_qty or reserved_qty.
+
+    On success (no blockers):
+      • style_lifecycle row              → hard deleted
+      • sku_map rows                     → hard deleted (they are SKU translation tables)
+      • style_component_mapping rows     → set active=False (cascade deactivation)
+      • fg_inventory rows (qty=0 only)   → hard deleted; non-zero rows are flagged active=False
+      • styles row                       → soft-deleted: active=False, deleted_at=now
+        (the record is kept for audit purposes and PO/invoice history)
+
+    A complete audit trail is written to audit_logs for every cascade action.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+
+    style = await db.styles.find_one({"_id": oid(sid)})
+    if not style:
+        raise HTTPException(404, "Style not found")
+
+    style_code = style.get("code", sid)
+    now = now_iso()
+    blockers: list = []
+
+    # ── Blocker 1: active PO line items ───────────────────────────────────────
+    po_refs = await db.purchase_orders.find_one({
+        "line_items.style_code": style_code,
+        "status": {"$nin": ["cancelled", "closed"]},
+    })
+    if po_refs:
+        blockers.append(
+            f"Active PO '{po_refs.get('po_number', po_refs['_id'])}' references style {style_code}"
+        )
+
+    # ── Blocker 2: active production jobs ─────────────────────────────────────
+    active_job = await db.production_jobs.find_one({
+        "style_id": ObjectId(sid),
+        "stage": {"$nin": ["dispatched", "cancelled"]},
+    })
+    if active_job:
+        blockers.append(
+            f"Active production job '{active_job.get('job_number', active_job['_id'])}' "
+            f"is still in progress for style {style_code}"
+        )
+
+    # ── Blocker 3: non-zero FG inventory ──────────────────────────────────────
+    nonzero_inv = await db.fg_inventory.find_one({
+        "style_id": ObjectId(sid),
+        "$or": [
+            {"ready_stock_qty": {"$gt": 0}},
+            {"reserved_qty":    {"$gt": 0}},
+        ],
+    })
+    if nonzero_inv:
+        blockers.append(
+            f"FG inventory has non-zero stock (color={nonzero_inv.get('color')}, "
+            f"size={nonzero_inv.get('size')}) for style {style_code}. Zero out stock first."
+        )
+
+    if blockers:
+        raise HTTPException(
+            409,
+            {
+                "message": f"Cannot delete style '{style_code}' — {len(blockers)} blocker(s) must be resolved first.",
+                "blockers": blockers,
+            }
+        )
+
+    # ── Cascade: clean up all soft-reference collections ──────────────────────
+    cascade_summary: dict = {}
+
+    # 1. style_lifecycle — hard delete (it belongs entirely to this style)
+    lc_del = await db.style_lifecycle.delete_one({"style_id": sid})
+    cascade_summary["lifecycle_deleted"] = lc_del.deleted_count
+
+    # 2. sku_map — hard delete (SKU translations are meaningless without the style)
+    sku_del = await db.sku_map.delete_many({"style_id": sid})
+    cascade_summary["sku_map_deleted"] = sku_del.deleted_count
+
+    # 3. style_component_mapping (BOM links) — set active=False
+    bom_res = await db.style_component_mapping.update_many(
+        {"style_id": sid},
+        {"$set": {"active": False, "updated_at": now}},
+    )
+    cascade_summary["bom_links_deactivated"] = bom_res.modified_count
+
+    # 4. fg_inventory — hard-delete zero-qty rows, soft-delete any remainder
+    zero_inv_del = await db.fg_inventory.delete_many({
+        "style_id": ObjectId(sid),
+        "ready_stock_qty": {"$lte": 0},
+        "reserved_qty":    {"$lte": 0},
+        "in_transit_qty":  {"$lte": 0},
+        "return_qty":      {"$lte": 0},
+        "damaged_qty":     {"$lte": 0},
+        "liquidation_qty": {"$lte": 0},
+    })
+    nonzero_inv_flag = await db.fg_inventory.update_many(
+        {"style_id": ObjectId(sid)},
+        {"$set": {"active": False, "updated_at": now}},
+    )
+    cascade_summary["fg_inventory_zeroed_deleted"] = zero_inv_del.deleted_count
+    cascade_summary["fg_inventory_nonzero_flagged"] = nonzero_inv_flag.modified_count
+
+    # 5. Soft-delete the style master itself
+    await db.styles.update_one(
+        {"_id": oid(sid)},
+        {"$set": {
+            "active":     False,
+            "deleted_at": now,
+            "updated_at": now,
+        }}
+    )
+
+    await log_activity(
+        "DELETE", "styles",
+        f"Style '{style_code}' soft-deleted. Cascade: {cascade_summary}",
+        u["email"],
+    )
+
+    return {
+        "ok":             True,
+        "id":             sid,
+        "style_code":     style_code,
+        "cascade":        cascade_summary,
+    }
+
 
 
 # ---------- CATALOGUE CODES ----------
@@ -7972,15 +8491,19 @@ async def resolve_style(
             size_map:  dict = mapping.get("size_map")  or {}
             # Translate: try the external value as-is first, then case-insensitive fallback
             def translate(m: dict, val: str) -> str:
-                if not val:
-                    return val
-                if val in m:
+                val = (val or "").strip()
+                if val and val in m:
                     return m[val]
-                val_lower = val.lower()
-                for k, v in m.items():
-                    if k.lower() == val_lower:
-                        return v
-                return val   # pass through unchanged when key not in map
+                if val:
+                    val_lower = val.lower()
+                    for k, v in m.items():
+                        if k.lower() == val_lower:
+                            return v
+                # Fallback: if input val is empty or unmapped, but map has a single entry,
+                # use that single mapped value (e.g. sku_map maps external_sku → single color/size)
+                if len(m) == 1:
+                    return next(iter(m.values()))
+                return val
 
             return {
                 "style_id":       str(style["_id"]),
@@ -10804,18 +11327,29 @@ async def import_online_orders(
         # ── Check FG stock coverage from fg_location_inventory (WMS) ─────────
         try:
             style_oid = ObjectId(result["style_id"])
+            color_val = (result.get("color") or "").strip()
+            size_val  = (result.get("size")  or "").strip()
             covered_available = 0
-            async for loc in db.fg_location_inventory.find({
-                "style_id": style_oid,
-                "color": result["color"],
-                "size":  result["size"],
-                "qty":   {"$gt": 0},
-            }):
-                covered_available += max(0, int(loc.get("qty", 0)) - int(loc.get("reserved_qty", 0)))
+
+            q_loc = {
+                "$or": [{"style_id": style_oid}, {"style_id": str(result["style_id"])}],
+                "qty": {"$gt": 0},
+            }
+            if color_val:
+                q_loc["color"] = {"$regex": f"^{re.escape(color_val)}$", "$options": "i"}
+            if size_val:
+                q_loc["size"]  = {"$regex": f"^{re.escape(size_val)}$",  "$options": "i"}
+
+            async for loc in db.fg_location_inventory.find(q_loc):
+                qty_val = int(loc.get("qty", 0) or 0)
+                res_val = int(loc.get("reserved_qty", 0) or 0)
+                covered_available += max(0, qty_val - res_val)
+
             sku_key = (result["style_id"], result["color"], result["size"])
             already_in_batch = in_flight_covered.get(sku_key, 0)
             free_available = max(0, covered_available - already_in_batch)
-        except Exception:
+        except Exception as _cov_err:
+            log.warning(f"WMS stock coverage check failed: {_cov_err}")
             free_available = 0
             sku_key = (result["style_id"], result["color"], result["size"])
 
@@ -12819,13 +13353,24 @@ async def _generate_picklist_for_order(order_id: str, channel: str, order_lines:
         # FIFO allocate — find candidate locations
         remaining = need
         picked = []
-        cur = db.fg_location_inventory.find({
-            "style_id": ObjectId(style_id), "color": color, "size": size, "qty": {"$gt": 0},
-        }).sort([("created_at", 1), ("location_code", 1)])
+        q_loc = {
+            "$or": [{"style_id": ObjectId(style_id)}, {"style_id": str(style_id)}],
+            "qty": {"$gt": 0},
+        }
+        color_val = (color or "").strip()
+        size_val  = (size  or "").strip()
+        if color_val:
+            q_loc["color"] = {"$regex": f"^{re.escape(color_val)}$", "$options": "i"}
+        if size_val:
+            q_loc["size"]  = {"$regex": f"^{re.escape(size_val)}$",  "$options": "i"}
+
+        cur = db.fg_location_inventory.find(q_loc).sort([("created_at", 1), ("location_code", 1)])
         async for loc in cur:
             if remaining <= 0:
                 break
-            free_here = int(loc.get("qty", 0)) - int(loc.get("reserved_qty", 0))
+            qty_val = int(loc.get("qty", 0) or 0)
+            res_val = int(loc.get("reserved_qty", 0) or 0)
+            free_here = qty_val - res_val
             if free_here <= 0:
                 continue
             take = min(remaining, free_here)

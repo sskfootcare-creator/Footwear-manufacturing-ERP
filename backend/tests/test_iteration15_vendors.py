@@ -3,6 +3,7 @@
 Run with:
     cd backend && .venv/Scripts/pytest tests/test_iteration15_vendors.py -v
 """
+import os
 import pytest
 import httpx
 
@@ -14,7 +15,9 @@ TIMEOUT = 15
 
 def admin_cookies() -> dict:
     """Return session cookies for the seeded admin account."""
-    r = httpx.post(f"{BASE}/auth/login", json={"email": "admin@sskfootcare.com", "password": "Admin@123"},
+    _email = os.environ.get("ADMIN_EMAIL",    "admin@sskfootcare.com")
+    _pwd   = os.environ.get("ADMIN_PASSWORD", "Admin@123")
+    r = httpx.post(f"{BASE}/auth/login", json={"email": _email, "password": _pwd},
                    timeout=TIMEOUT)
     assert r.status_code == 200, r.text
     return dict(r.cookies)

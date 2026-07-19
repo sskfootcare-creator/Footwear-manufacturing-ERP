@@ -1,10 +1,11 @@
+import os
 import pytest
 import requests
 import time
 
 API_URL = "http://localhost:8000/api"
-ADMIN_EMAIL = "admin@sskfootcare.com"
-ADMIN_PASS = "Admin@123"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+ADMIN_PASS  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 def test_login_rate_limiting():
     # We will use a unique dummy IP for this test to avoid interfering with other runs or tests
