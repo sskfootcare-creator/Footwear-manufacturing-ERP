@@ -110,26 +110,6 @@ export default function Login() {
                 Forgot password?
               </button>
             </div>
-
-            <div className="mt-6 border-t border-slate-200 pt-4">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold mb-2">Seeded Admin (Dev)</div>
-              <div className="flex items-center justify-between gap-2 text-xs text-slate-600 font-mono bg-slate-50 border border-slate-200 px-3 py-2">
-                <div>
-                  <div><span className="text-slate-400">email:</span> admin@ssk.com</div>
-                  <div><span className="text-slate-400">pass&nbsp;:</span> admin1234</div>
-                </div>
-                <button
-                  type="button"
-                  data-testid="login-autofill"
-                  onClick={() => { setEmail("admin@ssk.com"); setPassword("admin1234"); }}
-                  className="text-[10px] uppercase font-bold text-[#2563EB] hover:text-[#1D4ED8] tracking-wider"
-                >
-                  Autofill
-                </button>
-              </div>
-            </div>
-
-
           </form>
         </div>
 
