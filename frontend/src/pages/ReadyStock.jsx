@@ -12,6 +12,7 @@ import {
   Boxes, ImageOff, ChevronDown, ChevronRight, Upload, Hammer,
 } from "lucide-react";
 import AdHocProduceDrawer from "../components/AdHocProduceDrawer";
+import ResponsiveTable from "../components/ResponsiveTable";
 
 // ────────────────────────────────────────────────────────────
 //  Metric definitions — the cell value & the color accent
@@ -279,51 +280,86 @@ function LedgerDrawer({ styleId, styleCode, onClose }) {
         ) : rows.length === 0 ? (
           <div className="text-center py-10 text-slate-400 text-sm">No movements yet.</div>
         ) : (
-          <div className="overflow-x-auto max-h-[70vh] overflow-y-auto border border-slate-200">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-slate-50 border-b-2 border-slate-200">
-                <tr className="text-left">
-                  {["Time", "Style", "Color", "Size", "Type", "Qty", "Delta", "Ref", "By"].map((h) => (
-                    <th key={h} className="px-2 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {rows.map((r) => (
-                  <tr key={r.id} className="hover:bg-slate-50">
-                    <td className="px-2 py-2 font-mono text-[10px] text-slate-500 whitespace-nowrap">
-                      {r.created_at?.slice(0, 19).replace("T", " ")}
-                    </td>
-                    <td className="px-2 py-2 font-mono font-bold text-slate-900">{r.style_code}</td>
-                    <td className="px-2 py-2">{r.color}</td>
-                    <td className="px-2 py-2">{r.size}</td>
-                    <td className="px-2 py-2">
-                      <Badge color={
-                        r.movement_type === "production_in"  ? "green" :
-                        r.movement_type === "dispatched"     ? "blue"  :
-                        r.movement_type === "return_damaged" ? "red"   :
-                        r.movement_type === "adjustment"     ? "yellow" : "slate"
-                      }>{r.movement_type}</Badge>
-                    </td>
-                    <td className="px-2 py-2 font-mono font-bold">{r.quantity}</td>
-                    <td className="px-2 py-2 font-mono text-[10px] text-slate-600">
-                      {r.delta ? Object.entries(r.delta).map(([k, v]) => (
+          <div className="border border-slate-200 max-h-[70vh] overflow-y-auto">
+            <ResponsiveTable
+              columns={[
+                {
+                  key: "created_at",
+                  header: "Time",
+                  primary: true,
+                  className: "font-mono text-[10px] text-slate-500 whitespace-nowrap",
+                  render: (r) => r.created_at?.slice(0, 19).replace("T", " ") || "—",
+                },
+                {
+                  key: "style_code",
+                  header: "Style",
+                  primary: true,
+                  className: "font-mono font-bold text-slate-900",
+                  render: (r) => r.style_code,
+                },
+                {
+                  key: "color",
+                  header: "Color",
+                  render: (r) => r.color,
+                },
+                {
+                  key: "size",
+                  header: "Size",
+                  render: (r) => r.size,
+                },
+                {
+                  key: "movement_type",
+                  header: "Type",
+                  render: (r) => (
+                    <Badge color={
+                      r.movement_type === "production_in"  ? "green"  :
+                      r.movement_type === "dispatched"     ? "blue"   :
+                      r.movement_type === "return_damaged" ? "red"    :
+                      r.movement_type === "adjustment"     ? "yellow" : "slate"
+                    }>{r.movement_type}</Badge>
+                  ),
+                },
+                {
+                  key: "quantity",
+                  header: "Qty",
+                  className: "font-mono font-bold",
+                  render: (r) => r.quantity,
+                },
+                {
+                  key: "delta",
+                  header: "Delta",
+                  className: "font-mono text-[10px] text-slate-600",
+                  render: (r) => r.delta ? (
+                    <div className="space-y-0.5">
+                      {Object.entries(r.delta).map(([k, v]) => (
                         <div key={k}>
-                          <span className="text-slate-400">{k.replace("_qty","")}</span>{" "}
+                          <span className="text-slate-400">{k.replace("_qty", "")}</span>{" "}
                           <span className={v > 0 ? "text-green-700" : "text-red-700"}>
                             {v > 0 ? `+${v}` : v}
                           </span>
                         </div>
-                      )) : "—"}
-                    </td>
-                    <td className="px-2 py-2 font-mono text-[10px] text-slate-500">
-                      {r.reference_type}{r.reference_id ? ` · ${r.reference_id}` : ""}
-                    </td>
-                    <td className="px-2 py-2 font-mono text-[10px] text-slate-500">{r.by}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      ))}
+                    </div>
+                  ) : "—",
+                },
+                {
+                  key: "reference",
+                  header: "Ref",
+                  className: "font-mono text-[10px] text-slate-500",
+                  render: (r) => `${r.reference_type}${r.reference_id ? ` · ${r.reference_id}` : ""}`,
+                },
+                {
+                  key: "by",
+                  header: "By",
+                  className: "font-mono text-[10px] text-slate-500",
+                  render: (r) => r.by,
+                },
+              ]}
+              rows={rows}
+              rowKey={(r) => r.id}
+              stickyHeader
+              testId="ledger-table"
+            />
           </div>
         )}
       </div>

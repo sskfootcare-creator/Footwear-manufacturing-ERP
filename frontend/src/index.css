@@ -135,3 +135,17 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
+/* ── Mobile AppShell: clear bottom tab bar (60px + safe area) ── */
+@media (max-width: 1023px) {
+  .mobile-main-content {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ── Hide mobile nav chrome when printing ── */
+@media print {
+  [data-testid="mobile-top-bar"],
+  [data-testid="mobile-bottom-tab-bar"] {
+    display: none !important;
+  }
+}

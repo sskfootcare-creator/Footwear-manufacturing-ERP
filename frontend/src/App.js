@@ -2,7 +2,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import Login from "@/pages/Login";
-import AppShell from "@/pages/AppShell";
+import AppShell from "@/components/AppShell";
 import Dashboard from "@/pages/Dashboard";
 import Materials from "@/pages/Materials";
 import Workers from "@/pages/Workers";
