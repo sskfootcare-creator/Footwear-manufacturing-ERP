@@ -48,25 +48,34 @@ $MongoJob = Start-Job -ScriptBlock {
     & $exe --dbpath "$path/mongodb-portable/data"
 } -ArgumentList $ScriptDir
 
-# Start Backend job
-Write-Host "[2/3] Launching backend FastAPI job..." -ForegroundColor Yellow
+# Start Backend job (listening on 0.0.0.0 for LAN/WiFi access)
+Write-Host "[2/3] Launching backend FastAPI job (0.0.0.0:8000)..." -ForegroundColor Yellow
 $BackendJob = Start-Job -ScriptBlock {
     param($path)
     Set-Location "$path/backend"
-    .venv/Scripts/python.exe -m uvicorn server:app --port 8000 --reload
+    .venv/Scripts/python.exe -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 } -ArgumentList $ScriptDir
 
-# Start Frontend job
-Write-Host "[3/3] Launching frontend React job..." -ForegroundColor Yellow
+# Start Frontend job (listening on 0.0.0.0 for LAN/WiFi access)
+Write-Host "[3/3] Launching frontend React job (0.0.0.0:3000)..." -ForegroundColor Yellow
 $FrontendJob = Start-Job -ScriptBlock {
     param($path)
+    $env:HOST = "0.0.0.0"
+    $env:DANGEROUSLY_DISABLE_HOST_CHECK = "true"
     $env:BROWSER = "none"
     Set-Location "$path/frontend"
     cmd.exe /c npm start
 } -ArgumentList $ScriptDir
 
+# Find Local WiFi IP address for user convenience
+$WiFiIP = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "*WiFi*", "*Ethernet*", "*Chandu*" -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } | Select-Object -First 1).IPAddress
+if (!$WiFiIP) { $WiFiIP = "192.168.x.x" }
+
 Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "Showing Live Updates from all jobs (Press Ctrl+C to stop)..." -ForegroundColor Green
+Write-Host " SERVER READY ON LOCAL WIFI NETWORK!" -ForegroundColor Green
+Write-Host " Desktop (Local):  http://localhost:3000" -ForegroundColor Cyan
+Write-Host " Mobile/Tablet:    http://${WiFiIP}:3000" -ForegroundColor Yellow
+Write-Host " (Open the Mobile link on your phone connected to WiFi)" -ForegroundColor Gray
 Write-Host "==========================================================" -ForegroundColor Green
 
 # Tail logs from all jobs in the current console

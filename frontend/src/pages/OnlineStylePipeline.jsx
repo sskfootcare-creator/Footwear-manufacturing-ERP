@@ -265,7 +265,7 @@ function EditDetailsDrawer({ card, onClose, onDone }) {
 
   return (
     <Drawer onClose={onClose} title={`Edit — ${card.style_code}`} testId="edit-details-drawer">
-      <div className="p-4 space-y-5 pb-24">
+      <div className="p-4 space-y-5 pb-6">
         {/* Sale channels */}
         <div>
           <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1.5 flex items-center gap-1.5">
@@ -541,7 +541,7 @@ export default function OnlineStylePipeline() {
   }, [byStage]);
 
   return (
-    <div className="min-h-screen bg-[#F7F7F5]">
+    <div className="bg-[#F7F7F5]">
       <PageHeader
         title="Online Style Pipeline"
         subtitle="Draft → Live lifecycle for online-branch styles. Cards advance one stage at a time."
