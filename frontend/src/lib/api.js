@@ -1,16 +1,19 @@
 import axios from "axios";
 
-const getBackendUrl = () => {
-  if (typeof window !== "undefined" && window.location && window.location.hostname) {
-    const host = window.location.hostname;
-    const protocol = window.location.protocol;
-    // When accessed via LAN IP or custom domain, dynamically target port 8000 on that same host
-    if (host !== "localhost" && host !== "127.0.0.1") {
-      return `${protocol}//${host}:8000`;
-    }
+export const getBackendUrl = () => {
+  // 1. Explicitly configured REACT_APP_BACKEND_URL takes priority if present
+  if (process.env.REACT_APP_BACKEND_URL && process.env.REACT_APP_BACKEND_URL.trim() !== "") {
+    return process.env.REACT_APP_BACKEND_URL.trim();
   }
-  if (process.env.REACT_APP_BACKEND_URL && !process.env.REACT_APP_BACKEND_URL.includes("localhost")) {
-    return process.env.REACT_APP_BACKEND_URL;
+  // 2. Browser environment dynamic resolution
+  if (typeof window !== "undefined" && window.location) {
+    const { hostname, port, protocol, origin } = window.location;
+    // Local dev server running on port 3000 (React dev server) -> target backend on port 8000
+    if (port === "3000") {
+      return `${protocol}//${hostname}:8000`;
+    }
+    // Live server / staging / cloud preview / production deployment -> target same origin
+    return origin;
   }
   return "http://localhost:8000";
 };
@@ -29,6 +32,8 @@ export const http = axios.create({
 
 http.interceptors.request.use(
   (config) => {
+    // Dynamically set baseURL on every request so host changes / live deployments work seamlessly
+    config.baseURL = `${getBackendUrl()}/api`;
     const token = localStorage.getItem("token");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -108,9 +113,13 @@ export function friendlyAxiosError(err) {
 }
 
 export const inr = (n) =>
-  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(
-    Number(n || 0)
-  );
+  `₹${Number(n || 0).toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 0,
+  })}`;
 
-export const num = (n, d = 2) =>
-  new Intl.NumberFormat("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d }).format(Number(n || 0));
+export const num = (n, dec = 0) =>
+  Number(n || 0).toLocaleString("en-IN", {
+    maximumFractionDigits: dec,
+    minimumFractionDigits: dec,
+  });
