@@ -4791,12 +4791,17 @@ MONTHLY_REPORT_CANONICAL_FIELDS = [
     "final_amount", "total_mrp", "discount", "seller_price",
 ]
 
+# Canonical SETTLEMENT fields — platform payout & fee reconciliation.
+SETTLEMENT_CANONICAL_FIELDS = [
+    "order_ref", "leaf_sku",
+    "gross_amount", "commission", "shipping_fee", "rto_charge", "net_payout",
+    "settlement_date", "payment_id",
+]
+
 # ConfigRole distinguishes ORDER/PICKLIST configs (used by the online-orders
 # importer) from DISPATCH configs (used by the daily "what got packed today"
-# importer). One platform can have BOTH — e.g. Myntra ships an OP-xxxxx.csv
-# picklist AND a Packed_order_data.csv dispatch file — so the collection's
-# uniqueness key is (platform, role), not platform alone.
-ConfigRole = Literal["order", "dispatch", "monthly_report"]
+# importer), MONTHLY_REPORT configs, and SETTLEMENT configs.
+ConfigRole = Literal["order", "dispatch", "monthly_report", "settlement"]
 
 
 class OrderImportFormatConfigIn(BaseModel):
@@ -4992,6 +4997,54 @@ DEFAULT_ORDER_IMPORT_CONFIGS = [
         "is_picklist": False,
         "active": True,
         "notes": "Myntra Monthly_order_report.csv. Row-level classification: was_packed (packed_on!=null), was_returned_to_stock (rto_creation_date OR return_creation_date OR (status=F AND was_packed)), is_pending (status in SH/PK), is_net_sold (packed AND !returned AND !pending). Drives return_restocked movements to correct inventory that the daily dispatch file missed.",
+    },
+    # ── Myntra Settlement Report ──────────────────────────────────────────
+    {
+        "platform": "myntra",
+        "role": "settlement",
+        "sheet_locator": {"type": "first_sheet"},
+        "header_locator": {"type": "fixed_row", "row": 0},
+        "skip_rows_after_header": 0,
+        "column_map": {
+            "order_ref":       "order release id",
+            "leaf_sku":        "seller sku code",
+            "gross_amount":    "gross amount",
+            "commission":      "commission",
+            "shipping_fee":    "shipping fee",
+            "rto_charge":      "rto charge",
+            "net_payout":      "net payout",
+            "settlement_date": "settlement date",
+            "payment_id":      "payment id",
+        },
+        "known_sku_prefixes_to_strip": [],
+        "known_sku_prefix_replacements": {"FLL": "FL"},
+        "is_picklist": False,
+        "active": True,
+        "notes": "Myntra Settlement Advice CSV. Matches settlement records to order lines by order release id / seller sku code.",
+    },
+    # ── Flipkart Settlement Report ─────────────────────────────────────────
+    {
+        "platform": "flipkart",
+        "role": "settlement",
+        "sheet_locator": {"type": "first_sheet"},
+        "header_locator": {"type": "fixed_row", "row": 0},
+        "skip_rows_after_header": 0,
+        "column_map": {
+            "order_ref":       "order_id",
+            "leaf_sku":        "sku",
+            "gross_amount":    "sale_amount",
+            "commission":      "commission",
+            "shipping_fee":    "shipping_fee",
+            "rto_charge":      "reverse_shipping_fee",
+            "net_payout":      "bank_settlement_value",
+            "settlement_date": "settlement_date",
+            "payment_id":      "neft_id",
+        },
+        "known_sku_prefixes_to_strip": ["TH"],
+        "known_sku_prefix_replacements": {},
+        "is_picklist": False,
+        "active": True,
+        "notes": "Flipkart Settlement Report CSV. Matches settlement records by order_id / sku.",
     },
 ]
 
@@ -5293,6 +5346,8 @@ async def get_order_canonical_fields(request: Request, role: str = "order"):
         return {"role": "dispatch", "canonical_fields": DISPATCH_CANONICAL_FIELDS}
     if role == "monthly_report":
         return {"role": "monthly_report", "canonical_fields": MONTHLY_REPORT_CANONICAL_FIELDS}
+    if role == "settlement":
+        return {"role": "settlement", "canonical_fields": SETTLEMENT_CANONICAL_FIELDS}
     return {"role": "order", "canonical_fields": ORDER_CANONICAL_FIELDS}
 
 
@@ -6727,6 +6782,368 @@ async def import_monthly_report(
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#   PHASE 3 / SETTLEMENT IMPORT ENGINE — Config-driven CSV/Excel payout import
+# ═══════════════════════════════════════════════════════════════════════
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    if val is None or val == "":
+        return default
+    try:
+        if isinstance(val, str):
+            val = val.replace("₹", "").replace(",", "").strip()
+        return float(val)
+    except Exception:
+        return default
+
+
+async def _parse_and_resolve_settlement_row(
+    raw: Dict[str, Any],
+    cfg: Dict[str, Any],
+    platform: str,
+    row_index: int,
+) -> Dict[str, Any]:
+    col_map = cfg.get("column_map") or {}
+
+    order_ref_col = col_map.get("order_ref")
+    leaf_sku_col  = col_map.get("leaf_sku")
+
+    order_ref_raw = str(raw.get(order_ref_col) or "").strip() if order_ref_col else ""
+    order_ref = strip_excel_apostrophe(order_ref_raw)
+
+    leaf_sku_raw = str(raw.get(leaf_sku_col) or "").strip() if leaf_sku_col else ""
+    leaf_sku_raw = strip_excel_apostrophe(leaf_sku_raw)
+
+    leaf_sku, _ = apply_prefix_replacements(leaf_sku_raw, cfg.get("known_sku_prefix_replacements"))
+    leaf_sku = strip_known_prefixes(leaf_sku, cfg.get("known_sku_prefixes_to_strip"))
+
+    gross_col    = col_map.get("gross_amount")
+    comm_col     = col_map.get("commission")
+    ship_col     = col_map.get("shipping_fee")
+    rto_col      = col_map.get("rto_charge")
+    payout_col   = col_map.get("net_payout")
+    date_col     = col_map.get("settlement_date")
+    payid_col    = col_map.get("payment_id")
+
+    gross_amount    = _safe_float(raw.get(gross_col) if gross_col else 0.0)
+    commission      = _safe_float(raw.get(comm_col) if comm_col else 0.0)
+    shipping_fee    = _safe_float(raw.get(ship_col) if ship_col else 0.0)
+    rto_charge      = _safe_float(raw.get(rto_col) if rto_col else 0.0)
+    net_payout      = _safe_float(raw.get(payout_col) if payout_col else 0.0)
+    settlement_date = str(raw.get(date_col) or "").strip() if date_col else ""
+    payment_id      = str(raw.get(payid_col) or "").strip() if payid_col else ""
+
+    if not net_payout and gross_amount:
+        net_payout = round(gross_amount - commission - shipping_fee - rto_charge, 2)
+
+    matched_doc = None
+    if order_ref:
+        match_or = [
+            {"order_id": order_ref},
+            {"order_release_id": order_ref},
+            {"sub_order_id": order_ref},
+            {"order_item_id": order_ref},
+            {"po_number": order_ref},
+        ]
+        q: Dict[str, Any] = {"$or": match_or}
+        if leaf_sku:
+            q["$or"].extend([{"leaf_sku": leaf_sku}, {"style_code": leaf_sku}])
+
+        matched_doc = await db.online_order_items.find_one(q)
+        if not matched_doc:
+            matched_doc = await db.online_orders.find_one({"$or": [{"po_number": order_ref}, {"order_id": order_ref}, {"order_release_id": order_ref}]})
+
+    if not matched_doc and leaf_sku:
+        matched_doc = await db.online_order_items.find_one({"$or": [{"leaf_sku": leaf_sku}, {"style_code": leaf_sku}]})
+
+    matched = matched_doc is not None
+    matched_order_id   = str(matched_doc.get("order_id") or matched_doc.get("po_number") or matched_doc.get("_id")) if matched_doc else None
+    matched_item_id    = str(matched_doc.get("_id")) if matched_doc else None
+    matched_style_id   = str(matched_doc.get("style_id") or "") if matched_doc else None
+    matched_style_code = str(matched_doc.get("style_code") or "") if matched_doc else None
+    invoiced_amount    = float(matched_doc.get("selling_price") or matched_doc.get("final_amount") or matched_doc.get("invoice_amount") or matched_doc.get("unit_price") or 0.0) if matched_doc else 0.0
+    variance           = round(invoiced_amount - net_payout, 2)
+
+    return {
+        "source_row_index":   row_index,
+        "platform":           platform,
+        "order_ref":          order_ref,
+        "leaf_sku_raw":       leaf_sku_raw,
+        "leaf_sku":           leaf_sku,
+        "gross_amount":       round(gross_amount, 2),
+        "commission":         round(commission, 2),
+        "shipping_fee":       round(shipping_fee, 2),
+        "rto_charge":         round(rto_charge, 2),
+        "net_payout":         round(net_payout, 2),
+        "settlement_date":    settlement_date,
+        "payment_id":         payment_id,
+        "matched":            matched,
+        "matched_order_id":   matched_order_id,
+        "matched_item_id":    matched_item_id,
+        "matched_style_id":   matched_style_id,
+        "matched_style_code": matched_style_code,
+        "invoiced_amount":    round(invoiced_amount, 2),
+        "variance":           variance,
+        "raw_row":            raw,
+    }
+
+
+@api.post("/online-orders/settlement-import", dependencies=[Depends(bulk_import_rate_limiter)])
+async def import_settlement_report(
+    request: Request,
+    file: UploadFile = File(...),
+    platform: str = Query(..., description="e.g. 'myntra'"),
+    dry_run: bool = Query(True, description="Preview settlement matching & variance without persisting"),
+):
+    """Config-driven SETTLEMENT CSV/Excel import (Phase 3 — payout reconciliation).
+
+    Parses settlement advice files, matches rows against online orders by order_ref / SKU,
+    calculates variance (invoiced_amount vs net_payout), and updates profitability engine.
+    """
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+
+    platform_lc = (platform or "").strip().lower()
+    cfg_doc = await db.order_import_format_configs.find_one(
+        {"platform": platform_lc, "role": "settlement"}
+    )
+    if not cfg_doc:
+        raise HTTPException(
+            400,
+            f"No settlement config for platform '{platform_lc}'. "
+            "Create one via POST /api/order-import-format-configs with role='settlement' first."
+        )
+    if not cfg_doc.get("active", True):
+        raise HTTPException(400, f"Settlement config for '{platform_lc}' is inactive.")
+
+    cfg = stringify(cfg_doc)
+
+    content = await file.read()
+    filename = file.filename or "upload"
+
+    try:
+        wb = _read_workbook_or_csv(content, filename)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}")
+
+    ws, header_row_1, header = _resolve_data_sheet_and_header(wb, cfg)
+    skip_after = int(cfg.get("skip_rows_after_header") or 0)
+    data_start_row = header_row_1 + 1 + skip_after
+
+    raw_rows: List[Dict[str, Any]] = []
+    for r in range(data_start_row, ws.max_row + 1):
+        row_cells = ws[r]
+        vals = {header[i]: (row_cells[i].value if i < len(row_cells) else None)
+                for i in range(len(header)) if header[i]}
+        if not any((v not in (None, "", " ")) for v in vals.values()):
+            continue
+        raw_rows.append(vals)
+
+    canonical_rows: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(raw_rows, start=data_start_row):
+        canon = await _parse_and_resolve_settlement_row(raw, cfg, platform_lc, idx)
+        canonical_rows.append(canon)
+
+    matched_count   = sum(1 for c in canonical_rows if c.get("matched"))
+    unmatched_count = len(canonical_rows) - matched_count
+
+    total_gross      = round(sum(c.get("gross_amount", 0) for c in canonical_rows), 2)
+    total_commission = round(sum(c.get("commission", 0) for c in canonical_rows), 2)
+    total_shipping   = round(sum(c.get("shipping_fee", 0) for c in canonical_rows), 2)
+    total_rto        = round(sum(c.get("rto_charge", 0) for c in canonical_rows), 2)
+    total_net_payout = round(sum(c.get("net_payout", 0) for c in canonical_rows), 2)
+    total_invoiced   = round(sum(c.get("invoiced_amount", 0) for c in canonical_rows), 2)
+    total_variance   = round(sum(c.get("variance", 0) for c in canonical_rows), 2)
+
+    stats = {
+        "total_rows":            len(canonical_rows),
+        "matched_count":         matched_count,
+        "unmatched_count":       unmatched_count,
+        "total_gross_amount":    total_gross,
+        "total_commission":      total_commission,
+        "total_shipping_fee":    total_shipping,
+        "total_rto_charge":      total_rto,
+        "total_net_payout":      total_net_payout,
+        "total_invoiced_amount": total_invoiced,
+        "total_variance":        total_variance,
+    }
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "filename": filename,
+            "platform": platform_lc,
+            "stats": stats,
+            "rows": canonical_rows,
+        }
+
+    import_batch_id = f"settle_{now_iso().replace(':', '-').replace('.', '-')}_{uuid.uuid4().hex[:6]}"
+    for idx, canon in enumerate(canonical_rows):
+        settle_id = f"settle:{platform_lc}:{canon.get('order_ref') or 'noref'}:{canon.get('leaf_sku') or 'nosku'}:{idx}"
+        settle_doc = {
+            "id": settle_id,
+            "import_batch_id": import_batch_id,
+            "platform": platform_lc,
+            "order_ref": canon.get("order_ref"),
+            "leaf_sku": canon.get("leaf_sku"),
+            "gross_amount": canon.get("gross_amount"),
+            "commission": canon.get("commission"),
+            "shipping_fee": canon.get("shipping_fee"),
+            "rto_charge": canon.get("rto_charge"),
+            "net_payout": canon.get("net_payout"),
+            "settlement_date": canon.get("settlement_date"),
+            "payment_id": canon.get("payment_id"),
+            "matched": canon.get("matched"),
+            "matched_order_id": canon.get("matched_order_id"),
+            "matched_item_id": canon.get("matched_item_id"),
+            "matched_style_id": canon.get("matched_style_id"),
+            "matched_style_code": canon.get("matched_style_code"),
+            "invoiced_amount": canon.get("invoiced_amount"),
+            "variance": canon.get("variance"),
+            "created_at": now_iso(),
+        }
+        await db.online_settlements.update_one(
+            {"platform": platform_lc, "order_ref": canon.get("order_ref"), "leaf_sku": canon.get("leaf_sku")},
+            {"$set": settle_doc},
+            upsert=True
+        )
+
+        if canon.get("matched") and canon.get("matched_item_id"):
+            try:
+                item_id = canon["matched_item_id"]
+                match_id = ObjectId(item_id) if ObjectId.is_valid(item_id) else item_id
+                await db.online_order_items.update_one(
+                    {"_id": match_id},
+                    {"$set": {
+                        "is_reconciled": True,
+                        "reconciled_net_payout": canon.get("net_payout"),
+                        "settlement_variance": canon.get("variance"),
+                        "settlement_id": settle_id,
+                        "reconciled_at": now_iso(),
+                    }}
+                )
+            except Exception as e:
+                log.warning(f"Failed to update online_order_items for settlement {settle_id}: {e}")
+
+    await log_activity(
+        "SETTLEMENT_IMPORT", "online_settlements",
+        f"{platform_lc}: {stats['matched_count']}/{stats['total_rows']} matched, net payout ₹{stats['total_net_payout']} (batch {import_batch_id})",
+        u["email"],
+    )
+
+    return {
+        "dry_run": False,
+        "import_batch_id": import_batch_id,
+        "platform": platform_lc,
+        "stats": stats,
+        "committed": True,
+    }
+
+
+@api.get("/online-orders/settlements")
+async def list_online_settlements(
+    request: Request,
+    platform: Optional[str] = None,
+    matched: Optional[bool] = None,
+    style_id: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=500),
+):
+    await get_current_user(request)
+    q: Dict[str, Any] = {}
+    if platform: q["platform"] = platform.lower()
+    if matched is not None: q["matched"] = matched
+    if style_id: q["matched_style_id"] = style_id
+
+    total = await db.online_settlements.count_documents(q)
+    skip = (page - 1) * limit
+    docs = await db.online_settlements.find(q).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+
+    return {
+        "items": [stringify(d) for d in docs],
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit if total > 0 else 1,
+    }
+
+
+@api.get("/online-orders/settlement-summary")
+async def get_settlement_summary(
+    request: Request,
+    platform: Optional[str] = None,
+    style_id: Optional[str] = None,
+):
+    await get_current_user(request)
+    q: Dict[str, Any] = {}
+    if platform: q["platform"] = platform.lower()
+    if style_id: q["matched_style_id"] = style_id
+
+    platform_pipeline = [
+        {"$match": q},
+        {"$group": {
+            "_id": "$platform",
+            "count": {"$sum": 1},
+            "matched_count": {"$sum": {"$cond": ["$matched", 1, 0]}},
+            "unmatched_count": {"$sum": {"$cond": ["$matched", 0, 1]}},
+            "gross_amount": {"$sum": {"$ifNull": ["$gross_amount", 0]}},
+            "commission": {"$sum": {"$ifNull": ["$commission", 0]}},
+            "shipping_fee": {"$sum": {"$ifNull": ["$shipping_fee", 0]}},
+            "rto_charge": {"$sum": {"$ifNull": ["$rto_charge", 0]}},
+            "net_payout": {"$sum": {"$ifNull": ["$net_payout", 0]}},
+            "invoiced_amount": {"$sum": {"$ifNull": ["$invoiced_amount", 0]}},
+            "variance": {"$sum": {"$ifNull": ["$variance", 0]}},
+        }},
+    ]
+    by_platform_docs = await db.online_settlements.aggregate(platform_pipeline).to_list(100)
+    by_platform = [
+        {
+            "platform": d["_id"],
+            "count": d["count"],
+            "matched_count": d["matched_count"],
+            "unmatched_count": d["unmatched_count"],
+            "gross_amount": round(d["gross_amount"], 2),
+            "commission": round(d["commission"], 2),
+            "shipping_fee": round(d["shipping_fee"], 2),
+            "rto_charge": round(d["rto_charge"], 2),
+            "net_payout": round(d["net_payout"], 2),
+            "invoiced_amount": round(d["invoiced_amount"], 2),
+            "variance": round(d["variance"], 2),
+        }
+        for d in by_platform_docs
+    ]
+
+    style_pipeline = [
+        {"$match": {**q, "matched": True, "matched_style_code": {"$ne": None}}},
+        {"$group": {
+            "_id": "$matched_style_id",
+            "style_code": {"$first": "$matched_style_code"},
+            "count": {"$sum": 1},
+            "net_payout": {"$sum": {"$ifNull": ["$net_payout", 0]}},
+            "invoiced_amount": {"$sum": {"$ifNull": ["$invoiced_amount", 0]}},
+            "variance": {"$sum": {"$ifNull": ["$variance", 0]}},
+        }},
+    ]
+    by_style_docs = await db.online_settlements.aggregate(style_pipeline).to_list(500)
+    by_style = [
+        {
+            "style_id": str(d["_id"]) if d["_id"] else "",
+            "style_code": d.get("style_code") or "Unknown",
+            "count": d["count"],
+            "net_payout": round(d["net_payout"], 2),
+            "invoiced_amount": round(d["invoiced_amount"], 2),
+            "variance": round(d["variance"], 2),
+        }
+        for d in by_style_docs
+    ]
+
+    return {
+        "by_platform": by_platform,
+        "by_style": by_style,
+    }
+
+
 @api.get("/online-orders/reconciliation-summary")
 async def reconciliation_summary(
     request: Request,
@@ -7054,9 +7471,38 @@ async def _compute_online_profitability(
       + await _sum_settlement_fields("settlement_unsettled_reverse", _LOGISTICS_FEE_FIELDS, settle_match)
     )
 
+    # ── Online Settlements (Phase 3 SettlementImportIn) check ──
+    settlement_coll_exists = await _collection_exists("online_settlements")
+    reconciled_payout_sum = 0.0
+    reconciled_units = 0
+    per_style_reconciled_payout: Dict[str, float] = defaultdict(float)
+    per_style_reconciled_count: Dict[str, int] = defaultdict(int)
+
+    if settlement_coll_exists:
+        s_match: Dict[str, Any] = {"matched": True}
+        if platform: s_match["platform"] = platform.lower()
+        if style_id: s_match["matched_style_id"] = style_id
+
+        settle_agg = await db.online_settlements.aggregate([
+            {"$match": s_match},
+            {"$group": {
+                "_id": "$matched_style_id",
+                "net_payout": {"$sum": {"$ifNull": ["$net_payout", 0]}},
+                "count": {"$sum": 1},
+            }}
+        ]).to_list(1000)
+
+        for sa in settle_agg:
+            sid_s = str(sa["_id"]) if sa.get("_id") else ""
+            p_val = float(sa.get("net_payout") or 0)
+            c_val = int(sa.get("count") or 0)
+            reconciled_payout_sum += p_val
+            reconciled_units += c_val
+            if sid_s:
+                per_style_reconciled_payout[sid_s] += p_val
+                per_style_reconciled_count[sid_s] += c_val
+
     # ── Per-style settlement joins ──
-    # Try to attribute settled revenue + fees per style by looking up
-    # order_release_id → online_order_items.style_id from Phase 2 data.
     per_style_revenue_settled: Dict[str, float] = {}
     per_style_fees:            Dict[str, float] = {}
     if phase_3_available and fwd_exists:
@@ -7088,7 +7534,6 @@ async def _compute_online_profitability(
         style_cogs = unit_cogs * units_sold
         item_revenue = float(r.get("item_final_amount") or 0)
 
-        # Denominator = returned + net_sold (as per spec)
         total_touch = returned_units + units_sold
         return_rate = (returned_units / total_touch * 100) if total_touch > 0 else 0.0
 
@@ -7100,66 +7545,77 @@ async def _compute_online_profitability(
             "returned_units":  returned_units,
             "unit_cogs":       round(unit_cogs, 2),
             "cogs":            round(style_cogs, 2),
-            "item_revenue_fallback": round(item_revenue, 2),   # from final_amount
+            "item_revenue_fallback": round(item_revenue, 2),
             "return_rate_pct": round(return_rate, 2),
         })
         total_units_sold += units_sold
         total_net_cogs   += style_cogs
         total_item_revenue_fallback += item_revenue
 
-    # If Phase 3 isn't up, use the item-file's `final_amount` as a
-    # best-effort revenue signal so the profit line isn't outright 0.
-    revenue_used_for_profit = total_revenue_settled
-    revenue_source = "settlement_forward - settlement_reverse"
-    if not phase_3_available and total_item_revenue_fallback > 0:
+    is_estimated = True
+    if settlement_coll_exists and reconciled_payout_sum > 0:
+        total_revenue_settled = reconciled_payout_sum
+        if reconciled_units >= total_units_sold and total_units_sold > 0:
+            is_estimated = False
+            revenue_source = "net_payout (reconciled)"
+            revenue_used_for_profit = reconciled_payout_sum
+        else:
+            is_estimated = True
+            unrec_units = max(0, total_units_sold - reconciled_units)
+            est_portion = total_item_revenue_fallback * (unrec_units / total_units_sold) if total_units_sold > 0 else 0.0
+            revenue_used_for_profit = reconciled_payout_sum + est_portion
+            revenue_source = "net_payout (reconciled) + final_amount (estimated fallback)"
+    elif not phase_3_available and total_item_revenue_fallback > 0:
+        is_estimated = True
         revenue_used_for_profit = total_item_revenue_fallback
-        revenue_source = "online_order_items.final_amount (fallback while Phase 3 not imported)"
-        notes.append("Using item-file final_amount as revenue signal since Phase 3 settlements aren't imported yet.")
+        revenue_source = "online_order_items.final_amount (estimated fallback)"
+        notes.append("Using item-file final_amount as revenue signal since settlements aren't reconciled yet.")
+    else:
+        is_estimated = not (settlement_coll_exists and reconciled_payout_sum > 0)
+        revenue_used_for_profit = total_revenue_settled
+        revenue_source = "settlement_forward - settlement_reverse"
 
-    # Gross profit computed against whichever revenue signal we have
     gross_profit = revenue_used_for_profit - total_net_cogs
     gross_margin_pct = ((gross_profit / revenue_used_for_profit) * 100) if revenue_used_for_profit else 0.0
 
-    # Per-style profit — use settlement-derived per-style revenue when
-    # available, otherwise fall back to item_revenue_fallback.
     for row in by_style:
         sid_str = row.get("style_id") or ""
-        if phase_3_available and sid_str in per_style_revenue_settled:
+        rec_cnt = per_style_reconciled_count.get(sid_str, 0)
+        rec_pay = per_style_reconciled_payout.get(sid_str, 0.0)
+        row["reconciled_units_count"] = rec_cnt
+        row["unreconciled_units_count"] = max(0, row["units_sold"] - rec_cnt)
+        if rec_cnt > 0:
+            unrec_cnt = max(0, row["units_sold"] - rec_cnt)
+            if unrec_cnt == 0:
+                row_rev = rec_pay
+                row["revenue_source"] = "net_payout (reconciled)"
+                row["is_estimated"] = False
+            else:
+                est_p = row["item_revenue_fallback"] * (unrec_cnt / row["units_sold"]) if row["units_sold"] > 0 else 0.0
+                row_rev = rec_pay + est_p
+                row["revenue_source"] = "net_payout + final_amount (partially estimated)"
+                row["is_estimated"] = True
+        elif phase_3_available and sid_str in per_style_revenue_settled:
             row_rev = float(per_style_revenue_settled.get(sid_str, 0.0))
             row["revenue_source"] = "settlement_forward"
+            row["is_estimated"] = False
         else:
             row_rev = float(row.get("item_revenue_fallback") or 0)
-            row["revenue_source"] = "item_final_amount"
+            row["revenue_source"] = "item_final_amount (estimated)"
+            row["is_estimated"] = True
+
         row["revenue_settled"] = round(row_rev, 2)
         row["platform_fees"]   = round(float(per_style_fees.get(sid_str, 0.0)), 2)
         row["profit"]          = round(row_rev - row["cogs"], 2)
         row["margin_pct"]      = round(((row["profit"] / row_rev) * 100) if row_rev else 0.0, 2)
 
-    # ── Platform-fees interpretation note (from spec) ──
-    if fees_interpretation.get("available"):
-        interp_note = (
-            f"Sample validation: on {fees_interpretation['sample_size']} forward rows, "
-            f"Settled_Amount = ₹{fees_interpretation['settled_sum']:.2f}, "
-            f"Sum(fees) = ₹{fees_interpretation['fees_sum']:.2f}, "
-            f"Customer_Paid_Amount = ₹{fees_interpretation['customer_paid_sum']:.2f}. "
-            f"Interpretation: {fees_interpretation['interpretation']}. "
-            f"total_platform_fees is reported {fees_interpretation['treated_as'].upper()}."
-        )
-        notes.append(interp_note)
-    else:
-        notes.append(
-            "Platform fees interpretation: Myntra typically nets platform fees "
-            "OUT of Settled_Amount BEFORE reporting it. So `total_platform_fees` "
-            "here is INFORMATIONAL — do NOT subtract it again from "
-            "total_revenue_settled. Validate on a sample row that Settled_Amount "
-            "+ Sum(fees) ≈ Customer_Paid_Amount before changing this "
-            "assumption. Phase 3 will surface both interpretations side-by-side."
-        )
-
     return {
         "period":                    {"from": date_from, "to": date_to},
         "platform":                  platform,
         "style_id":                  style_id,
+        "is_estimated":              is_estimated,
+        "reconciled_units_count":    reconciled_units,
+        "unreconciled_units_count":  max(0, total_units_sold - reconciled_units),
         "net_units_sold":            total_units_sold,
         "total_net_cogs":            round(total_net_cogs, 2),
         "total_revenue_settled":     round(total_revenue_settled, 2),
@@ -7169,7 +7625,7 @@ async def _compute_online_profitability(
         "gross_profit":              round(gross_profit, 2),
         "gross_margin_pct":          round(gross_margin_pct, 2),
         "revenue_source_used":       revenue_source,
-        "phase_3_available":         phase_3_available,
+        "phase_3_available":         phase_3_available or (settlement_coll_exists and reconciled_payout_sum > 0),
         "fees_interpretation":       fees_interpretation,
         "notes":                     notes,
         "by_style":                  by_style,

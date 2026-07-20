@@ -31,7 +31,10 @@ import {
   RotateCcw,
   Loader2,
   Info,
+  DollarSign,
+  Upload,
 } from "lucide-react";
+import { SettlementImportDrawer } from "./OnlineOrders";
 
 const PALETTE = {
   packed:    "#2563EB",
@@ -78,6 +81,7 @@ export default function OnlineProfitability() {
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState("");
+  const [settlementOpen, setSettlementOpen] = useState(false);
 
   // Load styles for the dropdown once
   useEffect(() => {
@@ -219,6 +223,14 @@ export default function OnlineProfitability() {
         action={
           <div className="flex gap-2">
             <BtnSecondary
+              onClick={() => setSettlementOpen(true)}
+              data-testid="import-settlement-btn"
+            >
+              <span className="inline-flex items-center gap-1">
+                <DollarSign className="w-3.5 h-3.5" /> Import Settlement
+              </span>
+            </BtnSecondary>
+            <BtnSecondary
               onClick={rebuild}
               disabled={rebuilding || loading}
               data-testid="rebuild-rollup-btn"
@@ -324,20 +336,27 @@ export default function OnlineProfitability() {
 
       <div className="p-4 sm:p-8 space-y-6">
         {/* Interpretation banner */}
-        {summary && !summary.phase_3_available && (
+        {summary && (!summary.phase_3_available || summary.is_estimated) && (
           <div
-            className="border-2 border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-start gap-2"
+            className="border-2 border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex flex-wrap items-center justify-between gap-3"
             data-testid="phase3-warning-banner"
           >
-            <Info className="w-4 h-4 mt-0.5 shrink-0" />
-            <div>
-              <span className="font-bold">Phase 3 settlements not imported.</span>{" "}
-              Revenue is estimated from the item file&apos;s{" "}
-              <code className="text-xs bg-amber-100 px-1">final_amount</code>{" "}
-              until you import <code className="text-xs bg-amber-100 px-1">settlement_forward</code> /{" "}
-              <code className="text-xs bg-amber-100 px-1">settlement_reverse</code>. Numbers will
-              refine automatically once those imports run.
+            <div className="flex items-start gap-2 max-w-3xl">
+              <Info className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+              <div>
+                <span className="font-bold">Phase 3 settlements not fully reconciled.</span>{" "}
+                Revenue is estimated from item file prices until you import settlement advice payout files (forward / reverse payouts).
+                Reconciled numbers refine automatically once settlement CSVs are committed.
+              </div>
             </div>
+            <BtnPrimary
+              onClick={() => setSettlementOpen(true)}
+              className="shrink-0 bg-amber-800 hover:bg-amber-900 border-amber-800 text-white"
+            >
+              <span className="inline-flex items-center gap-1.5 text-xs">
+                <Upload className="w-3.5 h-3.5" /> Upload Settlement File
+              </span>
+            </BtnPrimary>
           </div>
         )}
 
@@ -360,9 +379,9 @@ export default function OnlineProfitability() {
           <StatTile
             label="Revenue Settled"
             value={inr(summary?.total_revenue_settled || 0)}
-            sub={summary?.phase_3_available ? "from settlements" : "fallback: item_amount"}
+            sub={summary?.is_estimated ? "Estimated (fallback)" : "Reconciled (payouts matched)"}
             testId="stat-revenue-settled"
-            accent="#0F172A"
+            accent={summary?.is_estimated ? "#F59E0B" : "#16A34A"}
           />
           <StatTile
             label="Gross Profit"
@@ -668,8 +687,13 @@ export default function OnlineProfitability() {
                       <td className="px-3 py-2 font-mono">
                         {num(r.margin_pct, 2)}%
                       </td>
-                      <td className="px-3 py-2 text-[10px] uppercase text-slate-500">
-                        {r.revenue_source || "—"}
+                      <td className="px-3 py-2 text-[10px] text-slate-500">
+                        <div className="flex items-center gap-1">
+                          <Badge color={r.is_estimated ? "orange" : "green"}>
+                            {r.is_estimated ? "Estimated" : "Reconciled"}
+                          </Badge>
+                          <span className="text-[10px] text-slate-400 font-mono">({r.revenue_source || "—"})</span>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -693,6 +717,10 @@ export default function OnlineProfitability() {
           </Card>
         )}
       </div>
+
+      {settlementOpen && (
+        <SettlementImportDrawer onClose={() => setSettlementOpen(false)} onDone={load} />
+      )}
     </div>
   );
 }
