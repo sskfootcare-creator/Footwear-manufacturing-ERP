@@ -8,7 +8,7 @@ SourceType = Literal["b2b_client", "online_channel"]
 OnlineChannel = Literal["myntra", "flipkart", "nykaa", "website"]
 Marketplace = Literal["myntra", "flipkart", "nykaa", "website", "ajio", "amazon", "other"]
 Platform = Literal["myntra", "flipkart", "ajio", "nykaa", "website", "other"]
-ConfigRole = Literal["order", "dispatch", "monthly_report"]
+ConfigRole = Literal["order", "dispatch", "monthly_report", "settlement"]
 
 
 class SkuMapIn(BaseModel):
@@ -173,14 +173,22 @@ class OrderImportFormatConfigIn(BaseModel):
 
     @field_validator("column_map")
     @classmethod
-    def _order_column_map_leaf_sku(cls, v):
+    def _order_column_map_leaf_sku(cls, v, info):
         if not isinstance(v, dict):
             raise PydanticCustomError("column_map_type", "column_map must be an object")
-        if not v.get("leaf_sku"):
-            raise PydanticCustomError(
-                "column_map_leaf_sku",
-                "column_map.leaf_sku is required — every order/picklist file must expose our internal SKU column"
-            )
+        role = getattr(info, "data", {}).get("role", "order") if info else "order"
+        if role == "settlement":
+            if not v.get("order_ref") and not v.get("leaf_sku"):
+                raise PydanticCustomError(
+                    "column_map_settlement_ref",
+                    "column_map must contain either order_ref or leaf_sku for settlement files"
+                )
+        else:
+            if not v.get("leaf_sku"):
+                raise PydanticCustomError(
+                    "column_map_leaf_sku",
+                    "column_map.leaf_sku is required — every order/picklist/dispatch/monthly file must expose our internal SKU column"
+                )
         return v
 
 

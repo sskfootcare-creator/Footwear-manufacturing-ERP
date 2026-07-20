@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { http } from "../lib/api";
 import {
   PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge,
@@ -55,6 +55,12 @@ const FALLBACK_DISPATCH_FIELDS = [
   "product_title", "qty",
 ];
 
+const FALLBACK_SETTLEMENT_FIELDS = [
+  "order_ref", "leaf_sku",
+  "gross_amount", "commission", "shipping_fee", "rto_charge", "net_payout",
+  "settlement_date", "payment_id",
+];
+
 const FIELD_HELP = {
   // Order/picklist fields
   order_id:         "Marketplace order id. Leave blank for pure-picklist files (Myntra OP-xxxxx.csv).",
@@ -89,6 +95,15 @@ const FIELD_HELP = {
   destination_state:   "Delivery state.",
   destination_pincode: "Delivery PIN code.",
   store_packet_id:     "Warehouse packet id (Myntra).",
+  // Settlement fields
+  order_ref:       "Order reference ID (Order ID / Order Release ID / Sub Order ID).",
+  gross_amount:    "Gross sale / order invoice amount.",
+  commission:      "Platform commission fee charged.",
+  shipping_fee:    "Logistics / forward shipping fee charged.",
+  rto_charge:      "Reverse shipping / RTO fee charged.",
+  net_payout:      "Bank settlement / net payout amount received.",
+  settlement_date: "Settlement payout date.",
+  payment_id:      "Bank transfer reference / NEFT ID / UTR.",
 };
 
 const emptyConfig = {
@@ -337,6 +352,7 @@ export default function OrderImportFormats() {
   const [loading, setLoading] = useState(false);
   const [canonicalOrder, setCanonicalOrder] = useState(FALLBACK_ORDER_FIELDS);
   const [canonicalDispatch, setCanonicalDispatch] = useState(FALLBACK_DISPATCH_FIELDS);
+  const [canonicalSettlement, setCanonicalSettlement] = useState(FALLBACK_SETTLEMENT_FIELDS);
   const [roleFilter, setRoleFilter] = useState("all"); // "all" | "order" | "dispatch"
   const [open, setOpen] = useState(false);
   const [editingKey, setEditingKey] = useState(null); // {platform, role} when editing
@@ -344,19 +360,29 @@ export default function OrderImportFormats() {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const getFieldsForRole = useCallback(
+    (r) => {
+      if (r === "dispatch") return canonicalDispatch;
+      if (r === "settlement") return canonicalSettlement;
+      return canonicalOrder;
+    },
+    [canonicalDispatch, canonicalSettlement, canonicalOrder]
+  );
+
   // Canonical field list for the currently-editing form (swaps by role)
   const canonicalFields = useMemo(
-    () => (form.role === "dispatch" ? canonicalDispatch : canonicalOrder),
-    [form.role, canonicalOrder, canonicalDispatch]
+    () => getFieldsForRole(form.role),
+    [form.role, getFieldsForRole]
   );
 
   const load = async () => {
     setLoading(true);
     try {
-      const [listRes, metaOrderRes, metaDispatchRes] = await Promise.all([
+      const [listRes, metaOrderRes, metaDispatchRes, metaSettlementRes] = await Promise.all([
         http.get("/order-import-format-configs"),
         http.get("/order-import-format-configs/_meta/canonical-fields?role=order"),
         http.get("/order-import-format-configs/_meta/canonical-fields?role=dispatch"),
+        http.get("/order-import-format-configs/_meta/canonical-fields?role=settlement"),
       ]);
       setConfigs(listRes.data);
       if (metaOrderRes.data?.canonical_fields?.length) {
@@ -364,6 +390,9 @@ export default function OrderImportFormats() {
       }
       if (metaDispatchRes.data?.canonical_fields?.length) {
         setCanonicalDispatch(metaDispatchRes.data.canonical_fields);
+      }
+      if (metaSettlementRes.data?.canonical_fields?.length) {
+        setCanonicalSettlement(metaSettlementRes.data.canonical_fields);
       }
     } catch (e) {
       console.error(e);
@@ -383,7 +412,7 @@ export default function OrderImportFormats() {
 
   const startCreate = (roleDefault = "order") => {
     setEditingKey(null);
-    const fields = roleDefault === "dispatch" ? canonicalDispatch : canonicalOrder;
+    const fields = getFieldsForRole(roleDefault);
     setForm({
       ...emptyConfig,
       role: roleDefault,
@@ -397,7 +426,7 @@ export default function OrderImportFormats() {
   const startEdit = (cfg) => {
     const cfgRole = cfg.role || "order";
     setEditingKey({ platform: cfg.platform, role: cfgRole });
-    const fields = cfgRole === "dispatch" ? canonicalDispatch : canonicalOrder;
+    const fields = getFieldsForRole(cfgRole);
     const cm = { ...(cfg.column_map || {}) };
     fields.forEach((f) => {
       if (!(f in cm)) cm[f] = "";
@@ -488,6 +517,9 @@ export default function OrderImportFormats() {
         subtitle="Config-driven registry of platform ORDER / PICKLIST / DISPATCH file formats. Add a new marketplace's file format without touching parser code."
         action={
           <div className="flex gap-2">
+            <BtnSecondary onClick={() => startCreate("settlement")} data-testid="oif-add-settlement">
+              <Plus className="w-4 h-4 mr-1.5" /> Add settlement config
+            </BtnSecondary>
             <BtnSecondary onClick={() => startCreate("dispatch")} data-testid="oif-add-dispatch">
               <Plus className="w-4 h-4 mr-1.5" /> Add dispatch config
             </BtnSecondary>
@@ -501,9 +533,11 @@ export default function OrderImportFormats() {
       {/* Role filter tabs */}
       <div className="flex gap-1 border-b border-neutral-200">
         {[
-          { key: "all",      label: "All",       count: configs.length },
-          { key: "order",    label: "Order / Picklist", count: configs.filter((c) => (c.role || "order") === "order").length },
-          { key: "dispatch", label: "Dispatch",  count: configs.filter((c) => c.role === "dispatch").length },
+          { key: "all",            label: "All",                  count: configs.length },
+          { key: "order",          label: "Order / Picklist",     count: configs.filter((c) => (c.role || "order") === "order").length },
+          { key: "dispatch",       label: "Dispatch",             count: configs.filter((c) => c.role === "dispatch").length },
+          { key: "monthly_report", label: "Monthly Reconciliation", count: configs.filter((c) => c.role === "monthly_report").length },
+          { key: "settlement",     label: "Settlement",           count: configs.filter((c) => c.role === "settlement").length },
         ].map((tab) => (
           <button key={tab.key}
             onClick={() => setRoleFilter(tab.key)}
@@ -694,18 +728,20 @@ export default function OrderImportFormats() {
                 <Select label="Role" value={form.role}
                   onChange={(e) => {
                     const newRole = e.target.value;
-                    const fields = newRole === "dispatch" ? canonicalDispatch : canonicalOrder;
+                    const fields = getFieldsForRole(newRole);
                     setForm({
                       ...form,
                       role: newRole,
                       // reset column_map when role changes (different fields)
                       column_map: fields.reduce((acc, f) => ({ ...acc, [f]: "" }), {}),
-                      is_picklist: newRole === "dispatch" ? false : form.is_picklist,
+                      is_picklist: newRole === "order" ? form.is_picklist : false,
                     });
                   }}
                   testId="oif-form-role">
                   <option value="order">Order / Picklist</option>
                   <option value="dispatch">Dispatch (daily "what got packed")</option>
+                  <option value="monthly_report">Monthly Reconciliation Report</option>
+                  <option value="settlement">Settlement (Payout advice)</option>
                 </Select>
               )}
 

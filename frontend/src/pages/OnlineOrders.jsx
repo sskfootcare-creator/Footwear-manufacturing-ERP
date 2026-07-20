@@ -7,7 +7,7 @@ import {
 import { Drawer } from "./Materials";
 import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
-  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText,
+  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, DollarSign,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import ResponsiveTable from "../components/ResponsiveTable";
@@ -1312,16 +1312,434 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
 }
 
 
+export function SettlementImportDrawer({ onClose, onDone }) {
+  const [platform, setPlatform] = useState("myntra");
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [committed, setCommitted] = useState(null);
+
+  const fileInputRef = useRef(null);
+
+  const handlePreview = async () => {
+    if (!file) { setError("Please select a settlement CSV/Excel file"); return; }
+    setError("");
+    setLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await http.post(
+        `/online-orders/settlement-import?platform=${platform}&dry_run=true`,
+        fd,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+      setPreview(r.data);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommit = async () => {
+    if (!file) return;
+    setError("");
+    setLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await http.post(
+        `/online-orders/settlement-import?platform=${platform}&dry_run=false`,
+        fd,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+      setCommitted(r.data);
+      if (onDone) onDone();
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Drawer onClose={onClose} title="Import Settlement Payout CSV" width="max-w-4xl">
+      <div className="space-y-6">
+        {error && (
+          <div className="p-3 text-xs bg-red-50 border border-red-200 text-red-700 font-bold rounded">
+            {error}
+          </div>
+        )}
+
+        {committed ? (
+          <div className="p-6 bg-emerald-50 border-2 border-emerald-300 rounded space-y-4">
+            <div className="flex items-center gap-2 text-emerald-800 font-bold text-lg">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+              Settlement payout committed successfully!
+            </div>
+            <div className="text-xs font-mono text-emerald-700">Batch ID: {committed.import_batch_id}</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-white p-3 border border-emerald-200 rounded">
+                <div className="text-[10px] text-slate-500 font-bold uppercase">Matched</div>
+                <div className="text-lg font-bold font-mono text-emerald-700">{committed.stats?.matched_count}</div>
+              </div>
+              <div className="bg-white p-3 border border-emerald-200 rounded">
+                <div className="text-[10px] text-slate-500 font-bold uppercase">Unmatched</div>
+                <div className="text-lg font-bold font-mono text-amber-700">{committed.stats?.unmatched_count}</div>
+              </div>
+              <div className="bg-white p-3 border border-emerald-200 rounded">
+                <div className="text-[10px] text-slate-500 font-bold uppercase">Net Payout</div>
+                <div className="text-lg font-bold font-mono text-slate-900">₹{committed.stats?.total_net_payout?.toLocaleString()}</div>
+              </div>
+              <div className="bg-white p-3 border border-emerald-200 rounded">
+                <div className="text-[10px] text-slate-500 font-bold uppercase">Variance</div>
+                <div className="text-lg font-bold font-mono text-rose-700">₹{committed.stats?.total_variance?.toLocaleString()}</div>
+              </div>
+            </div>
+            <div className="pt-2 flex justify-end">
+              <BtnPrimary onClick={onClose}>Done</BtnPrimary>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-50 p-4 border border-slate-200 rounded">
+              <div>
+                <Select label="Platform" value={platform} onChange={(e) => setPlatform(e.target.value)}>
+                  <option value="myntra">Myntra</option>
+                  <option value="flipkart">Flipkart</option>
+                  <option value="ajio">Ajio</option>
+                  <option value="nykaa">Nykaa</option>
+                  <option value="website">Website</option>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1">
+                  Settlement File (CSV / XLSX)
+                </label>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept=".csv,.xlsx,.xls"
+                  onChange={(e) => setFile(e.target.files[0])}
+                  className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-slate-900 file:text-white hover:file:bg-slate-800"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <BtnSecondary onClick={handlePreview} disabled={loading || !file}>
+                {loading && !preview ? "Processing..." : "Preview Matching & Variance"}
+              </BtnSecondary>
+            </div>
+
+            {preview && (
+              <div className="space-y-4 border-t pt-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Matched Rows</div>
+                    <div className="text-xl font-bold font-mono text-emerald-700">{preview.stats.matched_count} / {preview.stats.total_rows}</div>
+                  </div>
+                  <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Unmatched Rows</div>
+                    <div className="text-xl font-bold font-mono text-amber-700">{preview.stats.unmatched_count}</div>
+                  </div>
+                  <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Net Payout</div>
+                    <div className="text-xl font-bold font-mono text-slate-900">₹{preview.stats.total_net_payout?.toLocaleString()}</div>
+                  </div>
+                  <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Variance</div>
+                    <div className="text-xl font-bold font-mono text-rose-700">₹{preview.stats.total_variance?.toLocaleString()}</div>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded overflow-hidden max-h-80 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase font-bold text-slate-600">
+                      <tr>
+                        <th className="p-2 text-left sticky left-0 z-10 bg-slate-100">Row #</th>
+                        <th className="p-2 text-left">Order Ref</th>
+                        <th className="p-2 text-left">Leaf SKU</th>
+                        <th className="p-2 text-right">Gross</th>
+                        <th className="p-2 text-right">Fees</th>
+                        <th className="p-2 text-right">Net Payout</th>
+                        <th className="p-2 text-right">Invoiced</th>
+                        <th className="p-2 text-right">Variance</th>
+                        <th className="p-2 text-center">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.rows?.slice(0, 150).map((r, i) => {
+                        const fees = (r.commission || 0) + (r.shipping_fee || 0) + (r.rto_charge || 0);
+                        return (
+                          <tr key={i} className={`border-b border-slate-100 ${!r.matched ? "bg-amber-50/40" : "hover:bg-slate-50"}`}>
+                            <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
+                            <td className="p-2 font-mono text-[11px]">{r.order_ref || "—"}</td>
+                            <td className="p-2 font-mono text-[11px]">{r.leaf_sku || "—"}</td>
+                            <td className="p-2 text-right font-mono">₹{r.gross_amount}</td>
+                            <td className="p-2 text-right font-mono text-rose-600">₹{fees.toFixed(2)}</td>
+                            <td className="p-2 text-right font-mono font-bold text-slate-900">₹{r.net_payout}</td>
+                            <td className="p-2 text-right font-mono text-slate-600">₹{r.invoiced_amount}</td>
+                            <td className={`p-2 text-right font-mono font-bold ${r.variance !== 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                              ₹{r.variance}
+                            </td>
+                            <td className="p-2 text-center">
+                              <Badge color={r.matched ? "green" : "orange"}>{r.matched ? "Matched" : "Unmatched"}</Badge>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t">
+                  <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+                  <BtnPrimary onClick={handleCommit} disabled={loading}>
+                    {loading ? "Committing..." : "Commit Settlement Payout"}
+                  </BtnPrimary>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Drawer>
+  );
+}
+
+
+function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
+  const [summary, setSummary] = useState(null);
+  const [settlements, setSettlements] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [filterMatched, setFilterMatched] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (platformFilter) params.append("platform", platformFilter);
+      if (filterMatched !== "") params.append("matched", filterMatched);
+
+      const [sumRes, listRes] = await Promise.all([
+        http.get(`/online-orders/settlement-summary?${params.toString()}`),
+        http.get(`/online-orders/settlements?${params.toString()}&limit=100`),
+      ]);
+      setSummary(sumRes.data);
+      setSettlements(listRes.data?.items || []);
+    } catch {
+      setSummary(null);
+      setSettlements([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [platformFilter, filterMatched]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const platformTotal = useMemo(() => {
+    if (!summary?.by_platform) return null;
+    return summary.by_platform.reduce(
+      (acc, p) => {
+        acc.count += p.count || 0;
+        acc.matched_count += p.matched_count || 0;
+        acc.unmatched_count += p.unmatched_count || 0;
+        acc.net_payout += p.net_payout || 0;
+        acc.invoiced_amount += p.invoiced_amount || 0;
+        acc.variance += p.variance || 0;
+        return acc;
+      },
+      { count: 0, matched_count: 0, unmatched_count: 0, net_payout: 0, invoiced_amount: 0, variance: 0 }
+    );
+  }, [summary]);
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Settlement payout reconciliation summary</div>
+            <div className="text-sm text-slate-600 mt-0.5">
+              {platformFilter ? platformFilter : "all platforms"}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <BtnSecondary onClick={load} disabled={loading}>
+              <span className="flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</span>
+            </BtnSecondary>
+            <BtnPrimary onClick={onOpenImport}>
+              <span className="flex items-center gap-1.5"><DollarSign className="w-3.5 h-3.5" /> Import settlement</span>
+            </BtnPrimary>
+          </div>
+        </div>
+
+        {platformTotal && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Total Net Payout</div>
+              <div className="text-xl font-mono font-bold text-slate-900">₹{platformTotal.net_payout.toLocaleString()}</div>
+            </div>
+            <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Invoiced Amount</div>
+              <div className="text-xl font-mono font-bold text-slate-700">₹{platformTotal.invoiced_amount.toLocaleString()}</div>
+            </div>
+            <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Variance (Invoiced - Payout)</div>
+              <div className={`text-xl font-mono font-bold ${platformTotal.variance !== 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                ₹{platformTotal.variance.toLocaleString()}
+              </div>
+            </div>
+            <div className="bg-slate-50 p-3 border border-slate-200 rounded">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Matched / Unmatched</div>
+              <div className="text-xl font-mono font-bold text-slate-800">
+                <span className="text-emerald-600">{platformTotal.matched_count}</span> / <span className="text-amber-600">{platformTotal.unmatched_count}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {summary?.by_platform?.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-700">Variance by Platform</div>
+            <div className="border border-slate-200 rounded overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-100 text-[10px] uppercase font-bold text-slate-600">
+                  <tr>
+                    <th className="p-2 text-left">Platform</th>
+                    <th className="p-2 text-right">Rows</th>
+                    <th className="p-2 text-right">Gross Amount</th>
+                    <th className="p-2 text-right">Fees (Comm+Ship+RTO)</th>
+                    <th className="p-2 text-right">Net Payout</th>
+                    <th className="p-2 text-right">Invoiced Amount</th>
+                    <th className="p-2 text-right">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.by_platform.map((p) => {
+                    const fees = (p.commission || 0) + (p.shipping_fee || 0) + (p.rto_charge || 0);
+                    return (
+                      <tr key={p.platform} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="p-2 font-bold capitalize">{p.platform}</td>
+                        <td className="p-2 text-right font-mono">{p.count}</td>
+                        <td className="p-2 text-right font-mono">₹{p.gross_amount.toLocaleString()}</td>
+                        <td className="p-2 text-right font-mono text-rose-600">₹{fees.toLocaleString()}</td>
+                        <td className="p-2 text-right font-mono font-bold text-slate-900">₹{p.net_payout.toLocaleString()}</td>
+                        <td className="p-2 text-right font-mono">₹{p.invoiced_amount.toLocaleString()}</td>
+                        <td className={`p-2 text-right font-mono font-bold ${p.variance !== 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                          ₹{p.variance.toLocaleString()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {summary?.by_style?.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <div className="text-xs font-bold uppercase tracking-wider text-slate-700">Variance by Style</div>
+            <div className="border border-slate-200 rounded overflow-hidden max-h-60 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-100 text-[10px] uppercase font-bold text-slate-600 sticky top-0">
+                  <tr>
+                    <th className="p-2 text-left sticky left-0 z-10 bg-slate-100">Style Code</th>
+                    <th className="p-2 text-right">Reconciled Count</th>
+                    <th className="p-2 text-right">Net Payout</th>
+                    <th className="p-2 text-right">Invoiced Amount</th>
+                    <th className="p-2 text-right">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.by_style.map((s) => (
+                    <tr key={s.style_id || s.style_code} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="p-2 font-mono font-bold sticky left-0 z-10 bg-white">{s.style_code}</td>
+                      <td className="p-2 text-right font-mono">{s.count}</td>
+                      <td className="p-2 text-right font-mono font-bold text-slate-900">₹{s.net_payout.toLocaleString()}</td>
+                      <td className="p-2 text-right font-mono">₹{s.invoiced_amount.toLocaleString()}</td>
+                      <td className={`p-2 text-right font-mono font-bold ${s.variance !== 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                        ₹{s.variance.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs font-bold uppercase tracking-wider text-slate-700">Recent Settlement Payout Entries</div>
+          <div className="flex gap-2">
+            <Select label="" value={filterMatched} onChange={(e) => setFilterMatched(e.target.value)} className="w-36 text-xs">
+              <option value="">All Statuses</option>
+              <option value="true">Matched</option>
+              <option value="false">Unmatched</option>
+            </Select>
+          </div>
+        </div>
+
+        {settlements.length === 0 ? (
+          <div className="py-8 text-center text-xs text-slate-400 italic">No settlement payout records found.</div>
+        ) : (
+          <div className="border border-slate-200 rounded overflow-hidden max-h-96 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase font-bold text-slate-600">
+                <tr>
+                  <th className="p-2 text-left sticky left-0 z-10 bg-slate-100">Order Ref</th>
+                  <th className="p-2 text-left">Platform</th>
+                  <th className="p-2 text-left">Leaf SKU</th>
+                  <th className="p-2 text-left">Matched Style</th>
+                  <th className="p-2 text-right">Net Payout</th>
+                  <th className="p-2 text-right">Invoiced</th>
+                  <th className="p-2 text-right">Variance</th>
+                  <th className="p-2 text-center">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {settlements.map((s) => (
+                  <tr key={s.id || s._id} className={`border-b border-slate-100 ${!s.matched ? "bg-amber-50/30" : "hover:bg-slate-50"}`}>
+                    <td className="p-2 font-mono sticky left-0 z-10 bg-white">{s.order_ref || "—"}</td>
+                    <td className="p-2 capitalize"><Badge color="slate">{s.platform}</Badge></td>
+                    <td className="p-2 font-mono text-[11px]">{s.leaf_sku || "—"}</td>
+                    <td className="p-2 font-mono font-bold text-slate-800">{s.matched_style_code || "—"}</td>
+                    <td className="p-2 text-right font-mono font-bold text-slate-900">₹{s.net_payout}</td>
+                    <td className="p-2 text-right font-mono text-slate-600">₹{s.invoiced_amount}</td>
+                    <td className={`p-2 text-right font-mono font-bold ${s.variance !== 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                      ₹{s.variance}
+                    </td>
+                    <td className="p-2 text-center">
+                      <Badge color={s.matched ? "green" : "orange"}>{s.matched ? "Matched" : "Unmatched"}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+
 // ── Main page ─────────────────────────────────────────────
 export default function OnlineOrders() {
-  const [tab, setTab]           = useState("orders"); // "orders" | "reconciliation"
+  const [tab, setTab]           = useState("orders"); // "orders" | "reconciliation" | "settlement"
   const [jobs, setJobs]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [monthlyOpen, setMonthlyOpen]   = useState(false);
+  const [settlementOpen, setSettlementOpen] = useState(false);
   const [reconPlatform, setReconPlatform] = useState("");
   const [reconMonth, setReconMonth]       = useState("");
+  const [settlePlatform, setSettlePlatform] = useState("");
 
   const [filterChannel, setFilterChannel]   = useState("");
   const [filterStatus, setFilterStatus]     = useState("");
@@ -1377,7 +1795,9 @@ export default function OnlineOrders() {
         title="Online Orders"
         subtitle={tab === "orders"
           ? "Config-driven marketplace order & picklist imports"
-          : "Monthly report → returns/RTO/cancellations → inventory reconciliation"}
+          : tab === "reconciliation"
+          ? "Monthly report → returns/RTO/cancellations → inventory reconciliation"
+          : "Settlement advice payout import → order matching & variance reporting"}
         testId="online-orders-header"
         action={
           <div className="flex gap-2">
@@ -1406,20 +1826,26 @@ export default function OnlineOrders() {
                 <span className="flex items-center gap-2"><ScrollText className="w-4 h-4" /> Import monthly report</span>
               </BtnPrimary>
             )}
+            {tab === "settlement" && (
+              <BtnPrimary id="btn-settlement-import" onClick={() => setSettlementOpen(true)}>
+                <span className="flex items-center gap-2"><DollarSign className="w-4 h-4" /> Import settlement</span>
+              </BtnPrimary>
+            )}
           </div>
         }
       />
 
       {/* ── Tab bar ── */}
-      <div className="px-4 sm:px-8 bg-white border-b-2 border-slate-200 flex gap-1">
+      <div className="px-4 sm:px-8 bg-white border-b-2 border-slate-200 flex gap-1 overflow-x-auto">
         {[
-          { key: "orders",         label: "Orders",                  icon: ShoppingBag },
-          { key: "reconciliation", label: "Monthly Reconciliation", icon: ScrollText  },
+          { key: "orders",         label: "Orders",                     icon: ShoppingBag },
+          { key: "reconciliation", label: "Monthly Reconciliation",    icon: ScrollText  },
+          { key: "settlement",     label: "Settlement Reconciliation", icon: DollarSign  },
         ].map((t) => {
           const Ic = t.icon; const active = tab === t.key;
           return (
             <button key={t.key} onClick={() => setTab(t.key)}
-              className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-0.5 transition-colors inline-flex items-center gap-2 ${
+              className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-0.5 transition-colors inline-flex items-center gap-2 whitespace-nowrap ${
                 active
                   ? "border-slate-900 text-slate-900"
                   : "border-transparent text-slate-500 hover:text-slate-800"
@@ -1458,6 +1884,30 @@ export default function OnlineOrders() {
             platform={reconPlatform || null}
             month={reconMonth || null}
             onOpenImport={() => setMonthlyOpen(true)}
+          />
+        </div>
+      ) : tab === "settlement" ? (
+        <div className="px-4 sm:px-8 py-6 space-y-6">
+          {/* Filters */}
+          <div className="bg-white border-2 border-slate-200 px-4 py-3 flex flex-wrap gap-3 items-end">
+            <div className="w-40">
+              <Select label="Platform" id="settle-platform" value={settlePlatform}
+                onChange={(e) => setSettlePlatform(e.target.value)}>
+                <option value="">All platforms</option>
+                {channelOptions.map((c) => (
+                  <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+                ))}
+              </Select>
+            </div>
+            <button
+              className="text-xs text-slate-400 hover:text-slate-700 underline self-end mb-0.5"
+              onClick={() => setSettlePlatform("")}
+            >Clear</button>
+          </div>
+
+          <SettlementReconciliationCard
+            platformFilter={settlePlatform || null}
+            onOpenImport={() => setSettlementOpen(true)}
           />
         </div>
       ) : (
@@ -1556,6 +2006,10 @@ export default function OnlineOrders() {
 
       {monthlyOpen && (
         <MonthlyReportDrawer onClose={() => setMonthlyOpen(false)} onDone={load} />
+      )}
+
+      {settlementOpen && (
+        <SettlementImportDrawer onClose={() => setSettlementOpen(false)} onDone={load} />
       )}
     </div>
   );
