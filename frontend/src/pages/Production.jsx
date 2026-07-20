@@ -931,7 +931,7 @@ function ColorGroupCard(props) {
         <table className="w-full text-xs border border-slate-200">
           <thead className="bg-slate-50">
             <tr>
-              <th className="px-2 py-1 text-left text-[10px] uppercase tracking-wider font-bold text-slate-600 border-r border-slate-200">Size</th>
+              <th className="px-2 py-1 text-left text-[10px] uppercase tracking-wider font-bold text-slate-600 border-r border-slate-200 sticky left-0 z-10 bg-slate-50">Size</th>
               {group.sizes.map(sz => (
                 <th key={sz} className="px-2 py-1 text-center font-mono text-[11px] font-bold text-slate-700 border-r border-slate-200 last:border-r-0">{sz}</th>
               ))}
@@ -940,7 +940,7 @@ function ColorGroupCard(props) {
           </thead>
           <tbody>
             <tr className="border-t border-slate-200">
-              <td className="px-2 py-1.5 font-bold text-slate-700 border-r border-slate-200">{group.color}</td>
+              <td className="px-2 py-1.5 font-bold text-slate-700 border-r border-slate-200 sticky left-0 z-10 bg-white">{group.color}</td>
               {group.sizes.map(sz => (
                 <td key={sz} className="px-2 py-1.5 text-center font-mono border-r border-slate-200 last:border-r-0">
                   {effectiveCanEdit ? (
@@ -1964,7 +1964,7 @@ function ShortageModal({ state, onClose, navigate }) {
                   <table className="w-full text-xs">
                     <thead className="bg-slate-50 border-b border-slate-200">
                       <tr className="text-left text-[9px] uppercase tracking-wider text-slate-600 font-bold">
-                        <th className="px-4 py-2">Code</th>
+                        <th className="px-4 py-2 sticky left-0 z-10 bg-slate-50">Code</th>
                         <th className="px-4 py-2">Material Name</th>
                         <th className="px-4 py-2 text-right">Job Requirement</th>
                         <th className="px-4 py-2 text-right">Current Stock</th>
@@ -1975,7 +1975,7 @@ function ShortageModal({ state, onClose, navigate }) {
                     <tbody>
                       {group.items.map(item => (
                         <tr key={item.code} className="border-b border-slate-100 hover:bg-slate-50">
-                          <td className="px-4 py-2.5 font-mono font-bold">{item.code}</td>
+                          <td className="px-4 py-2.5 font-mono font-bold sticky left-0 z-10 bg-white group-hover:bg-slate-50">{item.code}</td>
                           <td className="px-4 py-2.5">{item.name}</td>
                           <td className="px-4 py-2.5 text-right font-mono">{item.required} {item.unit}</td>
                           <td className="px-4 py-2.5 text-right font-mono">{item.in_stock} {item.unit}</td>
@@ -2198,7 +2198,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
                   <table className="w-full text-xs">
                     <thead className="bg-slate-50 border-b border-slate-200">
                       <tr className="text-left text-[9px] uppercase tracking-wider text-slate-600 font-bold">
-                        <th className="px-3 py-2 w-16">Size</th>
+                        <th className="px-3 py-2 w-16 sticky left-0 z-10 bg-slate-50">Size</th>
                         <th className="px-3 py-2 text-right w-24">Completed Qty</th>
                         <th className="px-3 py-2 w-44">EAN Code</th>
                         <th className="px-3 py-2">Cartons Configuration (Row values)</th>
@@ -2219,7 +2219,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
                         return (
                           <tr key={sz} className="border-b border-slate-100 hover:bg-slate-50">
                             {/* Size */}
-                            <td className="px-3 py-3 font-mono font-bold text-slate-800">Sz {sz}</td>
+                            <td className="px-3 py-3 font-mono font-bold text-slate-800 sticky left-0 z-10 bg-white">Sz {sz}</td>
                             
                             {/* Completed Qty */}
                             <td className="px-3 py-3 text-right font-mono font-bold text-slate-900">{completed}</td>

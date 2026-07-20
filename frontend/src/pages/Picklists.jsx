@@ -367,7 +367,7 @@ function PicklistDrawer({ id, onClose, onChanged }) {
                   <div className="text-xs text-slate-500 mt-1">{new Date(pl.created_at).toLocaleString()}</div>
                 </div>
               </div>
-              <div className="grid grid-cols-4 gap-3 mt-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-xs">
                 <div><span className="text-slate-500">Picker:</span> <strong>{pl.picker || "________________"}</strong></div>
                 <div><span className="text-slate-500">Items:</span> <strong>{pl.total_items}</strong></div>
                 <div><span className="text-slate-500">Total Qty:</span> <strong>{pl.total_qty} pairs</strong></div>

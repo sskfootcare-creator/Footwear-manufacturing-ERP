@@ -381,80 +381,82 @@ export default function PendingProductList() {
                       )}
                     </div>
                   </div>
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50">
-                        <th className="border border-slate-400 px-2 py-1 text-left w-16">Size</th>
-                        {allSizes.map((sz) => (
-                          <th key={sz} className="border border-slate-400 px-1 py-1 text-center font-mono">{sz}</th>
-                        ))}
-                        <th className="border border-slate-400 px-2 py-1 text-center bg-slate-200 w-16">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td className="border border-slate-400 px-2 py-1 font-bold uppercase text-[10px]">Qty</td>
-                        {allSizes.map((sz) => {
-                          const cell = g.sizes[sz];
-                          return (
-                            <td
-                              key={sz}
-                              className={`border border-slate-400 px-1 py-1 text-center font-mono font-bold ${
-                                cell
-                                  ? cell.ready
-                                    ? "bg-white text-slate-900"
-                                    : "bg-red-50 text-red-800"
-                                  : "bg-slate-50 text-slate-300"
-                              }`}
-                            >
-                              {cell ? cell.qty : "·"}
-                            </td>
-                          );
-                        })}
-                        <td className="border border-slate-400 px-2 py-1 text-center bg-slate-100 font-black font-mono text-base">{g.total}</td>
-                      </tr>
-                      <tr>
-                        <td className="border border-slate-400 px-2 py-1 font-bold uppercase text-[10px]">Made</td>
-                        {allSizes.map((sz) => {
-                          const cell = g.sizes[sz];
-                          return (
-                            <td key={sz} className="border border-slate-400 px-1 py-1 text-center">
-                              {cell ? (
-                                activeSnapshot ? (
-                                  <div className="border border-dashed border-slate-300 w-6 h-6 mx-auto bg-slate-50 flex items-center justify-center text-[10px] text-slate-400 select-none font-bold" title="Read-only snapshot">-</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50">
+                          <th className="border border-slate-400 px-2 py-1 text-left w-16">Size</th>
+                          {allSizes.map((sz) => (
+                            <th key={sz} className="border border-slate-400 px-1 py-1 text-center font-mono">{sz}</th>
+                          ))}
+                          <th className="border border-slate-400 px-2 py-1 text-center bg-slate-200 w-16">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td className="border border-slate-400 px-2 py-1 font-bold uppercase text-[10px]">Qty</td>
+                          {allSizes.map((sz) => {
+                            const cell = g.sizes[sz];
+                            return (
+                              <td
+                                key={sz}
+                                className={`border border-slate-400 px-1 py-1 text-center font-mono font-bold ${
+                                  cell
+                                    ? cell.ready
+                                      ? "bg-white text-slate-900"
+                                      : "bg-red-50 text-red-800"
+                                    : "bg-slate-50 text-slate-300"
+                                }`}
+                              >
+                                {cell ? cell.qty : "·"}
+                              </td>
+                            );
+                          })}
+                          <td className="border border-slate-400 px-2 py-1 text-center bg-slate-100 font-black font-mono text-base">{g.total}</td>
+                        </tr>
+                        <tr>
+                          <td className="border border-slate-400 px-2 py-1 font-bold uppercase text-[10px]">Made</td>
+                          {allSizes.map((sz) => {
+                            const cell = g.sizes[sz];
+                            return (
+                              <td key={sz} className="border border-slate-400 px-1 py-1 text-center">
+                                {cell ? (
+                                  activeSnapshot ? (
+                                    <div className="border border-dashed border-slate-300 w-6 h-6 mx-auto bg-slate-50 flex items-center justify-center text-[10px] text-slate-400 select-none font-bold" title="Read-only snapshot">-</div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      data-testid={`made-cell-${g.style_code}-${g.color}-${sz}`}
+                                      onClick={() => setProduceCtx({
+                                        style_id:   g.style_id,
+                                        style_code: g.style_code,
+                                        style_name: g.style_name,
+                                        color:      g.color,
+                                        size:       sz,
+                                        pending:    cell.qty,
+                                        image:      {
+                                          url: g.image_url,
+                                          display_url: g.image_display_url,
+                                          thumbnail_url: g.image_thumbnail_url,
+                                        },
+                                      })}
+                                      className="border-2 border-slate-500 w-6 h-6 hover:bg-emerald-100 hover:border-emerald-600 active:bg-emerald-200 transition-colors mx-auto flex items-center justify-center print:cursor-default print:hover:bg-transparent"
+                                      title={`Record production for ${g.style_code} · ${g.color} · Size ${sz}`}
+                                    />
+                                  )
                                 ) : (
-                                  <button
-                                    type="button"
-                                    data-testid={`made-cell-${g.style_code}-${g.color}-${sz}`}
-                                    onClick={() => setProduceCtx({
-                                      style_id:   g.style_id,
-                                      style_code: g.style_code,
-                                      style_name: g.style_name,
-                                      color:      g.color,
-                                      size:       sz,
-                                      pending:    cell.qty,
-                                      image:      {
-                                        url: g.image_url,
-                                        display_url: g.image_display_url,
-                                        thumbnail_url: g.image_thumbnail_url,
-                                      },
-                                    })}
-                                    className="border-2 border-slate-500 w-6 h-6 hover:bg-emerald-100 hover:border-emerald-600 active:bg-emerald-200 transition-colors mx-auto flex items-center justify-center print:cursor-default print:hover:bg-transparent"
-                                    title={`Record production for ${g.style_code} · ${g.color} · Size ${sz}`}
-                                  />
-                                )
-                              ) : (
-                                <div className="border border-slate-200 w-5 h-5 mx-auto" />
-                              )}
-                            </td>
-                          );
-                        })}
-                        <td className="border border-slate-400 px-2 py-1 text-center">
-                          <div className="border-2 border-slate-900 w-6 h-6 mx-auto" title="All done" />
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
+                                  <div className="border border-slate-200 w-5 h-5 mx-auto" />
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td className="border border-slate-400 px-2 py-1 text-center">
+                            <div className="border-2 border-slate-900 w-6 h-6 mx-auto" title="All done" />
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                   {g.any_shortage && g.shortages.length > 0 && (
                     <div className="px-3 py-1.5 bg-red-50 border-t-2 border-red-500 text-[10px] text-red-800">
                       <span className="font-bold uppercase tracking-wider">Missing components:</span>{" "}

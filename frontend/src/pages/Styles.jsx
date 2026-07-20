@@ -1337,7 +1337,7 @@ export default function Styles() {
                     <table className="w-full text-xs bg-white border border-slate-200" id="style-inline-mappings-table">
                       <thead className="bg-slate-100 text-left border-b border-slate-200">
                         <tr>
-                          <th className="px-3 py-2 font-bold text-slate-600">Source Type</th>
+                          <th className="px-3 py-2 font-bold text-slate-600 sticky left-0 z-10 bg-slate-100">Source Type</th>
                           <th className="px-3 py-2 font-bold text-slate-600">Source Name</th>
                           <th className="px-3 py-2 font-bold text-slate-600">Ext. SKU</th>
                           <th className="px-3 py-2 font-bold text-slate-600">Ext. Name</th>
@@ -1350,7 +1350,7 @@ export default function Styles() {
                         {/* New Mapping inline row */}
                         {addingMapping && (
                           <tr className="bg-blue-50/50">
-                            <td className="p-2">
+                            <td className="p-2 sticky left-0 z-10 bg-blue-50">
                               <select
                                 className="w-full border border-slate-300 p-1"
                                 value={newMapping.source_type}
@@ -1430,7 +1430,7 @@ export default function Styles() {
                           const isEditing = editingMappingId === m.id;
                           return (
                             <tr key={m.id} className="hover:bg-slate-50">
-                              <td className="px-3 py-2">
+                              <td className="px-3 py-2 sticky left-0 z-10 bg-white">
                                 <Badge color={m.source_type === "b2b_client" ? "blue" : "orange"}>
                                   {m.source_type === "b2b_client" ? "B2B" : "Online"}
                                 </Badge>
@@ -1808,7 +1808,7 @@ export default function Styles() {
                   <table className="w-full text-left">
                     <thead className="bg-slate-100 sticky top-0 shadow-sm">
                       <tr>
-                        <th className="p-2 border-b">Code</th>
+                        <th className="p-2 border-b sticky left-0 z-10 bg-slate-100">Code</th>
                         <th className="p-2 border-b">Name</th>
                         <th className="p-2 border-b">Category</th>
                         <th className="p-2 border-b">Base Size</th>
@@ -1819,7 +1819,7 @@ export default function Styles() {
                     <tbody>
                       {bulkPreview.map((r, i) => (
                         <tr key={i} className="border-b hover:bg-slate-50">
-                          <td className="p-2 font-medium">{r.code}</td>
+                          <td className="p-2 font-medium sticky left-0 z-10 bg-white">{r.code}</td>
                           <td className="p-2">{r.name}</td>
                           <td className="p-2">{r.category}</td>
                           <td className="p-2 text-center">{r.base_size}</td>

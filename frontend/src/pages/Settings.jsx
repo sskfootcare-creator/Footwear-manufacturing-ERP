@@ -357,47 +357,49 @@ function PackingTemplatesSection() {
           one.
         </div>
       ) : (
-        <table className="w-full text-sm" data-testid="pt-list">
-          <thead className="bg-slate-50 border-b-2 border-slate-200">
-            <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-              <th className="px-4 py-2 font-bold">Client</th>
-              <th className="px-4 py-2 font-bold">Template</th>
-              <th className="px-4 py-2 font-bold">Aliases</th>
-              <th className="px-4 py-2 font-bold">Created</th>
-              <th className="px-4 py-2 font-bold text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {templates.map((t) => (
-              <tr
-                key={t.id}
-                className="border-b border-slate-100 hover:bg-slate-50"
-                data-testid={`pt-row-${t.id}`}
-              >
-                <td className="px-4 py-2 font-bold">{t.client_name}</td>
-                <td className="px-4 py-2 flex items-center gap-2">
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-[#16A34A]" />{" "}
-                  {t.name}
-                </td>
-                <td className="px-4 py-2 text-xs text-slate-600 font-mono">
-                  {(t.aliases || []).join(", ") || "—"}
-                </td>
-                <td className="px-4 py-2 text-xs text-slate-500 font-mono">
-                  {(t.created_at || "").slice(0, 10)}
-                </td>
-                <td className="px-4 py-2 text-right">
-                  <button
-                    onClick={() => remove(t)}
-                    className="text-slate-600 hover:text-red-600 p-1.5"
-                    data-testid={`pt-delete-${t.id}`}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm" data-testid="pt-list">
+            <thead className="bg-slate-50 border-b-2 border-slate-200">
+              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                <th className="px-4 py-2 font-bold">Client</th>
+                <th className="px-4 py-2 font-bold">Template</th>
+                <th className="px-4 py-2 font-bold">Aliases</th>
+                <th className="px-4 py-2 font-bold">Created</th>
+                <th className="px-4 py-2 font-bold text-right">Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {templates.map((t) => (
+                <tr
+                  key={t.id}
+                  className="border-b border-slate-100 hover:bg-slate-50"
+                  data-testid={`pt-row-${t.id}`}
+                >
+                  <td className="px-4 py-2 font-bold">{t.client_name}</td>
+                  <td className="px-4 py-2 flex items-center gap-2">
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-[#16A34A]" />{" "}
+                    {t.name}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-slate-600 font-mono">
+                    {(t.aliases || []).join(", ") || "—"}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-slate-500 font-mono">
+                    {(t.created_at || "").slice(0, 10)}
+                  </td>
+                  <td className="px-4 py-2 text-right">
+                    <button
+                      onClick={() => remove(t)}
+                      className="text-slate-600 hover:text-red-600 p-1.5"
+                      data-testid={`pt-delete-${t.id}`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       <ConfirmDialog
         open={!!confirm}

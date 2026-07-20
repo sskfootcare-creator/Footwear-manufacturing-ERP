@@ -343,7 +343,7 @@ function EditDetailsDrawer({ card, onClose, onDone }) {
           <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1.5 flex items-center gap-1.5">
             <Package className="w-3.5 h-3.5" /> Planned Components per Style
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             {COMPONENTS.map((c) => (
               <div key={c}>
                 <label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{c}</label>

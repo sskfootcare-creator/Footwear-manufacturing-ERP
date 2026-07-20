@@ -149,7 +149,7 @@ export default function ComponentBulkDrawer({ prefill, existingCodes, onClose, o
         </div>
         <Input label="Component Name *" value={meta.component_name} disabled={isExtend}
           onChange={(e) => setMeta((m) => ({ ...m, component_name: e.target.value }))} />
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Input label="Vendor" value={meta.vendor}
             onChange={(e) => setMeta((m) => ({ ...m, vendor: e.target.value }))} />
           <Input label="Unit" value={meta.unit}

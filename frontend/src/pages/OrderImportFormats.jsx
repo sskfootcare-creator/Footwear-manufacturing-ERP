@@ -659,7 +659,7 @@ export default function OrderImportFormats() {
           width="max-w-4xl"
         >
           <div className="space-y-5">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {editingKey ? (
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1">Platform</label>

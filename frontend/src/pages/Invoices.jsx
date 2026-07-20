@@ -470,7 +470,7 @@ function InvoiceDetailModal({ inv, onClose }) {
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <BalanceTile label="Gross" value={inr(inv.grand_total || 0)} />
             <BalanceTile
               label="Short / Adjusted"
@@ -742,7 +742,7 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
             auto-reduce the receivable in the ledger.
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">
                 GRN Date

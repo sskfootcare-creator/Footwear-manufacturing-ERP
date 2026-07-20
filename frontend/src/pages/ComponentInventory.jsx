@@ -326,7 +326,7 @@ function EditMetadataDrawer({ row, onClose, onDone }) {
           <Input label="Vendor" value={form.vendor} onChange={(e) => setForm((f) => ({ ...f, vendor: e.target.value }))} />
           <Input label="Unit" value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} />
         </div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Input label="Reorder Level"  type="number" value={form.reorder_level}
             onChange={(e) => setForm((f) => ({ ...f, reorder_level: e.target.value }))} />
           <Input label="Minimum Stock"  type="number" value={form.minimum_stock}
