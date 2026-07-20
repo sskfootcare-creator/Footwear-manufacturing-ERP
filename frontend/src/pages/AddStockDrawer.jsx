@@ -531,7 +531,7 @@ function CsvUploadTab({ onDone }) {
       {/* Dry-run preview */}
       {preview && !result && (
         <>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="border-2 border-slate-200 px-3 py-2">
               <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Total Rows</div>
               <div className="text-2xl font-bold font-mono">{preview.summary.total_rows_seen}</div>
@@ -613,7 +613,7 @@ function CsvUploadTab({ onDone }) {
       {/* Post-commit result */}
       {result && (
         <>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="border-2 border-slate-200 px-3 py-2">
               <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Attempted</div>
               <div className="text-2xl font-bold font-mono">{result.summary.attempted}</div>

@@ -122,7 +122,7 @@ export default function Defects() {
               </Select>
             </div>
             <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} testId="form-defect-desc" />
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Input label="Defective Qty" type="number" value={form.defective_qty} onChange={(e) => setForm({ ...form, defective_qty: e.target.value })} />
               <Input label="Rework Qty" type="number" value={form.rework_qty} onChange={(e) => setForm({ ...form, rework_qty: e.target.value })} />
               <Input label="Final Rejected" type="number" value={form.final_rejection_qty} onChange={(e) => setForm({ ...form, final_rejection_qty: e.target.value })} />

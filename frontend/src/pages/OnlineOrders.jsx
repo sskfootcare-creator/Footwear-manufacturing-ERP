@@ -347,7 +347,7 @@ function ImportDrawer({ onClose, onDone }) {
                 <CheckCircle2 className="w-5 h-5" /> Import committed
               </div>
               <div className="text-xs font-mono mb-1">batch: {committed.import_batch_id}</div>
-              <div className="grid grid-cols-3 gap-2 mt-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3">
                 <MiniStat label="orders" value={committed.committed?.orders_created ?? 0} accent="#0F172A" />
                 <MiniStat label="items"  value={committed.committed?.items_created  ?? 0} accent="#C27842" />
                 <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
@@ -422,7 +422,7 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
           <table className="w-full text-xs">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2 border-b">Row #</th>
+                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
                 <th className="text-left p-2 border-b">Type</th>
                 <th className="text-left p-2 border-b">Order / Batch</th>
                 <th className="text-left p-2 border-b">Raw leaf_sku</th>
@@ -439,7 +439,7 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                 const matched       = !!r.matched;
                 return (
                   <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                    <td className="p-2 font-mono">{r.source_row_index}</td>
+                    <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
                     <td className="p-2">
                       {isOrderRow
                         ? <Badge color="blue">order</Badge>
@@ -787,7 +787,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
           <table className="w-full text-xs">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2 border-b">Row #</th>
+                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
                 <th className="text-left p-2 border-b">Order / Release</th>
                 <th className="text-left p-2 border-b">Raw leaf_sku</th>
                 <th className="text-left p-2 border-b">Group → Size</th>
@@ -804,7 +804,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
                 const matched = !!r.matched;
                 return (
                   <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                    <td className="p-2 font-mono">{r.source_row_index}</td>
+                    <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
                     <td className="p-2 font-mono text-[11px]">
                       <div>{r.order_id || "—"}</div>
                       <div className="text-emerald-700">{r.order_release_id || "—"}</div>
@@ -1121,7 +1121,7 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
           <table className="w-full text-xs">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2 border-b">Row #</th>
+                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
                 <th className="text-left p-2 border-b">Release</th>
                 <th className="text-left p-2 border-b">Status</th>
                 <th className="text-left p-2 border-b">Leaf SKU</th>
@@ -1134,7 +1134,7 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
             <tbody>
               {rows.slice(0, 300).map((r, i) => (
                 <tr key={i} className={`border-b border-neutral-100 ${!r.matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                  <td className="p-2 font-mono">{r.source_row_index}</td>
+                  <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
                   <td className="p-2 font-mono text-[11px]">
                     <div>{r.order_id || "—"}</div>
                     <div className="text-emerald-700">{r.order_release_id || "—"}</div>

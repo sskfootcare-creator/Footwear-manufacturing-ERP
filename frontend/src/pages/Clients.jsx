@@ -93,90 +93,92 @@ export default function Clients() {
               Production board to see your client ledger here.
             </div>
           ) : (
-            <table className="w-full text-sm" data-testid="clients-table">
-              <thead className="bg-slate-50 border-b border-slate-200">
-                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                  <th className="px-4 py-2 font-bold">Client</th>
-                  <th className="px-4 py-2 font-bold text-right">Invoices</th>
-                  <th className="px-4 py-2 font-bold text-right">
-                    Total Invoiced
-                  </th>
-                  <th className="px-4 py-2 font-bold text-right">Received</th>
-                  <th className="px-4 py-2 font-bold text-right">
-                    Outstanding
-                  </th>
-                  <th className="px-4 py-2 font-bold text-right">Overdue</th>
-                  <th className="px-4 py-2 font-bold text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {clients.map((c) => (
-                  <tr
-                    key={c.client_name}
-                    className="border-b border-slate-100 hover:bg-slate-50"
-                    data-testid={`client-row-${c.client_name}`}
-                  >
-                    <td className="px-4 py-3 font-bold">{c.client_name}</td>
-                    <td className="px-4 py-3 text-right font-mono">
-                      {c.invoice_count}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm" data-testid="clients-table">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                    <th className="px-4 py-2 font-bold">Client</th>
+                    <th className="px-4 py-2 font-bold text-right">Invoices</th>
+                    <th className="px-4 py-2 font-bold text-right">
+                      Total Invoiced
+                    </th>
+                    <th className="px-4 py-2 font-bold text-right">Received</th>
+                    <th className="px-4 py-2 font-bold text-right">
+                      Outstanding
+                    </th>
+                    <th className="px-4 py-2 font-bold text-right">Overdue</th>
+                    <th className="px-4 py-2 font-bold text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clients.map((c) => (
+                    <tr
+                      key={c.client_name}
+                      className="border-b border-slate-100 hover:bg-slate-50"
+                      data-testid={`client-row-${c.client_name}`}
+                    >
+                      <td className="px-4 py-3 font-bold">{c.client_name}</td>
+                      <td className="px-4 py-3 text-right font-mono">
+                        {c.invoice_count}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono">
+                        {inr(c.total_invoiced)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-[#16A34A]">
+                        {inr(c.total_received)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono font-bold">
+                        {inr(c.outstanding)}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {c.overdue_count > 0 ? (
+                          <div>
+                            <Badge color="red">{c.overdue_count} overdue</Badge>
+                            <div className="text-xs font-mono text-red-600 mt-1">
+                              {inr(c.overdue_amount)}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => openLedger(c)}
+                          className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:bg-[#2563EB] hover:text-white border border-[#2563EB] px-3 py-1.5 flex items-center gap-1 ml-auto"
+                          data-testid={`open-ledger-${c.client_name}`}
+                        >
+                          <BookOpen className="w-3 h-3" /> Ledger
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="bg-slate-900 text-white">
+                  <tr>
+                    <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
+                      Grand Total
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {inr(c.total_invoiced)}
+                      {clients.reduce((s, c) => s + c.invoice_count, 0)}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono text-[#16A34A]">
-                      {inr(c.total_received)}
+                    <td className="px-4 py-3 text-right font-mono">
+                      {inr(clients.reduce((s, c) => s + c.total_invoiced, 0))}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-[#86EFAC]">
+                      {inr(clients.reduce((s, c) => s + c.total_received, 0))}
                     </td>
                     <td className="px-4 py-3 text-right font-mono font-bold">
-                      {inr(c.outstanding)}
+                      {inr(totalOutstanding)}
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      {c.overdue_count > 0 ? (
-                        <div>
-                          <Badge color="red">{c.overdue_count} overdue</Badge>
-                          <div className="text-xs font-mono text-red-600 mt-1">
-                            {inr(c.overdue_amount)}
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
+                    <td className="px-4 py-3 text-right font-mono font-bold text-red-300">
+                      {inr(totalOverdue)}
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => openLedger(c)}
-                        className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:bg-[#2563EB] hover:text-white border border-[#2563EB] px-3 py-1.5 flex items-center gap-1 ml-auto"
-                        data-testid={`open-ledger-${c.client_name}`}
-                      >
-                        <BookOpen className="w-3 h-3" /> Ledger
-                      </button>
-                    </td>
+                    <td></td>
                   </tr>
-                ))}
-              </tbody>
-              <tfoot className="bg-slate-900 text-white">
-                <tr>
-                  <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
-                    Grand Total
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono">
-                    {clients.reduce((s, c) => s + c.invoice_count, 0)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono">
-                    {inr(clients.reduce((s, c) => s + c.total_invoiced, 0))}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono text-[#86EFAC]">
-                    {inr(clients.reduce((s, c) => s + c.total_received, 0))}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono font-bold">
-                    {inr(totalOutstanding)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono font-bold text-red-300">
-                    {inr(totalOverdue)}
-                  </td>
-                  <td></td>
-                </tr>
-              </tfoot>
-            </table>
+                </tfoot>
+              </table>
+            </div>
           )}
         </Card>
 
@@ -265,7 +267,7 @@ function LedgerModal({ ledger, onClose }) {
             <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#C27842] mb-2 border-b border-slate-200 pb-1">
               Aging analysis
             </h3>
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
               {ledger.aging.map((a, i) => (
                 <div
                   key={i}
@@ -294,70 +296,72 @@ function LedgerModal({ ledger, onClose }) {
               <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#C27842] mb-2 border-b border-slate-200 pb-1">
                 Open invoices
               </h3>
-              <table
-                className="w-full text-xs border-2 border-slate-200"
-                data-testid="ledger-open-invoices"
-              >
-                <thead className="bg-slate-50">
-                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                    <th className="px-3 py-2 font-bold">Invoice #</th>
-                    <th className="px-3 py-2 font-bold">PO</th>
-                    <th className="px-3 py-2 font-bold">Date</th>
-                    <th className="px-3 py-2 font-bold">Due</th>
-                    <th className="px-3 py-2 font-bold text-right">Amount</th>
-                    <th className="px-3 py-2 font-bold text-right">Received</th>
-                    <th className="px-3 py-2 font-bold text-right">
-                      Outstanding
-                    </th>
-                    <th className="px-3 py-2 font-bold">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ledger.invoices
-                    .filter((i) => i.outstanding > 0)
-                    .map((i, idx) => (
-                      <tr
-                        key={idx}
-                        className="border-t border-slate-100 hover:bg-slate-50"
-                      >
-                        <td className="px-3 py-2 font-mono font-bold">
-                          {i.invoice_no}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-slate-600">
-                          {i.po_number || "—"}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-slate-600">
-                          {i.invoice_date}
-                        </td>
-                        <td className="px-3 py-2">
-                          <span
-                            className={
-                              i.status === "overdue"
-                                ? "text-red-600 font-bold"
-                                : ""
-                            }
-                          >
-                            {i.due_date}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {inr(i.net_amount || 0)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono text-[#16A34A]">
-                          {inr(i.received_amount || 0)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">
-                          {inr(i.outstanding)}
-                        </td>
-                        <td className="px-3 py-2">
-                          <Badge color={STATUS_COLOR[i.status] || "yellow"}>
-                            {i.status}
-                          </Badge>
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
+              <div className="overflow-x-auto">
+                <table
+                  className="w-full text-xs border-2 border-slate-200"
+                  data-testid="ledger-open-invoices"
+                >
+                  <thead className="bg-slate-50">
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                      <th className="px-3 py-2 font-bold">Invoice #</th>
+                      <th className="px-3 py-2 font-bold">PO</th>
+                      <th className="px-3 py-2 font-bold">Date</th>
+                      <th className="px-3 py-2 font-bold">Due</th>
+                      <th className="px-3 py-2 font-bold text-right">Amount</th>
+                      <th className="px-3 py-2 font-bold text-right">Received</th>
+                      <th className="px-3 py-2 font-bold text-right">
+                        Outstanding
+                      </th>
+                      <th className="px-3 py-2 font-bold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ledger.invoices
+                      .filter((i) => i.outstanding > 0)
+                      .map((i, idx) => (
+                        <tr
+                          key={idx}
+                          className="border-t border-slate-100 hover:bg-slate-50"
+                        >
+                          <td className="px-3 py-2 font-mono font-bold">
+                            {i.invoice_no}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-slate-600">
+                            {i.po_number || "—"}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-slate-600">
+                            {i.invoice_date}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span
+                              className={
+                                i.status === "overdue"
+                                  ? "text-red-600 font-bold"
+                                  : ""
+                              }
+                            >
+                              {i.due_date}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {inr(i.net_amount || 0)}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-[#16A34A]">
+                            {inr(i.received_amount || 0)}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">
+                            {inr(i.outstanding)}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge color={STATUS_COLOR[i.status] || "yellow"}>
+                              {i.status}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -369,95 +373,97 @@ function LedgerModal({ ledger, onClose }) {
                 {ledger.entries.length} entries
               </span>
             </h3>
-            <table
-              className="w-full text-xs border-2 border-slate-200"
-              data-testid="ledger-entries"
-            >
-              <thead className="bg-slate-900 text-white">
-                <tr className="text-left text-[10px] uppercase tracking-wider">
-                  <th className="px-3 py-2 font-bold">Date</th>
-                  <th className="px-3 py-2 font-bold">Vch. Type</th>
-                  <th className="px-3 py-2 font-bold">Vch. No.</th>
-                  <th className="px-3 py-2 font-bold">Particulars</th>
-                  <th className="px-3 py-2 font-bold text-right">Debit (Dr)</th>
-                  <th className="px-3 py-2 font-bold text-right">
-                    Credit (Cr)
-                  </th>
-                  <th className="px-3 py-2 font-bold text-right">
-                    Running Balance
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {ledger.entries.length === 0 ? (
-                  <tr>
-                    <td colSpan="7" className="text-center text-slate-400 py-8">
-                      No entries.
-                    </td>
+            <div className="overflow-x-auto">
+              <table
+                className="w-full text-xs border-2 border-slate-200"
+                data-testid="ledger-entries"
+              >
+                <thead className="bg-slate-900 text-white">
+                  <tr className="text-left text-[10px] uppercase tracking-wider">
+                    <th className="px-3 py-2 font-bold">Date</th>
+                    <th className="px-3 py-2 font-bold">Vch. Type</th>
+                    <th className="px-3 py-2 font-bold">Vch. No.</th>
+                    <th className="px-3 py-2 font-bold">Particulars</th>
+                    <th className="px-3 py-2 font-bold text-right">Debit (Dr)</th>
+                    <th className="px-3 py-2 font-bold text-right">
+                      Credit (Cr)
+                    </th>
+                    <th className="px-3 py-2 font-bold text-right">
+                      Running Balance
+                    </th>
                   </tr>
-                ) : (
-                  ledger.entries.map((e, i) => (
-                    <tr
-                      key={i}
-                      className="border-t border-slate-100 hover:bg-slate-50"
-                      data-testid={`ledger-entry-${i}`}
-                    >
-                      <td className="px-3 py-1.5 font-mono text-slate-600 whitespace-nowrap">
-                        {e.date}
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <span
-                          className="font-bold text-[10px] uppercase tracking-wider"
-                          style={{ color: VCH_COLOR[e.vch_type] || "#0F172A" }}
-                        >
-                          {e.vch_type}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 font-mono font-bold">
-                        {e.vch_no}
-                      </td>
-                      <td className="px-3 py-1.5 text-slate-700">
-                        {e.particulars}
-                      </td>
-                      <td className="px-3 py-1.5 text-right font-mono">
-                        {e.debit > 0 ? inr(e.debit) : ""}
-                      </td>
-                      <td className="px-3 py-1.5 text-right font-mono text-[#16A34A]">
-                        {e.credit > 0 ? inr(e.credit) : ""}
-                      </td>
-                      <td className="px-3 py-1.5 text-right font-mono font-bold">
-                        {inr(Math.abs(e.balance))}{" "}
-                        <span className="text-slate-500 text-[10px]">
-                          {e.balance_type}
-                        </span>
+                </thead>
+                <tbody>
+                  {ledger.entries.length === 0 ? (
+                    <tr>
+                      <td colSpan="7" className="text-center text-slate-400 py-8">
+                        No entries.
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-              <tfoot className="bg-slate-900 text-white">
-                <tr>
-                  <td
-                    colSpan="4"
-                    className="px-3 py-2 font-bold uppercase text-[10px] tracking-wider text-[#C27842]"
-                  >
-                    Closing Balance
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono">
-                    {inr(ledger.entries.reduce((s, e) => s + e.debit, 0))}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono">
-                    {inr(ledger.entries.reduce((s, e) => s + e.credit, 0))}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono font-bold text-base">
-                    {inr(Math.abs(ledger.closing_balance))}{" "}
-                    <span className="text-[#C27842]">
-                      {ledger.closing_balance_type}
-                    </span>
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
+                  ) : (
+                    ledger.entries.map((e, i) => (
+                      <tr
+                        key={i}
+                        className="border-t border-slate-100 hover:bg-slate-50"
+                        data-testid={`ledger-entry-${i}`}
+                      >
+                        <td className="px-3 py-1.5 font-mono text-slate-600 whitespace-nowrap">
+                          {e.date}
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <span
+                            className="font-bold text-[10px] uppercase tracking-wider"
+                            style={{ color: VCH_COLOR[e.vch_type] || "#0F172A" }}
+                          >
+                            {e.vch_type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 font-mono font-bold">
+                          {e.vch_no}
+                        </td>
+                        <td className="px-3 py-1.5 text-slate-700">
+                          {e.particulars}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono">
+                          {e.debit > 0 ? inr(e.debit) : ""}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono text-[#16A34A]">
+                          {e.credit > 0 ? inr(e.credit) : ""}
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono font-bold">
+                          {inr(Math.abs(e.balance))}{" "}
+                          <span className="text-slate-500 text-[10px]">
+                            {e.balance_type}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                <tfoot className="bg-slate-900 text-white">
+                  <tr>
+                    <td
+                      colSpan="4"
+                      className="px-3 py-2 font-bold uppercase text-[10px] tracking-wider text-[#C27842]"
+                    >
+                      Closing Balance
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono">
+                      {inr(ledger.entries.reduce((s, e) => s + e.debit, 0))}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono">
+                      {inr(ledger.entries.reduce((s, e) => s + e.credit, 0))}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono font-bold text-base">
+                      {inr(Math.abs(ledger.closing_balance))}{" "}
+                      <span className="text-[#C27842]">
+                        {ledger.closing_balance_type}
+                      </span>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
           </div>
 
           {ledger.closing_balance > 0 && (

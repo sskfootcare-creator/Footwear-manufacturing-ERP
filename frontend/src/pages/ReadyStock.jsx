@@ -505,7 +505,7 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
           <table className="w-full text-xs border border-slate-300" data-testid={`matrix-${style.code}`}>
             <thead className="bg-slate-100">
               <tr>
-                <th className="px-2 py-1.5 text-left text-[10px] uppercase tracking-wider font-bold text-slate-700 border-r border-slate-300">
+                <th className="px-2 py-1.5 text-left text-[10px] uppercase tracking-wider font-bold text-slate-700 border-r border-slate-300 sticky left-0 z-10 bg-slate-100">
                   Color
                 </th>
                 <th className="px-2 py-1.5 text-center text-[10px] uppercase tracking-wider font-bold text-slate-500 border-r border-slate-300 w-14">
@@ -530,7 +530,7 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
                                totals.byColorMinTotal[clr] > 0;
                 return (
                   <tr key={clr} className="border-t border-slate-300 hover:bg-slate-50/50">
-                    <td className="px-2 py-1.5 font-bold text-slate-800 border-r border-slate-300 whitespace-nowrap">
+                    <td className="px-2 py-1.5 font-bold text-slate-800 border-r border-slate-300 whitespace-nowrap sticky left-0 z-10 bg-white">
                       <div className="flex items-center gap-1.5">
                         <span
                           className="inline-block w-2.5 h-2.5 rounded-full border border-slate-300"

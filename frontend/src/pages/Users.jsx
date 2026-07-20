@@ -148,77 +148,79 @@ export default function Users() {
       />
       <div className="p-2 sm:p-4 lg:p-8">
         <Card className="overflow-hidden">
-          <table className="w-full text-sm" data-testid="users-table">
-            <thead className="bg-slate-50 border-b-2 border-slate-200">
-              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                <th className="px-4 py-3 font-bold">Name</th>
-                <th className="px-4 py-3 font-bold">Email</th>
-                <th className="px-4 py-3 font-bold">Role</th>
-                <th className="px-4 py-3 font-bold">Status</th>
-                <th className="px-4 py-3 font-bold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((u) => (
-                <tr
-                  key={u.id}
-                  className={`border-b border-slate-100 hover:bg-slate-50 transition-colors duration-150 ${
-                    u.active === false ? "bg-slate-50/40 text-slate-400" : ""
-                  }`}
-                >
-                  <td
-                    className={`px-4 py-3 font-bold ${u.active === false ? "line-through text-slate-400" : ""}`}
-                  >
-                    {u.name}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs">{u.email}</td>
-                  <td className="px-4 py-3">
-                    <Badge color={roleColor[u.role]}>{u.role}</Badge>
-                  </td>
-                  <td className="px-4 py-3">
-                    <Badge color={u.active === false ? "red" : "green"}>
-                      {u.active === false ? "Inactive" : "Active"}
-                    </Badge>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => startEdit(u)}
-                      title="Edit User"
-                      className="text-slate-600 hover:text-[#2563EB] hover:bg-blue-50 p-1.5 rounded transition-colors duration-150"
-                      data-testid={`edit-user-${u.email}`}
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => openReset(u)}
-                      title="Reset Password"
-                      className="text-slate-600 hover:text-amber-600 hover:bg-amber-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
-                      data-testid={`reset-password-${u.email}`}
-                    >
-                      <KeyRound className="w-4 h-4" />
-                    </button>
-                    {u.active === false ? (
-                      <button
-                        onClick={() => toggleActive(u)}
-                        title="Reactivate User"
-                        className="text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
-                      >
-                        <UserCheck className="w-4 h-4" />
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => remove(u.id)}
-                        title="Deactivate User"
-                        className="text-slate-500 hover:text-red-600 hover:bg-red-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
-                      >
-                        <UserX className="w-4 h-4" />
-                      </button>
-                    )}
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="users-table">
+              <thead className="bg-slate-50 border-b-2 border-slate-200">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-4 py-3 font-bold">Name</th>
+                  <th className="px-4 py-3 font-bold">Email</th>
+                  <th className="px-4 py-3 font-bold">Role</th>
+                  <th className="px-4 py-3 font-bold">Status</th>
+                  <th className="px-4 py-3 font-bold text-right">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {users.map((u) => (
+                  <tr
+                    key={u.id}
+                    className={`border-b border-slate-100 hover:bg-slate-50 transition-colors duration-150 ${
+                      u.active === false ? "bg-slate-50/40 text-slate-400" : ""
+                    }`}
+                  >
+                    <td
+                      className={`px-4 py-3 font-bold ${u.active === false ? "line-through text-slate-400" : ""}`}
+                    >
+                      {u.name}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs">{u.email}</td>
+                    <td className="px-4 py-3">
+                      <Badge color={roleColor[u.role]}>{u.role}</Badge>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge color={u.active === false ? "red" : "green"}>
+                        {u.active === false ? "Inactive" : "Active"}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => startEdit(u)}
+                        title="Edit User"
+                        className="text-slate-600 hover:text-[#2563EB] hover:bg-blue-50 p-1.5 rounded transition-colors duration-150"
+                        data-testid={`edit-user-${u.email}`}
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => openReset(u)}
+                        title="Reset Password"
+                        className="text-slate-600 hover:text-amber-600 hover:bg-amber-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
+                        data-testid={`reset-password-${u.email}`}
+                      >
+                        <KeyRound className="w-4 h-4" />
+                      </button>
+                      {u.active === false ? (
+                        <button
+                          onClick={() => toggleActive(u)}
+                          title="Reactivate User"
+                          className="text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
+                        >
+                          <UserCheck className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => remove(u.id)}
+                          title="Deactivate User"
+                          className="text-slate-500 hover:text-red-600 hover:bg-red-50 p-1.5 rounded transition-colors duration-150 ml-1 inline-flex items-center justify-center"
+                        >
+                          <UserX className="w-4 h-4" />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
       </div>
 

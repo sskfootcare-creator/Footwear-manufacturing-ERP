@@ -437,7 +437,7 @@ export default function Payroll() {
           width="max-w-3xl"
         >
           <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="bg-orange-50 border-2 border-orange-300 p-3">
                 <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-orange-700">
                   Total Earned

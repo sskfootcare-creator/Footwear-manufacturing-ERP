@@ -178,79 +178,81 @@ export default function Materials() {
         </div>
 
         <Card className="overflow-hidden">
-          <table className="w-full text-sm" data-testid="materials-table">
-            <thead className="bg-slate-50 border-b-2 border-slate-200 sticky top-0">
-              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                <th className="px-4 py-3 font-bold w-14"></th>
-                <th className="px-4 py-3 font-bold">Code</th>
-                <th className="px-4 py-3 font-bold">Name</th>
-                <th className="px-4 py-3 font-bold">Category</th>
-                <th className="px-4 py-3 font-bold">Unit</th>
-                <th className="px-4 py-3 font-bold text-right">Rate (₹)</th>
-                <th className="px-4 py-3 font-bold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan="7"
-                    className="px-6 py-10 text-center text-slate-400"
-                  >
-                    No materials yet. Click &quot;Add Material&quot; to start.
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="materials-table">
+              <thead className="bg-slate-50 border-b-2 border-slate-200 sticky top-0">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-4 py-3 font-bold w-14"></th>
+                  <th className="px-4 py-3 font-bold">Code</th>
+                  <th className="px-4 py-3 font-bold">Name</th>
+                  <th className="px-4 py-3 font-bold">Category</th>
+                  <th className="px-4 py-3 font-bold">Unit</th>
+                  <th className="px-4 py-3 font-bold text-right">Rate (₹)</th>
+                  <th className="px-4 py-3 font-bold text-right">Actions</th>
                 </tr>
-              ) : (
-                filtered.map((m) => (
-                  <tr
-                    key={m.id}
-                    className="border-b border-slate-100 hover:bg-slate-50"
-                    data-testid={`material-row-${m.code}`}
-                  >
-                    <td className="px-4 py-2">
-                      <ImageThumb
-                        image={{
-                          thumbnail_url: m.image_thumbnail_url,
-                          display_url: m.image_display_url,
-                          url: m.image_url,
-                        }}
-                        size={36}
-                        alt={`${m.code} — ${m.name}`}
-                        className="rounded"
-                        clickable
-                        testId={`material-thumb-${m.code}`}
-                      />
-                    </td>
-                    <td className="px-4 py-3 font-mono font-bold">{m.code}</td>
-                    <td className="px-4 py-3">{m.name}</td>
-                    <td className="px-4 py-3">
-                      <Badge color="slate">{m.category}</Badge>
-                    </td>
-                    <td className="px-4 py-3 text-xs uppercase tracking-wider">
-                      {m.unit}
-                    </td>
-                    <td className="px-4 py-3 font-mono font-bold text-right">
-                      {inr(m.rate)}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => startEdit(m)}
-                        className="text-slate-600 hover:text-[#2563EB] p-1.5"
-                      >
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => remove(m.id)}
-                        className="text-slate-600 hover:text-red-600 p-1.5 ml-1"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+              </thead>
+              <tbody>
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan="7"
+                      className="px-6 py-10 text-center text-slate-400"
+                    >
+                      No materials yet. Click &quot;Add Material&quot; to start.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  filtered.map((m) => (
+                    <tr
+                      key={m.id}
+                      className="border-b border-slate-100 hover:bg-slate-50"
+                      data-testid={`material-row-${m.code}`}
+                    >
+                      <td className="px-4 py-2">
+                        <ImageThumb
+                          image={{
+                            thumbnail_url: m.image_thumbnail_url,
+                            display_url: m.image_display_url,
+                            url: m.image_url,
+                          }}
+                          size={36}
+                          alt={`${m.code} — ${m.name}`}
+                          className="rounded"
+                          clickable
+                          testId={`material-thumb-${m.code}`}
+                        />
+                      </td>
+                      <td className="px-4 py-3 font-mono font-bold">{m.code}</td>
+                      <td className="px-4 py-3">{m.name}</td>
+                      <td className="px-4 py-3">
+                        <Badge color="slate">{m.category}</Badge>
+                      </td>
+                      <td className="px-4 py-3 text-xs uppercase tracking-wider">
+                        {m.unit}
+                      </td>
+                      <td className="px-4 py-3 font-mono font-bold text-right">
+                        {inr(m.rate)}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => startEdit(m)}
+                          className="text-slate-600 hover:text-[#2563EB] p-1.5"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => remove(m.id)}
+                          className="text-slate-600 hover:text-red-600 p-1.5 ml-1"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </Card>
       </div>
 

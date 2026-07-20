@@ -150,7 +150,7 @@ export default function Inventory() {
           </Card>
         )}
 
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <KpiTile label="Materials" value={items.length} accent="#0F172A" />
           <KpiTile
             label="Stock Value"
@@ -197,96 +197,98 @@ export default function Inventory() {
         </div>
 
         <Card className="overflow-hidden">
-          <table className="w-full text-sm" data-testid="inventory-table">
-            <thead className="bg-slate-50 border-b-2 border-slate-200">
-              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                <th className="px-3 py-3 font-bold">Code</th>
-                <th className="px-3 py-3 font-bold">Material</th>
-                <th className="px-3 py-3 font-bold">Category</th>
-                <th className="px-3 py-3 font-bold">Unit</th>
-                <th className="px-3 py-3 font-bold text-right">In</th>
-                <th className="px-3 py-3 font-bold text-right">Out</th>
-                <th className="px-3 py-3 font-bold text-right">Adj</th>
-                <th className="px-3 py-3 font-bold text-right">Balance</th>
-                <th className="px-3 py-3 font-bold text-right">Value</th>
-                <th className="px-3 py-3 font-bold text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan="10"
-                    className="px-6 py-10 text-center text-slate-400"
-                  >
-                    No inventory data. Click "Stock In" to record your first
-                    material purchase.
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="inventory-table">
+              <thead className="bg-slate-50 border-b-2 border-slate-200">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-3 py-3 font-bold">Code</th>
+                  <th className="px-3 py-3 font-bold">Material</th>
+                  <th className="px-3 py-3 font-bold">Category</th>
+                  <th className="px-3 py-3 font-bold">Unit</th>
+                  <th className="px-3 py-3 font-bold text-right">In</th>
+                  <th className="px-3 py-3 font-bold text-right">Out</th>
+                  <th className="px-3 py-3 font-bold text-right">Adj</th>
+                  <th className="px-3 py-3 font-bold text-right">Balance</th>
+                  <th className="px-3 py-3 font-bold text-right">Value</th>
+                  <th className="px-3 py-3 font-bold text-right">Actions</th>
                 </tr>
-              ) : (
-                filtered.map((r) => (
-                  <tr
-                    key={r.material_id}
-                    className={`border-b border-slate-100 hover:bg-slate-50 ${r.balance <= 0 ? "bg-red-50/40" : ""}`}
-                  >
-                    <td className="px-3 py-2 font-mono font-bold">{r.code}</td>
-                    <td className="px-3 py-2">{r.name}</td>
-                    <td className="px-3 py-2">
-                      <Badge color="slate">{r.category}</Badge>
-                    </td>
-                    <td className="px-3 py-2 text-xs uppercase tracking-wider">
-                      {r.unit}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-green-700">
-                      {r.stock_in}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-orange-700">
-                      {r.stock_out}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono text-slate-500">
-                      {r.adjustments}
-                    </td>
+              </thead>
+              <tbody>
+                {filtered.length === 0 ? (
+                  <tr>
                     <td
-                      className={`px-3 py-2 text-right font-mono font-bold ${r.balance <= 0 ? "text-red-700" : "text-slate-900"}`}
+                      colSpan="10"
+                      className="px-6 py-10 text-center text-slate-400"
                     >
-                      {r.balance <= 0 && (
-                        <AlertTriangle className="w-3 h-3 inline -mt-0.5 mr-1 text-red-500" />
-                      )}
-                      {r.balance}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono">
-                      {inr(r.value)}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <button
-                        onClick={() => openType("in", r)}
-                        className="p-1.5 text-slate-600 hover:text-green-700"
-                        title="Stock In"
-                        data-testid={`row-in-${r.code}`}
-                      >
-                        <ArrowDownToLine className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => openType("out", r)}
-                        className="p-1.5 text-slate-600 hover:text-orange-700 ml-1"
-                        title="Consume"
-                      >
-                        <ArrowUpFromLine className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => openHistory(r)}
-                        className="p-1.5 text-slate-600 hover:text-[#2563EB] ml-1"
-                        title="History"
-                        data-testid={`row-history-${r.code}`}
-                      >
-                        <History className="w-4 h-4" />
-                      </button>
+                      No inventory data. Click "Stock In" to record your first
+                      material purchase.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  filtered.map((r) => (
+                    <tr
+                      key={r.material_id}
+                      className={`border-b border-slate-100 hover:bg-slate-50 ${r.balance <= 0 ? "bg-red-50/40" : ""}`}
+                    >
+                      <td className="px-3 py-2 font-mono font-bold">{r.code}</td>
+                      <td className="px-3 py-2">{r.name}</td>
+                      <td className="px-3 py-2">
+                        <Badge color="slate">{r.category}</Badge>
+                      </td>
+                      <td className="px-3 py-2 text-xs uppercase tracking-wider">
+                        {r.unit}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-green-700">
+                        {r.stock_in}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-orange-700">
+                        {r.stock_out}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-500">
+                        {r.adjustments}
+                      </td>
+                      <td
+                        className={`px-3 py-2 text-right font-mono font-bold ${r.balance <= 0 ? "text-red-700" : "text-slate-900"}`}
+                      >
+                        {r.balance <= 0 && (
+                          <AlertTriangle className="w-3 h-3 inline -mt-0.5 mr-1 text-red-500" />
+                        )}
+                        {r.balance}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {inr(r.value)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          onClick={() => openType("in", r)}
+                          className="p-1.5 text-slate-600 hover:text-green-700"
+                          title="Stock In"
+                          data-testid={`row-in-${r.code}`}
+                        >
+                          <ArrowDownToLine className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => openType("out", r)}
+                          className="p-1.5 text-slate-600 hover:text-orange-700 ml-1"
+                          title="Consume"
+                        >
+                          <ArrowUpFromLine className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => openHistory(r)}
+                          className="p-1.5 text-slate-600 hover:text-[#2563EB] ml-1"
+                          title="History"
+                          data-testid={`row-history-${r.code}`}
+                        >
+                          <History className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </Card>
       </div>
 
@@ -308,56 +310,58 @@ export default function Inventory() {
           title={`Movement History – ${history.name}`}
           width="max-w-2xl"
         >
-          <table
-            className="w-full text-xs"
-            data-testid="movement-history-table"
-          >
-            <thead className="bg-slate-50 border-b-2 border-slate-200">
-              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                <th className="px-2 py-2 font-bold">Date</th>
-                <th className="px-2 py-2 font-bold">Type</th>
-                <th className="px-2 py-2 font-bold text-right">Qty</th>
-                <th className="px-2 py-2 font-bold text-right">Rate</th>
-                <th className="px-2 py-2 font-bold">Party / Note</th>
-                <th className="px-2 py-2 font-bold">By</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.movements.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan="6"
-                    className="px-3 py-8 text-center text-slate-400"
-                  >
-                    No movements yet.
-                  </td>
+          <div className="overflow-x-auto">
+            <table
+              className="w-full text-xs"
+              data-testid="movement-history-table"
+            >
+              <thead className="bg-slate-50 border-b-2 border-slate-200">
+                <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-2 py-2 font-bold">Date</th>
+                  <th className="px-2 py-2 font-bold">Type</th>
+                  <th className="px-2 py-2 font-bold text-right">Qty</th>
+                  <th className="px-2 py-2 font-bold text-right">Rate</th>
+                  <th className="px-2 py-2 font-bold">Party / Note</th>
+                  <th className="px-2 py-2 font-bold">By</th>
                 </tr>
-              ) : (
-                history.movements.map((m) => (
-                  <tr key={m.id} className="border-b border-slate-100">
-                    <td className="px-2 py-1.5 font-mono">
-                      {(m.date || m.created_at || "").slice(0, 10)}
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Badge color={TYPE_COLOR[m.type]}>
-                        {TYPE_LABEL[m.type]}
-                      </Badge>
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono font-bold">
-                      {m.quantity}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono">
-                      {m.rate ? `₹${m.rate}` : "—"}
-                    </td>
-                    <td className="px-2 py-1.5">{m.party || m.notes || "—"}</td>
-                    <td className="px-2 py-1.5 text-xs text-slate-500">
-                      {m.by}
+              </thead>
+              <tbody>
+                {history.movements.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan="6"
+                      className="px-3 py-8 text-center text-slate-400"
+                    >
+                      No movements yet.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  history.movements.map((m) => (
+                    <tr key={m.id} className="border-b border-slate-100">
+                      <td className="px-2 py-1.5 font-mono">
+                        {(m.date || m.created_at || "").slice(0, 10)}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <Badge color={TYPE_COLOR[m.type]}>
+                          {TYPE_LABEL[m.type]}
+                        </Badge>
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono font-bold">
+                        {m.quantity}
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono">
+                        {m.rate ? `₹${m.rate}` : "—"}
+                      </td>
+                      <td className="px-2 py-1.5">{m.party || m.notes || "—"}</td>
+                      <td className="px-2 py-1.5 text-xs text-slate-500">
+                        {m.by}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </Drawer>
       )}
     </div>
