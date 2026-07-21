@@ -25,6 +25,7 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  Cell,
   XAxis,
   YAxis,
   Tooltip,
@@ -231,7 +232,7 @@ export default function Expenses() {
             <div className="text-2xl font-black text-slate-900" data-testid="pnl-revenue-value">
               {inr(pnl.revenue)}
             </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex justify-between border-t pt-2">
+            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
               <span>Invoices: {inr(pnl.invoices_revenue)}</span>
               <span>Settlements: {inr(pnl.settlements_revenue)}</span>
             </div>
@@ -248,7 +249,7 @@ export default function Expenses() {
             <div className="text-2xl font-black text-slate-900" data-testid="pnl-cogs-value">
               {inr(pnl.material_cost + pnl.labor_cost)}
             </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex justify-between border-t pt-2">
+            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
               <span>Material: {inr(pnl.material_cost)}</span>
               <span>Labor: {inr(pnl.labor_cost)}</span>
             </div>
@@ -265,7 +266,7 @@ export default function Expenses() {
             <div className="text-2xl font-black text-slate-900" data-testid="pnl-expenses-value">
               {inr(pnl.expenses)}
             </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex justify-between border-t pt-2">
+            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
               <span>{expenses.length} Records</span>
               <span>Filter Total: {inr(listTotalExpenses)}</span>
             </div>
@@ -288,17 +289,17 @@ export default function Expenses() {
             <div className="text-2xl font-black" data-testid="pnl-net-profit-value">
               {inr(pnl.net_profit)}
             </div>
-            <div className="mt-2 text-[11px] text-slate-300 font-medium border-t border-slate-700/60 pt-2 flex items-center gap-1">
+            <div className="mt-2 text-[11px] text-slate-300 font-medium border-t border-slate-700/60 pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
               {pnl.net_profit >= 0 ? (
-                <>
-                  <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="flex items-center gap-1">
+                  <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                   <span>Revenue − Costs − Expenses</span>
-                </>
+                </span>
               ) : (
-                <>
-                  <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+                <span className="flex items-center gap-1">
+                  <TrendingDown className="w-3.5 h-3.5 text-red-400 shrink-0" />
                   <span>Expenses & Costs exceed Revenue</span>
-                </>
+                </span>
               )}
             </div>
           </Card>
@@ -320,13 +321,28 @@ export default function Expenses() {
                 <BarChart data={pnl.monthly_breakdown} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v}`} />
+                  <YAxis
+                    tick={{ fontSize: 11 }}
+                    tickFormatter={(v) => {
+                      if (v === 0) return "0";
+                      const absV = Math.abs(v);
+                      const sign = v < 0 ? "-" : "";
+                      if (absV >= 1000) {
+                        return `${sign}₹${(absV / 1000).toFixed(0)}k`;
+                      }
+                      return `${sign}₹${absV}`;
+                    }}
+                  />
                   <Tooltip formatter={(value) => [inr(value)]} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
                   <Bar dataKey="revenue" name="Revenue" fill="#16A34A" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="material_cost" name="Material Cost" fill="#F59E0B" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="expenses" name="Expenses" fill="#2563EB" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="net_profit" name="Net Profit" fill="#0EA5E9" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="net_profit" name="Net Profit" fill="#0EA5E9" radius={[4, 4, 0, 0]}>
+                    {pnl.monthly_breakdown.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.net_profit >= 0 ? "#0EA5E9" : "#EF4444"} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>

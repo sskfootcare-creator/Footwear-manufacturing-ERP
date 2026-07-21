@@ -641,7 +641,7 @@ export default function AppShell() {
 
       {/* ── DESKTOP STATIC SIDEBAR ─────────────────────────────────── */}
       <aside
-        className="hidden lg:flex w-64 bg-[#0F172A] text-slate-300 flex-col sticky top-0 h-screen"
+        className="hidden lg:flex w-64 bg-[#0F172A] text-slate-300 flex-col fixed left-0 top-0 bottom-0 z-20 h-screen"
         data-testid="sidebar"
       >
         <SidebarContent
@@ -655,7 +655,7 @@ export default function AppShell() {
 
       {/* ── MAIN CONTENT ───────────────────────────────────────────── */}
       <main
-        className="flex-1 min-w-0 mobile-main-content"
+        className="flex-1 min-w-0 lg:pl-64 mobile-main-content"
         data-testid="main-content"
       >
         <Outlet />
