@@ -14410,6 +14410,825 @@ async def dismiss_unresolved(request: Request, qid: str):
     return {"ok": True}
 
 
+# ---------- EXPENSES & SIMPLE P&L ENDPOINTS ----------
+
+@api.post("/expenses")
+async def create_expense(payload: ExpenseIn, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    doc = {
+        "category": payload.category,
+        "amount": float(payload.amount),
+        "date": payload.date,
+        "payee": payload.payee,
+        "notes": payload.notes or "",
+        "receipt": payload.receipt,
+        "created_at": now_iso(),
+        "created_by": u["email"],
+    }
+    res = await db.expenses.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_activity("CREATE", "expenses", f"Created expense ₹{payload.amount} ({payload.category}) for {payload.payee}", u["email"])
+    return stringify(doc)
+
+
+@api.get("/expenses")
+async def list_expenses(
+    request: Request,
+    category: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 1000
+):
+    await get_current_user(request)
+    q = {}
+    if category and category.lower() != "all":
+        q["category"] = category
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        q["date"] = date_q
+    if search:
+        s_regex = {"$regex": search, "$options": "i"}
+        q["$or"] = [
+            {"payee": s_regex},
+            {"category": s_regex},
+            {"notes": s_regex},
+        ]
+    docs = await db.expenses.find(q).sort([("date", -1), ("created_at", -1)]).limit(limit).to_list(limit)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/expenses/{eid}")
+async def get_expense(eid: str, request: Request):
+    await get_current_user(request)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    return stringify(doc)
+
+
+@api.put("/expenses/{eid}")
+async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    
+    update_data = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if update_data:
+        update_data["updated_at"] = now_iso()
+        await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_data})
+        doc.update(update_data)
+        await log_activity("UPDATE", "expenses", f"Updated expense id={eid}", u["email"])
+    return stringify(doc)
+
+
+@api.delete("/expenses/{eid}")
+async def delete_expense(eid: str, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    await db.expenses.delete_one({"_id": oid(eid)})
+    await log_activity("DELETE", "expenses", f"Deleted expense ₹{doc.get('amount')} ({doc.get('category')})", u["email"])
+    return {"ok": True, "deleted_id": eid}
+
+
+@api.get("/reports/pnl")
+@api.get("/expenses/pnl")
+async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
+    await get_current_user(request)
+    
+    # 1. Invoices Revenue
+    inv_q = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        inv_q["$or"] = [
+            {"invoice_date": date_q},
+            {"invoice_iso_date": date_q},
+            {"created_at": date_q}
+        ]
+    invoices = await db.invoices.find(inv_q).to_list(5000)
+    invoices_revenue = 0.0
+    for inv in invoices:
+        val = inv.get("grand_total") or inv.get("total_amount") or inv.get("total") or 0.0
+        invoices_revenue += float(val)
+        
+    # 2. Reconciled Settlements Revenue
+    settle_q = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        settle_q["$or"] = [
+            {"settlement_date": date_q},
+            {"created_at": date_q}
+        ]
+    settlements = await db.online_settlements.find(settle_q).to_list(5000)
+    settlements_revenue = 0.0
+    for st in settlements:
+        val = st.get("net_payout") or st.get("invoiced_amount") or st.get("settlement_value") or 0.0
+        settlements_revenue += float(val)
+
+    total_revenue = invoices_revenue + settlements_revenue
+
+    # 3. Material Cost
+    ven_po_q = {"status": {"$ne": "cancelled"}}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        ven_po_q["$or"] = [
+            {"created_at": date_q},
+            {"expected_delivery_date": date_q}
+        ]
+    vendor_pos = await db.vendor_pos.find(ven_po_q).to_list(5000)
+    material_cost = 0.0
+    for po in vendor_pos:
+        tot = po.get("total_amount") or po.get("grand_total")
+        if tot is None:
+            tot = sum(float(li.get("amount", 0) or 0) for li in po.get("line_items", []))
+        material_cost += float(tot or 0)
+
+    # 4. Labor Cost (Payroll earnings)
+    labor_cost = 0.0
+    try:
+        payroll_res = await report_payroll(request, from_date=from_date, to_date=to_date)
+        if isinstance(payroll_res, dict) and "rows" in payroll_res:
+            labor_cost = sum(float(r.get("total_earning", 0) or 0) for r in payroll_res["rows"])
+        elif isinstance(payroll_res, list):
+            labor_cost = sum(float(r.get("total_earning", 0) or 0) for r in payroll_res)
+    except Exception as e:
+        log.warning(f"Failed to calculate labor cost for P&L: {e}")
+
+    # 5. Expenses
+    exp_q = {}
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        exp_q["date"] = date_q
+    expenses_docs = await db.expenses.find(exp_q).to_list(5000)
+    total_expenses = 0.0
+    category_totals = defaultdict(float)
+    monthly_expenses = defaultdict(float)
+    monthly_revenue = defaultdict(float)
+    monthly_material = defaultdict(float)
+    monthly_labor = defaultdict(float)
+
+    for exp in expenses_docs:
+        amt = float(exp.get("amount", 0) or 0)
+        cat = exp.get("category", "Uncategorized")
+        dt = str(exp.get("date", ""))[:7] or "Unknown"
+        total_expenses += amt
+        category_totals[cat] += amt
+        monthly_expenses[dt] += amt
+
+    for inv in invoices:
+        val = float(inv.get("grand_total") or inv.get("total_amount") or inv.get("total") or 0)
+        dt = str(inv.get("invoice_date") or inv.get("invoice_iso_date") or inv.get("created_at") or "")[:7] or "Unknown"
+        monthly_revenue[dt] += val
+
+    for st in settlements:
+        val = float(st.get("net_payout") or st.get("invoiced_amount") or st.get("settlement_value") or 0)
+        dt = str(st.get("settlement_date") or st.get("created_at") or "")[:7] or "Unknown"
+        monthly_revenue[dt] += val
+
+    for po in vendor_pos:
+        tot = po.get("total_amount") or po.get("grand_total")
+        if tot is None:
+            tot = sum(float(li.get("amount", 0) or 0) for li in po.get("line_items", []))
+        dt = str(po.get("created_at") or po.get("expected_delivery_date") or "")[:7] or "Unknown"
+        monthly_material[dt] += float(tot or 0)
+
+    # Monthly breakdown aggregation
+    all_months = sorted(list(set(list(monthly_expenses.keys()) + list(monthly_revenue.keys()) + list(monthly_material.keys()))))
+    monthly_breakdown = []
+    for m in all_months:
+        if m == "Unknown" and len(all_months) > 1:
+            continue
+        m_rev = monthly_revenue.get(m, 0.0)
+        m_mat = monthly_material.get(m, 0.0)
+        m_lab = monthly_labor.get(m, 0.0)
+        m_exp = monthly_expenses.get(m, 0.0)
+        m_net = m_rev - m_mat - m_lab - m_exp
+        monthly_breakdown.append({
+            "month": m,
+            "revenue": round(m_rev, 2),
+            "material_cost": round(m_mat, 2),
+            "labor_cost": round(m_lab, 2),
+            "expenses": round(m_exp, 2),
+            "net_profit": round(m_net, 2)
+        })
+
+    gross_profit = total_revenue - material_cost - labor_cost
+    net_profit = gross_profit - total_expenses
+
+    return {
+        "revenue": round(total_revenue, 2),
+        "invoices_revenue": round(invoices_revenue, 2),
+        "settlements_revenue": round(settlements_revenue, 2),
+        "material_cost": round(material_cost, 2),
+        "labor_cost": round(labor_cost, 2),
+        "expenses": round(total_expenses, 2),
+        "gross_profit": round(gross_profit, 2),
+        "net_profit": round(net_profit, 2),
+        "category_totals": {k: round(v, 2) for k, v in category_totals.items()},
+        "monthly_breakdown": monthly_breakdown,
+    }
+
+
+# ---------- ONLINE RECONCILIATION ENGINE & MULTI-REPORT API ----------
+
+import csv
+import io
+import openpyxl
+
+def _clean_key(k: Any) -> str:
+    if k is None:
+        return ""
+    s = str(k).strip().lower()
+    return re.sub(r'[\s_]+', '_', s)
+
+def _get_float_val(row: dict, keys: list[str]) -> float:
+    for k in keys:
+        clean_k = _clean_key(k)
+        for rk, rv in row.items():
+            if _clean_key(rk) == clean_k or clean_k in _clean_key(rk):
+                if rv is not None and rv != "":
+                    try:
+                        return float(str(rv).replace(",", "").replace("₹", "").strip())
+                    except Exception:
+                        pass
+    return 0.0
+
+def _get_str_val(row: dict, keys: list[str]) -> str:
+    for k in keys:
+        clean_k = _clean_key(k)
+        for rk, rv in row.items():
+            if _clean_key(rk) == clean_k or clean_k in _clean_key(rk):
+                if rv is not None:
+                    return str(rv).strip()
+    return ""
+
+
+@api.post("/online-reconciliation/cost-snapshots")
+async def create_cost_snapshot(payload: StyleCostSnapshotIn, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    doc = {
+        "style_id": payload.style_id,
+        "style_code": payload.style_code.strip().upper(),
+        "effective_date": payload.effective_date.strip(),
+        "total_cost": float(payload.total_cost),
+        "material_cost": float(payload.material_cost or 0),
+        "labor_cost": float(payload.labor_cost or 0),
+        "notes": payload.notes or "",
+        "created_at": now_iso(),
+        "created_by": u["email"],
+    }
+    res = await db.style_cost_snapshots.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_activity("CREATE", "style_cost_snapshots", f"Created cost snapshot for {payload.style_code} effective {payload.effective_date} (₹{payload.total_cost})", u["email"])
+    return stringify(doc)
+
+
+@api.get("/online-reconciliation/cost-snapshots")
+async def list_cost_snapshots(request: Request, style_code: Optional[str] = None):
+    await get_current_user(request)
+    q = {}
+    if style_code:
+        q["style_code"] = style_code.strip().upper()
+    docs = await db.style_cost_snapshots.find(q).sort("effective_date", -1).to_list(1000)
+    return [stringify(d) for d in docs]
+
+
+@api.post("/online-reconciliation/clear-test-data")
+async def clear_reconciliation_test_data(request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    await db.online_daily_payments.delete_many({})
+    await db.online_settlements_detailed.delete_many({})
+    await db.online_non_order_deductions.delete_many({})
+    await db.online_monthly_order_reports.delete_many({})
+    await db.style_cost_snapshots.delete_many({})
+    return {"ok": True}
+
+
+@api.post("/online-reconciliation/import-daily-payments")
+async def import_daily_payments(request: Request, file: UploadFile = File(...)):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    content = await file.read()
+    text = content.decode("utf-8-sig", errors="ignore")
+    reader = csv.DictReader(io.StringIO(text))
+    
+    rows_to_insert = []
+    for row in reader:
+        # ALWAYS branch on Payment_Type column, not filename!
+        pay_type_raw = _get_str_val(row, ["payment_type", "type", "pay_type"]).lower()
+        pay_type = "prepaid" if "prepaid" in pay_type_raw else "postpaid"
+        
+        ord_type_raw = _get_str_val(row, ["order_type", "order_type_forward_reverse"]).lower()
+        ord_type = "Reverse" if "reverse" in ord_type_raw else "Forward"
+
+        r_doc = {
+            "neft_ref": _get_str_val(row, ["neft_ref", "neft ref", "utr", "payment_ref"]),
+            "settled_amount": _get_float_val(row, ["settled_amount", "settled amount", "amount", "net_amount"]),
+            "commission": _get_float_val(row, ["commission", "commission_amount"]),
+            "shipping_fee": _get_float_val(row, ["shipping_fee", "shipping fee", "logistics_fee"]),
+            "tds": _get_float_val(row, ["tds", "tds_amount"]),
+            "payment_type": pay_type,
+            "order_type": ord_type,
+            "order_release_id": _get_str_val(row, ["order_release_id", "release id"]),
+            "seller_order_id": _get_str_val(row, ["seller_order_id", "order id", "seller order id"]),
+            "order_line_id": _get_str_val(row, ["order_line_id", "line id"]),
+            "return_id": _get_str_val(row, ["return_id"]),
+            "payment_date": _get_str_val(row, ["payment_date", "date"]),
+            "filename": file.filename,
+            "imported_at": now_iso(),
+            "imported_by": u["email"],
+        }
+        rows_to_insert.append(r_doc)
+
+    if rows_to_insert:
+        await db.online_daily_payments.insert_many(rows_to_insert)
+    await log_activity("IMPORT", "online_daily_payments", f"Imported {len(rows_to_insert)} daily payment rows from '{file.filename}'", u["email"])
+    return {"ok": True, "count": len(rows_to_insert), "filename": file.filename}
+
+
+@api.post("/online-reconciliation/import-settlements")
+async def import_settlements(request: Request, file: UploadFile = File(...)):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    content = await file.read()
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+
+    settlements_inserted = 0
+    non_order_inserted = 0
+
+    for sheetname in wb.sheetnames:
+        sheet = wb[sheetname]
+        name_lower = sheetname.lower()
+        rows_data = list(sheet.iter_rows(values_only=True))
+        if not rows_data or len(rows_data) < 3:
+            continue
+
+        # Header is Row 3 (index 2), first 2 rows skipped
+        header_row = [str(c or "").strip() for c in rows_data[2]]
+        
+        is_non_order = "non_order_deduction" in name_lower
+        is_reverse = "reverse" in name_lower
+        is_unsettled = "unsettled" in name_lower
+        settlement_status = "unsettled" if is_unsettled else "settled"
+        direction = "reverse" if is_reverse else "forward"
+
+        for row_idx in range(3, len(rows_data)):
+            r_vals = rows_data[row_idx]
+            if not r_vals or all(c is None or str(c).strip() == "" for c in r_vals):
+                continue
+
+            row_dict = {header_row[i]: r_vals[i] for i in range(min(len(header_row), len(r_vals)))}
+
+            if is_non_order:
+                ded_doc = {
+                    "sheet_name": sheetname,
+                    "seller_id": _get_str_val(row_dict, ["seller_id", "seller id"]),
+                    "settlement_amount": _get_float_val(row_dict, ["settlement_amount", "amount"]),
+                    "settlement_type": _get_str_val(row_dict, ["settlement_type", "type"]),
+                    "utr": _get_str_val(row_dict, ["utr", "neft_ref", "reference"]),
+                    "invoice_ref": _get_str_val(row_dict, ["invoice_ref", "invoice"]),
+                    "settlement_date": _get_str_val(row_dict, ["settlement_date", "date"]),
+                    "settlement_description": _get_str_val(row_dict, ["settlement_description", "description", "remarks"]),
+                    "filename": file.filename,
+                    "imported_at": now_iso(),
+                    "imported_by": u["email"],
+                }
+                await db.online_non_order_deductions.insert_one(ded_doc)
+                non_order_inserted += 1
+            else:
+                s_doc = {
+                    "sheet_name": sheetname,
+                    "settlement_status": settlement_status,
+                    "direction": direction,
+                    "order_release_id": _get_str_val(row_dict, ["order_release_id", "release id"]),
+                    "seller_order_id": _get_str_val(row_dict, ["seller_order_id", "order id", "seller order id"]),
+                    "sku_id": _get_str_val(row_dict, ["sku_id", "sku id"]),
+                    "style_id": _get_str_val(row_dict, ["style_id", "style id"]),
+                    "seller_sku_code": _get_str_val(row_dict, ["seller_sku_code", "seller sku"]),
+                    "settled_amount_postpaid": _get_float_val(row_dict, ["settled_amount_postpaid"]),
+                    "settled_amount_prepaid": _get_float_val(row_dict, ["settled_amount_prepaid"]),
+                    "amount_pending_settlement_postpaid": _get_float_val(row_dict, ["amount_pending_settlement_postpaid"]),
+                    "amount_pending_settlement_prepaid": _get_float_val(row_dict, ["amount_pending_settlement_prepaid"]),
+                    "commission": _get_float_val(row_dict, ["commission_amount_incl_gst", "commission"]),
+                    "logistics_cost_forward": _get_float_val(row_dict, ["logistics_cost_forward_incl_tax", "logistics_cost_forward"]),
+                    "logistics_cost_reverse": _get_float_val(row_dict, ["logistics_cost_reverse_incl_tax", "logistics_cost_reverse"]),
+                    "reverse_additional_charges": _get_float_val(row_dict, ["reverse_additional_charges"]),
+                    "fixed_fee": _get_float_val(row_dict, ["fixed_fee"]),
+                    "pick_and_pack_fees": _get_float_val(row_dict, ["pick_and_pack_fees"]),
+                    "tech_enablement_charges": _get_float_val(row_dict, ["tech_enablement_charges"]),
+                    "tds": _get_float_val(row_dict, ["tds"]),
+                    "tcs": _get_float_val(row_dict, ["tcs"]),
+                    "gst": _get_float_val(row_dict, ["gst"]),
+                    "return_date": _get_str_val(row_dict, ["return_date", "return date"]),
+                    "return_type": _get_str_val(row_dict, ["return_type", "return type"]),
+                    "neft_ref": _get_str_val(row_dict, ["neft_ref", "utr", "payment_ref"]),
+                    "filename": file.filename,
+                    "imported_at": now_iso(),
+                    "imported_by": u["email"],
+                }
+                await db.online_settlements_detailed.insert_one(s_doc)
+                settlements_inserted += 1
+
+    await log_activity("IMPORT", "online_settlements_detailed", f"Imported {settlements_inserted} settlement rows and {non_order_inserted} non-order deductions from '{file.filename}'", u["email"])
+    return {
+        "ok": True,
+        "settlements_count": settlements_inserted,
+        "non_order_deductions_count": non_order_inserted,
+        "filename": file.filename,
+    }
+
+
+@api.post("/online-reconciliation/import-monthly-report")
+async def import_monthly_report(request: Request, file: UploadFile = File(...)):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    content = await file.read()
+    text = content.decode("utf-8-sig", errors="ignore")
+    reader = csv.DictReader(io.StringIO(text))
+
+    rows_to_insert = []
+    for row in reader:
+        seller_order_id = _get_str_val(row, ["seller order id", "seller_order_id", "order id"])
+        if not seller_order_id:
+            continue
+        m_doc = {
+            "seller_order_id": seller_order_id,
+            "order_release_id": _get_str_val(row, ["order release id", "order_release_id"]),
+            "sku_id": _get_str_val(row, ["sku id", "sku_id"]),
+            "style_id": _get_str_val(row, ["style id", "style_id"]),
+            "seller_sku_code": _get_str_val(row, ["seller sku code", "seller_sku_code"]),
+            "size": _get_str_val(row, ["size"]),
+            "order_status": _get_str_val(row, ["order status", "status"]),
+            "packed_on": _get_str_val(row, ["packed on", "packed_on", "packed_date"]),
+            "shipped_on": _get_str_val(row, ["shipped on", "shipped_on"]),
+            "delivered_on": _get_str_val(row, ["delivered on", "delivered_on"]),
+            "cancelled_on": _get_str_val(row, ["cancelled on", "cancelled_on"]),
+            "rto_return_creation_date": _get_str_val(row, ["rto/return creation date", "return_date"]),
+            "final_amount": _get_float_val(row, ["final amount", "final_amount"]),
+            "seller_price": _get_float_val(row, ["seller price", "seller_price"]),
+            "filename": file.filename,
+            "imported_at": now_iso(),
+            "imported_by": u["email"],
+        }
+        rows_to_insert.append(m_doc)
+
+    if rows_to_insert:
+        await db.online_monthly_order_reports.insert_many(rows_to_insert)
+    await log_activity("IMPORT", "online_monthly_order_reports", f"Imported {len(rows_to_insert)} monthly order report rows from '{file.filename}'", u["email"])
+    return {"ok": True, "count": len(rows_to_insert), "filename": file.filename}
+
+
+@api.post("/online-reconciliation/run")
+@api.get("/online-reconciliation/summary")
+async def run_online_reconciliation(
+    request: Request,
+    aged_pending_days: int = Query(30, description="Days threshold for aged pending classification"),
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    await get_current_user(request)
+
+    try:
+        aged_days_val = int(aged_pending_days) if not hasattr(aged_pending_days, 'default') else int(aged_pending_days.default)
+    except Exception:
+        aged_days_val = 30
+
+    # 1. Fetch all monthly order report rows
+    m_query = {}
+    if from_date or to_date:
+        d_q = {}
+        if from_date: d_q["$gte"] = from_date
+        if to_date:   d_q["$lte"] = to_date
+        m_query["$or"] = [{"packed_on": d_q}, {"delivered_on": d_q}, {"imported_at": d_q}]
+    
+    monthly_orders = await db.online_monthly_order_reports.find(m_query).to_list(10000)
+    
+    # 2. Fetch all detailed settlement rows
+    settlements = await db.online_settlements_detailed.find({}).to_list(10000)
+    
+    # Build lookup maps for settlement rows:
+    # Primary: seller_order_id
+    # Secondary: order_release_id + sku_id / style_id
+    settle_by_order_id = defaultdict(list)
+    settle_by_rel_sku = defaultdict(list)
+    for st in settlements:
+        soid = st.get("seller_order_id")
+        if soid:
+            settle_by_order_id[soid].append(st)
+        rel_id = st.get("order_release_id")
+        sku_id = st.get("sku_id") or st.get("style_id")
+        if rel_id and sku_id:
+            settle_by_rel_sku[f"{rel_id}_{sku_id}"].append(st)
+
+    # 3. Fetch all daily payments
+    daily_payments = await db.online_daily_payments.find({}).to_list(10000)
+
+    # 4. Fetch all SKU Mappings & Styles
+    sku_maps = await db.marketplace_style_color_mapping.find({}).to_list(5000)
+    sku_map_dict = {}
+    for sm in sku_maps:
+        k = sm.get("raw_sku") or f"{sm.get('marketplace_style_code')}_{sm.get('marketplace_color_code')}"
+        sku_map_dict[k] = sm.get("erp_style_code")
+        if sm.get("marketplace_style_code"):
+            sku_map_dict[sm["marketplace_style_code"]] = sm.get("erp_style_code")
+
+    styles = await db.styles.find({}).to_list(1000)
+    style_dict = {s.get("code"): s for s in styles if s.get("code")}
+
+    # 5. Fetch all Cost Snapshots
+    snapshots = await db.style_cost_snapshots.find({}).sort("effective_date", 1).to_list(5000)
+    snapshots_by_style = defaultdict(list)
+    for snap in snapshots:
+        snapshots_by_style[snap["style_code"]].append(snap)
+
+    # Today's date for age calculation
+    today_dt = datetime.now(timezone.utc).date()
+
+    settled_count = 0
+    pending_count = 0
+    aged_pending_count = 0
+    unmatched_count = 0
+    total_matched = 0
+
+    reconciled_lines = []
+    unreconciled_orders = []
+
+    cogs_exact_snapshot_count = 0
+    cogs_total_requiring = 0
+
+    # Return charges by style aggregation (directly from reverse sheets)
+    return_charges_by_style = defaultdict(float)
+    for st in settlements:
+        if st.get("direction") == "reverse" or "reverse" in str(st.get("sheet_name", "")).lower():
+            sku_code = st.get("seller_sku_code") or st.get("style_id") or ""
+            st_style = sku_map_dict.get(sku_code) or st.get("style_id") or sku_code or "UNKNOWN"
+            chg = float(st.get("logistics_cost_reverse", 0) or 0) + float(st.get("reverse_additional_charges", 0) or 0)
+            if chg > 0:
+                return_charges_by_style[st_style] += chg
+
+    # 6. Reconcile each monthly_order_report row
+    for mo in monthly_orders:
+        soid = mo.get("seller_order_id")
+        rel_id = mo.get("order_release_id")
+        sku_id = mo.get("sku_id") or mo.get("style_id")
+        
+        # Try matching
+        matches = settle_by_order_id.get(soid) or settle_by_rel_sku.get(f"{rel_id}_{sku_id}") or []
+        
+        if not matches:
+            # Check status to see if active/delivered order is missing from settlements
+            status = str(mo.get("order_status", "")).lower()
+            cancelled = bool(mo.get("cancelled_on")) and not bool(mo.get("packed_on"))
+            
+            reasons = []
+            if not soid:
+                reasons.append("Missing seller_order_id")
+            reasons.append("Absent from settlement files")
+            
+            unmatched_count += 1
+            unreconciled_orders.append({
+                "seller_order_id": soid or "—",
+                "order_release_id": rel_id or "—",
+                "seller_sku_code": mo.get("seller_sku_code") or "—",
+                "order_status": mo.get("order_status") or "Unknown",
+                "reasons": reasons,
+                "packed_on": mo.get("packed_on") or "—",
+            })
+            continue
+
+        total_matched += 1
+        # Classify based on matches
+        has_settled = any(st.get("settlement_status") == "settled" for st in matches)
+        has_unsettled = any(st.get("settlement_status") == "unsettled" for st in matches)
+
+        # Calculate pending age
+        order_date_str = mo.get("packed_on") or mo.get("shipped_on") or mo.get("delivered_on") or str(mo.get("imported_at", ""))[:10]
+        try:
+            o_date = datetime.strptime(order_date_str[:10], "%Y-%m-%d").date()
+            age_days = (today_dt - o_date).days
+        except Exception:
+            age_days = 0
+
+        if has_settled:
+            rec_status = "settled"
+            settled_count += 1
+        elif has_unsettled:
+            if age_days > aged_days_val:
+                rec_status = "aged_pending"
+                aged_pending_count += 1
+            else:
+                rec_status = "pending"
+                pending_count += 1
+        else:
+            rec_status = "unmatched"
+            unmatched_count += 1
+
+        # Calculate Settlement Financials for line
+        settled_postpaid = sum(st.get("settled_amount_postpaid", 0) for st in matches)
+        settled_prepaid = sum(st.get("settled_amount_prepaid", 0) for st in matches)
+        settled_amount = settled_postpaid + settled_prepaid
+
+        commission = sum(st.get("commission", 0) for st in matches)
+        logistics_fwd = sum(st.get("logistics_cost_forward", 0) for st in matches)
+        logistics_rev = sum(st.get("logistics_cost_reverse", 0) for st in matches)
+        rev_add_charges = sum(st.get("reverse_additional_charges", 0) for st in matches)
+        fixed_fee = sum(st.get("fixed_fee", 0) for st in matches)
+        pick_pack = sum(st.get("pick_and_pack_fees", 0) for st in matches)
+        tech_enablement = sum(st.get("tech_enablement_charges", 0) for st in matches)
+        taxes = sum(st.get("tds", 0) + st.get("tcs", 0) + st.get("gst", 0) for st in matches)
+
+        # Resolve COGS
+        seller_sku = mo.get("seller_sku_code") or ""
+        erp_style_code = sku_map_dict.get(seller_sku) or mo.get("style_id") or seller_sku.split("-")[0]
+        
+        # Check if cancelled before production
+        is_cancelled_before_prod = bool(mo.get("cancelled_on")) and not bool(mo.get("packed_on"))
+        
+        unit_cogs = 0.0
+        cost_estimated = False
+        
+        if not is_cancelled_before_prod:
+            cogs_total_requiring += 1
+            # Look up active cost snapshot on order date
+            snaps = snapshots_by_style.get(erp_style_code) or []
+            active_snap = None
+            for s_item in reversed(snaps):
+                if s_item.get("effective_date", "") <= order_date_str[:10]:
+                    active_snap = s_item
+                    break
+            
+            if active_snap:
+                unit_cogs = float(active_snap.get("total_cost", 0))
+                cogs_exact_snapshot_count += 1
+                cost_estimated = False
+            else:
+                # Fallback: earliest snapshot or current style cost
+                if snaps:
+                    unit_cogs = float(snaps[0].get("total_cost", 0))
+                else:
+                    st_obj = style_dict.get(erp_style_code)
+                    if st_obj:
+                        c_res = compute_style_costing(st_obj)
+                        unit_cogs = float(c_res.get("total_cost", 0))
+                    else:
+                        unit_cogs = 0.0
+                cost_estimated = True
+                unreconciled_orders.append({
+                    "seller_order_id": soid or "—",
+                    "order_release_id": rel_id or "—",
+                    "seller_sku_code": seller_sku,
+                    "order_status": mo.get("order_status") or "Unknown",
+                    "reasons": ["No active costing snapshot on order date (cost estimated)"],
+                    "packed_on": order_date_str,
+                })
+
+        # Return charges per line
+        total_line_costs = commission + fixed_fee + logistics_fwd + logistics_rev + rev_add_charges + pick_pack + tech_enablement + taxes + unit_cogs
+        net_profit = settled_amount - total_line_costs
+
+        reconciled_lines.append({
+            "seller_order_id": soid,
+            "order_release_id": rel_id,
+            "style_code": erp_style_code,
+            "seller_sku_code": seller_sku,
+            "order_date": order_date_str,
+            "status": rec_status,
+            "settled_amount": round(settled_amount, 2),
+            "commission": round(commission, 2),
+            "fixed_fee": round(fixed_fee, 2),
+            "logistics_cost": round(logistics_fwd + logistics_rev + rev_add_charges, 2),
+            "pick_and_pack_fees": round(pick_pack, 2),
+            "tech_enablement_charges": round(tech_enablement, 2),
+            "taxes": round(taxes, 2),
+            "actual_cogs": round(unit_cogs, 2),
+            "cost_estimated": cost_estimated,
+            "net_profit": round(net_profit, 2),
+        })
+
+    # 7. NEFT Cross-Check: Daily Payments vs settled.xlsx
+    neft_daily = defaultdict(float)
+    for dp in daily_payments:
+        neft = dp.get("neft_ref") or "UNSPECIFIED"
+        neft_daily[neft] += float(dp.get("settled_amount", 0) or 0)
+
+    neft_settled = defaultdict(float)
+    for st in settlements:
+        if st.get("settlement_status") == "settled":
+            neft = st.get("neft_ref") or "UNSPECIFIED"
+            amt = float(st.get("settled_amount_postpaid", 0) or 0) + float(st.get("settled_amount_prepaid", 0) or 0)
+            neft_settled[neft] += amt
+
+    all_nefts = set(list(neft_daily.keys()) + list(neft_settled.keys()))
+    neft_mismatches = []
+    for neft in all_nefts:
+        if neft == "UNSPECIFIED" and len(all_nefts) > 1:
+            continue
+        d_amt = neft_daily.get(neft, 0.0)
+        s_amt = neft_settled.get(neft, 0.0)
+        diff = round(d_amt - s_amt, 2)
+        if abs(diff) > 0.01:
+            neft_mismatches.append({
+                "neft_ref": neft,
+                "daily_payment_amount": round(d_amt, 2),
+                "settlement_file_amount": round(s_amt, 2),
+                "difference": diff,
+            })
+
+    # 8. Non-Order Deductions Total & Ledger
+    non_order_docs = await db.online_non_order_deductions.find({}).sort("settlement_date", -1).to_list(1000)
+    total_non_order_deductions = sum(float(d.get("settlement_amount", 0) or 0) for d in non_order_docs)
+
+    total_monthly_lines = len(monthly_orders)
+    join_rate_pct = round((total_matched / total_monthly_lines * 100), 2) if total_monthly_lines > 0 else 100.0
+    cogs_resolution_rate_pct = round((cogs_exact_snapshot_count / cogs_total_requiring * 100), 2) if cogs_total_requiring > 0 else 100.0
+
+    # Group profitability by style & month
+    style_profitability = defaultdict(lambda: {"units": 0, "settled": 0.0, "cogs": 0.0, "fees": 0.0, "net_profit": 0.0, "cost_estimated_count": 0})
+    for rl in reconciled_lines:
+        sc = rl["style_code"]
+        style_profitability[sc]["units"] += 1
+        style_profitability[sc]["settled"] += rl["settled_amount"]
+        style_profitability[sc]["cogs"] += rl["actual_cogs"]
+        fees = rl["commission"] + rl["fixed_fee"] + rl["logistics_cost"] + rl["pick_and_pack_fees"] + rl["tech_enablement_charges"] + rl["taxes"]
+        style_profitability[sc]["fees"] += fees
+        style_profitability[sc]["net_profit"] += rl["net_profit"]
+        if rl["cost_estimated"]:
+            style_profitability[sc]["cost_estimated_count"] += 1
+
+    by_style_list = [
+        {
+            "style_code": sc,
+            "units": val["units"],
+            "settled_amount": round(val["settled"], 2),
+            "actual_cogs": round(val["cogs"], 2),
+            "platform_fees": round(val["fees"], 2),
+            "net_profit": round(val["net_profit"], 2),
+            "cost_estimated_count": val["cost_estimated_count"],
+        }
+        for sc, val in style_profitability.items()
+    ]
+
+    return {
+        "join_rate_pct": join_rate_pct,
+        "cogs_resolution_rate_pct": cogs_resolution_rate_pct,
+        "total_monthly_report_units": total_monthly_lines,
+        "settled_count": settled_count,
+        "pending_count": pending_count,
+        "aged_pending_count": aged_pending_count,
+        "unmatched_count": unmatched_count,
+        "return_charges_by_style": {k: round(v, 2) for k, v in return_charges_by_style.items()},
+        "total_non_order_deductions": round(total_non_order_deductions, 2),
+        "non_order_deductions_ledger": [stringify(d) for d in non_order_docs[:100]],
+        "neft_mismatches": neft_mismatches,
+        "unreconciled_orders": unreconciled_orders[:200],
+        "profitability_by_style": by_style_list,
+    }
+
+
+@api.get("/online-reconciliation/unreconciled-orders")
+async def list_unreconciled_orders(request: Request):
+    await get_current_user(request)
+    summary = await run_online_reconciliation(request)
+    return summary.get("unreconciled_orders", [])
+
+
 @app.get("/")
 async def root():
     return {

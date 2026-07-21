@@ -16,6 +16,7 @@ import Defects from "@/pages/Defects";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
 import Settings from "@/pages/Settings";
+import Expenses from "@/pages/Expenses";
 import Invoices from "@/pages/Invoices";
 import Clients from "@/pages/Clients";
 import Vendors from "@/pages/Vendors";
@@ -79,6 +80,7 @@ function App() {
             <Route path="defects" element={<Defects />} />
             <Route path="reports" element={<Reports />} />
             <Route path="invoices" element={<Invoices />} />
+            <Route path="expenses" element={<Expenses />} />
             <Route path="clients" element={<Clients />} />
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />

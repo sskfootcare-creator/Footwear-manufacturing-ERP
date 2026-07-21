@@ -51,6 +51,14 @@ from models.sku_map import (
 from models.settings import (
     StageDurationsIn
 )
+from models.expenses import (
+    EXPENSE_CATEGORIES, ExpenseIn, ExpenseUpdate
+)
+from models.online_reconciliation import (
+    DailyPaymentRow, NonOrderDeductionRow, MonthlyOrderRow, StyleCostSnapshotIn, ReconciliationRunIn
+)
+
+
 
 __all__ = [
     # Auth
@@ -92,4 +100,8 @@ __all__ = [
     "OnlineOrderImportResult",
     # Settings
     "StageDurationsIn",
+    # Expenses
+    "EXPENSE_CATEGORIES", "ExpenseIn", "ExpenseUpdate",
+    # Online Reconciliation
+    "DailyPaymentRow", "NonOrderDeductionRow", "MonthlyOrderRow", "StyleCostSnapshotIn", "ReconciliationRunIn",
 ]
