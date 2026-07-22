@@ -52,12 +52,11 @@ from models.settings import (
     StageDurationsIn
 )
 from models.expenses import (
-    EXPENSE_CATEGORIES, ExpenseIn, ExpenseUpdate
+    EXPENSE_CATEGORIES, ExpenseIn, ExpenseUpdate, RecurringExpenseIn, RecurringExpenseUpdate
 )
 from models.online_reconciliation import (
-    DailyPaymentRow, NonOrderDeductionRow, MonthlyOrderRow, StyleCostSnapshotIn, ReconciliationRunIn
+    DailyPaymentRow, DailyPaymentImportIn, SettlementImportIn, NonOrderDeductionRow, NonOrderDeductionIn, MonthlyOrderRow, StyleCostSnapshotIn, ReconciliationRunIn
 )
-
 
 
 __all__ = [
@@ -101,7 +100,7 @@ __all__ = [
     # Settings
     "StageDurationsIn",
     # Expenses
-    "EXPENSE_CATEGORIES", "ExpenseIn", "ExpenseUpdate",
+    "EXPENSE_CATEGORIES", "ExpenseIn", "ExpenseUpdate", "RecurringExpenseIn", "RecurringExpenseUpdate",
     # Online Reconciliation
-    "DailyPaymentRow", "NonOrderDeductionRow", "MonthlyOrderRow", "StyleCostSnapshotIn", "ReconciliationRunIn",
+    "DailyPaymentRow", "DailyPaymentImportIn", "SettlementImportIn", "NonOrderDeductionRow", "NonOrderDeductionIn", "MonthlyOrderRow", "StyleCostSnapshotIn", "ReconciliationRunIn",
 ]

@@ -19,6 +19,34 @@ class DailyPaymentRow(BaseModel):
     payment_date: Optional[str] = ""
 
 
+class DailyPaymentImportIn(DailyPaymentRow):
+    pass
+
+
+class SettlementImportIn(BaseModel):
+    order_release_id: Optional[str] = ""
+    seller_order_id: Optional[str] = ""
+    sku_id: Optional[str] = ""
+    style_id: Optional[str] = ""
+    settled_amount_postpaid: float = 0.0
+    settled_amount_prepaid: float = 0.0
+    amount_pending_settlement_postpaid: float = 0.0
+    amount_pending_settlement_prepaid: float = 0.0
+    commission: float = 0.0
+    logistics_cost_forward: float = 0.0
+    logistics_cost_reverse: float = 0.0
+    reverse_additional_charges: float = 0.0
+    fixed_fee: float = 0.0
+    pick_and_pack_fees: float = 0.0
+    tech_enablement_charges: float = 0.0
+    tds: float = 0.0
+    tcs: float = 0.0
+    gst: float = 0.0
+    return_date: Optional[str] = ""
+    return_type: Optional[str] = ""
+    neft_ref: Optional[str] = ""
+
+
 class NonOrderDeductionRow(BaseModel):
     seller_id: Optional[str] = ""
     settlement_amount: float = 0.0
@@ -27,6 +55,10 @@ class NonOrderDeductionRow(BaseModel):
     invoice_ref: Optional[str] = ""
     settlement_date: Optional[str] = ""
     settlement_description: Optional[str] = ""
+
+
+class NonOrderDeductionIn(NonOrderDeductionRow):
+    pass
 
 
 class MonthlyOrderRow(BaseModel):
@@ -61,3 +93,4 @@ class ReconciliationRunIn(BaseModel):
     aged_pending_days: int = 30
     from_date: Optional[str] = None
     to_date: Optional[str] = None
+

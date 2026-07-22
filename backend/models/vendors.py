@@ -29,7 +29,9 @@ class GRNIn(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    invoice_ids: List[str]
+    invoice_ids: Optional[List[str]] = None
+    vendor_id: Optional[str] = None
+    vendor_po_id: Optional[str] = None
     amount: float
     payment_date: str
     mode: Literal["Bank Transfer", "RTGS", "NEFT", "Cheque", "UPI", "Cash", "Adjustment"]

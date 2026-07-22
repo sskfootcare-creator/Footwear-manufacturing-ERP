@@ -9177,6 +9177,32 @@ async def create_payment(payload: PaymentIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
     if payload.amount <= 0:
         raise HTTPException(400, "Amount must be positive")
+    
+    if payload.vendor_id:
+        vendor = await db.vendors.find_one({"_id": oid(payload.vendor_id)})
+        if not vendor:
+            raise HTTPException(404, "Vendor not found")
+        payment_no = await next_payment_no()
+        doc = {
+            "payment_no": payment_no,
+            "payment_date": payload.payment_date,
+            "amount": round(float(payload.amount), 2),
+            "mode": payload.mode,
+            "reference": payload.reference,
+            "bank": payload.bank,
+            "notes": payload.notes,
+            "type": "vendor_payment",
+            "vendor_id": str(vendor["_id"]),
+            "vendor_name": vendor.get("name"),
+            "vendor_po_id": payload.vendor_po_id or "",
+            "by": u["email"],
+            "created_at": now_iso(),
+        }
+        res = await db.payments.insert_one(doc)
+        doc["_id"] = res.inserted_id
+        await log_activity("create_vendor_payment", "vendor_payments", f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}", u["email"])
+        return stringify(doc)
+
     if not payload.invoice_ids:
         raise HTTPException(400, "At least one invoice required")
     invoices = await db.invoices.find({"_id": {"$in": [oid(i) for i in payload.invoice_ids]}}).to_list(50)
@@ -9245,7 +9271,7 @@ async def delete_payment(pid: str, request: Request):
 
 
 
-# ---------- VENDORS (Accounts Payable Master) ----------
+# ---------- VENDORS (Accounts Payable Master) & LEDGER ----------
 
 @api.get("/vendors")
 async def list_vendors(request: Request, include_inactive: bool = False, limit: int = 500):
@@ -9269,6 +9295,270 @@ async def create_vendor(payload: VendorIn, request: Request):
         raise HTTPException(409, f"A vendor named '{payload.name}' already exists.")
     doc["_id"] = res.inserted_id
     await log_activity("create_vendor", "vendors", f"Created vendor '{payload.name}'", u["email"])
+    return stringify(doc)
+
+
+# ---------- VENDOR LEDGER & AGEING (Accounts Payable) ----------
+
+async def _build_vendor_ledger(vid: str) -> dict:
+    vendor = await db.vendors.find_one({"_id": oid(vid)})
+    if not vendor:
+        raise HTTPException(404, "Vendor not found")
+    
+    vendor_name = vendor.get("name", "")
+    terms_days = vendor.get("payment_terms_days", 30)
+
+    # 1. Fetch receives for this vendor
+    rec_docs = await db.vendor_po_receives.find({"vendor_id": vid}).to_list(5000)
+    seen_receipt_ids = {r.get("receipt_id") for r in rec_docs if r.get("receipt_id")}
+
+    pos = await db.vendor_purchase_orders.find({"vendor_id": vid}).to_list(2000)
+    po_id_map = {str(p["_id"]): p.get("po_number") for p in pos}
+    po_ids = list(po_id_map.keys())
+
+    movements = await db.inventory_movements.find({
+        "type": "in",
+        "$or": [
+            {"vendor_po_id": {"$in": po_ids}},
+            {"party": vendor_name}
+        ]
+    }).to_list(5000)
+
+    mov_grouped = defaultdict(list)
+    for m in movements:
+        rid = m.get("receipt_id") or str(m["_id"])
+        if rid not in seen_receipt_ids:
+            mov_grouped[rid].append(m)
+
+    receives_list = []
+    for r in rec_docs:
+        receives_list.append({
+            "type": "receive",
+            "date": r.get("receipt_date") or str(r.get("created_at", ""))[:10],
+            "created_at": r.get("created_at", ""),
+            "reference": r.get("receipt_id") or r.get("po_number") or "GRN",
+            "po_number": r.get("po_number", ""),
+            "description": f"Material Receipt (PO: {r.get('po_number', 'N/A')})",
+            "credit": round(float(r.get("total_amount", 0)), 2),
+            "debit": 0.0,
+            "items": r.get("items", []),
+        })
+
+    for rid, m_list in mov_grouped.items():
+        tot_amt = sum(float(m.get("quantity", 0)) * float(m.get("rate", 0)) for m in m_list)
+        first_m = m_list[0]
+        po_num = po_id_map.get(first_m.get("vendor_po_id"), "")
+        receives_list.append({
+            "type": "receive",
+            "date": first_m.get("date") or str(first_m.get("created_at", ""))[:10],
+            "created_at": first_m.get("created_at", ""),
+            "reference": rid,
+            "po_number": po_num,
+            "description": f"Material Receipt (PO: {po_num or 'N/A'})",
+            "credit": round(tot_amt, 2),
+            "debit": 0.0,
+            "items": [
+                {
+                    "material_id": m.get("material_id"),
+                    "material_name": m.get("material_name"),
+                    "quantity": m.get("quantity"),
+                    "rate": m.get("rate"),
+                    "amount": round(float(m.get("quantity", 0)) * float(m.get("rate", 0)), 2),
+                }
+                for m in m_list
+            ]
+        })
+
+    # 2. Fetch payments for this vendor
+    pay_docs = await db.payments.find({
+        "$or": [
+            {"vendor_id": vid},
+            {"type": "vendor_payment", "vendor_name": vendor_name}
+        ]
+    }).to_list(5000)
+
+    payments_list = []
+    for p in pay_docs:
+        amt = float(p.get("amount", 0))
+        payments_list.append({
+            "type": "payment",
+            "date": p.get("payment_date") or str(p.get("created_at", ""))[:10],
+            "created_at": p.get("created_at", ""),
+            "reference": p.get("payment_no") or p.get("reference") or "PAYMENT",
+            "description": f"Payment via {p.get('mode', 'Bank')} ({p.get('reference') or 'N/A'})",
+            "credit": 0.0,
+            "debit": round(amt, 2),
+            "mode": p.get("mode"),
+            "notes": p.get("notes", ""),
+        })
+
+    # 3. Combine & sort chronologically
+    all_tx = receives_list + payments_list
+    all_tx.sort(key=lambda x: (x["date"], x["created_at"]))
+
+    running_bal = 0.0
+    transactions = []
+    for tx in all_tx:
+        if tx["type"] == "receive":
+            running_bal += tx["credit"]
+        else:
+            running_bal -= tx["debit"]
+        running_bal = round(running_bal, 2)
+        tx["running_balance"] = running_bal
+        transactions.append(tx)
+
+    tot_rec = round(sum(t["credit"] for t in receives_list), 2)
+    tot_paid = round(sum(t["debit"] for t in payments_list), 2)
+    cur_bal = round(tot_rec - tot_paid, 2)
+
+    return {
+        "vendor_id": vid,
+        "vendor_name": vendor_name,
+        "payment_terms_days": terms_days,
+        "total_received": tot_rec,
+        "total_paid": tot_paid,
+        "current_balance": cur_bal,
+        "transactions": transactions,
+        "_receives": receives_list,
+        "_payments": payments_list,
+    }
+
+
+def _compute_ageing_buckets(ledger_data: dict) -> dict:
+    vid = ledger_data["vendor_id"]
+    vname = ledger_data["vendor_name"]
+    terms_days = ledger_data["payment_terms_days"]
+    cur_bal = ledger_data["current_balance"]
+    receives = ledger_data.get("_receives", [])
+
+    current_date = datetime.now(timezone.utc).date()
+
+    out = {
+        "vendor_id": vid,
+        "vendor_name": vname,
+        "payment_terms_days": terms_days,
+        "outstanding_balance": cur_bal,
+        "current": 0.0,
+        "days_1_30": 0.0,
+        "days_31_60": 0.0,
+        "days_60_plus": 0.0,
+    }
+
+    if cur_bal <= 0:
+        return out
+
+    receives_sorted = sorted(receives, key=lambda r: (r["date"], r.get("created_at", "")))
+    tot_paid = ledger_data["total_paid"]
+
+    rem_paid = tot_paid
+    unpaid_receives = []
+    for r in receives_sorted:
+        c_amt = r["credit"]
+        if rem_paid >= c_amt:
+            rem_paid -= c_amt
+        else:
+            unpaid_amt = round(c_amt - rem_paid, 2)
+            rem_paid = 0.0
+            unpaid_receives.append({"date": r["date"], "amount": unpaid_amt})
+
+    if not unpaid_receives and cur_bal > 0:
+        out["current"] = round(cur_bal, 2)
+        return out
+
+    for ur in unpaid_receives:
+        try:
+            r_date = datetime.strptime(ur["date"][:10], "%Y-%m-%d").date()
+            age_days = (current_date - r_date).days
+        except Exception:
+            age_days = 0
+
+        amt = ur["amount"]
+        if age_days <= 0:
+            out["current"] = round(out["current"] + amt, 2)
+        elif 1 <= age_days <= 30:
+            out["days_1_30"] = round(out["days_1_30"] + amt, 2)
+        elif 31 <= age_days <= 60:
+            out["days_31_60"] = round(out["days_31_60"] + amt, 2)
+        else:
+            out["days_60_plus"] = round(out["days_60_plus"] + amt, 2)
+
+    return out
+
+
+@api.get("/vendors/ageing")
+async def get_all_vendors_ageing(request: Request, include_inactive: bool = False):
+    await get_current_user(request)
+    q = {} if include_inactive else {"active": {"$ne": False}}
+    vendors = await db.vendors.find(q).sort("name", 1).to_list(1000)
+    
+    records = []
+    total_outstanding = 0.0
+    total_current = 0.0
+    total_1_30 = 0.0
+    total_31_60 = 0.0
+    total_60_plus = 0.0
+
+    for v in vendors:
+        vid = str(v["_id"])
+        ledger = await _build_vendor_ledger(vid)
+        ageing = _compute_ageing_buckets(ledger)
+        records.append(ageing)
+
+        total_outstanding += ageing["outstanding_balance"]
+        total_current += ageing["current"]
+        total_1_30 += ageing["days_1_30"]
+        total_31_60 += ageing["days_31_60"]
+        total_60_plus += ageing["days_60_plus"]
+
+    return {
+        "summary": {
+            "total_vendors": len(records),
+            "total_outstanding": round(total_outstanding, 2),
+            "total_current": round(total_current, 2),
+            "total_days_1_30": round(total_1_30, 2),
+            "total_days_31_60": round(total_31_60, 2),
+            "total_days_60_plus": round(total_60_plus, 2),
+        },
+        "vendors": records
+    }
+
+
+@api.get("/vendors/{vid}/ledger")
+async def get_vendor_ledger(vid: str, request: Request):
+    await get_current_user(request)
+    ledger = await _build_vendor_ledger(vid)
+    ledger.pop("_receives", None)
+    ledger.pop("_payments", None)
+    return ledger
+
+
+@api.post("/vendors/{vid}/payments", status_code=201)
+async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    if payload.amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    vendor = await db.vendors.find_one({"_id": oid(vid)})
+    if not vendor:
+        raise HTTPException(404, "Vendor not found")
+    payment_no = await next_payment_no()
+    doc = {
+        "payment_no": payment_no,
+        "payment_date": payload.payment_date,
+        "amount": round(float(payload.amount), 2),
+        "mode": payload.mode,
+        "reference": payload.reference,
+        "bank": payload.bank,
+        "notes": payload.notes,
+        "type": "vendor_payment",
+        "vendor_id": str(vendor["_id"]),
+        "vendor_name": vendor.get("name"),
+        "vendor_po_id": payload.vendor_po_id or "",
+        "by": u["email"],
+        "created_at": now_iso(),
+    }
+    res = await db.payments.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_activity("create_vendor_payment", "vendor_payments", f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}", u["email"])
     return stringify(doc)
 
 
@@ -9486,6 +9776,29 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             }}
         )
         await db.inventory_movements.insert_many(movements)
+        total_receive_amount = sum(round(float(m["quantity"]) * float(m["rate"]), 2) for m in movements)
+        receive_doc = {
+            "vendor_id": str(po.get("vendor_id")),
+            "vendor_po_id": str(po["_id"]),
+            "po_number": po.get("po_number"),
+            "receipt_id": receipt_id,
+            "receipt_date": datetime.now(timezone.utc).date().isoformat(),
+            "items": [
+                {
+                    "material_id": m["material_id"],
+                    "material_code": m["material_code"],
+                    "material_name": m["material_name"],
+                    "quantity": m["quantity"],
+                    "rate": m["rate"],
+                    "amount": round(float(m["quantity"]) * float(m["rate"]), 2),
+                }
+                for m in movements
+            ],
+            "total_amount": round(total_receive_amount, 2),
+            "by": u["email"],
+            "created_at": now_iso(),
+        }
+        await db.vendor_po_receives.insert_one(receive_doc)
         po = await db.vendor_purchase_orders.find_one({"_id": po["_id"]})
         
     await log_activity("receive_vendor_po", "vendor_pos", f"Received materials for PO {po.get('po_number')} (receipt: {receipt_id})", u["email"])
@@ -9538,22 +9851,25 @@ async def list_clients(request: Request):
     return out
 
 
-@api.get("/clients/{client_name}/ledger")
-async def client_ledger(client_name: str, request: Request):
-    """Tally-style ledger for a single client.
+# ---------- CLIENTS / ACCOUNTS RECEIVABLE LEDGER & AGEING ----------
 
-    Entries (chronological):
-      - Invoice  -> debit  (increases receivable)
-      - GRN short/rejected -> credit (reduces receivable)
-      - Payment  -> credit (reduces receivable)
-    Returns ledger lines + a running balance.
-    """
-    await get_current_user(request)
+async def _build_client_ledger(cid_or_name: str) -> dict:
+    client_name = cid_or_name
+    client_id = cid_or_name
+
+    if cid_or_name and ObjectId.is_valid(cid_or_name):
+        c_doc = await db.clients.find_one({"_id": oid(cid_or_name)})
+        if c_doc and c_doc.get("name"):
+            client_name = c_doc["name"]
+        else:
+            inv_doc = await db.invoices.find_one({"_id": oid(cid_or_name)})
+            if inv_doc and inv_doc.get("client_name"):
+                client_name = inv_doc["client_name"]
+
     invs = await db.invoices.find({"client_name": client_name}, {"file_b64": 0}).to_list(2000)
     grns = await db.grns.find({"client_name": client_name}).to_list(2000)
     pays = await db.payments.find({"client_name": client_name}).to_list(2000)
 
-    # Build price index per invoice for GRN value adjustments
     price_idx: dict[str, dict] = {}
     for inv in invs:
         iid = str(inv["_id"])
@@ -9562,18 +9878,21 @@ async def client_ledger(client_name: str, request: Request):
         price_idx[iid] = prices
 
     entries = []
+    transactions = []
     for inv in invs:
         d = inv.get("invoice_iso_date") or _invoice_iso_date(inv.get("invoice_date", ""))
+        grand = float(inv.get("grand_total") or inv.get("net_amount") or 0)
         entries.append({
             "date": d,
             "vch_type": "Invoice",
             "vch_no": inv.get("invoice_no"),
             "particulars": f"Inv {inv.get('invoice_no')} · {(inv.get('po_numbers') or [inv.get('po_number')])[0] or ''}",
-            "debit": float(inv.get("grand_total") or 0),
+            "debit": grand,
             "credit": 0.0,
             "ref_id": str(inv["_id"]),
             "due_date": inv.get("due_date"),
         })
+
     for g in grns:
         prices = price_idx.get(g.get("invoice_id", ""), {})
         short_value = 0.0
@@ -9591,6 +9910,7 @@ async def client_ledger(client_name: str, request: Request):
                 "credit": round(short_value, 2),
                 "ref_id": str(g["_id"]),
             })
+
     for p in pays:
         entries.append({
             "date": p.get("payment_date") or "",
@@ -9608,58 +9928,157 @@ async def client_ledger(client_name: str, request: Request):
     bal = 0.0
     for e in entries:
         bal += float(e["debit"]) - float(e["credit"])
+        bal = round(bal, 2)
         e["debit"] = round(float(e["debit"]), 2)
         e["credit"] = round(float(e["credit"]), 2)
-        e["balance"] = round(bal, 2)
+        e["balance"] = bal
+        e["running_balance"] = bal
         e["balance_type"] = "Dr" if bal >= 0 else "Cr"
 
-    # Aging buckets — based on still-open invoices
+        tx_item = {
+            "type": e["vch_type"].lower().replace(" ", "_"),
+            "vch_type": e["vch_type"],
+            "date": e["date"],
+            "reference": e.get("vch_no") or e.get("ref_id"),
+            "description": e["particulars"],
+            "debit": e["debit"],
+            "credit": e["credit"],
+            "running_balance": bal,
+            "due_date": e.get("due_date"),
+        }
+        transactions.append(tx_item)
+
     inv_ids = [str(d["_id"]) for d in invs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids)
     grn_map = await _aggregate_grn_adjustments(inv_ids)
     decorated = [_decorate_invoice(d, pay_map, grn_map) for d in invs]
-    today = datetime.now().date()
-    buckets = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
-    bucket_count = {"0-30": 0, "31-60": 0, "61-90": 0, "90+": 0}
+
+    today = datetime.now(timezone.utc).date()
+    ageing_buckets = {
+        "current": 0.0,
+        "days_1_30": 0.0,
+        "days_31_60": 0.0,
+        "days_60_plus": 0.0,
+    }
+
+    tot_invoiced = sum(float(r.get("net_amount") or r.get("grand_total") or 0) for r in decorated)
+    tot_received = sum(float(r.get("received_amount") or 0) for r in decorated)
+
     for r in decorated:
         outstanding = float(r.get("outstanding") or 0)
-        if outstanding <= 0 or not r.get("due_date"):
+        if outstanding <= 0:
+            continue
+        due_str = r.get("due_date") or r.get("invoice_date")
+        if not due_str:
+            ageing_buckets["current"] = round(ageing_buckets["current"] + outstanding, 2)
             continue
         try:
-            due = datetime.fromisoformat(r["due_date"]).date()
+            due = datetime.strptime(str(due_str)[:10], "%Y-%m-%d").date()
+            days_overdue = (today - due).days
         except Exception:
-            continue
-        days_overdue = (today - due).days
-        if days_overdue <= 30:
-            k = "0-30"
-        elif days_overdue <= 60:
-            k = "31-60"
-        elif days_overdue <= 90:
-            k = "61-90"
-        else:
-            k = "90+"
-        buckets[k] += outstanding
-        bucket_count[k] += 1
+            days_overdue = 0
 
-    total_invoiced = sum(float(r.get("net_amount") or 0) for r in decorated)
-    total_received = sum(float(r.get("received_amount") or 0) for r in decorated)
+        if days_overdue <= 0:
+            ageing_buckets["current"] = round(ageing_buckets["current"] + outstanding, 2)
+        elif 1 <= days_overdue <= 30:
+            ageing_buckets["days_1_30"] = round(ageing_buckets["days_1_30"] + outstanding, 2)
+        elif 31 <= days_overdue <= 60:
+            ageing_buckets["days_31_60"] = round(ageing_buckets["days_31_60"] + outstanding, 2)
+        else:
+            ageing_buckets["days_60_plus"] = round(ageing_buckets["days_60_plus"] + outstanding, 2)
 
     return {
+        "client_id": client_id,
         "client_name": client_name,
-        "entries": entries,
+        "total_invoiced": round(tot_invoiced, 2),
+        "total_received": round(tot_received, 2),
+        "current_balance": round(bal, 2),
+        "outstanding_balance": round(bal, 2),
         "closing_balance": round(bal, 2),
         "closing_balance_type": "Dr" if bal >= 0 else "Cr",
+        "entries": entries,
+        "transactions": transactions,
+        "ageing": ageing_buckets,
         "totals": {
-            "invoiced": round(total_invoiced, 2),
-            "received": round(total_received, 2),
+            "invoiced": round(tot_invoiced, 2),
+            "received": round(tot_received, 2),
             "outstanding": round(bal, 2),
         },
-        "aging": [
-            {"bucket": k, "amount": round(v, 2), "count": bucket_count[k]}
-            for k, v in buckets.items()
-        ],
         "invoices": decorated,
     }
+
+
+@api.get("/clients/ageing")
+async def get_all_clients_ageing(request: Request):
+    await get_current_user(request)
+    docs = await db.invoices.find({}, {"client_name": 1}).to_list(5000)
+    client_names = sorted(list(set(d.get("client_name") for d in docs if d.get("client_name"))))
+    
+    records = []
+    tot_out = 0.0
+    tot_cur = 0.0
+    tot_1_30 = 0.0
+    tot_31_60 = 0.0
+    tot_60_plus = 0.0
+
+    for cname in client_names:
+        ledger = await _build_client_ledger(cname)
+        ag = ledger["ageing"]
+        bal = ledger["current_balance"]
+        
+        c_record = {
+            "client_name": cname,
+            "outstanding_balance": bal,
+            "current": ag["current"],
+            "days_1_30": ag["days_1_30"],
+            "days_31_60": ag["days_31_60"],
+            "days_60_plus": ag["days_60_plus"],
+        }
+        records.append(c_record)
+        tot_out += bal
+        tot_cur += ag["current"]
+        tot_1_30 += ag["days_1_30"]
+        tot_31_60 += ag["days_31_60"]
+        tot_60_plus += ag["days_60_plus"]
+
+    return {
+        "summary": {
+            "total_clients": len(records),
+            "total_outstanding": round(tot_out, 2),
+            "total_current": round(tot_cur, 2),
+            "total_days_1_30": round(tot_1_30, 2),
+            "total_days_31_60": round(tot_31_60, 2),
+            "total_days_60_plus": round(tot_60_plus, 2),
+        },
+        "clients": records
+    }
+
+
+@api.get("/clients/{id}/ledger")
+async def client_ledger(id: str, request: Request):
+    """Tally-style ledger for a single client (by client_name or client_id)."""
+    await get_current_user(request)
+    return await _build_client_ledger(id)
+
+
+@api.post("/test-helpers/create-test-invoice")
+async def create_test_invoice(payload: dict, request: Request):
+    await get_current_user(request)
+    doc = {
+        "invoice_no": payload.get("invoice_no", "INV-TEST"),
+        "invoice_date": payload.get("invoice_date", "22/07/2026"),
+        "invoice_iso_date": payload.get("invoice_iso_date", "2026-07-22"),
+        "due_date": payload.get("due_date", "2026-08-21"),
+        "payment_terms_days": payload.get("payment_terms_days", 30),
+        "client_name": payload.get("client_name"),
+        "grand_total": float(payload.get("grand_total", 0)),
+        "net_amount": float(payload.get("net_amount", 0)),
+        "line_items_snapshot": [],
+        "created_at": now_iso(),
+    }
+    res = await db.invoices.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return stringify(doc)
 
 
 # ---------- PACKING LIST ----------
@@ -14412,6 +14831,8 @@ async def dismiss_unresolved(request: Request, qid: str):
 
 # ---------- EXPENSES & SIMPLE P&L ENDPOINTS ----------
 
+# ---------- EXPENSES & SIMPLE P&L ENDPOINTS ----------
+
 @api.post("/expenses")
 async def create_expense(payload: ExpenseIn, request: Request):
     u = await get_current_user(request)
@@ -14423,6 +14844,9 @@ async def create_expense(payload: ExpenseIn, request: Request):
         "payee": payload.payee,
         "notes": payload.notes or "",
         "receipt": payload.receipt,
+        "is_recurring": bool(payload.is_recurring),
+        "recurring_expense_id": payload.recurring_expense_id or "",
+        "status": payload.status or "confirmed",
         "created_at": now_iso(),
         "created_by": u["email"],
     }
@@ -14432,82 +14856,152 @@ async def create_expense(payload: ExpenseIn, request: Request):
     return stringify(doc)
 
 
-@api.get("/expenses")
-async def list_expenses(
-    request: Request,
-    category: Optional[str] = None,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    search: Optional[str] = None,
-    limit: int = 1000
-):
+# ---------- RECURRING EXPENSES & AUTO-GENERATION ----------
+
+async def _check_and_generate_recurring_expenses():
+    """Auto-generates due/overdue ExpenseIn entries for all active RecurringExpenseIn templates."""
+    today_dt = datetime.now(timezone.utc).date()
+    today_str = today_dt.isoformat()
+    current_ym = today_str[:7]
+
+    active_templates = await db.recurring_expenses.find({"active": True}).to_list(1000)
+    generated_count = 0
+    updated_count = 0
+
+    for tmpl in active_templates:
+        tid = str(tmpl["_id"])
+        due_day = int(tmpl.get("due_day", 1))
+        start_date = tmpl.get("start_date", "2000-01-01")
+        end_date = tmpl.get("end_date")
+
+        if start_date > today_str:
+            continue
+        if end_date and end_date < today_str:
+            continue
+
+        year, month = today_dt.year, today_dt.month
+        import calendar
+        max_days = calendar.monthrange(year, month)[1]
+        target_day = min(due_day, max_days)
+        target_date_str = f"{year:04d}-{month:02d}-{target_day:02d}"
+
+        existing = await db.expenses.find_one({
+            "recurring_expense_id": tid,
+            "date": {"$regex": f"^{current_ym}"}
+        })
+
+        if not existing:
+            status = "overdue" if today_str > target_date_str else "due"
+            exp_doc = {
+                "category": tmpl.get("category", "Rent & Utilities"),
+                "amount": float(tmpl.get("amount", 0)),
+                "date": target_date_str,
+                "payee": tmpl.get("payee", "Payee"),
+                "notes": tmpl.get("notes") or f"Auto-generated recurring expense for {current_ym}",
+                "receipt": None,
+                "is_recurring": True,
+                "recurring_expense_id": tid,
+                "status": status,
+                "created_at": now_iso(),
+                "created_by": "system_scheduler",
+            }
+            await db.expenses.insert_one(exp_doc)
+            generated_count += 1
+        else:
+            if existing.get("status") == "due" and today_str > target_date_str:
+                await db.expenses.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {"status": "overdue", "updated_at": now_iso()}}
+                )
+                updated_count += 1
+
+    return {"generated_count": generated_count, "updated_count": updated_count}
+
+
+@api.post("/expenses/recurring", status_code=201)
+async def create_recurring_expense(payload: RecurringExpenseIn, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    doc = {
+        "category": payload.category,
+        "payee": payload.payee,
+        "amount": float(payload.amount),
+        "frequency": payload.frequency,
+        "start_date": payload.start_date,
+        "due_day": int(payload.due_day),
+        "end_date": payload.end_date,
+        "active": payload.active,
+        "notes": payload.notes or "",
+        "created_at": now_iso(),
+        "created_by": u["email"],
+    }
+    res = await db.recurring_expenses.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await log_activity("CREATE", "recurring_expenses", f"Created recurring expense '{payload.category}' (₹{payload.amount}) for {payload.payee}", u["email"])
+    
+    await _check_and_generate_recurring_expenses()
+    return stringify(doc)
+
+
+@api.get("/expenses/recurring")
+async def list_recurring_expenses(request: Request, active_only: bool = False):
     await get_current_user(request)
-    q = {}
-    if category and category.lower() != "all":
-        q["category"] = category
-    if from_date or to_date:
-        date_q = {}
-        if from_date:
-            date_q["$gte"] = from_date
-        if to_date:
-            date_q["$lte"] = to_date
-        q["date"] = date_q
-    if search:
-        s_regex = {"$regex": search, "$options": "i"}
-        q["$or"] = [
-            {"payee": s_regex},
-            {"category": s_regex},
-            {"notes": s_regex},
-        ]
-    docs = await db.expenses.find(q).sort([("date", -1), ("created_at", -1)]).limit(limit).to_list(limit)
+    q = {"active": True} if active_only else {}
+    docs = await db.recurring_expenses.find(q).sort("created_at", -1).to_list(1000)
     return [stringify(d) for d in docs]
 
 
-@api.get("/expenses/{eid}")
-async def get_expense(eid: str, request: Request):
+@api.post("/expenses/check-recurring")
+async def trigger_check_recurring_expenses(request: Request):
     await get_current_user(request)
-    try:
-        doc = await db.expenses.find_one({"_id": oid(eid)})
-    except Exception:
-        raise HTTPException(404, "Expense not found")
+    res = await _check_and_generate_recurring_expenses()
+    return res
+
+
+@api.get("/expenses/due-queue")
+async def get_expenses_due_queue(request: Request):
+    await get_current_user(request)
+    await _check_and_generate_recurring_expenses()
+    docs = await db.expenses.find({"status": {"$in": ["due", "overdue"]}}).sort("date", 1).to_list(1000)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/expenses/recurring/{rid}")
+async def get_recurring_expense(rid: str, request: Request):
+    await get_current_user(request)
+    doc = await db.recurring_expenses.find_one({"_id": oid(rid)})
     if not doc:
-        raise HTTPException(404, "Expense not found")
+        raise HTTPException(404, "Recurring expense template not found")
     return stringify(doc)
 
 
-@api.put("/expenses/{eid}")
-async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
+@api.patch("/expenses/recurring/{rid}")
+async def update_recurring_expense(rid: str, payload: RecurringExpenseUpdate, request: Request):
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
-    try:
-        doc = await db.expenses.find_one({"_id": oid(eid)})
-    except Exception:
-        raise HTTPException(404, "Expense not found")
+    doc = await db.recurring_expenses.find_one({"_id": oid(rid)})
     if not doc:
-        raise HTTPException(404, "Expense not found")
+        raise HTTPException(404, "Recurring expense template not found")
     
-    update_data = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
-    if update_data:
-        update_data["updated_at"] = now_iso()
-        await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_data})
-        doc.update(update_data)
-        await log_activity("UPDATE", "expenses", f"Updated expense id={eid}", u["email"])
+    updates = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if updates:
+        updates["updated_at"] = now_iso()
+        await db.recurring_expenses.update_one({"_id": oid(rid)}, {"$set": updates})
+        doc.update(updates)
+        await log_activity("UPDATE", "recurring_expenses", f"Updated recurring expense template id={rid}", u["email"])
     return stringify(doc)
 
 
-@api.delete("/expenses/{eid}")
-async def delete_expense(eid: str, request: Request):
+@api.delete("/expenses/recurring/{rid}")
+async def delete_recurring_expense(rid: str, request: Request):
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
-    try:
-        doc = await db.expenses.find_one({"_id": oid(eid)})
-    except Exception:
-        raise HTTPException(404, "Expense not found")
+    doc = await db.recurring_expenses.find_one({"_id": oid(rid)})
     if not doc:
-        raise HTTPException(404, "Expense not found")
-    await db.expenses.delete_one({"_id": oid(eid)})
-    await log_activity("DELETE", "expenses", f"Deleted expense ₹{doc.get('amount')} ({doc.get('category')})", u["email"])
-    return {"ok": True, "deleted_id": eid}
+        raise HTTPException(404, "Recurring expense template not found")
+    await db.recurring_expenses.delete_one({"_id": oid(rid)})
+    await log_activity("DELETE", "recurring_expenses", f"Deleted recurring expense template id={rid}", u["email"])
+    return {"ok": True}
 
 
 @api.get("/reports/pnl")
@@ -14585,8 +15079,8 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
     except Exception as e:
         log.warning(f"Failed to calculate labor cost for P&L: {e}")
 
-    # 5. Expenses
-    exp_q = {}
+    # 5. Expenses (Confirmed only)
+    exp_q = {"status": {"$nin": ["due", "overdue"]}}
     if from_date or to_date:
         date_q = {}
         if from_date:
@@ -14595,9 +15089,15 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
             date_q["$lte"] = to_date
         exp_q["date"] = date_q
     expenses_docs = await db.expenses.find(exp_q).to_list(5000)
+
     total_expenses = 0.0
+    recurring_expenses_total = 0.0
+    variable_expenses_total = 0.0
+
     category_totals = defaultdict(float)
     monthly_expenses = defaultdict(float)
+    monthly_recurring_expenses = defaultdict(float)
+    monthly_variable_expenses = defaultdict(float)
     monthly_revenue = defaultdict(float)
     monthly_material = defaultdict(float)
     monthly_labor = defaultdict(float)
@@ -14606,9 +15106,18 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
         amt = float(exp.get("amount", 0) or 0)
         cat = exp.get("category", "Uncategorized")
         dt = str(exp.get("date", ""))[:7] or "Unknown"
+        is_rec = bool(exp.get("is_recurring")) or bool(exp.get("recurring_expense_id"))
+
         total_expenses += amt
         category_totals[cat] += amt
         monthly_expenses[dt] += amt
+
+        if is_rec:
+            recurring_expenses_total += amt
+            monthly_recurring_expenses[dt] += amt
+        else:
+            variable_expenses_total += amt
+            monthly_variable_expenses[dt] += amt
 
     for inv in invoices:
         val = float(inv.get("grand_total") or inv.get("total_amount") or inv.get("total") or 0)
@@ -14637,6 +15146,8 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
         m_mat = monthly_material.get(m, 0.0)
         m_lab = monthly_labor.get(m, 0.0)
         m_exp = monthly_expenses.get(m, 0.0)
+        m_rec_exp = monthly_recurring_expenses.get(m, 0.0)
+        m_var_exp = monthly_variable_expenses.get(m, 0.0)
         m_net = m_rev - m_mat - m_lab - m_exp
         monthly_breakdown.append({
             "month": m,
@@ -14644,6 +15155,8 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
             "material_cost": round(m_mat, 2),
             "labor_cost": round(m_lab, 2),
             "expenses": round(m_exp, 2),
+            "recurring_expenses": round(m_rec_exp, 2),
+            "variable_expenses": round(m_var_exp, 2),
             "net_profit": round(m_net, 2)
         })
 
@@ -14657,11 +15170,120 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
         "material_cost": round(material_cost, 2),
         "labor_cost": round(labor_cost, 2),
         "expenses": round(total_expenses, 2),
+        "recurring_expenses": round(recurring_expenses_total, 2),
+        "variable_expenses": round(variable_expenses_total, 2),
         "gross_profit": round(gross_profit, 2),
         "net_profit": round(net_profit, 2),
         "category_totals": {k: round(v, 2) for k, v in category_totals.items()},
         "monthly_breakdown": monthly_breakdown,
     }
+
+
+@api.get("/expenses")
+async def list_expenses(
+    request: Request,
+    category: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 1000
+):
+    await get_current_user(request)
+    q = {}
+    if category and category.lower() != "all":
+        q["category"] = category
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = from_date
+        if to_date:
+            date_q["$lte"] = to_date
+        q["date"] = date_q
+    if search:
+        s_regex = {"$regex": search, "$options": "i"}
+        q["$or"] = [
+            {"payee": s_regex},
+            {"category": s_regex},
+            {"notes": s_regex},
+        ]
+    docs = await db.expenses.find(q).sort([("date", -1), ("created_at", -1)]).limit(limit).to_list(limit)
+    return [stringify(d) for d in docs]
+
+
+@api.post("/expenses/{eid}/confirm")
+async def confirm_expense(eid: str, request: Request, payload: Optional[dict] = None):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    doc = await db.expenses.find_one({"_id": oid(eid)})
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    
+    update_fields = {"status": "confirmed", "confirmed_at": now_iso(), "confirmed_by": u["email"]}
+    if payload:
+        if "amount" in payload and payload["amount"] is not None:
+            update_fields["amount"] = float(payload["amount"])
+        if "payee" in payload and payload["payee"]:
+            update_fields["payee"] = payload["payee"]
+        if "date" in payload and payload["date"]:
+            update_fields["date"] = payload["date"]
+        if "notes" in payload:
+            update_fields["notes"] = payload["notes"]
+        if "receipt" in payload:
+            update_fields["receipt"] = payload["receipt"]
+        if "category" in payload and payload["category"]:
+            update_fields["category"] = payload["category"]
+
+    await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_fields})
+    doc = await db.expenses.find_one({"_id": oid(eid)})
+    await log_activity("CONFIRM", "expenses", f"Confirmed recurring expense id={eid} (₹{doc.get('amount')})", u["email"])
+    return stringify(doc)
+
+
+@api.get("/expenses/{eid}")
+async def get_expense(eid: str, request: Request):
+    await get_current_user(request)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    return stringify(doc)
+
+
+@api.put("/expenses/{eid}")
+async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    
+    update_data = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if update_data:
+        update_data["updated_at"] = now_iso()
+        await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_data})
+        doc.update(update_data)
+        await log_activity("UPDATE", "expenses", f"Updated expense id={eid}", u["email"])
+    return stringify(doc)
+
+
+@api.delete("/expenses/{eid}")
+async def delete_expense(eid: str, request: Request):
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+    try:
+        doc = await db.expenses.find_one({"_id": oid(eid)})
+    except Exception:
+        raise HTTPException(404, "Expense not found")
+    if not doc:
+        raise HTTPException(404, "Expense not found")
+    await db.expenses.delete_one({"_id": oid(eid)})
+    await log_activity("DELETE", "expenses", f"Deleted expense ₹{doc.get('amount')} ({doc.get('category')})", u["email"])
+    return {"ok": True, "deleted_id": eid}
 
 
 # ---------- ONLINE RECONCILIATION ENGINE & MULTI-REPORT API ----------
@@ -14968,6 +15590,15 @@ async def run_online_reconciliation(
         sku_map_dict[k] = sm.get("erp_style_code")
         if sm.get("marketplace_style_code"):
             sku_map_dict[sm["marketplace_style_code"]] = sm.get("erp_style_code")
+
+    db_sku_maps = await db.sku_map.find({}).to_list(5000)
+    for sm in db_sku_maps:
+        ext_sku = sm.get("external_sku")
+        st_code = sm.get("style_code") or sm.get("erp_style_code")
+        if ext_sku and st_code:
+            sku_map_dict[ext_sku] = st_code
+            sku_map_dict[ext_sku.strip().upper()] = st_code
+            sku_map_dict[ext_sku.strip().lower()] = st_code
 
     styles = await db.styles.find({}).to_list(1000)
     style_dict = {s.get("code"): s for s in styles if s.get("code")}
