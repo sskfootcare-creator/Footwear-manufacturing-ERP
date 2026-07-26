@@ -12131,18 +12131,12 @@ async def my_tasks(request: Request, scope: Optional[str] = "active"):
                 "is_rfp": rfp_by_me,
             })
 
-        all_completed = all(
-            (j.get("ready_for_pickup") or {}).get("worker_id") == caller_wid and (j.get("ready_for_pickup") or {}).get("role") == role
-            or curr_stage == "dispatched"
-            or (curr_idx > role_idx >= 0)
-            for j in sorted_jobs
-        )
-
-        is_active = (curr_stage == role and not any_rfp and curr_stage != "dispatched")
+        all_completed = any_rfp or (curr_stage == "dispatched")
+        is_active = not all_completed
 
         if scope == "active" and not is_active:
             continue
-        elif scope == "completed" and not all_completed and not any_rfp:
+        elif scope == "completed" and not all_completed:
             continue
         elif scope not in ("active", "completed", "all"):
             if not is_active:
@@ -12362,12 +12356,17 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
 
     current_stage = job.get("stage", "")
     assigns = job.get("assignments") or {}
-    stage_assign = assigns.get(current_stage, {})
+    
+    worker_role = None
+    for r, asgn in assigns.items():
+        if asgn.get("worker_id") == caller_wid:
+            worker_role = r
+            break
 
-    if stage_assign.get("worker_id") != caller_wid:
+    if not worker_role:
         raise HTTPException(
             status_code=403,
-            detail="You are not assigned to the current stage of this job"
+            detail="You are not assigned to this job"
         )
 
     po_num = job.get("po_number")
@@ -12375,9 +12374,9 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
     color = job.get("color") or ""
 
     if po_num and po_num != "—":
-        q = {"stage": current_stage, "po_number": po_num, "style_code": style_code, "color": color}
+        q = {"po_number": po_num, "style_code": style_code, "color": color}
         sibling_jobs = await db.production_jobs.find(q).to_list(500)
-        sibling_jobs = [j for j in sibling_jobs if (j.get("assignments") or {}).get(current_stage, {}).get("worker_id") == caller_wid]
+        sibling_jobs = [j for j in sibling_jobs if (j.get("assignments") or {}).get(worker_role, {}).get("worker_id") == caller_wid]
         if not sibling_jobs:
             sibling_jobs = [job]
     else:
@@ -12405,7 +12404,7 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
         total_marked += q_val
 
         rfp = {
-            "role": current_stage,
+            "role": worker_role,
             "worker_id": caller_wid,
             "worker_name": u.get("name", ""),
             "completed_qty": q_val,
