@@ -103,9 +103,7 @@ export default function POs() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const { data } = await http.post("/pos/extract", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const { data } = await http.post("/pos/extract", fd);
       const clientName = data.client_name || data.vendor_name || "";
       const validCodes = new Set(styles.map((s) => s.code.trim().toUpperCase()));
 
@@ -146,7 +144,7 @@ export default function POs() {
             unit_price: Number(li.unit_price || 0),
             amount: Number(
               li.amount ||
-                Number(li.quantity || 0) * Number(li.unit_price || 0),
+              Number(li.quantity || 0) * Number(li.unit_price || 0),
             ),
           };
         }),
@@ -253,7 +251,7 @@ export default function POs() {
               (li) =>
                 li.external_sku &&
                 li.external_sku.trim().toUpperCase() !==
-                  li.style_code.trim().toUpperCase(),
+                li.style_code.trim().toUpperCase(),
             )
             .map(async (li) => {
               const style = styles.find(
@@ -663,13 +661,12 @@ export default function POs() {
                       isStyleValid &&
                       li.external_sku &&
                       li.external_sku.trim().toUpperCase() !==
-                        li.style_code.trim().toUpperCase();
+                      li.style_code.trim().toUpperCase();
                     return (
                       <tr
                         key={i}
-                        className={`border-t border-slate-200 ${
-                          !isStyleValid ? "bg-red-50/40" : ""
-                        }`}
+                        className={`border-t border-slate-200 ${!isStyleValid ? "bg-red-50/40" : ""
+                          }`}
                         data-testid={`po-line-${i}`}
                       >
                         <td className="px-1 py-1 sticky left-0 z-10 bg-white">

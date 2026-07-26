@@ -9,21 +9,21 @@ import {
 
 // Match the same movement types as the main page
 const MOVEMENT_TYPES = [
-  { value: "production_in",    label: "Production In (+ready)" },
-  { value: "reserved",         label: "Reserved (+reserved)" },
-  { value: "unreserved",       label: "Unreserved (-reserved)" },
-  { value: "dispatched",       label: "Dispatched (-ready & -reserved)" },
-  { value: "return_in",        label: "Return In (+return)" },
+  { value: "production_in", label: "Production In (+ready)" },
+  { value: "reserved", label: "Reserved (+reserved)" },
+  { value: "unreserved", label: "Unreserved (-reserved)" },
+  { value: "dispatched", label: "Dispatched (-ready & -reserved)" },
+  { value: "return_in", label: "Return In (+return)" },
   { value: "return_restocked", label: "Return Restocked (-return, +ready)" },
-  { value: "return_damaged",   label: "Return Damaged (-return, +damaged)" },
-  { value: "liquidation_out",  label: "Liquidation Out (-ready, +liquidation)" },
+  { value: "return_damaged", label: "Return Damaged (-return, +damaged)" },
+  { value: "liquidation_out", label: "Liquidation Out (-ready, +liquidation)" },
 ];
 
 const sortSizes = (arr) => [...arr].sort((a, b) => {
   const na = parseFloat(a), nb = parseFloat(b);
   if (!isNaN(na) && !isNaN(nb)) return na - nb;
   if (!isNaN(na)) return -1;
-  if (!isNaN(nb)) return  1;
+  if (!isNaN(nb)) return 1;
   return String(a).localeCompare(String(b));
 });
 
@@ -112,17 +112,17 @@ function ChipInput({ label, tokens, onChange, placeholder, testId }) {
 // TAB 1 — MATRIX ENTRY
 // ═══════════════════════════════════════════════════════════
 function MatrixEntryTab({ styles, initialStyleId, onDone }) {
-  const [styleId, setStyleId]           = useState(initialStyleId || "");
+  const [styleId, setStyleId] = useState(initialStyleId || "");
   const [movementType, setMovementType] = useState("production_in");
-  const [colors, setColors]             = useState([]);
-  const [sizes, setSizes]               = useState([]);
-  const [grid, setGrid]                 = useState({});  // "color|size" → qty (number as string)
-  const [refId, setRefId]               = useState("");
-  const [notes, setNotes]               = useState("");
+  const [colors, setColors] = useState([]);
+  const [sizes, setSizes] = useState([]);
+  const [grid, setGrid] = useState({});  // "color|size" → qty (number as string)
+  const [refId, setRefId] = useState("");
+  const [notes, setNotes] = useState("");
   const [minStockLevel, setMinStockLevel] = useState(25);
-  const [busy, setBusy]                 = useState(false);
-  const [result, setResult]             = useState(null);
-  const [prefilling, setPrefilling]     = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [prefilling, setPrefilling] = useState(false);
 
   // When style changes, prefill colors/sizes with what already exists in FG for that style
   useEffect(() => {
@@ -177,14 +177,14 @@ function MatrixEntryTab({ styles, initialStyleId, onDone }) {
       const q = parseInt(raw || "0", 10);
       if (!isNaN(q) && q > 0) {
         movements.push({
-          style_id:       styleId,
-          color:          c,
-          size:           s,
-          movement_type:  movementType,
-          quantity:       q,
+          style_id: styleId,
+          color: c,
+          size: s,
+          movement_type: movementType,
+          quantity: q,
           reference_type: "manual",
-          reference_id:   refId.trim(),
-          notes:          notes.trim(),
+          reference_id: refId.trim(),
+          notes: notes.trim(),
         });
       }
     }
@@ -420,11 +420,11 @@ function MatrixEntryTab({ styles, initialStyleId, onDone }) {
 // TAB 2 — CSV UPLOAD
 // ═══════════════════════════════════════════════════════════
 function CsvUploadTab({ onDone }) {
-  const [file, setFile]       = useState(null);
+  const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);   // { parsed, errors, summary }
-  const [result, setResult]   = useState(null);   // { summary, results, parse_errors }
-  const [busy, setBusy]       = useState(false);
-  const [error, setError]     = useState("");
+  const [result, setResult] = useState(null);   // { summary, results, parse_errors }
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   const downloadTemplate = async () => {
     try {
@@ -446,9 +446,7 @@ function CsvUploadTab({ onDone }) {
     try {
       const fd = new FormData();
       fd.append("file", f);
-      const r = await http.post("/fg-inventory/import-csv?dry_run=true", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const r = await http.post("/fg-inventory/import-csv?dry_run=true", fd);
       setPreview(r.data);
     } catch (e) {
       setError(friendlyAxiosError(e));
@@ -462,9 +460,7 @@ function CsvUploadTab({ onDone }) {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const r = await http.post("/fg-inventory/import-csv?dry_run=false", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const r = await http.post("/fg-inventory/import-csv?dry_run=false", fd,);
       setResult(r.data);
       onDone && onDone();
     } catch (e) {
@@ -665,22 +661,20 @@ export default function AddStockDrawer({ styles = [], initialStyleId = "", onClo
           <button
             data-testid="tab-matrix"
             onClick={() => setTab("matrix")}
-            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-4 transition-colors ${
-              tab === "matrix"
-                ? "text-[#0F172A] border-[#C27842]"
-                : "text-slate-500 border-transparent hover:text-slate-900"
-            }`}
+            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-4 transition-colors ${tab === "matrix"
+              ? "text-[#0F172A] border-[#C27842]"
+              : "text-slate-500 border-transparent hover:text-slate-900"
+              }`}
           >
             <span className="flex items-center gap-1.5"><Grid3x3 className="w-4 h-4" /> Matrix Entry</span>
           </button>
           <button
             data-testid="tab-csv"
             onClick={() => setTab("csv")}
-            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-4 transition-colors ${
-              tab === "csv"
-                ? "text-[#0F172A] border-[#C27842]"
-                : "text-slate-500 border-transparent hover:text-slate-900"
-            }`}
+            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-4 transition-colors ${tab === "csv"
+              ? "text-[#0F172A] border-[#C27842]"
+              : "text-slate-500 border-transparent hover:text-slate-900"
+              }`}
           >
             <span className="flex items-center gap-1.5"><FileUp className="w-4 h-4" /> CSV Upload</span>
           </button>

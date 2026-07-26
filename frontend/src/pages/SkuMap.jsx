@@ -69,22 +69,22 @@ function KVPairs({ label, rows, onChange }) {
 
 // ── Unmapped tab ──────────────────────────────────────────
 function UnmappedTab({ styles, onDone }) {
-  const [groups, setGroups]     = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [groups, setGroups] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState({});
 
   // Map modal states
   const [mappingTarget, setMappingTarget] = useState(null);
-  const [mapMode, setMapMode]             = useState("existing"); // "existing" | "new"
+  const [mapMode, setMapMode] = useState("existing"); // "existing" | "new"
   const [selectedStyleId, setSelectedStyleId] = useState("");
-  const [newStyleForm, setNewStyleForm]   = useState({
+  const [newStyleForm, setNewStyleForm] = useState({
     code: "", name: "", category: "Footwear", description: "",
     base_size: "7", overhead_pct: 8, packing_cost: 12, margin_pct: 25, gst_pct: 5,
     default_pairs_per_carton: {}
   });
-  const [styleSearch, setStyleSearch]     = useState("");
-  const [submitError, setSubmitError]     = useState("");
-  const [submitting, setSubmitting]       = useState(false);
+  const [styleSearch, setStyleSearch] = useState("");
+  const [submitError, setSubmitError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -404,12 +404,12 @@ function UnmappedTab({ styles, onDone }) {
 
 // ── Bulk import drawer ────────────────────────────────────
 function BulkImportDrawer({ onClose, onDone }) {
-  const [srcType, setSrcType]   = useState("b2b_client");
-  const [srcName, setSrcName]   = useState("");
-  const [file, setFile]         = useState(null);
+  const [srcType, setSrcType] = useState("b2b_client");
+  const [srcName, setSrcName] = useState("");
+  const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [result, setResult]     = useState(null);
-  const [error, setError]       = useState("");
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
   const fileRef = useRef();
 
   const CSV_TEMPLATE = `external_sku,style_code,external_style_name,color_from,color_to,size_from,size_to
@@ -426,9 +426,7 @@ TC-002,SSK-MOC-02,Moccasin Navy,,,,`;
       fd.append("file", file);
       fd.append("source_type", srcType);
       fd.append("source_name", srcName.trim());
-      const r = await http.post("/sku-map/bulk", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const r = await http.post("/sku-map/bulk", fd);
       setResult(r.data);
       onDone();
     } catch (e) {
@@ -535,30 +533,30 @@ TC-002,SSK-MOC-02,Moccasin Navy,,,,`;
 
 // ── main page ─────────────────────────────────────────────
 export default function SkuMap() {
-  const [mappings, setMappings]   = useState([]);
-  const [styles, setStyles]       = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [open, setOpen]           = useState(false);
-  const [bulkOpen, setBulkOpen]   = useState(false);
-  const [editId, setEditId]       = useState(null);
-  const [form, setForm]           = useState(emptyForm);
+  const [mappings, setMappings] = useState([]);
+  const [styles, setStyles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [form, setForm] = useState(emptyForm);
   const [formError, setFormError] = useState("");
-  const [saving, setSaving]       = useState(false);
-  const [confirm, setConfirm]     = useState(null);
-  const [tab, setTab]             = useState("mappings"); // "mappings" | "unmapped"
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const [tab, setTab] = useState("mappings"); // "mappings" | "unmapped"
 
   // filters
-  const [filterType, setFilterType]     = useState("");
+  const [filterType, setFilterType] = useState("");
   const [filterSource, setFilterSource] = useState("");
-  const [searchQuery, setSearchQuery]   = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (filterType)   params.append("source_type", filterType);
+      if (filterType) params.append("source_type", filterType);
       if (filterSource) params.append("source_name", filterSource);
-      if (searchQuery)  params.append("search",      searchQuery);
+      if (searchQuery) params.append("search", searchQuery);
       const qs = params.toString() ? `?${params}` : "";
       const [mRes, sRes] = await Promise.all([
         http.get(`/sku-map${qs}`),
@@ -584,8 +582,8 @@ export default function SkuMap() {
 
   async function handleSave() {
     setFormError("");
-    if (!form.style_id.trim())     return setFormError("Please select a style.");
-    if (!form.source_name.trim())  return setFormError("Source name is required.");
+    if (!form.style_id.trim()) return setFormError("Please select a style.");
+    if (!form.source_name.trim()) return setFormError("Source name is required.");
     if (!form.external_sku.trim()) return setFormError("External SKU is required.");
     setSaving(true);
     try {
@@ -593,7 +591,7 @@ export default function SkuMap() {
         await http.put(`/sku-map/${editId}`, {
           external_style_name: form.external_style_name,
           color_map: rowsToDict(form.color_map),
-          size_map:  rowsToDict(form.size_map),
+          size_map: rowsToDict(form.size_map),
         });
       } else {
         await http.post("/sku-map", {
@@ -621,10 +619,9 @@ export default function SkuMap() {
   const selectedStyle = styles.find((s) => s.id === form.style_id);
 
   const TAB_CLS = (t) =>
-    `px-5 py-3 text-sm font-bold border-b-2 transition-colors ${
-      tab === t
-        ? "border-[#C27842] text-slate-900"
-        : "border-transparent text-slate-500 hover:text-slate-900"
+    `px-5 py-3 text-sm font-bold border-b-2 transition-colors ${tab === t
+      ? "border-[#C27842] text-slate-900"
+      : "border-transparent text-slate-500 hover:text-slate-900"
     }`;
 
   return (
@@ -716,7 +713,7 @@ export default function SkuMap() {
                   <tbody className="divide-y divide-slate-100">
                     {mappings.map((m) => {
                       const colorEntries = Object.entries(m.color_map || {});
-                      const sizeEntries  = Object.entries(m.size_map  || {});
+                      const sizeEntries = Object.entries(m.size_map || {});
                       return (
                         <tr key={m.id} className="hover:bg-slate-50 transition-colors">
                           <td className="px-4 py-3">

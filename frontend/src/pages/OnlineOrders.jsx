@@ -13,17 +13,17 @@ import { Link } from "react-router-dom";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const CHANNEL_COLORS = {
-  myntra:   "pink",
+  myntra: "pink",
   flipkart: "blue",
-  nykaa:    "orange",
-  ajio:     "purple",
-  amazon:   "yellow",
-  website:  "slate",
+  nykaa: "orange",
+  ajio: "purple",
+  amazon: "yellow",
+  website: "slate",
 };
 
 const STATUS_COLORS = {
   matched: "green",
-  mapped:  "blue",
+  mapped: "blue",
   unmatched: "red",
 };
 
@@ -116,15 +116,15 @@ const ONLINE_ORDERS_COLUMNS = [
 // /order-import-formats so the admin can onboard it without a code change.
 // ═══════════════════════════════════════════════════════════════════════
 function ImportDrawer({ onClose, onDone }) {
-  const [configs, setConfigs]     = useState(null); // null = still loading
-  const [platform, setPlatform]   = useState("");
-  const [file, setFile]           = useState(null);
-  const [step, setStep]           = useState("choose"); // choose | preview | done
-  const [preview, setPreview]     = useState(null);
+  const [configs, setConfigs] = useState(null); // null = still loading
+  const [platform, setPlatform] = useState("");
+  const [file, setFile] = useState(null);
+  const [step, setStep] = useState("choose"); // choose | preview | done
+  const [preview, setPreview] = useState(null);
   const [committing, setCommitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [committed, setCommitted] = useState(null);
-  const [error, setError]         = useState("");
+  const [error, setError] = useState("");
   const fileRef = useRef();
 
   useEffect(() => {
@@ -154,9 +154,7 @@ function ImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/import-configured?platform=${encodeURIComponent(platform)}&dry_run=true`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setPreview(r.data);
       setStep("preview");
     } catch (e) {
@@ -175,9 +173,7 @@ function ImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/import-configured?platform=${encodeURIComponent(platform)}&dry_run=false`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setCommitted(r.data);
       setStep("done");
       onDone();
@@ -202,9 +198,9 @@ function ImportDrawer({ onClose, onDone }) {
     <Drawer
       onClose={onClose}
       title={
-        step === "choose"  ? "Import orders — step 1: choose file" :
-        step === "preview" ? "Import orders — step 2: review & commit" :
-                             "Import orders — done"
+        step === "choose" ? "Import orders — step 1: choose file" :
+          step === "preview" ? "Import orders — step 2: review & commit" :
+            "Import orders — done"
       }
       width="max-w-4xl"
     >
@@ -349,7 +345,7 @@ function ImportDrawer({ onClose, onDone }) {
               <div className="text-xs font-mono mb-1">batch: {committed.import_batch_id}</div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3">
                 <MiniStat label="orders" value={committed.committed?.orders_created ?? 0} accent="#0F172A" />
-                <MiniStat label="items"  value={committed.committed?.items_created  ?? 0} accent="#C27842" />
+                <MiniStat label="items" value={committed.committed?.items_created ?? 0} accent="#C27842" />
                 <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
               </div>
             </div>
@@ -397,11 +393,11 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
 
       {/* Summary stats */}
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-        <MiniStat label="total"       value={stats.total_rows_read     ?? 0} accent="#0F172A" />
-        <MiniStat label="matched"     value={stats.matched             ?? 0} accent="#16A34A" />
-        <MiniStat label="unmatched"   value={stats.unmatched           ?? 0} accent="#DC2626" />
-        <MiniStat label="order rows"  value={stats.order_style_rows    ?? 0} accent="#2563EB" />
-        <MiniStat label="picklist rows" value={stats.picklist_rows     ?? 0} accent="#7C3AED" />
+        <MiniStat label="total" value={stats.total_rows_read ?? 0} accent="#0F172A" />
+        <MiniStat label="matched" value={stats.matched ?? 0} accent="#16A34A" />
+        <MiniStat label="unmatched" value={stats.unmatched ?? 0} accent="#DC2626" />
+        <MiniStat label="order rows" value={stats.order_style_rows ?? 0} accent="#2563EB" />
+        <MiniStat label="picklist rows" value={stats.picklist_rows ?? 0} accent="#7C3AED" />
         <MiniStat label="distinct orders" value={stats.distinct_orders ?? 0} accent="#C27842" />
       </div>
 
@@ -434,9 +430,9 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
             </thead>
             <tbody>
               {rows.slice(0, 300).map((r, i) => {
-                const isOrderRow    = !!r.order_id;
+                const isOrderRow = !!r.order_id;
                 const isPicklistRow = !isOrderRow;
-                const matched       = !!r.matched;
+                const matched = !!r.matched;
                 return (
                   <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
                     <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
@@ -516,7 +512,7 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
           <span className="flex items-center justify-center gap-2">
             <Upload className="w-4 h-4" />
             {committing ? "Committing…" :
-             `Commit ${rows.length} row${rows.length !== 1 ? "s" : ""} → online_orders`}
+              `Commit ${rows.length} row${rows.length !== 1 ? "s" : ""} → online_orders`}
           </span>
         </BtnPrimary>
       </div>
@@ -535,15 +531,15 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
 //   - Rows are always 1 unit per row (unlike picklist which can be qty>1)
 // ═══════════════════════════════════════════════════════════════════════
 function DispatchImportDrawer({ onClose, onDone }) {
-  const [configs, setConfigs]     = useState(null);
-  const [platform, setPlatform]   = useState("");
-  const [file, setFile]           = useState(null);
-  const [step, setStep]           = useState("choose");
-  const [preview, setPreview]     = useState(null);
+  const [configs, setConfigs] = useState(null);
+  const [platform, setPlatform] = useState("");
+  const [file, setFile] = useState(null);
+  const [step, setStep] = useState("choose");
+  const [preview, setPreview] = useState(null);
   const [committing, setCommitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [committed, setCommitted] = useState(null);
-  const [error, setError]         = useState("");
+  const [error, setError] = useState("");
   const fileRef = useRef();
 
   useEffect(() => {
@@ -573,9 +569,7 @@ function DispatchImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/dispatch-import?platform=${encodeURIComponent(platform)}&dry_run=true`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setPreview(r.data);
       setStep("preview");
     } catch (e) {
@@ -594,9 +588,7 @@ function DispatchImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/dispatch-import?platform=${encodeURIComponent(platform)}&dry_run=false`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setCommitted(r.data);
       setStep("done");
       onDone();
@@ -618,9 +610,9 @@ function DispatchImportDrawer({ onClose, onDone }) {
     <Drawer
       onClose={onClose}
       title={
-        step === "choose"  ? "Import daily dispatch — step 1: choose file" :
-        step === "preview" ? "Import daily dispatch — step 2: review & commit" :
-                             "Dispatch import — done"
+        step === "choose" ? "Import daily dispatch — step 1: choose file" :
+          step === "preview" ? "Import daily dispatch — step 2: review & commit" :
+            "Dispatch import — done"
       }
       width="max-w-5xl"
     >
@@ -775,10 +767,10 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
       </div>
 
       <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
-        <MiniStat label="total rows"        value={stats.total_rows_read         ?? 0} accent="#0F172A" />
-        <MiniStat label="matched"           value={stats.matched                 ?? 0} accent="#16A34A" />
-        <MiniStat label="unmatched"         value={stats.unmatched               ?? 0} accent="#DC2626" />
-        <MiniStat label="empty leaf_sku"    value={stats.empty_leaf_sku          ?? 0} accent="#D97706" />
+        <MiniStat label="total rows" value={stats.total_rows_read ?? 0} accent="#0F172A" />
+        <MiniStat label="matched" value={stats.matched ?? 0} accent="#16A34A" />
+        <MiniStat label="unmatched" value={stats.unmatched ?? 0} accent="#DC2626" />
+        <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
         <MiniStat label="distinct releases" value={stats.distinct_order_releases ?? 0} accent="#2563EB" />
       </div>
 
@@ -878,7 +870,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
           <span className="flex items-center justify-center gap-2">
             <Truck className="w-4 h-4" />
             {committing ? "Committing…" :
-             `Commit dispatch — decrement ready_stock for ${stats.matched} matched row${stats.matched !== 1 ? "s" : ""}`}
+              `Commit dispatch — decrement ready_stock for ${stats.matched} matched row${stats.matched !== 1 ? "s" : ""}`}
           </span>
         </BtnPrimary>
       </div>
@@ -897,15 +889,15 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
 // was_returned_to_stock row (idempotent per (order_release_id, leaf_sku)).
 // ═══════════════════════════════════════════════════════════════════════
 function MonthlyReportDrawer({ onClose, onDone }) {
-  const [configs, setConfigs]     = useState(null);
-  const [platform, setPlatform]   = useState("");
-  const [file, setFile]           = useState(null);
-  const [step, setStep]           = useState("choose");
-  const [preview, setPreview]     = useState(null);
+  const [configs, setConfigs] = useState(null);
+  const [platform, setPlatform] = useState("");
+  const [file, setFile] = useState(null);
+  const [step, setStep] = useState("choose");
+  const [preview, setPreview] = useState(null);
   const [committing, setCommitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [committed, setCommitted] = useState(null);
-  const [error, setError]         = useState("");
+  const [error, setError] = useState("");
   const fileRef = useRef();
 
   useEffect(() => {
@@ -929,8 +921,7 @@ function MonthlyReportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/monthly-report-import?platform=${encodeURIComponent(platform)}&dry_run=true`,
-        fd, { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setPreview(r.data);
       setStep("preview");
     } catch (e) {
@@ -947,8 +938,7 @@ function MonthlyReportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/monthly-report-import?platform=${encodeURIComponent(platform)}&dry_run=false`,
-        fd, { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setCommitted(r.data);
       setStep("done");
       onDone();
@@ -965,9 +955,9 @@ function MonthlyReportDrawer({ onClose, onDone }) {
     <Drawer
       onClose={onClose}
       title={
-        step === "choose"  ? "Monthly reconciliation — step 1: choose file" :
-        step === "preview" ? "Monthly reconciliation — step 2: review & commit" :
-                             "Monthly reconciliation — done"
+        step === "choose" ? "Monthly reconciliation — step 1: choose file" :
+          step === "preview" ? "Monthly reconciliation — step 2: review & commit" :
+            "Monthly reconciliation — done"
       }
       width="max-w-6xl"
     >
@@ -1070,12 +1060,12 @@ function MonthlyReportDrawer({ onClose, onDone }) {
               </div>
               <div className="text-xs font-mono mb-3">batch: {committed.import_batch_id}</div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <MiniStat label="items upserted"     value={committed.committed?.items_upserted        ?? 0} accent="#0F172A" />
-                <MiniStat label="orders upserted"    value={committed.committed?.orders_upserted       ?? 0} accent="#C27842" />
-                <MiniStat label="returns restocked"  value={committed.committed?.returns_posted        ?? 0} accent="#16A34A" />
-                <MiniStat label="returns damaged"    value={committed.committed?.return_damaged_posted ?? 0} accent="#B91C1C" />
-                <MiniStat label="idempotent skipped" value={committed.committed?.returns_skipped       ?? 0} accent="#64748B" />
-                <MiniStat label="exceptions"         value={committed.committed?.exceptions_queued     ?? 0} accent="#DC2626" />
+                <MiniStat label="items upserted" value={committed.committed?.items_upserted ?? 0} accent="#0F172A" />
+                <MiniStat label="orders upserted" value={committed.committed?.orders_upserted ?? 0} accent="#C27842" />
+                <MiniStat label="returns restocked" value={committed.committed?.returns_posted ?? 0} accent="#16A34A" />
+                <MiniStat label="returns damaged" value={committed.committed?.return_damaged_posted ?? 0} accent="#B91C1C" />
+                <MiniStat label="idempotent skipped" value={committed.committed?.returns_skipped ?? 0} accent="#64748B" />
+                <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
               </div>
             </div>
             <div className="flex gap-3">
@@ -1092,7 +1082,7 @@ function MonthlyReportDrawer({ onClose, onDone }) {
 }
 
 function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
-  const rows  = preview.rows  || [];
+  const rows = preview.rows || [];
   const stats = preview.stats || {};
   const breakdown = stats.reason_breakdown || {};
 
@@ -1107,12 +1097,12 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
       <FunnelViz stats={stats} breakdown={breakdown} />
 
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-        <MiniStat label="total rows"        value={stats.total_rows              ?? 0} accent="#0F172A" />
-        <MiniStat label="matched sku"       value={stats.matched                 ?? 0} accent="#16A34A" />
-        <MiniStat label="unmatched sku"     value={stats.unmatched               ?? 0} accent="#DC2626" />
+        <MiniStat label="total rows" value={stats.total_rows ?? 0} accent="#0F172A" />
+        <MiniStat label="matched sku" value={stats.matched ?? 0} accent="#16A34A" />
+        <MiniStat label="unmatched sku" value={stats.unmatched ?? 0} accent="#DC2626" />
         <MiniStat label="never touched inv" value={stats.never_touched_inventory ?? 0} accent="#64748B" />
-        <MiniStat label="pending in transit"value={stats.pending                 ?? 0} accent="#EAB308" />
-        <MiniStat label="empty leaf_sku"    value={stats.empty_leaf_sku          ?? 0} accent="#D97706" />
+        <MiniStat label="pending in transit" value={stats.pending ?? 0} accent="#EAB308" />
+        <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
       </div>
 
       {/* Rows table — status columns instead of dispatch fields */}
@@ -1152,8 +1142,8 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
                   <td className="p-2 text-[11px] whitespace-nowrap">{r.delivered_on || "—"}</td>
                   <td className="p-2 text-[11px] whitespace-nowrap">
                     {r.return_creation_date && <div className="text-red-700">ret: {r.return_creation_date}</div>}
-                    {r.rto_creation_date    && <div className="text-red-700">rto: {r.rto_creation_date}</div>}
-                    {r.cancelled_on         && <div className="text-amber-700">cxl: {r.cancelled_on}</div>}
+                    {r.rto_creation_date && <div className="text-red-700">rto: {r.rto_creation_date}</div>}
+                    {r.cancelled_on && <div className="text-amber-700">cxl: {r.cancelled_on}</div>}
                     {(!r.return_creation_date && !r.rto_creation_date && !r.cancelled_on) && "—"}
                   </td>
                   <td className="p-2">
@@ -1194,7 +1184,7 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
           <span className="flex items-center justify-center gap-2">
             <ScrollText className="w-4 h-4" />
             {committing ? "Committing…" :
-             `Commit reconciliation — ${stats.returned_to_stock} return-restocks + ${stats.matched} classifications`}
+              `Commit reconciliation — ${stats.returned_to_stock} return-restocks + ${stats.matched} classifications`}
           </span>
         </BtnPrimary>
       </div>
@@ -1211,30 +1201,30 @@ function ClassificationBadges({ r }) {
       </div>
     );
   }
-  if (r.is_net_sold)            return <Badge color="green">net sold</Badge>;
-  if (r.was_returned_to_stock)  return <Badge color="red">returned · {r.return_reason}</Badge>;
-  if (r.is_pending)             return <Badge color="yellow">pending</Badge>;
+  if (r.is_net_sold) return <Badge color="green">net sold</Badge>;
+  if (r.was_returned_to_stock) return <Badge color="red">returned · {r.return_reason}</Badge>;
+  if (r.is_pending) return <Badge color="yellow">pending</Badge>;
   if (r.never_touched_inventory) return <Badge color="slate">never packed</Badge>;
   return <Badge color="slate">—</Badge>;
 }
 
 // A compact funnel: total → packed → minus reversals → net sold.
 function FunnelViz({ stats, breakdown }) {
-  const total       = stats.total_rows              ?? 0;
-  const packed      = stats.packed                  ?? 0;
-  const returned    = stats.returned_to_stock       ?? 0;
-  const pending     = stats.pending                 ?? 0;
-  const netSold     = stats.net_sold                ?? 0;
-  const neverTouched= stats.never_touched_inventory ?? 0;
+  const total = stats.total_rows ?? 0;
+  const packed = stats.packed ?? 0;
+  const returned = stats.returned_to_stock ?? 0;
+  const pending = stats.pending ?? 0;
+  const netSold = stats.net_sold ?? 0;
+  const neverTouched = stats.never_touched_inventory ?? 0;
   const barW = (n) => (total > 0 ? Math.max(4, Math.round((n / total) * 100)) : 0);
 
   const stages = [
-    { label: "Total rows",       count: total,      color: "bg-slate-700",     text: "text-white"    },
+    { label: "Total rows", count: total, color: "bg-slate-700", text: "text-white" },
     { label: "Never packed (ignore)", count: neverTouched, color: "bg-slate-300", text: "text-slate-800" },
-    { label: "Packed",           count: packed,     color: "bg-blue-600",      text: "text-white"    },
-    { label: "− Returned to stock", count: -returned, color: "bg-red-500",     text: "text-white",  sub: breakdown },
-    { label: "− Still in transit",  count: -pending,  color: "bg-amber-400",   text: "text-amber-900" },
-    { label: "= Net sold",       count: netSold,    color: "bg-emerald-600",   text: "text-white",   emphasize: true },
+    { label: "Packed", count: packed, color: "bg-blue-600", text: "text-white" },
+    { label: "− Returned to stock", count: -returned, color: "bg-red-500", text: "text-white", sub: breakdown },
+    { label: "− Still in transit", count: -pending, color: "bg-amber-400", text: "text-amber-900" },
+    { label: "= Net sold", count: netSold, color: "bg-emerald-600", text: "text-white", emphasize: true },
   ];
 
   return (
@@ -1246,7 +1236,7 @@ function FunnelViz({ stats, breakdown }) {
             {s.label}
           </div>
           <div className={`h-6 flex items-center px-2 font-mono text-xs font-bold ${s.color} ${s.text}`}
-               style={{ width: `${Math.min(100, Math.abs(barW(s.count)))}%`, minWidth: 40 }}>
+            style={{ width: `${Math.min(100, Math.abs(barW(s.count)))}%`, minWidth: 40 }}>
             {s.count >= 0 ? s.count : `${s.count}`}
           </div>
           {s.sub && Object.values(s.sub).some((v) => v > 0) && (
@@ -1270,7 +1260,7 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
     try {
       const params = new URLSearchParams();
       if (platform) params.append("platform", platform);
-      if (month)    params.append("month", month);
+      if (month) params.append("month", month);
       const r = await http.get(`/online-orders/reconciliation-summary?${params.toString()}`);
       setData(r.data);
     } catch { setData(null); }
@@ -1331,9 +1321,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/settlement-import?platform=${platform}&dry_run=true`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setPreview(r.data);
     } catch (e) {
       setError(e.response?.data?.detail || e.message);
@@ -1351,9 +1339,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
       fd.append("file", file);
       const r = await http.post(
         `/online-orders/settlement-import?platform=${platform}&dry_run=false`,
-        fd,
-        { headers: { "Content-Type": "multipart/form-data" } }
-      );
+        fd);
       setCommitted(r.data);
       if (onDone) onDone();
     } catch (e) {
@@ -1730,21 +1716,21 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
 
 // ── Main page ─────────────────────────────────────────────
 export default function OnlineOrders() {
-  const [tab, setTab]           = useState("orders"); // "orders" | "reconciliation" | "settlement"
-  const [jobs, setJobs]         = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [tab, setTab] = useState("orders"); // "orders" | "reconciliation" | "settlement"
+  const [jobs, setJobs] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(false);
-  const [monthlyOpen, setMonthlyOpen]   = useState(false);
+  const [monthlyOpen, setMonthlyOpen] = useState(false);
   const [settlementOpen, setSettlementOpen] = useState(false);
   const [reconPlatform, setReconPlatform] = useState("");
-  const [reconMonth, setReconMonth]       = useState("");
+  const [reconMonth, setReconMonth] = useState("");
   const [settlePlatform, setSettlePlatform] = useState("");
 
-  const [filterChannel, setFilterChannel]   = useState("");
-  const [filterStatus, setFilterStatus]     = useState("");
-  const [filterFrom, setFilterFrom]         = useState("");
-  const [filterTo, setFilterTo]             = useState("");
+  const [filterChannel, setFilterChannel] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo, setFilterTo] = useState("");
 
   // channel filter is now derived from active configs so it stays in sync
   const [channelOptions, setChannelOptions] = useState(["myntra", "flipkart", "nykaa", "website"]);
@@ -1767,9 +1753,9 @@ export default function OnlineOrders() {
     try {
       const params = new URLSearchParams();
       if (filterChannel) params.append("channel", filterChannel);
-      if (filterStatus)  params.append("style_match_status", filterStatus);
-      if (filterFrom)    params.append("from_date", filterFrom);
-      if (filterTo)      params.append("to_date",   filterTo);
+      if (filterStatus) params.append("style_match_status", filterStatus);
+      if (filterFrom) params.append("from_date", filterFrom);
+      if (filterTo) params.append("to_date", filterTo);
       const qs = params.toString() ? `?${params}` : "";
       const r = await http.get(`/online-orders${qs}`);
       setJobs(r.data);
@@ -1796,8 +1782,8 @@ export default function OnlineOrders() {
         subtitle={tab === "orders"
           ? "Config-driven marketplace order & picklist imports"
           : tab === "reconciliation"
-          ? "Monthly report → returns/RTO/cancellations → inventory reconciliation"
-          : "Settlement advice payout import → order matching & variance reporting"}
+            ? "Monthly report → returns/RTO/cancellations → inventory reconciliation"
+            : "Settlement advice payout import → order matching & variance reporting"}
         testId="online-orders-header"
         action={
           <div className="flex gap-2">
@@ -1838,18 +1824,17 @@ export default function OnlineOrders() {
       {/* ── Tab bar ── */}
       <div className="px-4 sm:px-8 bg-white border-b-2 border-slate-200 flex gap-1 overflow-x-auto">
         {[
-          { key: "orders",         label: "Orders",                     icon: ShoppingBag },
-          { key: "reconciliation", label: "Monthly Reconciliation",    icon: ScrollText  },
-          { key: "settlement",     label: "Settlement Reconciliation", icon: DollarSign  },
+          { key: "orders", label: "Orders", icon: ShoppingBag },
+          { key: "reconciliation", label: "Monthly Reconciliation", icon: ScrollText },
+          { key: "settlement", label: "Settlement Reconciliation", icon: DollarSign },
         ].map((t) => {
           const Ic = t.icon; const active = tab === t.key;
           return (
             <button key={t.key} onClick={() => setTab(t.key)}
-              className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-0.5 transition-colors inline-flex items-center gap-2 whitespace-nowrap ${
-                active
+              className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-0.5 transition-colors inline-flex items-center gap-2 whitespace-nowrap ${active
                   ? "border-slate-900 text-slate-900"
                   : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
+                }`}
               data-testid={`oo-tab-${t.key}`}>
               <Ic className="w-4 h-4" /> {t.label}
             </button>
@@ -1912,87 +1897,87 @@ export default function OnlineOrders() {
         </div>
       ) : (
         <>
-      {/* Stats strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 px-4 sm:px-8 py-5">
-        {[
-          { label: "Total Jobs", value: stats.total, accent: "#0F172A" },
-          { label: "Total Qty", value: stats.qty, accent: "#C27842" },
-          { label: "Resolved", value: stats.resolved, accent: "#16A34A" },
-          { label: "Unresolved", value: stats.unresolved, accent: "#DC2626" },
-        ].map(({ label, value, accent }) => (
-          <Card key={label} className="p-4 relative overflow-hidden">
-            <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ background: accent }} />
-            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">{label}</div>
-            <div className="font-mono text-2xl font-bold mt-2">{value}</div>
-          </Card>
-        ))}
-      </div>
+          {/* Stats strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 px-4 sm:px-8 py-5">
+            {[
+              { label: "Total Jobs", value: stats.total, accent: "#0F172A" },
+              { label: "Total Qty", value: stats.qty, accent: "#C27842" },
+              { label: "Resolved", value: stats.resolved, accent: "#16A34A" },
+              { label: "Unresolved", value: stats.unresolved, accent: "#DC2626" },
+            ].map(({ label, value, accent }) => (
+              <Card key={label} className="p-4 relative overflow-hidden">
+                <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ background: accent }} />
+                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">{label}</div>
+                <div className="font-mono text-2xl font-bold mt-2">{value}</div>
+              </Card>
+            ))}
+          </div>
 
-      {/* Filters */}
-      <div className="px-4 sm:px-8 py-4 bg-white border-y-2 border-slate-200 flex flex-wrap gap-3 items-end">
-        <div className="w-40">
-          <Select label="Channel" id="filter-channel" value={filterChannel}
-            onChange={(e) => setFilterChannel(e.target.value)}>
-            <option value="">All Channels</option>
-            {channelOptions.map((c) => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
-          </Select>
-        </div>
-        <div className="w-40">
-          <Select label="Match Status" id="filter-status" value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}>
-            <option value="">All Statuses</option>
-            <option value="mapped">Mapped</option>
-            <option value="matched">Matched</option>
-            <option value="unmatched">Unmatched</option>
-          </Select>
-        </div>
-        <div className="w-36">
-          <Input label="From Date" id="filter-from" type="date"
-            value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} />
-        </div>
-        <div className="w-36">
-          <Input label="To Date" id="filter-to" type="date"
-            value={filterTo} onChange={(e) => setFilterTo(e.target.value)} />
-        </div>
-        <BtnSecondary id="btn-filter-apply" onClick={load}>Apply</BtnSecondary>
-        <button
-          className="text-xs text-slate-400 hover:text-slate-700 underline self-end mb-0.5"
-          onClick={() => { setFilterChannel(""); setFilterStatus(""); setFilterFrom(""); setFilterTo(""); }}
-        >Clear</button>
-      </div>
+          {/* Filters */}
+          <div className="px-4 sm:px-8 py-4 bg-white border-y-2 border-slate-200 flex flex-wrap gap-3 items-end">
+            <div className="w-40">
+              <Select label="Channel" id="filter-channel" value={filterChannel}
+                onChange={(e) => setFilterChannel(e.target.value)}>
+                <option value="">All Channels</option>
+                {channelOptions.map((c) => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
+              </Select>
+            </div>
+            <div className="w-40">
+              <Select label="Match Status" id="filter-status" value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}>
+                <option value="">All Statuses</option>
+                <option value="mapped">Mapped</option>
+                <option value="matched">Matched</option>
+                <option value="unmatched">Unmatched</option>
+              </Select>
+            </div>
+            <div className="w-36">
+              <Input label="From Date" id="filter-from" type="date"
+                value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} />
+            </div>
+            <div className="w-36">
+              <Input label="To Date" id="filter-to" type="date"
+                value={filterTo} onChange={(e) => setFilterTo(e.target.value)} />
+            </div>
+            <BtnSecondary id="btn-filter-apply" onClick={load}>Apply</BtnSecondary>
+            <button
+              className="text-xs text-slate-400 hover:text-slate-700 underline self-end mb-0.5"
+              onClick={() => { setFilterChannel(""); setFilterStatus(""); setFilterFrom(""); setFilterTo(""); }}
+            >Clear</button>
+          </div>
 
-      {/* Table */}
-      <div className="px-4 sm:px-8 py-6">
-        {loading ? (
-          <Card className="overflow-hidden">
-            <ResponsiveTable
-              columns={ONLINE_ORDERS_COLUMNS}
-              rows={[]}
-              loading={true}
-              testId="online-orders-table"
-            />
-          </Card>
-        ) : jobs.length === 0 ? (
-          <Card className="p-10 text-center">
-            <ShoppingBag className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-            <div className="text-slate-500 font-semibold mb-1">No online orders found</div>
-            <div className="text-xs text-slate-400 mb-4">Import a marketplace order or picklist file to get started.</div>
-            <BtnPrimary onClick={() => setImportOpen(true)}>
-              <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Import orders</span>
-            </BtnPrimary>
-          </Card>
-        ) : (
-          <Card className="overflow-hidden">
-            <ResponsiveTable
-              columns={ONLINE_ORDERS_COLUMNS}
-              rows={jobs}
-              rowKey={(j) => j.id}
-              rowClassName={(j) => j.style_match_status === "unmatched" ? "bg-red-50/40" : ""}
-              testId="online-orders-table"
-            />
-          </Card>
-        )}
-      </div>
+          {/* Table */}
+          <div className="px-4 sm:px-8 py-6">
+            {loading ? (
+              <Card className="overflow-hidden">
+                <ResponsiveTable
+                  columns={ONLINE_ORDERS_COLUMNS}
+                  rows={[]}
+                  loading={true}
+                  testId="online-orders-table"
+                />
+              </Card>
+            ) : jobs.length === 0 ? (
+              <Card className="p-10 text-center">
+                <ShoppingBag className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                <div className="text-slate-500 font-semibold mb-1">No online orders found</div>
+                <div className="text-xs text-slate-400 mb-4">Import a marketplace order or picklist file to get started.</div>
+                <BtnPrimary onClick={() => setImportOpen(true)}>
+                  <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Import orders</span>
+                </BtnPrimary>
+              </Card>
+            ) : (
+              <Card className="overflow-hidden">
+                <ResponsiveTable
+                  columns={ONLINE_ORDERS_COLUMNS}
+                  rows={jobs}
+                  rowKey={(j) => j.id}
+                  rowClassName={(j) => j.style_match_status === "unmatched" ? "bg-red-50/40" : ""}
+                  testId="online-orders-table"
+                />
+              </Card>
+            )}
+          </div>
         </>
       )}
 

@@ -59,9 +59,7 @@ export default function ImageUploader({
     fd.append("file", file);
     setUploading(true);
     try {
-      const res = await http.post("/upload/image", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const res = await http.post("/upload/image", fd);
       const { url, original_url, display_url, thumbnail_url, width, height } =
         res.data || {};
       onChange({
@@ -195,9 +193,8 @@ export default function ImageUploader({
         <div className="flex flex-col justify-center flex-1 min-w-[200px]">
           <div className="flex items-center gap-2 mb-2">
             <label
-              className={`inline-flex items-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${
-                uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
-              }`}
+              className={`inline-flex items-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
+                }`}
               data-testid={`${testIdPrefix}-upload-label`}
             >
               {uploading ? (
@@ -234,7 +231,7 @@ export default function ImageUploader({
             <button
               type="button"
               onClick={clear}
-            className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start inline-flex items-center gap-1 p-2 -ml-2 min-h-[44px] touch-manipulation"
+              className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start inline-flex items-center gap-1 p-2 -ml-2 min-h-[44px] touch-manipulation"
               data-testid={`${testIdPrefix}-clear`}
             >
               <X className="w-3 h-3" /> Clear Image
@@ -307,9 +304,8 @@ export function ImageThumb({
       alt={alt}
       loading="lazy"
       onError={() => setBroken(true)}
-      className={`object-cover border border-slate-200 ${className} ${
-        clickable ? "cursor-zoom-in hover:opacity-80 transition-opacity" : ""
-      }`}
+      className={`object-cover border border-slate-200 ${className} ${clickable ? "cursor-zoom-in hover:opacity-80 transition-opacity" : ""
+        }`}
       style={{ width: size, height: size }}
       data-testid={testId}
       onClick={clickable ? () => setOpen(true) : undefined}
