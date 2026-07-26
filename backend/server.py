@@ -1545,7 +1545,6 @@ async def upsert_style_lifecycle(style_id: str, payload: StyleLifecycleUpsert, r
 @api.patch("/styles/{sid}/online-status")
 async def patch_style_online_status(sid: str, payload: OnlineStatusPatchIn, request: Request):
     """Advance a style's online lifecycle status.
-
     Rules:
       • Forward-only along the main pipeline sequence (one step at a time).
       • 'archived' and 'liquidation_candidate' can be set from ANY state.
