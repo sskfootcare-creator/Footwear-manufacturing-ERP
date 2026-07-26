@@ -201,13 +201,72 @@ function ProductionCardModal({ jobId, onClose }) {
                     padding: "8px", fontSize: "0.95rem", fontWeight: 800, color: "#f1f5f9", textAlign: "center",
                   }}>
                     {details.sizes.map((s) => (
-                      <div key={s.size}>{s.quantity}</div>
+                      <div key={s.size}>
+                        <div>{s.quantity}</div>
+                        {s.completed_qty > 0 && (
+                          <div style={{ fontSize: "0.68rem", color: "#4ade80", fontWeight: 700 }}>✓ {s.completed_qty}</div>
+                        )}
+                      </div>
                     ))}
-                    <div style={{ color: "#6ee7b7" }}>{details.total_qty}</div>
+                    <div>
+                      <div style={{ color: "#6ee7b7" }}>{details.total_qty}</div>
+                      {details.total_completed_qty > 0 && (
+                        <div style={{ fontSize: "0.68rem", color: "#4ade80", fontWeight: 700 }}>✓ {details.total_completed_qty}</div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             ) : null}
+
+            {/* Stage Progress & Worker Assignments */}
+            {details.assignments && Object.keys(details.assignments).length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: "0.68rem", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>
+                  Stage Progress & Assignments
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {["upper", "stitching", "sole", "bottom", "packing"].map((stg) => {
+                    const asgn = details.assignments[stg];
+                    if (!asgn) return null;
+                    const isDone = asgn.status === "completed" || details.components?.[`${stg}_done`];
+                    const isCurrent = details.stage === stg;
+                    return (
+                      <div key={stg} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        padding: "8px 12px", background: "rgba(15,23,42,0.5)",
+                        borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)"
+                      }}>
+                        <div>
+                          <span style={{ fontSize: "0.8rem", fontWeight: 700, color: "#e2e8f0", textTransform: "capitalize" }}>
+                            {STAGE_LABELS[stg] || stg}:
+                          </span>
+                          <span style={{ fontSize: "0.8rem", color: "#94a3b8", marginLeft: 6 }}>
+                            {asgn.worker_name || "Assigned"}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {asgn.rate_per_pair != null && (
+                            <span style={{ fontSize: "0.75rem", color: "#fbbf24", fontWeight: 700 }}>
+                              ₹{asgn.rate_per_pair}/pr
+                            </span>
+                          )}
+                          <span style={{
+                            fontSize: "0.65rem", fontWeight: 800, padding: "2px 8px", borderRadius: 6,
+                            textTransform: "uppercase",
+                            background: isDone ? "rgba(34,197,94,0.2)" : isCurrent ? "rgba(234,179,8,0.2)" : "rgba(148,163,184,0.1)",
+                            color: isDone ? "#4ade80" : isCurrent ? "#fde047" : "#94a3b8",
+                            border: `1px solid ${isDone ? "rgba(34,197,94,0.4)" : isCurrent ? "rgba(234,179,8,0.4)" : "rgba(148,163,184,0.2)"}`
+                          }}>
+                            {isDone ? "✓ Completed" : isCurrent ? "In Progress" : "Pending"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Component / BOM Notes if present */}
             {details.bom_items && details.bom_items.length > 0 ? (
@@ -626,8 +685,134 @@ function TaskCard({ job, workerName, onMarkReady, onViewCard }) {
 }
 
 
+// ── Immutable Completed Card for Payroll ─────────────────────────────────────
+function PayrollCompletedCard({ job, onViewCard }) {
+  const poNum = job.po_number || "—";
+  const styleCode = job.style_code || "—";
+  const color = job.color || "";
+  const totalPairs = job.completed_qty || job.total_quantity || job.quantity || job.pairs || 0;
+  const rate = job.rate_per_pair || job.rate || 0;
+  const earning = job.total_earning || job.earning || (totalPairs * rate);
+  const imgUrl = job.image_thumbnail_url || job.image_url;
+  const roleLabel = STAGE_LABELS[job.role] || job.role || "Completed";
+
+  return (
+    <div style={{
+      background: "rgba(30,41,59,0.8)",
+      backdropFilter: "blur(10px)",
+      border: "1px solid rgba(34,197,94,0.3)",
+      borderRadius: 16,
+      padding: "1rem 1.1rem",
+      marginBottom: 12,
+      boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+    }}>
+      {/* Top Header Row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+          {imgUrl ? (
+            <img
+              src={imgUrl}
+              alt={styleCode}
+              style={{
+                width: 56, height: 56, borderRadius: 10, objectFit: "cover",
+                border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", flexShrink: 0
+              }}
+            />
+          ) : (
+            <div style={{
+              width: 56, height: 56, borderRadius: 10, background: "#0f172a",
+              border: "1px solid rgba(255,255,255,0.12)", display: "grid", placeItems: "center", flexShrink: 0
+            }}>
+              <Package size={24} color="#475569" />
+            </div>
+          )}
+          <div>
+            <div style={{ fontSize: "0.7rem", color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              {poNum}
+            </div>
+            <div style={{ fontSize: "1.1rem", fontWeight: 800, color: "#f1f5f9", marginTop: 2 }}>
+              {styleCode}
+            </div>
+            <div style={{ fontSize: "0.82rem", color: "#94a3b8", marginTop: 2, fontWeight: 600 }}>
+              {[color, `${totalPairs} pairs total`].filter(Boolean).join(" · ")}
+            </div>
+
+            {/* Size Breakdown Badges */}
+            {job.sizes && job.sizes.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
+                {job.sizes.map((sz) => (
+                  <span
+                    key={sz.size}
+                    style={{
+                      background: "rgba(15,23,42,0.7)",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 6, padding: "2px 8px",
+                      fontSize: "0.72rem", color: "#cbd5e1", fontWeight: 600,
+                    }}
+                  >
+                    Size {sz.size}: <strong style={{ color: "#f59e0b" }}>{sz.completed_qty || sz.ordered_qty || sz.pairs}</strong>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <span style={{
+            display: "inline-block", fontSize: "0.68rem", fontWeight: 800,
+            padding: "3px 10px", borderRadius: 20,
+            background: "rgba(34,197,94,0.15)", color: "#86efac",
+            border: "1px solid rgba(34,197,94,0.3)",
+            textTransform: "uppercase", letterSpacing: "0.05em",
+          }}>
+            COMPLETED ({roleLabel})
+          </span>
+          <div style={{ fontSize: "0.85rem", color: "#6ee7b7", fontWeight: 800, marginTop: 6 }}>
+            {inr(rate)} / pair
+          </div>
+          <div style={{ fontSize: "0.78rem", color: "#fbbf24", fontWeight: 800, marginTop: 2 }}>
+            {inr(earning)}
+          </div>
+        </div>
+      </div>
+
+      {/* Immutable Footer Banner */}
+      <div style={{
+        marginTop: 12, background: "rgba(34,197,94,0.08)",
+        border: "1px solid rgba(34,197,94,0.25)", borderRadius: 10,
+        padding: "0.65rem 0.95rem", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <CheckCircle2 size={18} color="#4ade80" />
+          <div>
+            <div style={{ color: "#86efac", fontSize: "0.82rem", fontWeight: 700 }}>Work Completed</div>
+            <div style={{ color: "#94a3b8", fontSize: "0.75rem" }}>
+              {totalPairs} pairs recorded · <span style={{ color: "#6ee7b7", fontWeight: 700 }}>{inr(earning)}</span>
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => onViewCard?.(job.id || job.job_id)}
+          style={{
+            background: "rgba(51,65,85,0.7)",
+            border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8,
+            color: "#e2e8f0", padding: "6px 14px", cursor: "pointer",
+            fontWeight: 700, fontSize: "0.78rem",
+            display: "flex", alignItems: "center", gap: 6,
+          }}
+        >
+          <FileText size={14} color="#C27842" />
+          Card
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 // ── Payroll Panel ─────────────────────────────────────────────────────────────
-function PayrollPanel({ worker }) {
+function PayrollPanel({ worker, onViewCard }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -649,13 +834,21 @@ function PayrollPanel({ worker }) {
 
   if (loading) return (
     <div style={{ textAlign: "center", padding: "3rem 0", color: "#64748b" }}>
-      <Loader2 size={24} style={{ animation: "spin 1s linear infinite" }} />
+      <Loader2 size={28} style={{ animation: "spin 1s linear infinite" }} />
+      <div style={{ marginTop: 8, fontSize: "0.85rem" }}>Loading payroll data...</div>
     </div>
   );
-  if (error) return <div style={{ color: "#fca5a5", textAlign: "center", padding: "2rem 0" }}>{error}</div>;
+  if (error) return (
+    <div style={{
+      background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)",
+      borderRadius: 12, padding: "1rem", color: "#fca5a5", fontSize: "0.85rem",
+    }}>
+      {error}
+    </div>
+  );
   if (!data) return null;
 
-  const p = data.payroll;
+  const p = data.payroll || {};
   return (
     <div>
       <div style={{ fontSize: "0.68rem", color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>
@@ -694,6 +887,24 @@ function PayrollPanel({ worker }) {
               <span style={{ color: "#e2e8f0", fontWeight: 700, fontSize: "0.85rem" }}>{pairs} pairs</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Completed Production Cards & Earnings */}
+      {p.jobs && p.jobs.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontSize: "0.68rem", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 10 }}>
+            Completed Production Cards ({p.jobs.length})
+          </div>
+          <div>
+            {p.jobs.map((job, idx) => (
+              <PayrollCompletedCard
+                key={job.id || idx}
+                job={job}
+                onViewCard={(jid) => onViewCard?.(jid || job.id || job.job_id)}
+              />
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -938,7 +1149,12 @@ export default function KarigarDashboard() {
           </>
         )}
 
-        {tab === "payroll" && <PayrollPanel worker={worker} />}
+        {tab === "payroll" && (
+          <PayrollPanel
+            worker={worker}
+            onViewCard={(jid) => setActiveCardJobId(jid)}
+          />
+        )}
       </div>
 
       {/* Production Card Modal */}

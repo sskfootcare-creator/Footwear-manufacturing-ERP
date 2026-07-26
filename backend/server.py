@@ -12288,12 +12288,19 @@ async def my_task_details(job_id: str, request: Request):
     j0 = sibling_jobs[0]
     sizes = []
     seen = set()
+    total_completed_qty = 0
     for j in sorted(sibling_jobs, key=lambda x: (float(x.get("size", 999)) if str(x.get("size", "")).replace('.', '', 1).isdigit() else 999)):
         sz = str(j.get("size", "—"))
         if sz in seen:
             continue
         seen.add(sz)
-        sizes.append({"size": sz, "quantity": j.get("quantity", 0)})
+        c_qty = j.get("completed_qty", 0) or (j.get("ready_for_pickup") or {}).get("completed_qty", 0) or 0
+        total_completed_qty += c_qty
+        sizes.append({
+            "size": sz,
+            "quantity": j.get("quantity", 0),
+            "completed_qty": c_qty,
+        })
 
     total_qty = sum(j.get("quantity", 0) for j in sibling_jobs)
 
@@ -12314,9 +12321,11 @@ async def my_task_details(job_id: str, request: Request):
         "stage": j0.get("stage", "—"),
         "sizes": sizes,
         "total_qty": total_qty,
+        "total_completed_qty": total_completed_qty,
         "image_url": style_d.get("image_url") or style_d.get("image_display_url"),
         "image_thumbnail_url": style_d.get("image_thumbnail_url") or style_d.get("image_url"),
         "components": j0.get("components") or {},
+        "assignments": j0.get("assignments") or {},
         "bom_items": style_d.get("bom_items") or style_d.get("components") or [],
         "my_assignment": {
             "role": my_asgn_role,
@@ -12390,10 +12399,32 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
             "notes": payload.notes or "",
         }
 
+        # Determine next production stage for Kanban & workflow
+        norm_curr = "upper" if current_stage == "cutting" else current_stage
+        try:
+            curr_idx = PRODUCTION_STAGES.index(norm_curr)
+        except ValueError:
+            curr_idx = 1
+        next_idx = min(curr_idx + 1, len(PRODUCTION_STAGES) - 1)
+        next_stage = PRODUCTION_STAGES[next_idx]
+
+        update_dict = {
+            "ready_for_pickup": rfp,
+            "completed_qty": q_val,
+            "stage": next_stage,
+            "stage_entered_at": now,
+            "updated_at": now,
+            f"components.{current_stage}_done": True,
+            f"components.{current_stage}_completed_qty": q_val,
+            f"assignments.{current_stage}.status": "completed",
+            f"assignments.{current_stage}.completed_qty": q_val,
+            f"assignments.{current_stage}.completed_at": now,
+        }
+
         await db.production_jobs.update_one(
             {"_id": j["_id"]},
             {
-                "$set": {"ready_for_pickup": rfp, "updated_at": now},
+                "$set": update_dict,
                 "$push": {
                     "history": {
                         "event": "marked_ready",
@@ -13025,14 +13056,14 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
         q["updated_at"]["$lte"] = to_date + "T23:59:59Z"
     jobs = await db.production_jobs.find(q).to_list(5000)
 
+    styles = await db.styles.find({}).to_list(1000)
+    styles_cache = {str(s.get("code")).strip().upper(): stringify(s) for s in styles if s.get("code")}
+
     earnings = {}
+    raw_jobs_by_worker = {}
     for j in jobs:
-        comp = j.get("completed_qty", 0)
-        if not comp and j.get("stage") == "dispatched":
-            comp = j.get("quantity", 0)
-        if not comp:
-            continue
         assigns = j.get("assignments") or {}
+        rfp = j.get("ready_for_pickup") or {}
         for role, a in assigns.items():
             wid = a.get("worker_id")
             if not wid:
@@ -13040,9 +13071,24 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
             w = worker_map.get(wid)
             if not w:
                 continue
+
+            role_comp = a.get("completed_qty")
+            if role_comp is None or role_comp == 0:
+                if rfp.get("worker_id") == wid and rfp.get("role") == role:
+                    role_comp = rfp.get("completed_qty", 0) or 0
+                elif j.get("stage") == role:
+                    role_comp = j.get("completed_qty", 0) or 0
+                elif j.get("stage") == "dispatched":
+                    role_comp = j.get("quantity", 0)
+                else:
+                    role_comp = j.get("completed_qty", 0) or 0
+
+            if not role_comp:
+                continue
+
             rate = float(a.get("rate_per_pair") if a.get("rate_per_pair") is not None
                          else w.get("rate_per_pair", 0) or 0)
-            earn = rate * comp
+            earn = rate * role_comp
             if wid not in earnings:
                 earnings[wid] = {
                     "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
@@ -13056,9 +13102,10 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
                     "net_payable": 0.0,
                     "by_role": {}, "jobs": [],
                 }
-            earnings[wid]["total_pairs"] += comp
+                raw_jobs_by_worker[wid] = []
+            earnings[wid]["total_pairs"] += role_comp
             earnings[wid]["total_earning"] += earn
-            earnings[wid]["by_role"][role] = earnings[wid]["by_role"].get(role, 0) + comp
+            earnings[wid]["by_role"][role] = earnings[wid]["by_role"].get(role, 0) + role_comp
 
             # Productivity bonus
             bonus_amt = 0
@@ -13082,12 +13129,90 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
                     except Exception:
                         pass
 
-            earnings[wid]["jobs"].append({
-                "po_number": j.get("po_number"), "style_code": j.get("style_code"),
-                "color": j.get("color"), "size": j.get("size"),
-                "role": role, "pairs": comp, "rate": rate,
-                "earning": round(earn, 2), "bonus": bonus_amt,
+            raw_jobs_by_worker[wid].append({
+                "job_id": str(j["_id"]),
+                "po_number": j.get("po_number"),
+                "style_code": j.get("style_code"),
+                "color": j.get("color"),
+                "size": j.get("size"),
+                "role": role,
+                "pairs": role_comp,
+                "rate": rate,
+                "earning": round(earn, 2),
+                "bonus": bonus_amt,
             })
+
+    # Group completed jobs per worker into Production Card summaries
+    for wid, e in earnings.items():
+        raw_list = raw_jobs_by_worker.get(wid, [])
+        grouped_cards = {}
+        for item in raw_list:
+            po_num = str(item.get("po_number") or "").strip()
+            style_code = str(item.get("style_code") or "").strip()
+            color = str(item.get("color") or "").strip()
+            role = str(item.get("role") or "").strip()
+            if po_num and po_num != "—":
+                ckey = f"{po_num}_{style_code}_{color}_{role}"
+            else:
+                ckey = f"single_{item['job_id']}_{role}"
+
+            if ckey not in grouped_cards:
+                st_info = styles_cache.get(style_code.upper(), {})
+                img = st_info.get("image_url") or st_info.get("image_thumbnail_url") or st_info.get("photo_link") or ""
+                grouped_cards[ckey] = {
+                    "id": item["job_id"],
+                    "job_id": item["job_id"],
+                    "po_number": po_num or "—",
+                    "style_code": style_code,
+                    "color": color,
+                    "role": role,
+                    "stage": "dispatched" if item.get("stage") == "dispatched" else role,
+                    "rate_per_pair": item["rate"],
+                    "rate": item["rate"],
+                    "total_quantity": 0,
+                    "quantity": 0,
+                    "completed_qty": 0,
+                    "pairs": 0,
+                    "total_earning": 0.0,
+                    "earning": 0.0,
+                    "bonus": 0.0,
+                    "image_url": img,
+                    "image_thumbnail_url": img,
+                    "article_name": st_info.get("name", ""),
+                    "is_completed": True,
+                    "sizes": [],
+                    "size_map": {},
+                }
+            gc = grouped_cards[ckey]
+            gc["total_quantity"] += item["pairs"]
+            gc["quantity"] += item["pairs"]
+            gc["completed_qty"] += item["pairs"]
+            gc["pairs"] += item["pairs"]
+            gc["total_earning"] = round(gc["total_earning"] + item["earning"], 2)
+            gc["earning"] = gc["total_earning"]
+            gc["bonus"] = round(gc["bonus"] + item["bonus"], 2)
+            
+            sz_str = str(item.get("size", "—"))
+            if sz_str not in gc["size_map"]:
+                gc["size_map"][sz_str] = {
+                    "job_id": item["job_id"],
+                    "size": sz_str,
+                    "ordered_qty": item["pairs"],
+                    "completed_qty": item["pairs"],
+                    "pairs": item["pairs"],
+                }
+            else:
+                gc["size_map"][sz_str]["ordered_qty"] += item["pairs"]
+                gc["size_map"][sz_str]["completed_qty"] += item["pairs"]
+                gc["size_map"][sz_str]["pairs"] += item["pairs"]
+
+        for gc in grouped_cards.values():
+            def parse_sz(s_item):
+                s = str(s_item.get("size", 999))
+                return float(s) if s.replace('.', '', 1).isdigit() else 999
+            gc["sizes"] = sorted(list(gc.pop("size_map").values()), key=parse_sz)
+
+        e["jobs"] = list(grouped_cards.values())
 
     # Aggregate advances per worker (filter by period if dates given)
     adv_q = {}
