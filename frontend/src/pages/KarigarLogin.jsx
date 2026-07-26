@@ -103,14 +103,17 @@ export default function KarigarLogin() {
           display: flex; align-items: center; justify-content: center;
           font-size: 1.4rem; font-weight: 600; color: #e2e8f0;
           cursor: pointer; user-select: none;
-          transition: all 0.12s ease;
+          -webkit-user-select: none;
+          -webkit-touch-callout: none;
           -webkit-tap-highlight-color: transparent;
+          touch-action: manipulation;
+          transition: transform 0.1s ease, background-color 0.1s ease;
         }
-        .kl-key:hover, .kl-key:active {
-          background: rgba(71,85,105,0.9);
-          transform: scale(0.96);
+        .kl-key:active {
+          background: rgba(194,120,66,0.65) !important;
+          transform: scale(0.95) !important;
         }
-        .kl-btn { transition: all 0.2s ease; }
+        .kl-btn { transition: all 0.2s ease; touch-action: manipulation; }
         .kl-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 25px rgba(194,120,66,0.45) !important; }
         .kl-btn:active:not(:disabled) { transform: scale(0.98); }
       `}</style>

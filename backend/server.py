@@ -256,10 +256,35 @@ def normalize_image_url(raw: str) -> str:
         qs = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True) if k.lower() != "dl"]
         return urlunsplit((parts.scheme, "dl.dropboxusercontent.com", parts.path, urlencode(qs), ""))
 
-    # ---- ONEDRIVE (1drv.ms shortlink OR onedrive.live.com share) ----------
-    if host == "1drv.ms" or host.endswith("onedrive.live.com"):
-        b = _b64.urlsafe_b64encode(val.encode("utf-8")).decode("ascii").rstrip("=")
-        return f"https://api.onedrive.com/v1.0/shares/u!{b}/root/content"
+    # ---- ONEDRIVE / SHAREPOINT --------------------------------------------
+    if "api.onedrive.com/v1.0/shares/u!" in val:
+        import re as _re, base64 as _b64
+        m = _re.search(r"/shares/u!([^/]+)", val)
+        if m:
+            b64_str = m.group(1)
+            padding = "=" * (-len(b64_str) % 4)
+            try:
+                decoded = _b64.b64decode(b64_str.replace("_", "/").replace("-", "+") + padding).decode("utf-8")
+                if decoded.startswith("http"):
+                    val = decoded
+                    parts = urlsplit(val)
+                    host = (parts.hostname or "").lower()
+            except Exception:
+                pass
+
+    if host == "1drv.ms" or host.endswith("onedrive.live.com") or host.endswith("sharepoint.com"):
+        if "onedrive.live.com" in host:
+            if "/embed" in parts.path:
+                return urlunsplit((parts.scheme, parts.netloc, parts.path.replace("/embed", "/download"), parts.query, ""))
+            qs_dict = dict(parse_qsl(parts.query))
+            if "resid" in qs_dict:
+                return f"https://onedrive.live.com/download?{parts.query}"
+        if host.endswith("sharepoint.com"):
+            qs_dict = dict(parse_qsl(parts.query))
+            if "download" not in qs_dict:
+                qs_dict["download"] = "1"
+                return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(qs_dict), ""))
+        return val
 
     # ---- GOOGLE DRIVE -----------------------------------------------------
     if host.endswith("drive.google.com"):
@@ -1545,7 +1570,6 @@ async def upsert_style_lifecycle(style_id: str, payload: StyleLifecycleUpsert, r
 @api.patch("/styles/{sid}/online-status")
 async def patch_style_online_status(sid: str, payload: OnlineStatusPatchIn, request: Request):
     """Advance a style's online lifecycle status.
-
     Rules:
       • Forward-only along the main pipeline sequence (one step at a time).
       • 'archived' and 'liquidation_candidate' can be set from ANY state.
