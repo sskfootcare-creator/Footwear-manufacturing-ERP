@@ -45,6 +45,11 @@ const isTexonRelated = (name = "", category = "") => {
   return n.includes("texon") || c.includes("texon") || n.includes("insole board") || n.includes("board");
 };
 
+const COMPONENT_CATEGORIES = [
+  "Upper", "Sole", "Insole", "Sockliner", "Bottom",
+  "Lace", "Box", "Tag", "Label", "Packaging", "Other",
+];
+
 const emptyForm = {
   code: "",
   name: "",
@@ -58,6 +63,8 @@ const emptyForm = {
   image_display_url: "",
   image_thumbnail_url: "",
   with_eva: null,
+  is_component: false,
+  component_category: "Sole",
 };
 
 export default function Materials() {
@@ -105,6 +112,8 @@ export default function Materials() {
       image_display_url: m.image_display_url || "",
       image_thumbnail_url: m.image_thumbnail_url || "",
       with_eva: m.with_eva ?? null,
+      is_component: m.is_component || false,
+      component_category: m.component_category || "Sole",
     });
     setFormError("");
     setOpen(true);
@@ -248,7 +257,14 @@ export default function Materials() {
                       <td className="px-4 py-3 font-mono font-bold">{m.code}</td>
                       <td className="px-4 py-3 font-medium">{formatMaterialName(m)}</td>
                       <td className="px-4 py-3">
-                        <Badge color="slate">{m.category}</Badge>
+                        <div className="flex flex-wrap gap-1 items-center">
+                          <Badge color="slate">{m.category}</Badge>
+                          {m.is_component && (
+                            <Badge color="purple">
+                              Component: {m.component_category || m.category}
+                            </Badge>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-xs uppercase tracking-wider">
                         {m.unit}
@@ -408,6 +424,32 @@ export default function Materials() {
               value={form.notes}
               onChange={(e) => setForm({ ...form, notes: e.target.value })}
             />
+            <div className="border border-purple-200 bg-purple-50/50 p-3 rounded space-y-2">
+              <label className="flex items-center gap-2 text-xs font-bold text-purple-900 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.is_component}
+                  onChange={(e) => setForm({ ...form, is_component: e.target.checked })}
+                  data-testid="form-mat-is-component"
+                  className="rounded text-purple-600 focus:ring-purple-500"
+                />
+                <span className="uppercase tracking-wider">Tie to Component Inventory (Sole, Insole, etc.)</span>
+              </label>
+              {form.is_component && (
+                <Select
+                  label="Component Category"
+                  value={form.component_category}
+                  onChange={(e) => setForm({ ...form, component_category: e.target.value })}
+                  testId="form-mat-comp-cat"
+                >
+                  {COMPONENT_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </div>
             <div className="flex gap-2 pt-3">
               <BtnPrimary onClick={save} data-testid="save-material-btn">
                 <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save

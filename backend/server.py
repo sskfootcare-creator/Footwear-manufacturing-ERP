@@ -922,6 +922,70 @@ async def delete_user(user_id: str, request: Request):
 
 
 # ---------- MATERIALS (rate card) ----------
+async def _sync_material_to_component(mat_doc: dict):
+    """Sync raw material to component inventory if marked as component or linked."""
+    is_comp = mat_doc.get("is_component")
+    if not is_comp:
+        return
+    cat = mat_doc.get("component_category") or mat_doc.get("category", "").title()
+    category_map = {
+        "Upper": "Upper", "Sole": "Sole", "Lining": "Other",
+        "Accessory": "Other", "Consumable": "Other", "Packing": "Packaging", "Other": "Other"
+    }
+    comp_cat = cat if cat in ["Upper", "Sole", "Insole", "Sockliner", "Bottom", "Lace", "Box", "Tag", "Label", "Packaging", "Other"] else category_map.get(cat, "Other")
+    
+    code = mat_doc.get("code", "").strip()
+    mat_id = str(mat_doc.get("_id") or mat_doc.get("id"))
+    image_url = mat_doc.get("image_url", "")
+    image_display_url = mat_doc.get("image_display_url", "")
+    image_thumbnail_url = mat_doc.get("image_thumbnail_url", "")
+    name = mat_doc.get("name", "")
+    unit = mat_doc.get("unit", "pair")
+    vendor = mat_doc.get("preferred_vendor_id", "")
+    reorder = int(mat_doc.get("reorder_level", 0))
+
+    existing = await db.component_master.find({"component_code": code}).to_list(1000)
+    if existing:
+        await db.component_master.update_many(
+            {"component_code": code},
+            {"$set": {
+                "material_id": mat_id,
+                "component_name": name,
+                "component_category": comp_cat,
+                "image_url": image_url,
+                "image_display_url": image_display_url,
+                "image_thumbnail_url": image_thumbnail_url,
+                "updated_at": now_iso(),
+            }}
+        )
+    else:
+        comp_doc = {
+            "component_code": code,
+            "component_name": name,
+            "component_category": comp_cat,
+            "color": "",
+            "size": "",
+            "vendor": vendor,
+            "unit": unit,
+            "current_stock": 0,
+            "reserved_stock": 0,
+            "reorder_level": reorder,
+            "minimum_stock": reorder,
+            "lead_time_days": 0,
+            "active": True,
+            "material_id": mat_id,
+            "image_url": image_url,
+            "image_display_url": image_display_url,
+            "image_thumbnail_url": image_thumbnail_url,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        try:
+            await db.component_master.insert_one(comp_doc)
+        except DuplicateKeyError:
+            pass
+
+
 @api.get("/materials")
 async def list_materials(request: Request):
     await get_current_user(request)
@@ -944,6 +1008,7 @@ async def create_material(payload: MaterialIn, request: Request):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
+    await _sync_material_to_component(doc)
     return doc
 
 @api.patch("/materials/{mid}")
@@ -959,7 +1024,9 @@ async def update_material(mid: str, payload: MaterialIn, request: Request):
         await db.materials.update_one({"_id": oid(mid)}, {"$set": update})
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
-    return stringify(await db.materials.find_one({"_id": oid(mid)}))
+    updated_doc = stringify(await db.materials.find_one({"_id": oid(mid)}))
+    await _sync_material_to_component(updated_doc)
+    return updated_doc
 
 @api.delete("/materials/{mid}")
 async def delete_material(mid: str, request: Request):
@@ -1743,9 +1810,13 @@ async def list_online_styles(
 # we just maintain the aggregate reserved_stock counter on the row.
 
 def _serialize_component(doc: dict) -> dict:
-    """Attach the derived available_stock field before returning to clients."""
+    """Attach the derived available_stock and image metadata before returning to clients."""
     out = stringify(doc)
     out["available_stock"] = int(out.get("current_stock", 0)) - int(out.get("reserved_stock", 0))
+    out["material_id"] = out.get("material_id") or ""
+    out["image_url"] = out.get("image_url") or ""
+    out["image_display_url"] = out.get("image_display_url") or ""
+    out["image_thumbnail_url"] = out.get("image_thumbnail_url") or ""
     return out
 
 
@@ -2097,7 +2168,24 @@ async def update_component(cid: str, payload: ComponentMasterUpdate, request: Re
     if not update:
         return _serialize_component(doc)
     update["updated_at"] = now_iso()
+    code = doc.get("component_code")
+    shared_keys = {"component_name", "component_category", "vendor", "unit", "image_url", "image_display_url", "image_thumbnail_url", "material_id"}
+    shared_update = {k: v for k, v in update.items() if k in shared_keys}
+    if code and shared_update:
+        await db.component_master.update_many({"component_code": code}, {"$set": shared_update})
     await db.component_master.update_one({"_id": doc["_id"]}, {"$set": update})
+    
+    mat_id = update.get("material_id") or doc.get("material_id")
+    if mat_id and ("image_url" in update or "component_name" in update):
+        mat_update = {}
+        if "image_url" in update:
+            mat_update["image_url"] = update.get("image_url", "")
+            mat_update["image_display_url"] = update.get("image_display_url", "")
+            mat_update["image_thumbnail_url"] = update.get("image_thumbnail_url", "")
+        if mat_update:
+            mat_update["updated_at"] = now_iso()
+            await db.materials.update_one({"_id": oid(mat_id)}, {"$set": mat_update})
+
     await log_activity("UPDATE", "component",
         f"{doc['component_code']} metadata updated: {', '.join(update.keys())}", u["email"])
     return _serialize_component(await db.component_master.find_one({"_id": doc["_id"]}))
@@ -2220,6 +2308,10 @@ async def create_component_bulk_matrix(payload: ComponentBulkMatrix, request: Re
                 "minimum_stock":      int(payload.minimum_stock),
                 "lead_time_days":     int(payload.lead_time_days),
                 "active":             True,
+                "material_id":        payload.material_id or "",
+                "image_url":           payload.image_url or "",
+                "image_display_url":   payload.image_display_url or "",
+                "image_thumbnail_url": payload.image_thumbnail_url or "",
                 "created_at":         now,
                 "updated_at":         now,
                 "created_by":         u["email"],
@@ -12759,6 +12851,9 @@ async def list_inventory(request: Request):
             "adjustments": round(b["adj"], 2),
             "balance": round(stock, 2),
             "value": round(stock * (b["last_rate"] or mat.get("rate", 0)), 2),
+            "image_url": mat.get("image_url", ""),
+            "image_display_url": mat.get("image_display_url", ""),
+            "image_thumbnail_url": mat.get("image_thumbnail_url", ""),
         })
     out.sort(key=lambda r: (r["category"] or "", r["name"] or ""))
     return out
