@@ -24,6 +24,27 @@ const CATEGORIES = [
 ];
 const UNITS = ["sqft", "pcs", "kg", "gm", "ltr", "ml", "mtr", "set"];
 
+export function formatMaterialName(m) {
+  if (!m) return "";
+  const name = m.name || m.material_name || "";
+  if (m.with_eva === true) {
+    if (!name.toLowerCase().includes("with eva")) {
+      return `${name} (with EVA)`;
+    }
+  } else if (m.with_eva === false) {
+    if (!name.toLowerCase().includes("without eva")) {
+      return `${name} (without EVA)`;
+    }
+  }
+  return name;
+}
+
+const isTexonRelated = (name = "", category = "") => {
+  const n = (name || "").toLowerCase();
+  const c = (category || "").toLowerCase();
+  return n.includes("texon") || c.includes("texon") || n.includes("insole board") || n.includes("board");
+};
+
 const emptyForm = {
   code: "",
   name: "",
@@ -36,6 +57,7 @@ const emptyForm = {
   image_url: "",
   image_display_url: "",
   image_thumbnail_url: "",
+  with_eva: null,
 };
 
 export default function Materials() {
@@ -82,6 +104,7 @@ export default function Materials() {
       image_url: m.image_url || "",
       image_display_url: m.image_display_url || "",
       image_thumbnail_url: m.image_thumbnail_url || "",
+      with_eva: m.with_eva ?? null,
     });
     setFormError("");
     setOpen(true);
@@ -223,7 +246,7 @@ export default function Materials() {
                         />
                       </td>
                       <td className="px-4 py-3 font-mono font-bold">{m.code}</td>
-                      <td className="px-4 py-3">{m.name}</td>
+                      <td className="px-4 py-3 font-medium">{formatMaterialName(m)}</td>
                       <td className="px-4 py-3">
                         <Badge color="slate">{m.category}</Badge>
                       </td>
@@ -308,6 +331,21 @@ export default function Materials() {
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               testId="form-mat-name"
             />
+            {isTexonRelated(form.name, form.category) && (
+              <Select
+                label="EVA Backing Variant"
+                value={form.with_eva === true ? "true" : form.with_eva === false ? "false" : ""}
+                onChange={(e) => {
+                  const val = e.target.value === "true" ? true : e.target.value === "false" ? false : null;
+                  setForm({ ...form, with_eva: val });
+                }}
+                testId="form-mat-with-eva"
+              >
+                <option value="">None / Unspecified</option>
+                <option value="true">With EVA (Texon Board)</option>
+                <option value="false">Without EVA (Texon Board)</option>
+              </Select>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <Select
                 label="Category"

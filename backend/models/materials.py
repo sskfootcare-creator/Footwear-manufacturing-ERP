@@ -16,6 +16,7 @@ class MaterialIn(BaseModel):
     image_url:           Optional[str] = ""
     image_display_url:   Optional[str] = ""
     image_thumbnail_url: Optional[str] = ""
+    with_eva:            Optional[bool] = None
 
 
 class BomItem(BaseModel):
@@ -29,6 +30,7 @@ class BomItem(BaseModel):
     waste_pct: float = 0
     section: str = "Other"
     component: Optional[str] = None
+    with_eva: Optional[bool] = None
 
 
 class LaborItem(BaseModel):

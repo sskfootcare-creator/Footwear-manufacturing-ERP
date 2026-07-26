@@ -961,7 +961,16 @@ function ColorGroupCard(props) {
 
       {/* Components */}
       <div className="px-3 pb-2">
-        <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500 mb-1.5">Components</div>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500">Components</div>
+          <div className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+            group.components.upper_done && group.components.bottom_done
+              ? "bg-green-50 text-green-700 border-green-200"
+              : "bg-amber-50 text-amber-700 border-amber-200"
+          }`}>
+            Upper {group.components.upper_done ? "✓" : "pending"} / Bottom {group.components.bottom_done ? "✓" : "pending"}
+          </div>
+        </div>
         <div className="grid grid-cols-3 gap-2">
           <ComponentCell label="Upper" done={group.components.upper_done} layers={COMPONENT_LAYERS.upper}
             disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "upper_done", v)} />
@@ -1081,9 +1090,24 @@ function ColorGroupCard(props) {
           {canEdit && prevStage && (
             <button disabled={!effectiveCanEdit} onClick={() => onMove(group, prevStage.key)} className={`text-[10px] uppercase tracking-wider font-bold border px-2 py-1 ${effectiveCanEdit ? 'text-slate-500 hover:text-slate-900 border-slate-300' : 'text-slate-300 border-slate-200 cursor-not-allowed'}`}>← {prevStage.label}</button>
           )}
-          {canEdit && nextStage && group.stage !== "qc_pack" && (
-            <button disabled={!effectiveCanEdit} onClick={() => onMove(group, nextStage.key)} className={`text-[10px] uppercase tracking-wider font-bold text-white px-3 py-1 ${effectiveCanEdit ? 'bg-[#0F172A] hover:bg-[#C27842]' : 'bg-slate-300 cursor-not-allowed'}`} data-testid={`move-next-${group.key}`}>{nextStage.label} →</button>
-          )}
+          {canEdit && nextStage && group.stage !== "qc_pack" && (() => {
+            const isLastingTarget = nextStage.key === "lasting";
+            const isBlocked = isLastingTarget && (!group.components.upper_done || !group.components.bottom_done);
+            const isDisabled = !effectiveCanEdit || isBlocked;
+            return (
+              <button
+                disabled={isDisabled}
+                onClick={() => onMove(group, nextStage.key)}
+                title={isBlocked ? "Cannot move to lasting: upper and/or bottom not completed" : ""}
+                className={`text-[10px] uppercase tracking-wider font-bold text-white px-3 py-1 ${
+                  !isDisabled ? 'bg-[#0F172A] hover:bg-[#C27842]' : 'bg-slate-300 cursor-not-allowed opacity-60'
+                }`}
+                data-testid={`move-next-${group.key}`}
+              >
+                {nextStage.label} →
+              </button>
+            );
+          })()}
         </div>
       </div>
     </Card>
