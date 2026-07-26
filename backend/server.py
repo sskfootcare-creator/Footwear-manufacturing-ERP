@@ -11766,6 +11766,20 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     if not job:
         raise HTTPException(404, "Not found")
     
+    # Parallel-completion gate before moving to lasting stage
+    if payload.stage == "lasting":
+        comp = job.get("components") or {}
+        upper_done = bool(comp.get("upper_done"))
+        bottom_done = bool(comp.get("bottom_done"))
+        if not upper_done or not bottom_done:
+            if not upper_done and not bottom_done:
+                msg = "Cannot move to lasting: upper and bottom/insole not completed"
+            elif not upper_done:
+                msg = "Cannot move to lasting: upper not completed"
+            else:
+                msg = "Cannot move to lasting: bottom/insole not completed"
+            raise HTTPException(status_code=400, detail=msg)
+
     update = {"updated_at": now_iso()}
     # If stage actually changed, reset the per-stage clock and deadline
     if job.get("stage") != payload.stage:
