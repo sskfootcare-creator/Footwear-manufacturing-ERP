@@ -17,6 +17,8 @@ class MaterialIn(BaseModel):
     image_display_url:   Optional[str] = ""
     image_thumbnail_url: Optional[str] = ""
     with_eva:            Optional[bool] = None
+    is_component:       Optional[bool] = False
+    component_category: Optional[str] = None
 
 
 class BomItem(BaseModel):

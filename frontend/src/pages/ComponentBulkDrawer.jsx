@@ -8,6 +8,8 @@ import {
   Save, X, AlertTriangle, CheckCircle2, Plus, Trash2, Package,
 } from "lucide-react";
 
+import ImageUploader from "../components/ImageUploader";
+
 const CATEGORIES = [
   "Upper", "Sole", "Insole", "Sockliner", "Bottom",
   "Lace", "Box", "Tag", "Label", "Packaging", "Other",
@@ -32,6 +34,9 @@ export default function ComponentBulkDrawer({ prefill, existingCodes, onClose, o
     reorder_level:      0,
     minimum_stock:      0,
     lead_time_days:     0,
+    image_url:           prefill?.image_url           || "",
+    image_display_url:   prefill?.image_display_url   || "",
+    image_thumbnail_url: prefill?.image_thumbnail_url || "",
   });
   const [colorInput, setColorInput] = useState("");
   const [sizeInput,  setSizeInput]  = useState("");
@@ -123,6 +128,9 @@ export default function ComponentBulkDrawer({ prefill, existingCodes, onClose, o
         reorder_level:      Number(meta.reorder_level) || 0,
         minimum_stock:      Number(meta.minimum_stock) || 0,
         lead_time_days:     Number(meta.lead_time_days) || 0,
+        image_url:           meta.image_url || "",
+        image_display_url:   meta.image_display_url || "",
+        image_thumbnail_url: meta.image_thumbnail_url || "",
         rows,
       };
       const r = await http.post(`/components/bulk-matrix`, payload);
@@ -138,6 +146,23 @@ export default function ComponentBulkDrawer({ prefill, existingCodes, onClose, o
       title={isExtend ? `Add Stock in Bulk — ${prefill.component_code}` : "Add Components in Bulk"}
       width="max-w-3xl">
       <div className="space-y-4 pb-6">
+        <ImageUploader
+          label="Component Image"
+          maxSizeMB={8}
+          value={{
+            url: meta.image_url,
+            display_url: meta.image_display_url,
+            thumbnail_url: meta.image_thumbnail_url,
+          }}
+          onChange={(imgObj) =>
+            setMeta((m) => ({
+              ...m,
+              image_url: imgObj.url || "",
+              image_display_url: imgObj.display_url || "",
+              image_thumbnail_url: imgObj.thumbnail_url || "",
+            }))
+          }
+        />
         {/* Metadata */}
         <div className="grid grid-cols-2 gap-3">
           <Input label="Component Code *" value={meta.component_code} disabled={isExtend}

@@ -6,6 +6,7 @@ import {
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import ComponentBulkDrawer from "./ComponentBulkDrawer";
+import ImageUploader, { ImageThumb } from "../components/ImageUploader";
 import {
   AlertTriangle, Plus, RefreshCw, History, Package, Boxes,
   ChevronRight, Layers, ShieldAlert, Trash2, PencilLine, Upload, Save, X,
@@ -296,6 +297,9 @@ function EditMetadataDrawer({ row, onClose, onDone }) {
     minimum_stock:      row.minimum_stock || 0,
     lead_time_days:     row.lead_time_days || 0,
     active:             row.active,
+    image_url:          row.image_url || "",
+    image_display_url:  row.image_display_url || "",
+    image_thumbnail_url: row.image_thumbnail_url || "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
@@ -316,6 +320,23 @@ function EditMetadataDrawer({ row, onClose, onDone }) {
   return (
     <Drawer onClose={onClose} title={`Edit — ${row.component_code} · ${row.color || "—"}/${row.size || "—"}`}>
       <div className="space-y-3 pb-6">
+        <ImageUploader
+          label="Component Image"
+          maxSizeMB={8}
+          value={{
+            url: form.image_url,
+            display_url: form.image_display_url,
+            thumbnail_url: form.image_thumbnail_url,
+          }}
+          onChange={(imgObj) =>
+            setForm((f) => ({
+              ...f,
+              image_url: imgObj.url || "",
+              image_display_url: imgObj.display_url || "",
+              image_thumbnail_url: imgObj.thumbnail_url || "",
+            }))
+          }
+        />
         <Input label="Component Name" value={form.component_name}
           onChange={(e) => setForm((f) => ({ ...f, component_name: e.target.value }))} />
         <Select label="Category" value={form.component_category}
@@ -392,6 +413,13 @@ function ComponentGroupCard({ group, metric, onAddMovement, onOpenLedger, onEdit
   const totalReserved= rows.reduce((s, r) => s + Number(r.reserved_stock || 0), 0);
   const totalAvail   = totalCurrent - totalReserved;
 
+  const imageRow = rows.find((r) => r.image_url || r.image_display_url || r.image_thumbnail_url);
+  const imageObj = imageRow ? {
+    thumbnail_url: imageRow.image_thumbnail_url,
+    display_url: imageRow.image_display_url,
+    url: imageRow.image_url,
+  } : null;
+
   return (
     <Card
       className={`border-l-4 hover:border-[#C27842] transition-colors ${lowCells > 0 ? "ring-2 ring-red-500 ring-inset" : ""}`}
@@ -414,11 +442,23 @@ function ComponentGroupCard({ group, metric, onAddMovement, onOpenLedger, onEdit
           </div>
         </div>
         <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="font-mono font-bold text-sm">{group.code}</div>
-            <div className="text-xs text-slate-600 truncate">
-              {group.name}
-              {group.vendor && <span className="text-slate-400"> · vendor {group.vendor}</span>}
+          <div className="flex items-center gap-3 min-w-0">
+            {imageObj && (
+              <ImageThumb
+                image={imageObj}
+                size={42}
+                alt={`${group.code} — ${group.name}`}
+                className="rounded border border-slate-200 flex-shrink-0"
+                clickable
+                testId={`comp-thumb-${group.code}`}
+              />
+            )}
+            <div className="min-w-0">
+              <div className="font-mono font-bold text-sm">{group.code}</div>
+              <div className="text-xs text-slate-600 truncate">
+                {group.name}
+                {group.vendor && <span className="text-slate-400"> · vendor {group.vendor}</span>}
+              </div>
             </div>
           </div>
           <div className="flex-shrink-0 flex items-center gap-1.5">

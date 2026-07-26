@@ -10,6 +10,7 @@ import {
   Badge,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
+import { ImageThumb } from "../components/ImageUploader";
 import {
   Plus,
   ArrowDownToLine,
@@ -201,6 +202,7 @@ export default function Inventory() {
             <table className="w-full text-sm" data-testid="inventory-table">
               <thead className="bg-slate-50 border-b-2 border-slate-200">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-3 py-3 font-bold w-12">Image</th>
                   <th className="px-3 py-3 font-bold">Code</th>
                   <th className="px-3 py-3 font-bold">Material</th>
                   <th className="px-3 py-3 font-bold">Category</th>
@@ -217,7 +219,7 @@ export default function Inventory() {
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="10"
+                      colSpan="11"
                       className="px-6 py-10 text-center text-slate-400"
                     >
                       No inventory data. Click "Stock In" to record your first
@@ -230,6 +232,19 @@ export default function Inventory() {
                       key={r.material_id}
                       className={`border-b border-slate-100 hover:bg-slate-50 ${r.balance <= 0 ? "bg-red-50/40" : ""}`}
                     >
+                      <td className="px-3 py-2">
+                        <ImageThumb
+                          image={{
+                            thumbnail_url: r.image_thumbnail_url,
+                            display_url: r.image_display_url,
+                            url: r.image_url,
+                          }}
+                          size={32}
+                          alt={`${r.code} — ${r.name}`}
+                          className="rounded"
+                          clickable
+                        />
+                      </td>
                       <td className="px-3 py-2 font-mono font-bold">{r.code}</td>
                       <td className="px-3 py-2">{r.name}</td>
                       <td className="px-3 py-2">
@@ -310,6 +325,23 @@ export default function Inventory() {
           title={`Movement History – ${history.name}`}
           width="max-w-2xl"
         >
+          <div className="flex items-center gap-3 p-3 bg-slate-50 border-b border-slate-200 mb-3">
+            <ImageThumb
+              image={{
+                thumbnail_url: history.image_thumbnail_url,
+                display_url: history.image_display_url,
+                url: history.image_url,
+              }}
+              size={48}
+              alt={`${history.code} — ${history.name}`}
+              className="rounded border border-slate-200"
+              clickable
+            />
+            <div>
+              <div className="font-mono font-bold text-sm">{history.code}</div>
+              <div className="text-xs text-slate-600">{history.name}</div>
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table
               className="w-full text-xs"

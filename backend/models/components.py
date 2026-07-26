@@ -27,6 +27,10 @@ class ComponentIn(BaseModel):
     minimum_stock:      int = 0
     lead_time_days:     int = 0
     active:             bool = True
+    material_id:        Optional[str] = ""
+    image_url:           Optional[str] = ""
+    image_display_url:   Optional[str] = ""
+    image_thumbnail_url: Optional[str] = ""
 
 
 class ComponentMasterUpdate(BaseModel):
@@ -41,6 +45,10 @@ class ComponentMasterUpdate(BaseModel):
     minimum_stock:      Optional[int] = None
     lead_time_days:     Optional[int] = None
     active:             Optional[bool] = None
+    material_id:        Optional[str] = None
+    image_url:           Optional[str] = None
+    image_display_url:   Optional[str] = None
+    image_thumbnail_url: Optional[str] = None
 
 
 class ComponentBulkMatrix(BaseModel):
@@ -55,6 +63,10 @@ class ComponentBulkMatrix(BaseModel):
     reorder_level:      int = 0
     minimum_stock:      int = 0
     lead_time_days:     int = 0
+    material_id:        Optional[str] = ""
+    image_url:           Optional[str] = ""
+    image_display_url:   Optional[str] = ""
+    image_thumbnail_url: Optional[str] = ""
     rows: List[Dict[str, Any]]
 
 
