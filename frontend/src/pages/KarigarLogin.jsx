@@ -115,11 +115,11 @@ export default function KarigarLogin() {
           -webkit-tap-highlight-color: transparent;
           touch-action: manipulation;
           will-change: transform, background-color;
-          transition: transform 0.04s ease-out, background-color 0.04s ease-out;
+          transition: transform 0.1s ease, background-color 0.1s ease;
         }
         .kl-key:active {
           background: rgba(194,120,66,0.65) !important;
-          transform: scale(0.92) !important;
+          transform: scale(0.95) !important;
         }
         .kl-btn { transition: all 0.2s ease; touch-action: manipulation; }
         .kl-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 25px rgba(194,120,66,0.45) !important; }
