@@ -50,6 +50,7 @@ function ProductionCardModal({ jobId, onClose }) {
     }
     fetchDetails();
     return () => { unmounted = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
 
   const downloadPdf = async () => {
@@ -717,6 +718,7 @@ export default function KarigarDashboard() {
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskScope]);
 
   useEffect(() => {
