@@ -116,19 +116,41 @@ function ProductionCardModal({ jobId, onClose }) {
         ) : (
           <div>
             {/* Style Image */}
-            {details.image_url ? (
-              <div style={{
-                borderRadius: 12, overflow: "hidden", marginBottom: 12,
-                border: "1px solid rgba(255,255,255,0.1)", background: "#0f172a",
-                maxHeight: 180, display: "flex", justifyContent: "center", alignItems: "center"
-              }}>
-                <img
-                  src={details.image_url}
-                  alt={details.style_code}
-                  style={{ width: "100%", maxHeight: 180, objectFit: "contain" }}
-                />
-              </div>
-            ) : null}
+            <div style={{ marginBottom: 14 }}>
+              {details.image_url || details.image_thumbnail_url ? (
+                <div style={{
+                  borderRadius: 14, overflow: "hidden",
+                  border: "1px solid rgba(255,255,255,0.12)", background: "#020617",
+                  maxHeight: 220, display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", position: "relative",
+                  boxShadow: "0 10px 25px rgba(0,0,0,0.4)"
+                }}>
+                  <img
+                    src={details.image_url || details.image_thumbnail_url}
+                    alt={details.style_code}
+                    style={{ width: "100%", maxHeight: 220, objectFit: "contain", background: "#020617" }}
+                  />
+                  <div style={{
+                    position: "absolute", bottom: 8, right: 8,
+                    background: "rgba(15,23,42,0.85)", backdropFilter: "blur(6px)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    padding: "3px 8px", borderRadius: 6, fontSize: "0.68rem", color: "#cbd5e1", fontWeight: 700
+                  }}>
+                    📷 Style Reference Image
+                  </div>
+                </div>
+              ) : (
+                <div style={{
+                  borderRadius: 12, padding: "1.25rem 1rem",
+                  border: "1px dashed rgba(255,255,255,0.15)", background: "rgba(15,23,42,0.4)",
+                  textAlign: "center", color: "#64748b", fontSize: "0.8rem",
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                }}>
+                  <Package size={30} strokeWidth={1.5} color="#475569" />
+                  <span style={{ fontWeight: 600 }}>No style reference image uploaded for {details.style_code}</span>
+                </div>
+              )}
+            </div>
 
             {/* Info Grid */}
             <div style={{
