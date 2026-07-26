@@ -124,12 +124,12 @@ def clear_auth_cookies(response):
 
 
 def _extract_token(request: Request) -> str | None:
-    tok = request.cookies.get("access_token")
-    if tok:
-        return tok
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
+    tok = request.cookies.get("access_token")
+    if tok:
+        return tok
     return None
 
 

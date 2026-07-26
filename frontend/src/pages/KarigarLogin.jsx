@@ -30,6 +30,13 @@ export default function KarigarLogin() {
     [step]
   );
 
+  const handleKeyTouch = (e, d) => {
+    if (e.type === "touchstart") {
+      e.preventDefault();
+    }
+    handleKey(d);
+  };
+
   const handlePhoneNext = () => {
     if (phone.length < 10) {
       setError("Please enter your 10-digit mobile number");
@@ -103,14 +110,18 @@ export default function KarigarLogin() {
           display: flex; align-items: center; justify-content: center;
           font-size: 1.4rem; font-weight: 600; color: #e2e8f0;
           cursor: pointer; user-select: none;
-          transition: all 0.12s ease;
+          -webkit-user-select: none;
+          -webkit-touch-callout: none;
           -webkit-tap-highlight-color: transparent;
+          touch-action: manipulation;
+          will-change: transform, background-color;
+          transition: transform 0.04s ease-out, background-color 0.04s ease-out;
         }
-        .kl-key:hover, .kl-key:active {
-          background: rgba(71,85,105,0.9);
-          transform: scale(0.96);
+        .kl-key:active {
+          background: rgba(194,120,66,0.65) !important;
+          transform: scale(0.92) !important;
         }
-        .kl-btn { transition: all 0.2s ease; }
+        .kl-btn { transition: all 0.2s ease; touch-action: manipulation; }
         .kl-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 25px rgba(194,120,66,0.45) !important; }
         .kl-btn:active:not(:disabled) { transform: scale(0.98); }
       `}</style>
@@ -172,7 +183,8 @@ export default function KarigarLogin() {
                 key={i}
                 className="kl-key"
                 style={d === "⌫" ? { color: "#f87171" } : {}}
-                onClick={() => handleKey(d)}
+                onTouchStart={(e) => handleKeyTouch(e, d)}
+                onClick={(e) => handleKeyTouch(e, d)}
                 aria-label={d === "⌫" ? "Delete" : `Digit ${d}`}
                 id={`kl-key-${d === "⌫" ? "del" : d}`}
               >

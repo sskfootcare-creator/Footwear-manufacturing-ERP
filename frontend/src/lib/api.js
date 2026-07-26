@@ -34,7 +34,12 @@ http.interceptors.request.use(
   (config) => {
     // Dynamically set baseURL on every request so host changes / live deployments work seamlessly
     config.baseURL = `${getBackendUrl()}/api`;
-    const token = localStorage.getItem("token") || localStorage.getItem("karigar_token");
+    const isKarigarContext =
+      (typeof window !== "undefined" && window.location.pathname.startsWith("/karigar")) ||
+      (config.url && config.url.includes("/my/"));
+    const token = isKarigarContext
+      ? (localStorage.getItem("karigar_token") || localStorage.getItem("token"))
+      : (localStorage.getItem("token") || localStorage.getItem("karigar_token"));
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -47,13 +52,22 @@ http.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+    const isKarigarReq =
+      originalRequest &&
+      originalRequest.url &&
+      (originalRequest.url.includes("/my/") || originalRequest.url.includes("/auth/worker-login"));
+    const isKarigarPage =
+      typeof window !== "undefined" &&
+      (window.location.pathname.startsWith("/karigar") || window.location.pathname === "/karigar-login");
+
     if (
       error.response &&
       error.response.status === 401 &&
       originalRequest &&
       !originalRequest._retry &&
       !originalRequest.url.includes("auth/refresh") &&
-      !originalRequest.url.includes("auth/login")
+      !originalRequest.url.includes("auth/login") &&
+      !isKarigarReq
     ) {
       originalRequest._retry = true;
       try {
@@ -67,10 +81,24 @@ http.interceptors.response.use(
       } catch (refreshError) {
         localStorage.removeItem("token");
         localStorage.removeItem("refresh_token");
-        if (window.location.pathname !== "/login") {
-          window.location.href = "/login";
+        if (isKarigarPage) {
+          localStorage.removeItem("karigar_token");
+          localStorage.removeItem("karigar_worker");
+          if (window.location.pathname !== "/karigar-login") {
+            window.location.href = "/karigar-login";
+          }
+        } else {
+          if (window.location.pathname !== "/login") {
+            window.location.href = "/login";
+          }
         }
         return Promise.reject(refreshError);
+      }
+    } else if (error.response && error.response.status === 401 && (isKarigarReq || isKarigarPage)) {
+      localStorage.removeItem("karigar_token");
+      localStorage.removeItem("karigar_worker");
+      if (typeof window !== "undefined" && window.location.pathname !== "/karigar-login") {
+        window.location.href = "/karigar-login";
       }
     }
     return Promise.reject(error);
