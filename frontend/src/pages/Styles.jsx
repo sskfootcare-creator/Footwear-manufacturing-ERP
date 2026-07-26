@@ -511,6 +511,7 @@ export default function Styles() {
     setForm((f) => ({
       ...f,
       image_url: imgObj.url || "",
+      image_original_url: imgObj.original_url || imgObj.url || "",
       image_display_url: imgObj.display_url || "",
       image_thumbnail_url: imgObj.thumbnail_url || "",
     }));
@@ -861,6 +862,7 @@ export default function Styles() {
                 testIdPrefix="style-image"
                 value={{
                   url: form.image_url,
+                  original_url: form.image_original_url || form.image_url,
                   display_url: form.image_display_url,
                   thumbnail_url: form.image_thumbnail_url,
                 }}

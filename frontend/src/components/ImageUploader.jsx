@@ -118,19 +118,44 @@ export default function ImageUploader({
         return u.toString();
       }
 
-      // ---- ONEDRIVE (1drv.ms shortlink OR onedrive.live.com share URL) ----
-      // The public "shares API" trick: base64url-encode the FULL share URL
-      // and open it at /shares/u!<b64>/root/content — returns the raw file
-      // and works from <img> tags (no auth needed for anyone-with-link shares).
+      // ---- ONEDRIVE DECODE LEGACY SHARES API URLs --------------------------
+      if (val.includes("api.onedrive.com/v1.0/shares/u!")) {
+        const m = val.match(/\/shares\/u!([^/]+)/);
+        if (m && m[1]) {
+          try {
+            let b64 = m[1].replace(/_/g, "/").replace(/-/g, "+");
+            while (b64.length % 4) b64 += "=";
+            const decoded = atob(b64);
+            if (decoded.startsWith("http")) {
+              val = decoded;
+              return val;
+            }
+          } catch {}
+        }
+      }
+
+      // ---- ONEDRIVE / SHAREPOINT -------------------------------------------
       if (
         u.hostname === "1drv.ms" ||
-        /(^|\.)onedrive\.live\.com$/i.test(u.hostname)
+        /(^|\.)onedrive\.live\.com$/i.test(u.hostname) ||
+        /(^|\.)sharepoint\.com$/i.test(u.hostname)
       ) {
-        const b64 = btoa(val)
-          .replace(/=+$/g, "") // strip padding
-          .replace(/\//g, "_")
-          .replace(/\+/g, "-");
-        return `https://api.onedrive.com/v1.0/shares/u!${b64}/root/content`;
+        if (/(^|\.)onedrive\.live\.com$/i.test(u.hostname)) {
+          if (u.pathname.includes("/embed")) {
+            u.pathname = u.pathname.replace("/embed", "/download");
+            return u.toString();
+          }
+          if (u.searchParams.has("resid")) {
+            return `https://onedrive.live.com/download?${u.searchParams.toString()}`;
+          }
+        }
+        if (/(^|\.)sharepoint\.com$/i.test(u.hostname)) {
+          if (!u.searchParams.has("download")) {
+            u.searchParams.set("download", "1");
+            return u.toString();
+          }
+        }
+        return val;
       }
 
       // ---- GOOGLE DRIVE ---------------------------------------------------
@@ -149,10 +174,11 @@ export default function ImageUploader({
   };
 
   const pasteUrl = (e) => {
-    const val = normalizeImageUrl(e.target.value);
+    const rawVal = e.target.value;
+    const val = normalizeImageUrl(rawVal);
     onChange({
       url: val,
-      original_url: val,
+      original_url: rawVal,
       display_url: val,
       thumbnail_url: val,
     });
@@ -222,7 +248,7 @@ export default function ImageUploader({
               type="text"
               placeholder="Paste image URL"
               className="flex-1 bg-white border-2 border-slate-300 px-2 py-2.5 text-xs outline-none focus:border-slate-500 min-h-[44px]"
-              value={asObj.url || ""}
+              value={asObj.original_url || asObj.url || ""}
               onChange={pasteUrl}
               data-testid={`${testIdPrefix}-url-input`}
             />
