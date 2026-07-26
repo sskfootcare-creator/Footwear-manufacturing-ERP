@@ -8,7 +8,7 @@ import {
 
 // ── karigar-scoped HTTP helper ────────────────────────────────────────────────
 function karigarHttp() {
-  const token = localStorage.getItem("token") || localStorage.getItem("karigar_token");
+  const token = localStorage.getItem("karigar_token") || localStorage.getItem("token");
   return {
     get: (url, cfg) => http.get(url, { ...cfg, headers: { ...(cfg?.headers || {}), Authorization: `Bearer ${token}` } }),
     post: (url, data, cfg) => http.post(url, data, { ...cfg, headers: { ...(cfg?.headers || {}), Authorization: `Bearer ${token}` } }),
@@ -694,7 +694,7 @@ export default function KarigarDashboard() {
     catch { return {}; }
   })();
 
-  const token = localStorage.getItem("token") || localStorage.getItem("karigar_token");
+  const token = localStorage.getItem("karigar_token") || localStorage.getItem("token");
 
   useEffect(() => {
     if (!token) navigate("/karigar-login", { replace: true });
