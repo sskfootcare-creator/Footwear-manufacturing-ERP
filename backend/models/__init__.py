@@ -19,7 +19,8 @@ from models.orders import (
     PRODUCTION_STAGES, POLineItem, POIn, ProductionStageUpdate
 )
 from models.workers import (
-    WorkerIn, AssignmentUpdate, BulkAssign, AdvanceIn
+    WorkerIn, AssignmentUpdate, BulkAssign, AdvanceIn,
+    SetPinIn, WorkerLoginIn, ReadyForPickupIn
 )
 from models.vendors import (
     DEFAULT_CREDIT_DAYS, PAYMENT_MODES, GRNLineItem, GRNIn, PaymentIn,
@@ -57,6 +58,7 @@ from models.expenses import (
 from models.online_reconciliation import (
     DailyPaymentRow, DailyPaymentImportIn, SettlementImportIn, NonOrderDeductionRow, NonOrderDeductionIn, MonthlyOrderRow, StyleCostSnapshotIn, ReconciliationRunIn
 )
+from models.notifications import NotificationIn
 
 
 __all__ = [
@@ -75,6 +77,7 @@ __all__ = [
     "PRODUCTION_STAGES", "POLineItem", "POIn", "ProductionStageUpdate",
     # Workers
     "WorkerIn", "AssignmentUpdate", "BulkAssign", "AdvanceIn",
+    "SetPinIn", "WorkerLoginIn", "ReadyForPickupIn",
     # Vendors
     "DEFAULT_CREDIT_DAYS", "PAYMENT_MODES", "GRNLineItem", "GRNIn", "PaymentIn",
     "VendorIn", "VendorUpdate", "VendorPOLineItem", "VendorPOIn", "VendorPOUpdate",
@@ -103,4 +106,6 @@ __all__ = [
     "EXPENSE_CATEGORIES", "ExpenseIn", "ExpenseUpdate", "RecurringExpenseIn", "RecurringExpenseUpdate",
     # Online Reconciliation
     "DailyPaymentRow", "DailyPaymentImportIn", "SettlementImportIn", "NonOrderDeductionRow", "NonOrderDeductionIn", "MonthlyOrderRow", "StyleCostSnapshotIn", "ReconciliationRunIn",
+    # Notifications
+    "NotificationIn",
 ]

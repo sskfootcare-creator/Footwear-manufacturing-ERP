@@ -1,9 +1,11 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { http } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { Loader2 } from "lucide-react";
+import { Loader2, HardHat } from "lucide-react";
 
 export default function Login() {
+  const navigate = useNavigate();
   const { login, error } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -100,18 +102,50 @@ export default function Login() {
               Sign in
             </button>
 
-            <div className="text-right">
+            <div className="flex items-center justify-between text-xs pt-1">
+              <button
+                type="button"
+                data-testid="karigar-login-link"
+                onClick={() => navigate("/karigar-login")}
+                className="font-bold text-[#C27842] hover:underline flex items-center gap-1"
+              >
+                <HardHat className="w-3.5 h-3.5 inline" /> Karigar Login →
+              </button>
               <button
                 type="button"
                 data-testid="forgot-password-link"
                 onClick={() => { setForgotOpen(true); setForgotEmail(email); setForgotResult(null); }}
-                className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:text-[#1D4ED8]"
+                className="uppercase tracking-wider font-bold text-[#2563EB] hover:text-[#1D4ED8]"
               >
                 Forgot password?
               </button>
             </div>
           </form>
+
+          {/* Prominent Karigar Login Banner */}
+          <div className="mt-8 pt-6 border-t border-slate-200">
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3.5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-md bg-[#C27842] text-white flex items-center justify-center font-bold flex-shrink-0">
+                  <HardHat className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-slate-900">Karigar / Worker Portal</div>
+                  <div className="text-[11px] text-slate-600">Login with Phone + PIN</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/karigar-login")}
+                className="px-3 py-1.5 bg-[#C27842] hover:bg-[#a05a28] text-white text-xs font-bold rounded shadow-sm transition-colors shrink-0"
+                data-testid="karigar-portal-btn"
+              >
+                Karigar Login →
+              </button>
+            </div>
+          </div>
         </div>
+
 
         <div className="text-xs text-slate-400 uppercase tracking-[0.2em]">© SSK Footcare Manufacturing LLP</div>
       </div>

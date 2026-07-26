@@ -10,13 +10,15 @@ import {
   Badge,
   ConfirmDialog,
 } from "../components/ui-kit";
+import { useNavigate } from "react-router-dom";
 import { Drawer } from "./Materials";
-import { Plus, Trash2, Pencil, Save, UserX, UserCheck, KeyRound } from "lucide-react";
+import { Plus, Trash2, Pencil, Save, UserX, UserCheck, KeyRound, HardHat } from "lucide-react";
 
 const ROLES = ["admin", "manager", "production", "sales"];
 const empty = { email: "", name: "", role: "production", password: "" };
 
 export default function Users() {
+  const navigate = useNavigate();
   const [users, setUsers] = useState([]);
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
@@ -141,13 +143,38 @@ export default function Users() {
         subtitle="Admin / Users"
         testId="users-header"
         action={
-          <BtnPrimary onClick={startNew} data-testid="add-user-btn">
-            <Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Add User
-          </BtnPrimary>
+          <div className="flex gap-2">
+            <BtnSecondary onClick={() => navigate("/workers")} data-testid="manage-karigars-btn">
+              <HardHat className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Karigars / PINs
+            </BtnSecondary>
+            <BtnPrimary onClick={startNew} data-testid="add-user-btn">
+              <Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Add User
+            </BtnPrimary>
+          </div>
         }
       />
-      <div className="p-2 sm:p-4 lg:p-8">
+      <div className="p-2 sm:p-4 lg:p-8 space-y-4">
+        {/* Banner explaining Karigar (Worker) accounts */}
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs sm:text-sm text-slate-700">
+          <div className="flex items-start gap-3">
+            <div className="p-2 bg-amber-500/20 rounded-md text-amber-700 flex-shrink-0">
+              <HardHat className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="font-bold text-slate-900">Looking for Karigar (Worker) logins?</span>{" "}
+              Karigars do not use email passwords. They authenticate via <span className="font-bold text-amber-700">Phone + PIN</span> on the dedicated mobile app. Manage Karigar profiles and set PINs in <span className="font-semibold">Master → Karigars / Labour</span>.
+            </div>
+          </div>
+          <BtnSecondary
+            onClick={() => navigate("/workers")}
+            className="text-xs shrink-0 self-end sm:self-center"
+          >
+            Go to Karigars →
+          </BtnSecondary>
+        </div>
+
         <Card className="overflow-hidden">
+
           <div className="overflow-x-auto">
             <table className="w-full text-sm" data-testid="users-table">
               <thead className="bg-slate-50 border-b-2 border-slate-200">

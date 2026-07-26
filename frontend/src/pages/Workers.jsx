@@ -11,7 +11,7 @@ import {
   ConfirmDialog,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
-import { Plus, Trash2, Pencil, Save, Phone } from "lucide-react";
+import { Plus, Trash2, Pencil, Save, Phone, KeyRound, Check } from "lucide-react";
 
 const SKILLS = [
   { key: "cutting", label: "Cutting" },
@@ -55,6 +55,39 @@ export default function Workers() {
   const [form, setForm] = useState(empty);
   const [filterSkill, setFilterSkill] = useState("");
   const [confirm, setConfirm] = useState(null);
+
+  // PIN drawer state
+  const [pinTarget, setPinTarget] = useState(null);
+  const [pinVal, setPinVal] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [pinDone, setPinDone] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
+
+  const openPinDrawer = (w) => {
+    setPinTarget(w);
+    setPinVal("");
+    setPinError("");
+    setPinDone(false);
+  };
+
+  const savePin = async () => {
+    setPinError("");
+    const cleaned = pinVal.trim();
+    if (!/^\d{4,6}$/.test(cleaned)) {
+      setPinError("PIN must be 4 to 6 numeric digits");
+      return;
+    }
+    setPinBusy(true);
+    try {
+      await http.patch(`/workers/${pinTarget.id}/set-pin`, { pin: cleaned });
+      setPinDone(true);
+      load();
+    } catch (e) {
+      setPinError(e.response?.data?.detail || e.message);
+    } finally {
+      setPinBusy(false);
+    }
+  };
 
   const load = async () => {
     const { data } = await http.get("/workers");
@@ -164,8 +197,9 @@ export default function Workers() {
                   <th className="px-4 py-3 font-bold">Skill</th>
                   <th className="px-4 py-3 font-bold">Phone</th>
                   <th className="px-4 py-3 font-bold text-right">Rate/pair</th>
+                  <th className="px-4 py-3 font-bold">App PIN</th>
                   <th className="px-4 py-3 font-bold">Status</th>
-                  <th className="px-4 py-3" />
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -200,16 +234,30 @@ export default function Workers() {
                         ₹{w.rate_per_pair}
                       </td>
                       <td className="px-4 py-3">
+                        <Badge color={w.has_pin ? "green" : "orange"}>
+                          {w.has_pin ? "PIN Set" : "No PIN"}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3">
                         <Badge color={w.active === false ? "red" : "green"}>
                           {w.active === false ? "Inactive" : "Active"}
                         </Badge>
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          onClick={() => startEdit(w)}
-                          className="text-slate-600 hover:text-[#2563EB] p-1.5"
+                          onClick={() => openPinDrawer(w)}
+                          className="text-slate-600 hover:text-amber-600 p-1.5"
                           disabled={w.active === false}
-                          title="Edit"
+                          title="Set / Reset Karigar Login PIN"
+                          data-testid={`set-pin-${w.name}`}
+                        >
+                          <KeyRound className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => startEdit(w)}
+                          className="text-slate-600 hover:text-[#2563EB] p-1.5 ml-1"
+                          disabled={w.active === false}
+                          title="Edit Profile"
                         >
                           <Pencil className="w-4 h-4" />
                         </button>
@@ -225,6 +273,7 @@ export default function Workers() {
                         </button>
                       </td>
                     </tr>
+
                   ))
                 )}
               </tbody>
@@ -320,6 +369,75 @@ export default function Workers() {
           </div>
         </Drawer>
       )}
+      {/* PIN Drawer */}
+      {pinTarget && (
+        <Drawer
+          onClose={() => setPinTarget(null)}
+          title={`Set Login PIN for ${pinTarget.name}`}
+        >
+          <div className="space-y-4">
+            <div className="text-xs text-slate-500 bg-slate-50 p-3 rounded border border-slate-200">
+              Set a 4–6 digit numeric PIN for <span className="font-bold text-slate-800">{pinTarget.name}</span>. Karigar logs in using their registered mobile number <span className="font-mono font-bold text-slate-800">{pinTarget.phone || "(no phone set)"}</span> + this PIN.
+            </div>
+
+            {!pinTarget.phone && (
+              <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded">
+                ⚠️ This karigar has no phone number recorded. Please update their phone number first so they can log in.
+              </div>
+            )}
+
+            {pinDone ? (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded flex items-center gap-2">
+                <Check className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <div className="font-bold">PIN Updated Successfully!</div>
+                  <div className="text-xs text-emerald-700">
+                    {pinTarget.name} can now log in at <span className="font-mono">/karigar-login</span>.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <Input
+                  label="New 4–6 Digit PIN"
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={pinVal}
+                  onChange={(e) => setPinVal(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="e.g. 1234"
+                  testId="input-worker-pin"
+                />
+
+                {pinError && (
+                  <div className="p-2.5 bg-red-50 border border-red-200 text-red-600 text-xs rounded">
+                    {pinError}
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <BtnPrimary
+                    onClick={savePin}
+                    disabled={pinBusy || !pinVal || !pinTarget.phone}
+                    data-testid="save-pin-btn"
+                  >
+                    <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />
+                    {pinBusy ? "Saving..." : "Set PIN"}
+                  </BtnPrimary>
+                  <BtnSecondary onClick={() => setPinTarget(null)}>Cancel</BtnSecondary>
+                </div>
+              </>
+            )}
+
+            {pinDone && (
+              <BtnSecondary onClick={() => setPinTarget(null)} className="w-full">
+                Close
+              </BtnSecondary>
+            )}
+          </div>
+        </Drawer>
+      )}
+
       <ConfirmDialog
         open={!!confirm}
         title={confirm?.title}
@@ -330,3 +448,4 @@ export default function Workers() {
     </div>
   );
 }
+

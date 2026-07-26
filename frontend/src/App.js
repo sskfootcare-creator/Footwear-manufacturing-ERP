@@ -36,6 +36,8 @@ import ListingFormats from "@/pages/ListingFormats";
 import OrderImportFormats from "@/pages/OrderImportFormats";
 import SelectWorkspace from "@/pages/SelectWorkspace";
 import ResetPassword from "@/pages/ResetPassword";
+import KarigarLogin from "@/pages/KarigarLogin";
+import KarigarDashboard from "@/pages/KarigarDashboard";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
@@ -65,6 +67,8 @@ function App() {
         <Routes>
           <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
           <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/karigar-login" element={<KarigarLogin />} />
+          <Route path="/karigar" element={<KarigarDashboard />} />
           <Route path="/select-workspace" element={<Protected><SelectWorkspace /></Protected>} />
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 

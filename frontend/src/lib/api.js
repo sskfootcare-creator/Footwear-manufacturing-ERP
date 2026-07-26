@@ -34,7 +34,7 @@ http.interceptors.request.use(
   (config) => {
     // Dynamically set baseURL on every request so host changes / live deployments work seamlessly
     config.baseURL = `${getBackendUrl()}/api`;
-    const token = localStorage.getItem("token");
+    const token = localStorage.getItem("token") || localStorage.getItem("karigar_token");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }

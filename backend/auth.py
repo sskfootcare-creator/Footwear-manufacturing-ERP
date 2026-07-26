@@ -74,7 +74,9 @@ def validate_password(password: str) -> None:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters long.")
 
 
-def create_access_token(user_id: str, email: str, role: str) -> str:
+def create_access_token(
+    user_id: str, email: str, role: str, worker_id: str | None = None
+) -> str:
     payload = {
         "sub": user_id,
         "email": email,
@@ -82,6 +84,8 @@ def create_access_token(user_id: str, email: str, role: str) -> str:
         "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_HOURS),
         "type": "access",
     }
+    if worker_id is not None:
+        payload["worker_id"] = worker_id
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
@@ -138,6 +142,23 @@ async def get_current_user_factory(db):
             payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
             if payload.get("type") != "access":
                 raise HTTPException(status_code=401, detail="Invalid token type")
+
+            # ── Worker tokens resolve from db.workers, not db.users ──────────
+            if payload.get("role") == "worker":
+                worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
+                if not worker or not worker.get("active", True):
+                    raise HTTPException(status_code=401, detail="Worker not found or inactive")
+                return {
+                    "id": str(worker["_id"]),
+                    "worker_id": str(worker["_id"]),
+                    "name": worker.get("name", ""),
+                    "phone": worker.get("phone", ""),
+                    "role": "worker",
+                    "email": payload.get("email", ""),  # synthetic — phone used as email in token
+                    "skill": worker.get("skill", ""),
+                }
+
+            # ── Regular user token ────────────────────────────────────────────
             user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")

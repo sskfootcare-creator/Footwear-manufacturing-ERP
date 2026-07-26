@@ -1,7 +1,7 @@
 """Workers & Payroll Pydantic Models."""
 
 from typing import List, Optional, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class WorkerIn(BaseModel):
@@ -35,3 +35,33 @@ class AdvanceIn(BaseModel):
     date: Optional[str] = ""
     notes: Optional[str] = ""
     txn_type: Literal["advance", "payment", "bonus", "adjustment"] = "advance"
+
+
+# ── Worker PIN & login ────────────────────────────────────────────────────────
+
+class SetPinIn(BaseModel):
+    """Admin/manager: set or reset a 4–6 digit numeric PIN for a worker."""
+    pin: str
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, v: str) -> str:
+        v = v.strip()
+        if not v.isdigit() or not (4 <= len(v) <= 6):
+            raise ValueError("PIN must be 4–6 digits")
+        return v
+
+
+class WorkerLoginIn(BaseModel):
+    """Worker self-login: phone number + numeric PIN."""
+    phone: str
+    pin: str
+
+
+class ReadyForPickupIn(BaseModel):
+    """Worker marks a job or grouped job ready for the manager to collect."""
+    completed_qty: Optional[int] = None
+    notes: Optional[str] = ""
+    size_breakdown: Optional[dict] = None  # e.g. {"4": 120, "5": 120, "6": 240} or {job_id: qty}
+
+
