@@ -30,13 +30,6 @@ export default function KarigarLogin() {
     [step]
   );
 
-  const handleKeyTouch = (e, d) => {
-    if (e.type === "touchstart") {
-      e.preventDefault();
-    }
-    handleKey(d);
-  };
-
   const handlePhoneNext = () => {
     if (phone.length < 10) {
       setError("Please enter your 10-digit mobile number");
@@ -114,7 +107,6 @@ export default function KarigarLogin() {
           -webkit-touch-callout: none;
           -webkit-tap-highlight-color: transparent;
           touch-action: manipulation;
-          will-change: transform, background-color;
           transition: transform 0.1s ease, background-color 0.1s ease;
         }
         .kl-key:active {
@@ -183,8 +175,7 @@ export default function KarigarLogin() {
                 key={i}
                 className="kl-key"
                 style={d === "⌫" ? { color: "#f87171" } : {}}
-                onTouchStart={(e) => handleKeyTouch(e, d)}
-                onClick={(e) => handleKeyTouch(e, d)}
+                onClick={() => handleKey(d)}
                 aria-label={d === "⌫" ? "Delete" : `Digit ${d}`}
                 id={`kl-key-${d === "⌫" ? "del" : d}`}
               >
