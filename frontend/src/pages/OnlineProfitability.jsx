@@ -125,9 +125,7 @@ export default function OnlineProfitability() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await http.post(`/online-reconciliation/${endpoint}`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const res = await http.post(`/online-reconciliation/${endpoint}`, formData);
       setUploadMessage(`Successfully imported ${res.data.filename || file.name}`);
       loadReconciliation();
     } catch (err) {
@@ -173,44 +171,40 @@ export default function OnlineProfitability() {
           <div className="flex flex-wrap gap-1">
             <button
               onClick={() => setActiveTab("reconciliation")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${
-                activeTab === "reconciliation"
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "reconciliation"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
+                }`}
               data-testid="tab-reconciliation"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Reconciliation Engine
             </button>
             <button
               onClick={() => setActiveTab("import")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${
-                activeTab === "import"
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "import"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
+                }`}
               data-testid="tab-import"
             >
               <Upload className="w-3.5 h-3.5" /> File Import Suite (5 Reports)
             </button>
             <button
               onClick={() => setActiveTab("returns_deductions")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${
-                activeTab === "returns_deductions"
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "returns_deductions"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
+                }`}
               data-testid="tab-returns"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Return Charges & Deductions
             </button>
             <button
               onClick={() => setActiveTab("unreconciled")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${
-                activeTab === "unreconciled"
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "unreconciled"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
+                }`}
               data-testid="tab-unreconciled"
             >
               <AlertOctagon className="w-3.5 h-3.5 text-amber-400" /> Unreconciled Orders
