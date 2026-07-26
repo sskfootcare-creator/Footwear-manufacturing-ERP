@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { http } from "@/lib/api";
 import {
   LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer,
   Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat,
   Warehouse, IndianRupee, Settings as SettingsIcon, Receipt,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check,
+  Check, Bell,
 } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -447,6 +448,19 @@ function UserMenuPopover({ user, workspace, onSwitch, onLogout, open, onToggle }
           </div>
         </div>
 
+        {/* Karigar App Link */}
+        <div className="px-3 pt-2">
+          <button
+            onClick={() => { onToggle(); navigate("/karigar-login"); }}
+            data-testid="open-karigar-app-btn"
+            className="w-full flex items-center gap-3 px-3 text-[#C27842] hover:text-amber-400 transition-colors rounded hover:bg-slate-800/60"
+            style={{ minHeight: 44 }}
+          >
+            <HardHat className="w-4 h-4 flex-shrink-0" />
+            <span className="text-sm font-semibold">Karigar Portal (Phone + PIN)</span>
+          </button>
+        </div>
+
         {/* Logout */}
         <div className="p-3">
           <button
@@ -462,6 +476,7 @@ function UserMenuPopover({ user, workspace, onSwitch, onLogout, open, onToggle }
       </div>
     </div>
   );
+
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -530,6 +545,147 @@ function BottomTabBar({ workspace, onMoreOpen, userRole }) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   NOTIFICATION BELL (pickup-ready alerts for admin/manager/production)
+   ─────────────────────────────────────────────────────────────────────────── */
+const NOTIF_POLL_MS = 60_000;
+const NOTIF_ROLES = ["admin", "manager", "production"];
+
+const STAGE_LABELS_NOTIF = {
+  procurement: "Procurement", cutting: "Cutting", folding: "Folding",
+  attachment: "Attachment", stitching: "Stitching", lasting: "Lasting",
+  sole_pasting: "Sole Pasting", finishing: "Finishing", qc_pack: "QC & Pack",
+};
+
+function NotificationBell({ userRole }) {
+  const [notifs, setNotifs] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const ref = useRef(null);
+  const navigate = useNavigate();
+
+  const canSee = NOTIF_ROLES.includes(userRole);
+
+  const fetchNotifs = useCallback(async () => {
+    if (!canSee) return;
+    try {
+      const { data } = await http.get("/notifications?unread_only=true");
+      setNotifs(data || []);
+    } catch { /* silently ignore */ }
+  }, [canSee]);
+
+  useEffect(() => {
+    fetchNotifs();
+    const iv = setInterval(fetchNotifs, NOTIF_POLL_MS);
+    return () => clearInterval(iv);
+  }, [fetchNotifs]);
+
+  // Close panel on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("touchstart", handler); };
+  }, [open]);
+
+  const markRead = async (id) => {
+    setLoading(true);
+    try {
+      await http.patch(`/notifications/${id}/read`, {});
+      setNotifs((prev) => prev.filter((n) => n.id !== id));
+    } catch { /* ignore */ } finally { setLoading(false); }
+  };
+
+  const handleClickNotif = (n) => {
+    markRead(n.id);
+    setOpen(false);
+    navigate("/production");
+  };
+
+  if (!canSee) return null;
+
+  const unreadCount = notifs.length;
+
+  return (
+    <div className="relative" ref={ref}>
+      {/* Bell button */}
+      <button
+        onClick={() => { setOpen((v) => !v); fetchNotifs(); }}
+        aria-label={`Notifications${unreadCount > 0 ? ` (${unreadCount} unread)` : ""}`}
+        data-testid="notification-bell"
+        className="relative p-2 text-slate-400 hover:text-white transition-colors rounded active:bg-slate-800"
+        style={{ minHeight: 44, minWidth: 44, display: "flex", alignItems: "center", justifyContent: "center" }}
+      >
+        <Bell className="w-5 h-5" />
+        {unreadCount > 0 && (
+          <span
+            className="absolute top-1 right-1 min-w-[17px] h-[17px] bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-0.5"
+            data-testid="notification-badge"
+          >
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {/* Drop-down panel */}
+      <div
+        className={`absolute right-0 top-full mt-2 w-80 bg-[#0F172A] border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden transition-all duration-200 origin-top-right ${
+          open ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+        }`}
+        data-testid="notification-panel"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+          <span className="text-sm font-black text-white tracking-tight">Pickup Alerts</span>
+          {unreadCount > 0 && (
+            <span className="text-[10px] font-bold bg-red-500/15 text-red-400 border border-red-500/25 rounded-full px-2 py-0.5">
+              {unreadCount} unread
+            </span>
+          )}
+        </div>
+
+        {/* List */}
+        <div className="max-h-80 overflow-y-auto">
+          {notifs.length === 0 ? (
+            <div className="px-4 py-6 text-center text-slate-500 text-sm">No pending pickup alerts</div>
+          ) : (
+            notifs.map((n) => (
+              <button
+                key={n.id}
+                onClick={() => handleClickNotif(n)}
+                data-testid={`notif-item-${n.id}`}
+                className="w-full text-left px-4 py-3 hover:bg-slate-800/60 border-b border-slate-800/60 transition-colors last:border-0"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="w-2 h-2 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-bold text-white truncate">
+                      {n.style_code} — {STAGE_LABELS_NOTIF[n.stage] || n.stage}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      {n.worker_name} · {n.completed_qty} pairs ready
+                    </div>
+                    <div className="text-[10px] text-slate-600 mt-0.5">
+                      {n.at ? new Date(n.at).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }) : ""}
+                    </div>
+                  </div>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+
+        {notifs.length > 0 && (
+          <div className="px-4 py-2 border-t border-slate-800 text-center">
+            <span className="text-[10px] text-slate-600">Click an alert to open Production and advance the stage</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    MOBILE: TOP BAR
    ───────────────────────────────────────────────────────────────────────────── */
 function MobileTopBar({ user, workspace, onSwitch, onLogout }) {
@@ -583,8 +739,9 @@ function MobileTopBar({ user, workspace, onSwitch, onLogout }) {
           )}
         </div>
 
-        {/* Right: user menu */}
-        <div style={{ minWidth: 44 }} className="flex justify-end">
+        {/* Right: notification bell + user menu */}
+        <div style={{ minWidth: 44 }} className="flex items-center justify-end gap-1">
+          <NotificationBell userRole={user?.role} />
           <UserMenuPopover
             user={user}
             workspace={workspace}

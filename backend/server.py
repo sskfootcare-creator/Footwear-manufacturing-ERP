@@ -11778,10 +11778,13 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         "notes": payload.notes or "",
         "qc_pass": payload.qc_pass, "rejected_qty": payload.rejected_qty,
     }
-    await db.production_jobs.update_one(
-        {"_id": oid(jid)},
-        {"$set": update, "$push": {"history": history_entry}},
-    )
+    mongo_update: dict = {"$set": update, "$push": {"history": history_entry}}
+    # When stage actually changes, clear the ready_for_pickup flag (karigar must re-flag
+    # if the manager decides to re-assign the same worker in the next stage)
+    if job.get("stage") != payload.stage:
+        mongo_update["$unset"] = {"ready_for_pickup": ""}
+    await db.production_jobs.update_one({"_id": oid(jid)}, mongo_update)
+
     # auto-consume inventory when moving OUT of procurement (first time only)
     if job.get("stage") == "procurement" and payload.stage != "procurement":
         try:
@@ -11878,12 +11881,21 @@ async def update_job_quantity(jid: str, payload: QuantityUpdate, request: Reques
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
 
 
+# ── Workers CRUD & Auth ──
 # ---------- WORKERS / KARIGARS ----------
+def _format_worker(doc: dict) -> dict:
+    if not doc:
+        return doc
+    sd = stringify(doc)
+    sd["has_pin"] = bool(doc.get("pin_hash"))
+    sd.pop("pin_hash", None)
+    return sd
+
 @api.get("/workers")
 async def list_workers(request: Request):
     await get_current_user(request)
     docs = await db.workers.find({}).sort("name", 1).to_list(500)
-    return [stringify(d) for d in docs]
+    return [_format_worker(d) for d in docs]
 
 @api.post("/workers")
 async def create_worker(payload: WorkerIn, request: Request):
@@ -11892,9 +11904,8 @@ async def create_worker(payload: WorkerIn, request: Request):
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
     res = await db.workers.insert_one(doc)
-    doc.pop("_id", None)
-    doc["id"] = str(res.inserted_id)
-    return doc
+    created = await db.workers.find_one({"_id": res.inserted_id})
+    return _format_worker(created)
 
 @api.patch("/workers/{wid}")
 async def update_worker(wid: str, payload: WorkerIn, request: Request):
@@ -11902,7 +11913,8 @@ async def update_worker(wid: str, payload: WorkerIn, request: Request):
     update = payload.model_dump()
     update["updated_at"] = now_iso()
     await db.workers.update_one({"_id": oid(wid)}, {"$set": update})
-    return stringify(await db.workers.find_one({"_id": oid(wid)}))
+    updated = await db.workers.find_one({"_id": oid(wid)})
+    return _format_worker(updated)
 
 @api.delete("/workers/{wid}")
 async def delete_worker(wid: str, request: Request):
@@ -11910,8 +11922,568 @@ async def delete_worker(wid: str, request: Request):
     await db.workers.update_one({"_id": oid(wid)}, {"$set": {"active": False, "updated_at": now_iso()}})
     return {"ok": True}
 
+@api.patch("/workers/{wid}/set-pin")
+async def set_worker_pin(wid: str, payload: SetPinIn, request: Request):
+    """Admin/manager: set or reset a worker's 4–6 digit numeric PIN for the karigar app."""
+    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    worker = await db.workers.find_one({"_id": oid(wid)})
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    pin_hash = hash_password(payload.pin)
+    await db.workers.update_one(
+        {"_id": oid(wid)},
+        {"$set": {"pin_hash": pin_hash, "updated_at": now_iso()}}
+    )
+    return {"ok": True, "worker_id": wid}
+
+# ---------- WORKER AUTH (karigar login) ----------
+
+@api.post("/auth/worker-login")
+async def worker_login(payload: WorkerLoginIn, request: Request, response: Response):
+    """Worker (karigar) login via phone + PIN. Issues a JWT with role='worker'.
+    Reuses the same sliding-window rate-limit pattern as the regular login.
+    """
+    client_ip = (
+        request.headers.get("x-test-rate-limit-client-ip")
+        or (request.client.host if request.client else "unknown")
+    )
+    limiter_key = f"wpin:{client_ip}"
+    now_ts = datetime.now(timezone.utc).timestamp()
+    window_start = now_ts - LOGIN_WINDOW_SECONDS
+    _login_failures[limiter_key] = [
+        t for t in _login_failures[limiter_key] if t > window_start
+    ]
+    if len(_login_failures[limiter_key]) >= LOGIN_MAX_ATTEMPTS:
+        retry_after = int(LOGIN_WINDOW_SECONDS - (now_ts - _login_failures[limiter_key][0]))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {retry_after // 60} minutes.",
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )
+
+    phone = (payload.phone or "").strip()
+    worker = await db.workers.find_one({"phone": phone, "active": {"$ne": False}})
+    pin_hash = worker.get("pin_hash", "") if worker else ""
+
+    if not worker or not pin_hash or not verify_password(payload.pin, pin_hash):
+        _login_failures[limiter_key].append(now_ts)
+        raise HTTPException(status_code=401, detail="Invalid phone or PIN")
+
+    _login_failures.pop(limiter_key, None)
+    wid = str(worker["_id"])
+    access = create_access_token(wid, phone, "worker", worker_id=wid)
+    set_auth_cookies(response, access)
+    return {
+        "worker_id": wid,
+        "name": worker.get("name", ""),
+        "skill": worker.get("skill", ""),
+        "role": "worker",
+        "access_token": access,
+    }
+
+
+# ---------- WORKER SELF-SERVICE ENDPOINTS (/my/...) ----------
+
+@api.get("/my/tasks")
+async def my_tasks(request: Request, scope: Optional[str] = "active"):
+    """Worker-only: list jobs assigned to the calling worker.
+
+    Query params:
+      scope: 'active' (default) | 'completed' | 'all'
+
+    Groups jobs by (po_number, style_code, color, stage, role) into a single Production Card
+    task per group, containing a size-wise breakdown.
+    """
+    u = await get_current_user(request)
+    if u.get("role") != "worker":
+        raise HTTPException(status_code=403, detail="Worker access only")
+    caller_wid = u["worker_id"]
+
+    jobs = await db.production_jobs.find({}).to_list(5000)
+    styles_cache = {}
+
+    # Group jobs by (po_number, style_code, color, stage, role)
+    grouped = {}
+
+    for job in jobs:
+        assigns = job.get("assignments") or {}
+        po_num = job.get("po_number") or ""
+        style_code = job.get("style_code") or ""
+        color = job.get("color") or ""
+        curr_stage = job.get("stage", "")
+
+        for role, asgn in assigns.items():
+            if asgn.get("worker_id") == caller_wid:
+                if po_num and po_num != "—":
+                    gkey = f"{po_num}_{style_code}_{color}_{curr_stage}_{role}"
+                else:
+                    gkey = f"single_{str(job['_id'])}_{curr_stage}_{role}"
+
+                if gkey not in grouped:
+                    grouped[gkey] = {
+                        "po_number": po_num or "—",
+                        "client_name": job.get("client_name"),
+                        "style_code": style_code,
+                        "color": color,
+                        "stage": curr_stage,
+                        "delivery_date": job.get("delivery_date"),
+                        "stage_entered_at": job.get("stage_entered_at"),
+                        "stage_deadline": job.get("stage_deadline"),
+                        "role": role,
+                        "rate_per_pair": asgn.get("rate_per_pair"),
+                        "jobs": [],
+                    }
+                grouped[gkey]["jobs"].append(job)
+
+    results = []
+    for gkey, g in grouped.items():
+        role = g["role"]
+        curr_stage = g["stage"]
+
+        try:
+            curr_idx = PRODUCTION_STAGES.index(curr_stage)
+        except ValueError:
+            curr_idx = -1
+        try:
+            role_idx = PRODUCTION_STAGES.index(role)
+        except ValueError:
+            role_idx = -1
+
+        # Sort jobs by size
+        def parse_sz(j):
+            s = str(j.get("size", 999))
+            return float(s) if s.replace('.', '', 1).isdigit() else 999
+
+        sorted_jobs = sorted(g["jobs"], key=parse_sz)
+        primary_job = sorted_jobs[0]
+        job_ids = [str(j["_id"]) for j in sorted_jobs]
+
+        # Aggregate quantities & status
+        sizes = []
+        total_ordered = 0
+        total_completed = 0
+        total_rfp_qty = 0
+        rfp_notes = ""
+        any_rfp = False
+
+        for j in sorted_jobs:
+            q = j.get("quantity") or 0
+            c = j.get("completed_qty") or 0
+            rfp = j.get("ready_for_pickup") or {}
+            rfp_by_me = (rfp.get("worker_id") == caller_wid and rfp.get("role") == role)
+
+            if rfp_by_me:
+                any_rfp = True
+                rfp_q = rfp.get("completed_qty", 0) or 0
+                total_rfp_qty += rfp_q
+                if rfp.get("notes"):
+                    rfp_notes = rfp.get("notes")
+            else:
+                rfp_q = 0
+
+            total_ordered += q
+            total_completed += c
+
+            sizes.append({
+                "job_id": str(j["_id"]),
+                "size": str(j.get("size", "—")),
+                "ordered_qty": q,
+                "completed_qty": c,
+                "rfp_qty": rfp_q,
+                "is_rfp": rfp_by_me,
+            })
+
+        all_completed = all(
+            (j.get("ready_for_pickup") or {}).get("worker_id") == caller_wid and (j.get("ready_for_pickup") or {}).get("role") == role
+            or curr_stage == "dispatched"
+            or (curr_idx > role_idx >= 0)
+            for j in sorted_jobs
+        )
+
+        is_active = (curr_stage == role and not any_rfp and curr_stage != "dispatched")
+
+        if scope == "active" and not is_active:
+            continue
+        elif scope == "completed" and not all_completed and not any_rfp:
+            continue
+        elif scope not in ("active", "completed", "all"):
+            if not is_active:
+                continue
+
+        # Fetch style image & details
+        style_code = g["style_code"]
+        if style_code not in styles_cache:
+            st_doc = await db.styles.find_one({"code": style_code})
+            styles_cache[style_code] = stringify(st_doc) if st_doc else {}
+        st_info = styles_cache[style_code]
+
+        safe = {
+            "id": str(primary_job["_id"]),
+            "job_ids": job_ids,
+            "po_number": g["po_number"],
+            "client_name": g["client_name"],
+            "style_code": style_code,
+            "color": g["color"],
+            "total_quantity": total_ordered,
+            "quantity": total_ordered,
+            "completed_qty": total_completed,
+            "stage": curr_stage,
+            "stage_entered_at": g["stage_entered_at"],
+            "stage_deadline": g["stage_deadline"],
+            "ready_for_pickup": {
+                "role": role,
+                "worker_id": caller_wid,
+                "completed_qty": total_rfp_qty,
+                "notes": rfp_notes,
+            } if any_rfp else None,
+            "delivery_date": g["delivery_date"],
+            "is_completed": all_completed or any_rfp,
+            "image_url": st_info.get("image_url") or st_info.get("image_thumbnail_url"),
+            "image_thumbnail_url": st_info.get("image_thumbnail_url") or st_info.get("image_url"),
+            "article_name": st_info.get("name", ""),
+            "my_assignment": {
+                "role": role,
+                "rate_per_pair": g["rate_per_pair"],
+            },
+            "sizes": sizes,
+        }
+        results.append(safe)
+
+    return results
+
+
+@api.get("/my/tasks/{job_id}/card.pdf", dependencies=[Depends(pdf_rate_limiter)])
+async def my_task_production_card_pdf(job_id: str, request: Request):
+    """Worker-only: stream the printable A4 Production Card PDF for a job assigned to the calling worker."""
+    u = await get_current_user(request)
+    if u.get("role") != "worker":
+        raise HTTPException(status_code=403, detail="Worker access only")
+    caller_wid = u["worker_id"]
+
+    job = await db.production_jobs.find_one({"_id": oid(job_id)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    assigns = job.get("assignments") or {}
+    assigned_workers = {a.get("worker_id") for a in assigns.values()}
+    if caller_wid not in assigned_workers:
+        raise HTTPException(403, "You are not assigned to this job")
+
+    # Find sibling jobs for the same PO + style + color group
+    po_num = job.get("po_number")
+    style_code = job.get("style_code")
+    color = job.get("color")
+
+    q = {}
+    if po_num:
+        q["po_number"] = po_num
+    if style_code:
+        q["style_code"] = style_code
+    if color:
+        q["color"] = color
+
+    sibling_jobs = await db.production_jobs.find(q).to_list(500) if q else [job]
+    if not sibling_jobs:
+        sibling_jobs = [job]
+
+    j0 = sibling_jobs[0]
+    sizes = []
+    seen = set()
+    for j in sorted(sibling_jobs, key=lambda x: (float(x.get("size", 999)) if str(x.get("size", "")).replace('.', '', 1).isdigit() else 999)):
+        sz = str(j.get("size", "—"))
+        if sz in seen:
+            continue
+        seen.add(sz)
+        sizes.append({"size": sz, "quantity": j.get("quantity", 0)})
+
+    total_qty = sum(j.get("quantity", 0) for j in sibling_jobs)
+    comp = {
+        "upper_done": all((j.get("components") or {}).get("upper_done") for j in sibling_jobs),
+        "bottom_done": all((j.get("components") or {}).get("bottom_done") for j in sibling_jobs),
+        "sole_done": all((j.get("components") or {}).get("sole_done") for j in sibling_jobs),
+    }
+    group = {
+        "po_number": j0.get("po_number", ""),
+        "client_name": j0.get("client_name", ""),
+        "style_code": j0.get("style_code", ""),
+        "color": j0.get("color", ""),
+        "description": j0.get("description", ""),
+        "delivery_date": j0.get("delivery_date", ""),
+        "sizes": sizes,
+        "total_qty": total_qty,
+        "components": comp,
+        "assignments": j0.get("assignments") or {},
+    }
+
+    style = await db.styles.find_one({"code": j0.get("style_code")})
+    style_d = stringify(style) if style else None
+    pdf_bytes = build_production_card(group, style_d)
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="ProductionCard-{group["style_code"]}-{group["color"]}.pdf"'
+        },
+    )
+
+
+@api.get("/my/tasks/{job_id}/details")
+async def my_task_details(job_id: str, request: Request):
+    """Worker-only: return full Production Card data JSON (size breakdown, BOM, image, PO info)."""
+    u = await get_current_user(request)
+    if u.get("role") != "worker":
+        raise HTTPException(status_code=403, detail="Worker access only")
+    caller_wid = u["worker_id"]
+
+    job = await db.production_jobs.find_one({"_id": oid(job_id)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    assigns = job.get("assignments") or {}
+    assigned_workers = {a.get("worker_id") for a in assigns.values()}
+    if caller_wid not in assigned_workers:
+        raise HTTPException(403, "You are not assigned to this job")
+
+    po_num = job.get("po_number")
+    style_code = job.get("style_code")
+    color = job.get("color")
+
+    q = {}
+    if po_num:
+        q["po_number"] = po_num
+    if style_code:
+        q["style_code"] = style_code
+    if color:
+        q["color"] = color
+
+    sibling_jobs = await db.production_jobs.find(q).to_list(500) if q else [job]
+    if not sibling_jobs:
+        sibling_jobs = [job]
+
+    j0 = sibling_jobs[0]
+    sizes = []
+    seen = set()
+    for j in sorted(sibling_jobs, key=lambda x: (float(x.get("size", 999)) if str(x.get("size", "")).replace('.', '', 1).isdigit() else 999)):
+        sz = str(j.get("size", "—"))
+        if sz in seen:
+            continue
+        seen.add(sz)
+        sizes.append({"size": sz, "quantity": j.get("quantity", 0)})
+
+    total_qty = sum(j.get("quantity", 0) for j in sibling_jobs)
+
+    style = await db.styles.find_one({"code": style_code})
+    style_d = stringify(style) if style else {}
+
+    my_asgn_role = next((r for r, a in assigns.items() if a.get("worker_id") == caller_wid), None)
+    my_asgn = assigns.get(my_asgn_role, {}) if my_asgn_role else {}
+
+    return {
+        "job_id": job_id,
+        "po_number": j0.get("po_number", "—"),
+        "client_name": j0.get("client_name", "—"),
+        "style_code": style_code,
+        "article_name": style_d.get("name", ""),
+        "color": color,
+        "delivery_date": j0.get("delivery_date", "—"),
+        "stage": j0.get("stage", "—"),
+        "sizes": sizes,
+        "total_qty": total_qty,
+        "image_url": style_d.get("image_url") or style_d.get("image_display_url"),
+        "image_thumbnail_url": style_d.get("image_thumbnail_url") or style_d.get("image_url"),
+        "components": j0.get("components") or {},
+        "bom_items": style_d.get("bom_items") or style_d.get("components") or [],
+        "my_assignment": {
+            "role": my_asgn_role,
+            "rate_per_pair": my_asgn.get("rate_per_pair"),
+        },
+    }
+
+
+@api.patch("/my/tasks/{job_id}/ready-for-pickup")
+async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Request):
+    """Worker-only: flag a job or grouped job (size-wise) as ready for the manager to collect."""
+    u = await get_current_user(request)
+    if u.get("role") != "worker":
+        raise HTTPException(status_code=403, detail="Worker access only")
+    caller_wid = u["worker_id"]
+
+    job = await db.production_jobs.find_one({"_id": oid(job_id)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    current_stage = job.get("stage", "")
+    assigns = job.get("assignments") or {}
+    stage_assign = assigns.get(current_stage, {})
+
+    if stage_assign.get("worker_id") != caller_wid:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not assigned to the current stage of this job"
+        )
+
+    po_num = job.get("po_number")
+    style_code = job.get("style_code")
+    color = job.get("color") or ""
+
+    if po_num and po_num != "—":
+        q = {"stage": current_stage, "po_number": po_num, "style_code": style_code, "color": color}
+        sibling_jobs = await db.production_jobs.find(q).to_list(500)
+        sibling_jobs = [j for j in sibling_jobs if (j.get("assignments") or {}).get(current_stage, {}).get("worker_id") == caller_wid]
+        if not sibling_jobs:
+            sibling_jobs = [job]
+    else:
+        sibling_jobs = [job]
+    if not sibling_jobs:
+        sibling_jobs = [job]
+
+    now = now_iso()
+    sb = payload.size_breakdown or {}
+
+    total_marked = 0
+    for j in sibling_jobs:
+        jid_str = str(j["_id"])
+        sz_str = str(j.get("size", ""))
+
+        if jid_str in sb:
+            q_val = int(sb[jid_str])
+        elif sz_str in sb:
+            q_val = int(sb[sz_str])
+        elif payload.completed_qty is not None:
+            q_val = payload.completed_qty if len(sibling_jobs) == 1 else j.get("quantity", 0)
+        else:
+            q_val = j.get("quantity", 0)
+
+        total_marked += q_val
+
+        rfp = {
+            "role": current_stage,
+            "worker_id": caller_wid,
+            "worker_name": u.get("name", ""),
+            "completed_qty": q_val,
+            "at": now,
+            "notes": payload.notes or "",
+        }
+
+        await db.production_jobs.update_one(
+            {"_id": j["_id"]},
+            {
+                "$set": {"ready_for_pickup": rfp, "updated_at": now},
+                "$push": {
+                    "history": {
+                        "event": "marked_ready",
+                        "role": current_stage,
+                        "worker_id": caller_wid,
+                        "by": u.get("name", ""),
+                        "completed_qty": q_val,
+                        "notes": payload.notes or "",
+                        "at": now,
+                    }
+                },
+            },
+        )
+
+    # Create in-app notification for managers/production
+    notif = {
+        "type": "pickup_ready",
+        "job_id": job_id,
+        "style_code": job.get("style_code", ""),
+        "stage": current_stage,
+        "worker_id": caller_wid,
+        "worker_name": u.get("name", ""),
+        "completed_qty": total_marked,
+        "notes": payload.notes or "",
+        "at": now,
+        "read": False,
+        "read_by": None,
+        "read_at": None,
+        "created_at": now,
+    }
+    await db.notifications.insert_one(notif)
+
+    rfp_summary = {
+        "role": current_stage,
+        "worker_id": caller_wid,
+        "completed_qty": total_marked,
+        "at": now,
+        "notes": payload.notes or "",
+    }
+    return {"ok": True, "completed_qty": total_marked, "ready_for_pickup": rfp_summary}
+
+
+# ---------- WORKER SELF-SERVICE PAYROLL ----------
+
+@api.get("/my/payroll")
+async def my_payroll(
+    request: Request,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Worker-only: per-karigar earnings for the calling worker (self-scoped).
+    Defaults to the current calendar month.
+    """
+    u = await get_current_user(request)
+    if u.get("role") != "worker":
+        raise HTTPException(status_code=403, detail="Worker access only")
+    caller_wid = u["worker_id"]
+
+    if not from_date:
+        from_date = datetime.now(timezone.utc).strftime("%Y-%m-01")
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+
+    # Reuse the full payroll computation
+    full = await report_payroll(request, from_date=from_date, to_date=to_date)
+    rows = full.get("rows", [])
+    # Filter to just the calling worker
+    my_row = next((r for r in rows if r.get("worker_id") == caller_wid), None)
+    if not my_row:
+        my_row = {
+            "worker_id": caller_wid,
+            "name": u.get("name", ""),
+            "skill": u.get("skill", ""),
+            "total_pairs": 0,
+            "total_earning": 0.0,
+            "total_bonus": 0.0,
+            "net_payable": 0.0,
+            "by_role": {},
+            "jobs": [],
+        }
+    return {"from_date": from_date, "to_date": to_date, "payroll": my_row}
+
+
+# ---------- NOTIFICATIONS (production / admin / manager) ----------
+
+@api.get("/notifications")
+async def list_notifications(request: Request, unread_only: bool = True):
+    """List pickup-ready notifications (admin/manager/production only), newest first."""
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+    q: dict = {"type": "pickup_ready"}
+    if unread_only:
+        q["read"] = False
+    notifs = await db.notifications.find(q).sort("at", -1).to_list(200)
+    return [stringify(n) for n in notifs]
+
+
+@api.patch("/notifications/{nid}/read")
+async def mark_notification_read(nid: str, request: Request):
+    """Mark a pickup-ready notification as read (admin/manager/production only)."""
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "production")(u)
+    now = now_iso()
+    result = await db.notifications.update_one(
+        {"_id": oid(nid)},
+        {"$set": {"read": True, "read_by": u.get("email", u.get("name", "")), "read_at": now}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Notification not found")
+    return {"ok": True}
+
 
 # ---------- PROCUREMENT MATERIAL REQUIREMENT ----------
+
 async def _compute_material_requirement(job_ids: list[str]) -> dict:
     """Aggregate material requirements across jobs based on their style BOM and yield."""
     obj_ids = []
@@ -15923,6 +16495,21 @@ async def on_startup():
             log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
     await db.production_jobs.create_index("po_id")
     await db.vendors.create_index("name")
+
+    # Worker PIN login: phone index for fast lookup
+    try:
+        await db.workers.create_index("phone", name="workers_phone", sparse=True)
+    except Exception as e:
+        log.warning(f"Could not create workers.phone index: {e}")
+
+    # Notifications: unread + time index for efficient polling
+    try:
+        await db.notifications.create_index(
+            [("read", 1), ("at", -1)], name="notifications_unread_time"
+        )
+        await db.notifications.create_index("job_id", name="notifications_job_id")
+    except Exception as e:
+        log.warning(f"Could not create notifications indexes: {e}")
 
     # SKU map indexes: unique compound on (source_type, source_name, external_sku) + style lookup
     try:
