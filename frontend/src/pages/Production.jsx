@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { http } from "../lib/api";
+import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
@@ -444,7 +444,7 @@ export default function Production() {
       const res = await http.post("/procurement/requirement.pdf",
         { job_ids, scope_label: label || `${groups.length} card(s)` }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
-    } catch (e) { alert("Material requirement failed: " + (e.response?.data?.detail || e.message)); }
+    } catch (e) { alert("Material requirement failed: " + friendlyAxiosError(e)); }
   };
 
   const checkShortage = async (groups) => {
