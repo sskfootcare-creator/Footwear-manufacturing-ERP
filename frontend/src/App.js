@@ -38,6 +38,9 @@ import SelectWorkspace from "@/pages/SelectWorkspace";
 import ResetPassword from "@/pages/ResetPassword";
 import KarigarLogin from "@/pages/KarigarLogin";
 import KarigarDashboard from "@/pages/KarigarDashboard";
+import StylePLM from "@/pages/StylePLM";
+import PatternManager from "@/pages/PatternManager";
+import ToolingLibrary from "@/pages/ToolingLibrary";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
@@ -73,6 +76,10 @@ function App() {
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
             <Route index element={<Dashboard />} />
+            <Route path="styles" element={<Styles />} />
+            <Route path="plm" element={<StylePLM />} />
+            <Route path="patterns" element={<PatternManager />} />
+            <Route path="tooling" element={<ToolingLibrary />} />
             <Route path="materials" element={<Materials />} />
             <Route path="workers" element={<Workers />} />
             <Route path="inventory" element={<Inventory />} />

@@ -25,6 +25,20 @@ def _fmt(n, d=2):
     return f"{v:,.{d}f}"
 
 
+SWATCH_CATEGORIES = {"upper", "lining", "sole", "insole", "bottom"}
+
+
+def _make_swatch_box():
+    t = Table([[""]], colWidths=[16 * mm], rowHeights=[12 * mm])
+    t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.8, BLACK),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    ]))
+    return t
+
+
 def build_material_requirement(scope_label: str, jobs_summary: list[dict],
                                material_lines: list[dict], notes: str = "") -> bytes:
     """
@@ -112,9 +126,18 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
     ]))
 
     # Material requirement table
-    mat_rows = [["#", "Code", "Material", "Category", "Unit", "Qty Required", "Rate", "Total Cost"]]
+    mat_rows = [["#", "Code", "Material", "Category", "Unit", "Qty Required", "Rate", "Total Cost", "Swatch"]]
+    row_heights = [None]
     total_cost = 0.0
     for i, m in enumerate(material_lines, 1):
+        cat = (m.get("category") or "").strip().lower()
+        if cat in SWATCH_CATEGORIES:
+            swatch_cell = _make_swatch_box()
+            row_heights.append(14 * mm)
+        else:
+            swatch_cell = "—"
+            row_heights.append(None)
+
         mat_rows.append([
             str(i),
             m.get("code", ""),
@@ -122,16 +145,20 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
             m.get("category", ""),
             m.get("unit", ""),
             _fmt(m.get("total_qty_required", 0), 2),
-            f"₹{_fmt(m.get('rate', 0), 2)}",
-            f"₹{_fmt(m.get('total_cost', 0), 2)}",
+            f"Rs.{_fmt(m.get('rate', 0), 2)}",
+            f"Rs.{_fmt(m.get('total_cost', 0), 2)}",
+            swatch_cell,
         ])
         total_cost += m.get("total_cost", 0)
+
+    row_heights.append(None)
     mat_rows.append([
         "", "", "", "", "", Paragraph("<b>TOTAL</b>", ParagraphStyle("b", fontName="Helvetica-Bold", fontSize=9, alignment=2)),
-        "", Paragraph(f"<b>₹{_fmt(total_cost, 2)}</b>", ParagraphStyle("b2", fontName="Helvetica-Bold", fontSize=10, alignment=2))
+        "", Paragraph(f"<b>Rs.{_fmt(total_cost, 2)}</b>", ParagraphStyle("b2", fontName="Helvetica-Bold", fontSize=10, alignment=2)),
+        ""
     ])
 
-    mat_t = Table(mat_rows, colWidths=[10 * mm, 22 * mm, 50 * mm, 25 * mm, 14 * mm, 22 * mm, 18 * mm, 22 * mm])
+    mat_t = Table(mat_rows, colWidths=[8 * mm, 20 * mm, 50 * mm, 18 * mm, 10 * mm, 18 * mm, 16 * mm, 20 * mm, 20 * mm], rowHeights=row_heights)
     mat_t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.6, LINE),
         ("GRID", (0, 0), (-1, -2), 0.4, LINE),
@@ -140,11 +167,14 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
         ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
         ("FONT", (0, 1), (-1, -2), "Helvetica", 8),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("ALIGN", (4, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (4, 0), (-2, -1), "RIGHT"),
         ("ALIGN", (4, 1), (4, -2), "CENTER"),
+        ("ALIGN", (8, 0), (8, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
         ("BACKGROUND", (0, -1), (-1, -1), LIGHT),
         ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
     ]))

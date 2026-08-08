@@ -65,6 +65,7 @@ const emptyForm = {
   with_eva: null,
   is_component: false,
   component_category: "Sole",
+  default_yield_per_unit: "",
 };
 
 export default function Materials() {
@@ -114,6 +115,7 @@ export default function Materials() {
       with_eva: m.with_eva ?? null,
       is_component: m.is_component || false,
       component_category: m.component_category || "Sole",
+      default_yield_per_unit: m.default_yield_per_unit != null ? m.default_yield_per_unit : "",
     });
     setFormError("");
     setOpen(true);
@@ -125,6 +127,10 @@ export default function Materials() {
         ...form,
         rate: Number(form.rate),
         reorder_level: Number(form.reorder_level || 0),
+        default_yield_per_unit:
+          form.default_yield_per_unit !== "" && form.default_yield_per_unit != null
+            ? Number(form.default_yield_per_unit)
+            : null,
       };
       if (edit) await http.patch(`/materials/${edit}`, body);
       else await http.post("/materials", body);
@@ -394,6 +400,31 @@ export default function Materials() {
               onChange={(e) => setForm({ ...form, rate: e.target.value })}
               testId="form-mat-rate"
             />
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1 flex items-center gap-1">
+                Default Yield
+                <span
+                  className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold cursor-help"
+                  title="Standard pairs produced per 1 unit of this material (e.g., 10 uppers per metre). Applied automatically to new BOM lines using this material — still editable per-line for exceptions."
+                  data-testid="default-yield-tooltip"
+                >
+                  ?
+                </span>
+                <span className="text-[10px] font-normal normal-case tracking-normal text-slate-400 ml-1">(optional)</span>
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                placeholder="e.g. 10 (pairs per unit)"
+                value={form.default_yield_per_unit}
+                onChange={(e) =>
+                  setForm({ ...form, default_yield_per_unit: e.target.value })
+                }
+                data-testid="form-mat-default-yield"
+                className="w-full border border-neutral-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]/30 focus:border-[#2563EB]"
+              />
+            </div>
             <Input
               label="Reorder Level (min stock)"
               type="number"

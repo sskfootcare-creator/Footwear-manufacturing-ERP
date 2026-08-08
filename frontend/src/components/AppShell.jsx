@@ -21,7 +21,10 @@ const NAV_GROUPS = [
     workspaces: ["b2b", "online", "management"],
     items: [
       { to: "/",                    label: "Dashboard",            icon: LayoutDashboard, end: true, roles: ["admin","manager","production","sales"] },
-      { to: "/styles",              label: "Styles",               icon: Layers,          roles: ["admin","manager","sales"] },
+      { to: "/styles",              label: "Styles Master",        icon: Layers,          roles: ["admin","manager","sales"] },
+      { to: "/plm",                 label: "Digital Style Folder", icon: BookOpen,        roles: ["admin","manager","production","sales"] },
+      { to: "/patterns",            label: "Pattern Manager",      icon: Layers,          roles: ["admin","manager","production"] },
+      { to: "/tooling",             label: "Tooling & Sole Moulds",icon: Hammer,          roles: ["admin","manager","production"] },
       { to: "/materials",           label: "Materials",            icon: Boxes,           roles: ["admin","manager"] },
       { to: "/inventory",           label: "Raw Material Inventory",icon: Warehouse,       roles: ["admin","manager","production"] },
       { to: "/components",          label: "Component Inventory",  icon: Package,         roles: ["admin","manager","production"] },

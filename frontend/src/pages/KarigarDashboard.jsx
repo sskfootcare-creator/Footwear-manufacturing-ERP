@@ -56,7 +56,7 @@ function ProductionCardModal({ jobId, onClose }) {
   const downloadPdf = async () => {
     setPdfLoading(true);
     try {
-      const res = await api.get(`/my/tasks/${jobId}/card.pdf`, { responseType: "blob" });
+      const res = await api.get(`/my/tasks/${jobId}/card.pdf?variant=dual`, { responseType: "blob" });
       const blob = new Blob([res.data], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
