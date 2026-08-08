@@ -726,9 +726,12 @@ export default function Styles() {
                       label="Materials"
                       value={inr(s.costing.materials_cost)}
                     />
-                    <Row label="Labor" value={inr(s.costing.labor_cost)} />
                     <Row
-                      label="Total cost"
+                      label={s.costing?.is_assigned ? "Labor (Assigned)" : "Labor"}
+                      value={inr(s.costing.labor_cost)}
+                    />
+                    <Row
+                      label={s.costing?.is_assigned ? "Total Cost (Actual)" : "Total cost"}
                       value={inr(s.costing.total_cost)}
                       bold
                     />

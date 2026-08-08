@@ -244,7 +244,9 @@ export default function StylePLM({ initialStyleCode, onBack }) {
 
           <div className="flex items-center gap-6 font-mono text-xs">
             <div className="text-right">
-              <span className="text-slate-400 block text-[10px] uppercase font-bold">Base Cost</span>
+              <span className="text-slate-400 block text-[10px] uppercase font-bold">
+                {selectedStyle.costing?.is_assigned ? "Total Prod. Cost (Assigned)" : "Total Prod. Cost"}
+              </span>
               <span className="text-emerald-400 font-bold text-sm">Rs.{selectedStyle.costing?.total_cost || "0.00"}</span>
             </div>
             <div className="text-right border-l border-slate-800 pl-6">

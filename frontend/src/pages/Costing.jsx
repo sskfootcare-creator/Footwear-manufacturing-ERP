@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { http, inr } from "../lib/api";
 import { PageHeader, Card, Select, Input } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
-import { Calculator as CalcIcon } from "lucide-react";
+import { Calculator as CalcIcon, UserCheck, Info } from "lucide-react";
 
 export default function Costing() {
   const [styles, setStyles] = useState([]);
@@ -143,7 +143,7 @@ export default function Costing() {
               </div>
             </Section>
 
-              <Section title="Labor Operations">
+              <Section title="Labor Operations (Planned)">
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {selected.labor.map((l, i) => (
                     <div key={i} className="border-2 border-slate-200 p-3">
@@ -157,6 +157,51 @@ export default function Costing() {
                   ))}
                 </div>
               </Section>
+
+              {/* Real Job Assignments & Worker Rates */}
+              {selected.costing?.is_assigned && (
+                <Section title="Active Production Job Assignments (Worker Rates)">
+                  <div className="bg-emerald-50 border-2 border-emerald-300 p-4 rounded-md space-y-3" data-testid="actual-job-assignments-section">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-emerald-900 font-bold text-xs uppercase tracking-wider">
+                        <UserCheck className="w-4 h-4 text-emerald-600" />
+                        Worker Job Assignments & Actual Labor Rates
+                      </div>
+                      <span className="px-2 py-0.5 bg-emerald-700 text-white text-[10px] font-bold rounded uppercase tracking-wider">
+                        Live Production
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {selected.costing.assigned_roles.map((asgn, i) => (
+                        <div key={i} className="bg-white border border-emerald-200 p-2.5 rounded shadow-sm flex items-center justify-between">
+                          <div>
+                            <div className="font-bold uppercase text-[10px] text-emerald-900 tracking-wider">
+                              {asgn.role}
+                            </div>
+                            <div className="text-slate-700 font-medium text-xs mt-0.5">
+                              {asgn.worker_name || "Assigned Karigar"}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-mono font-bold text-emerald-700 text-sm">
+                              {inr(asgn.rate_per_pair)}
+                            </div>
+                            <div className="text-[9px] text-slate-400 font-mono">per pair</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="pt-2 border-t border-emerald-200 flex items-center justify-between text-xs">
+                      <span className="text-emerald-900 font-medium">Total Assigned Worker Labor Cost:</span>
+                      <span className="font-mono font-black text-emerald-800 text-sm">
+                        {inr(selected.costing.labor_cost)} / pair
+                      </span>
+                    </div>
+                  </div>
+                </Section>
+              )}
             </div>
           )}
         </Card>
@@ -164,15 +209,38 @@ export default function Costing() {
         {selected && adjusted && (
           <div>
             <div className="lg:sticky lg:top-6 bg-[#0F172A] text-white p-4 sm:p-6 border-2 border-[#0F172A]">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-4 flex items-center gap-2">
-                <CalcIcon className="w-3.5 h-3.5" /> Cost Sheet
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold flex items-center gap-2">
+                  <CalcIcon className="w-3.5 h-3.5" /> Cost Sheet
+                </div>
+                {selected.costing?.is_assigned ? (
+                  <span
+                    className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[9px] font-bold uppercase rounded flex items-center gap-1"
+                    title="Calculated from active worker job assignments in production"
+                    data-testid="assigned-labor-badge"
+                  >
+                    <UserCheck className="w-3 h-3" /> Actual Job Assigned
+                  </span>
+                ) : (
+                  <span
+                    className="px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold uppercase rounded flex items-center gap-1"
+                    title="No production job assignments found yet; using planned style labor cost"
+                    data-testid="estimated-labor-badge"
+                  >
+                    <Info className="w-3 h-3" /> Estimated Labor
+                  </span>
+                )}
               </div>
               <div className="space-y-1">
                 <CRow
                   label="Materials"
                   value={inr(selected.costing.materials_cost)}
                 />
-                <CRow label="Labor" value={inr(selected.costing.labor_cost)} />
+                <CRow
+                  label={selected.costing?.is_assigned ? "Labor (Job Assigned)" : "Labor (Estimated)"}
+                  value={inr(selected.costing.labor_cost)}
+                  accent={selected.costing?.is_assigned}
+                />
                 <CRow
                   label="Overhead"
                   value={inr(selected.costing.overhead_cost)}
@@ -182,7 +250,7 @@ export default function Costing() {
                   value={inr(selected.costing.packing_cost)}
                 />
                 <div className="border-t border-dashed border-slate-600 my-2" />
-                <CRow label="Total Cost" value={inr(adjusted.total)} bold />
+                <CRow label="Total Cost of Production" value={inr(adjusted.total)} bold big />
               </div>
 
               <div className="mt-5 pt-4 border-t border-slate-700 space-y-3">

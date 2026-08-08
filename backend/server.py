@@ -1084,6 +1084,95 @@ def compute_style_costing(style: dict) -> dict:
     }
 
 
+async def compute_style_costing_async(style: dict, db) -> dict:
+    """Computes style costing, automatically incorporating real worker assignment rates
+    if production jobs exist for this style.
+    """
+    c = compute_style_costing(style)
+    c["planned_labor_cost"] = c["labor_cost"]
+    c["labor_source"] = "estimated"
+    c["is_assigned"] = False
+    c["assigned_roles"] = []
+
+    try:
+        style_id = str(style.get("_id", style.get("id", "")))
+        style_code = style.get("code", "")
+
+        if not style_id and not style_code:
+            return c
+
+        query_conditions = []
+        if style_id:
+            query_conditions.append({"style_id": style_id})
+        if style_code:
+            query_conditions.append({"style_code": style_code})
+
+        jobs = await db.production_jobs.find(
+            {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
+        ).to_list(500)
+
+        assigned_roles_map = {}
+        job_rates = []
+
+        for job in jobs:
+            assignments = job.get("assignments") or {}
+            if isinstance(assignments, dict) and assignments:
+                total_job_rate = 0.0
+                has_valid = False
+                for role, asgn in assignments.items():
+                    if isinstance(asgn, dict):
+                        rate = float(asgn.get("rate_per_pair") or 0)
+                        if rate > 0:
+                            total_job_rate += rate
+                            has_valid = True
+                            if role not in assigned_roles_map:
+                                assigned_roles_map[role] = {
+                                    "role": role,
+                                    "worker_id": asgn.get("worker_id", ""),
+                                    "worker_name": asgn.get("worker_name", ""),
+                                    "rate_per_pair": round(rate, 2),
+                                }
+                if has_valid:
+                    job_rates.append(total_job_rate)
+
+        if job_rates:
+            actual_labor_cost = round(sum(job_rates) / len(job_rates), 2)
+            c["actual_labor_cost"] = actual_labor_cost
+            c["labor_cost"] = actual_labor_cost
+            c["labor_source"] = "actual"
+            c["is_assigned"] = True
+            c["assigned_roles"] = list(assigned_roles_map.values())
+
+            materials_cost = c["materials_cost"]
+            base_cost = materials_cost + actual_labor_cost
+            overhead_pct = float(style.get("overhead_pct", 0) or 0)
+            overhead_cost = base_cost * (overhead_pct / 100)
+            packing = c["packing_cost"]
+            total_cost = base_cost + overhead_cost + packing
+
+            margin_pct = float(style.get("margin_pct", 0) or 0)
+            suggested_margin_amount = total_cost * (margin_pct / 100)
+            suggested_target_price = total_cost + suggested_margin_amount
+            gst_pct = float(style.get("gst_pct", 0) or 0)
+            gst_amount = suggested_target_price * (gst_pct / 100)
+            suggested_target_price_with_gst = suggested_target_price + gst_amount
+
+            c["overhead_cost"] = round(overhead_cost, 2)
+            c["total_cost"] = round(total_cost, 2)
+            c["suggested_margin_amount"] = round(suggested_margin_amount, 2)
+            c["suggested_target_price"] = round(suggested_target_price, 2)
+            c["gst_amount"] = round(gst_amount, 2)
+            c["suggested_target_price_with_gst"] = round(suggested_target_price_with_gst, 2)
+            c["selling_price"] = round(suggested_target_price, 2)
+            c["final_price"] = round(suggested_target_price_with_gst, 2)
+            c["margin_amount"] = round(suggested_margin_amount, 2)
+    except Exception:
+        pass
+
+    return c
+
+
+
 async def compute_po_profitability(po_line: dict, style_obj: dict, db) -> dict:
     """Compute real profit for a PO line: unit_price (negotiated) minus actual costs.
 
@@ -3520,7 +3609,7 @@ async def list_styles(
     out = []
     for d in docs:
         d = stringify(d)
-        d["costing"] = compute_style_costing(d)
+        d["costing"] = await compute_style_costing_async(d, db)
         d["in_online_pipeline"] = d["id"] in pipeline_ids
         out.append(d)
     return out
@@ -3700,7 +3789,7 @@ async def get_style(sid: str, request: Request):
     if not d:
         raise HTTPException(404, "Not found")
     d = stringify(d)
-    d["costing"] = compute_style_costing(d)
+    d["costing"] = await compute_style_costing_async(d, db)
     return d
 
 @api.post("/styles")
@@ -3736,7 +3825,7 @@ async def create_style(payload: StyleIn, request: Request):
         raise HTTPException(status_code=409, detail=f"Style code '{generated_code}' collision — please retry")
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
-    doc["costing"] = compute_style_costing(doc)
+    doc["costing"] = await compute_style_costing_async(doc, db)
     # Auto-initialize Digital Style Folder (23 standardized PLM sub-folders)
     try:
         await db.style_folders.insert_one({
@@ -3778,7 +3867,7 @@ async def update_style(sid: str, payload: StyleIn, request: Request):
     update["updated_at"] = now_iso()
     await db.styles.update_one({"_id": oid(sid)}, {"$set": update})
     d = stringify(await db.styles.find_one({"_id": oid(sid)}))
-    d["costing"] = compute_style_costing(d)
+    d["costing"] = await compute_style_costing_async(d, db)
     return d
 
 @api.delete("/styles/{sid}")
@@ -8428,6 +8517,390 @@ async def _attach_po_profitability(po_docs: list, db):
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
                 item["profitability"] = await compute_po_profitability(item, style_doc, db)
+
+@api.get("/b2b-profitability")
+async def get_b2b_profitability(
+    request: Request,
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    style_id: Optional[str] = Query(None),
+    db_override: Any = None,
+):
+    if callable(get_current_user):
+        await get_current_user(request)
+
+    db_inst = db_override
+    if db_inst is None:
+        app_state = getattr(getattr(request, "app", None), "state", None)
+        db_inst = getattr(app_state, "db", None) if app_state else getattr(request, "db", None)
+        if db_inst is None:
+            db_inst = db
+
+    today_str = now_iso()[:10]
+    if not date_to or not date_to.strip():
+        date_to = today_str
+    if not date_from or not date_from.strip():
+        try:
+            d_to = datetime.strptime(date_to[:10], "%Y-%m-%d")
+            date_from = (d_to - timedelta(days=30)).strftime("%Y-%m-%d")
+        except Exception:
+            date_from = "2000-01-01"
+
+    inv_query = {}
+    if date_from and date_to:
+        inv_query["$or"] = [
+            {"invoice_date": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+            {"invoice_iso_date": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+            {"supply_date": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+            {"created_at": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+        ]
+
+    invoices = await db_inst.invoices.find(inv_query, {"file_b64": 0}).sort("created_at", -1).to_list(5000)
+
+    pos_map = {}
+    po_ids = set()
+    for inv in invoices:
+        if inv.get("po_id"):
+            try:
+                po_ids.add(oid(inv["po_id"]))
+            except Exception:
+                pass
+
+    if po_ids:
+        pos_list = await db_inst.pos.find({"_id": {"$in": list(po_ids)}}).to_list(5000)
+        for p in pos_list:
+            pos_map[str(p["_id"])] = stringify(p)
+            if p.get("po_number"):
+                pos_map[p["po_number"]] = stringify(p)
+
+    all_lines = []
+
+    if not invoices:
+        po_query = {}
+        if date_from and date_to:
+            po_query["$or"] = [
+                {"po_date": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+                {"created_at": {"$gte": date_from, "$lte": date_to + "T23:59:59"}},
+            ]
+        po_docs = await db_inst.pos.find(po_query).sort("created_at", -1).to_list(5000)
+        for p in po_docs:
+            p_str = stringify(p)
+            client_name = p_str.get("client_name") or p_str.get("client", {}).get("name") or "Unknown Client"
+            c_id = p_str.get("client_id") or ""
+            p_date = (p_str.get("po_date") or p_str.get("created_at") or "")[:10]
+            po_no = p_str.get("po_number", "PO-N/A")
+
+            for item in p_str.get("line_items", []):
+                all_lines.append({
+                    "po_id": p_str.get("id"),
+                    "po_number": po_no,
+                    "invoice_no": None,
+                    "invoice_date": p_date,
+                    "client_id": c_id,
+                    "client_name": client_name,
+                    "item": item,
+                })
+    else:
+        for inv in invoices:
+            inv_str = stringify(inv)
+            inv_no = inv_str.get("invoice_no") or "INV-N/A"
+            inv_date = (inv_str.get("invoice_date") or inv_str.get("invoice_iso_date") or inv_str.get("created_at") or "")[:10]
+            po_id = inv_str.get("po_id")
+            po_obj = pos_map.get(str(po_id)) or pos_map.get(inv_str.get("po_number")) or {}
+            client_name = inv_str.get("client_name") or po_obj.get("client_name") or "Unknown Client"
+            c_id = po_obj.get("client_id") or ""
+
+            line_items = inv_str.get("line_items_snapshot") or inv_str.get("line_items") or po_obj.get("line_items", [])
+            for item in line_items:
+                all_lines.append({
+                    "po_id": po_id,
+                    "po_number": inv_str.get("po_number") or po_obj.get("po_number") or "PO-N/A",
+                    "invoice_no": inv_no,
+                    "invoice_date": inv_date,
+                    "client_id": c_id,
+                    "client_name": client_name,
+                    "item": item,
+                })
+
+    if client_id and isinstance(client_id, str):
+        c_id_lower = client_id.lower().strip()
+        all_lines = [
+            l for l in all_lines
+            if (l["client_id"] and str(l["client_id"]).lower() == c_id_lower) or
+               (l["client_name"] and c_id_lower in str(l["client_name"]).lower())
+        ]
+
+    codes = set()
+    sids = set()
+    for l in all_lines:
+        it = l["item"]
+        if it.get("style_code"):
+            codes.add(str(it["style_code"]).strip())
+        if it.get("style_id"):
+            try:
+                sids.add(oid(it["style_id"]))
+            except Exception:
+                pass
+
+    query_styles = []
+    if codes:
+        query_styles.append({"code": {"$in": list(codes)}})
+    if sids:
+        query_styles.append({"_id": {"$in": list(sids)}})
+
+    styles_map = {}
+    if query_styles:
+        found_styles = await db_inst.styles.find({"$or": query_styles} if len(query_styles) > 1 else query_styles[0]).to_list(10000)
+        for s in found_styles:
+            styles_map[s.get("code", "")] = s
+            styles_map[str(s["_id"])] = s
+
+    processed_lines = []
+    by_client_map = {}
+    by_style_map = {}
+    by_month_map = {}
+
+    total_revenue = 0.0
+    total_cost = 0.0
+    total_profit = 0.0
+    total_pairs = 0
+
+    confirmed_revenue = 0.0
+    confirmed_cost = 0.0
+    confirmed_profit = 0.0
+    confirmed_lines_count = 0
+
+    estimated_revenue = 0.0
+    estimated_cost = 0.0
+    estimated_profit = 0.0
+    estimated_lines_count = 0
+
+    for l in all_lines:
+        it = l["item"]
+        code = str(it.get("style_code") or "").strip()
+        sid = str(it.get("style_id") or "")
+        style_doc = styles_map.get(code) or styles_map.get(sid)
+
+        if style_id and isinstance(style_id, str):
+            st_id_lower = style_id.lower().strip()
+            if style_doc:
+                s_code = str(style_doc.get("code", "")).lower()
+                s_id = str(style_doc.get("_id", "")).lower()
+                if st_id_lower not in (s_code, s_id):
+                    continue
+            elif st_id_lower not in (code.lower(), sid.lower()):
+                continue
+
+        qty = int(it.get("quantity") or it.get("qty") or it.get("pairs") or 1)
+        if style_doc:
+            prof = await compute_po_profitability(it, style_doc, db_inst)
+        else:
+            u_price = float(it.get("unit_price") or it.get("price") or it.get("rate") or 0)
+            prof = {
+                "unit_price": u_price,
+                "bom_cost": 0.0,
+                "labor_cost": 0.0,
+                "labor_source": "estimated",
+                "is_estimated": True,
+                "overhead_cost": 0.0,
+                "packing_cost": 0.0,
+                "total_cost": 0.0,
+                "profit": u_price,
+                "profit_pct": 100.0 if u_price > 0 else 0.0,
+            }
+
+        unit_price = float(prof.get("unit_price", 0))
+        unit_bom = float(prof.get("bom_cost", 0))
+        unit_labor = float(prof.get("labor_cost", 0))
+        unit_overhead = float(prof.get("overhead_cost", 0))
+        unit_packing = float(prof.get("packing_cost", 0))
+        unit_total_cost = float(prof.get("total_cost", 0))
+        is_est = bool(prof.get("is_estimated", True))
+
+        line_rev = round(unit_price * qty, 2)
+        line_cst = round(unit_total_cost * qty, 2)
+        line_prf = round((unit_price - unit_total_cost) * qty, 2)
+        line_prf_pct = round((line_prf / line_rev * 100), 1) if line_rev > 0 else 0.0
+
+        style_code_disp = code or (style_doc.get("code") if style_doc else "N/A")
+        style_name_disp = it.get("style_name") or (style_doc.get("name") if style_doc else "Unknown Style")
+        c_name = l["client_name"]
+        inv_d = l["invoice_date"] or "N/A"
+        month_key = inv_d[:7] if len(inv_d) >= 7 else "N/A"
+
+        line_rec = {
+            "id": f"{l['po_number']}_{style_code_disp}_{qty}",
+            "po_number": l["po_number"],
+            "invoice_no": l["invoice_no"],
+            "invoice_date": inv_d,
+            "client_name": c_name,
+            "style_code": style_code_disp,
+            "style_name": style_name_disp,
+            "quantity": qty,
+            "unit_price": unit_price,
+            "bom_cost": unit_bom,
+            "labor_cost": unit_labor,
+            "labor_source": prof.get("labor_source", "estimated"),
+            "is_estimated": is_est,
+            "overhead_cost": unit_overhead,
+            "packing_cost": unit_packing,
+            "unit_total_cost": unit_total_cost,
+            "line_revenue": line_rev,
+            "line_cost": line_cst,
+            "line_profit": line_prf,
+            "profit_pct": line_prf_pct,
+        }
+        processed_lines.append(line_rec)
+
+        total_revenue += line_rev
+        total_cost += line_cst
+        total_profit += line_prf
+        total_pairs += qty
+
+        if is_est:
+            estimated_revenue += line_rev
+            estimated_cost += line_cst
+            estimated_profit += line_prf
+            estimated_lines_count += 1
+        else:
+            confirmed_revenue += line_rev
+            confirmed_cost += line_cst
+            confirmed_profit += line_prf
+            confirmed_lines_count += 1
+
+        if c_name not in by_client_map:
+            by_client_map[c_name] = {
+                "client_name": c_name,
+                "total_pairs": 0,
+                "total_revenue": 0.0,
+                "total_cost": 0.0,
+                "total_profit": 0.0,
+                "confirmed_profit": 0.0,
+                "confirmed_lines_count": 0,
+                "estimated_profit": 0.0,
+                "estimated_lines_count": 0,
+                "lines": [],
+            }
+        bc = by_client_map[c_name]
+        bc["total_pairs"] += qty
+        bc["total_revenue"] += line_rev
+        bc["total_cost"] += line_cst
+        bc["total_profit"] += line_prf
+        if is_est:
+            bc["estimated_profit"] += line_prf
+            bc["estimated_lines_count"] += 1
+        else:
+            bc["confirmed_profit"] += line_prf
+            bc["confirmed_lines_count"] += 1
+        bc["lines"].append(line_rec)
+
+        if style_code_disp not in by_style_map:
+            by_style_map[style_code_disp] = {
+                "style_code": style_code_disp,
+                "style_name": style_name_disp,
+                "total_pairs": 0,
+                "total_revenue": 0.0,
+                "total_cost": 0.0,
+                "total_profit": 0.0,
+                "confirmed_profit": 0.0,
+                "confirmed_lines_count": 0,
+                "estimated_profit": 0.0,
+                "estimated_lines_count": 0,
+                "lines": [],
+            }
+        bs = by_style_map[style_code_disp]
+        bs["total_pairs"] += qty
+        bs["total_revenue"] += line_rev
+        bs["total_cost"] += line_cst
+        bs["total_profit"] += line_prf
+        if is_est:
+            bs["estimated_profit"] += line_prf
+            bs["estimated_lines_count"] += 1
+        else:
+            bs["confirmed_profit"] += line_prf
+            bs["confirmed_lines_count"] += 1
+        bs["lines"].append(line_rec)
+
+        if month_key not in by_month_map:
+            by_month_map[month_key] = {
+                "month": month_key,
+                "total_pairs": 0,
+                "total_revenue": 0.0,
+                "total_cost": 0.0,
+                "total_profit": 0.0,
+                "confirmed_profit": 0.0,
+                "confirmed_lines_count": 0,
+                "estimated_profit": 0.0,
+                "estimated_lines_count": 0,
+            }
+        bm = by_month_map[month_key]
+        bm["total_pairs"] += qty
+        bm["total_revenue"] += line_rev
+        bm["total_cost"] += line_cst
+        bm["total_profit"] += line_prf
+        if is_est:
+            bm["estimated_profit"] += line_prf
+            bm["estimated_lines_count"] += 1
+        else:
+            bm["confirmed_profit"] += line_prf
+            bm["confirmed_lines_count"] += 1
+
+    def _finalize_list(item_map):
+        res = []
+        for k, v in item_map.items():
+            v["total_revenue"] = round(v["total_revenue"], 2)
+            v["total_cost"] = round(v["total_cost"], 2)
+            v["total_profit"] = round(v["total_profit"], 2)
+            v["confirmed_profit"] = round(v["confirmed_profit"], 2)
+            v["estimated_profit"] = round(v["estimated_profit"], 2)
+            v["profit_pct"] = round((v["total_profit"] / v["total_revenue"] * 100), 1) if v["total_revenue"] > 0 else 0.0
+            res.append(v)
+        res.sort(key=lambda x: x["total_profit"], reverse=True)
+        return res
+
+    by_client = _finalize_list(by_client_map)
+    by_style = _finalize_list(by_style_map)
+
+    by_month = []
+    for k, v in by_month_map.items():
+        v["total_revenue"] = round(v["total_revenue"], 2)
+        v["total_cost"] = round(v["total_cost"], 2)
+        v["total_profit"] = round(v["total_profit"], 2)
+        v["confirmed_profit"] = round(v["confirmed_profit"], 2)
+        v["estimated_profit"] = round(v["estimated_profit"], 2)
+        v["profit_pct"] = round((v["total_profit"] / v["total_revenue"] * 100), 1) if v["total_revenue"] > 0 else 0.0
+        by_month.append(v)
+    by_month.sort(key=lambda x: x["month"])
+
+    tot_rev = round(total_revenue, 2)
+    tot_cst = round(total_cost, 2)
+    tot_prf = round(total_profit, 2)
+    tot_pct = round((tot_prf / tot_rev * 100), 1) if tot_rev > 0 else 0.0
+
+    return {
+        "summary": {
+            "total_revenue": tot_rev,
+            "total_cost": tot_cst,
+            "total_profit": tot_prf,
+            "profit_pct": tot_pct,
+            "total_pairs": total_pairs,
+            "confirmed_revenue": round(confirmed_revenue, 2),
+            "confirmed_cost": round(confirmed_cost, 2),
+            "confirmed_profit": round(confirmed_profit, 2),
+            "confirmed_lines_count": confirmed_lines_count,
+            "estimated_revenue": round(estimated_revenue, 2),
+            "estimated_cost": round(estimated_cost, 2),
+            "estimated_profit": round(estimated_profit, 2),
+            "estimated_lines_count": estimated_lines_count,
+            "total_lines_count": len(processed_lines),
+        },
+        "by_client": by_client,
+        "by_style": by_style,
+        "by_month": by_month,
+        "lines": processed_lines,
+    }
+
 
 @api.get("/pos")
 async def list_pos(request: Request):

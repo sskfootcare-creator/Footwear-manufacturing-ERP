@@ -8,7 +8,7 @@ import {
   Warehouse, IndianRupee, Settings as SettingsIcon, Receipt,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check, Bell,
+  Check, Bell, TrendingUp,
 } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -48,8 +48,9 @@ const NAV_GROUPS = [
       { to: "/vendor-pos", label: "Vendor POs",   icon: FileText,    roles: ["admin","manager"] },
       { to: "/invoices",   label: "Invoices",     icon: Receipt,     roles: ["admin","manager","sales"] },
       { to: "/clients",    label: "Clients",      icon: BookOpen,    roles: ["admin","manager","sales"] },
-      { to: "/costing",    label: "Costing",      icon: Calculator,  roles: ["admin","manager"] },
-      { to: "/defects",    label: "Defects",      icon: AlertOctagon,roles: ["admin","manager","production"] },
+      { to: "/costing",           label: "Costing",           icon: Calculator,  roles: ["admin","manager"] },
+      { to: "/b2b-profitability", label: "B2B Profitability", icon: TrendingUp,  roles: ["admin","manager"] },
+      { to: "/defects",           label: "Defects",           icon: AlertOctagon,roles: ["admin","manager","production"] },
       { to: "/reports",    label: "Reports",      icon: BarChart3,   roles: ["admin","manager"] },
     ],
   },
@@ -92,6 +93,7 @@ const PAGE_TITLES = {
   "/expenses":             "Expenses & P&L",
   "/clients":              "Clients",
   "/costing":              "Costing",
+  "/b2b-profitability":    "B2B Profitability",
   "/defects":              "Defects",
   "/reports":              "Reports",
   "/online-pipeline":      "Online Style Pipeline",
