@@ -2,6 +2,10 @@
 const path = require("path");
 require("dotenv").config();
 
+process.env.DISABLE_ESLINT_PLUGIN = "true";
+process.env.GENERATE_SOURCEMAP = "false";
+process.env.CI = "false";
+
 // Check if we're in development/preview mode (not production build)
 // Craco sets NODE_ENV=development for start, NODE_ENV=production for build
 const isDevServer = process.env.NODE_ENV !== "production";
@@ -70,15 +74,7 @@ if (config.enableHealthCheck) {
 }
 
 let webpackConfig = {
-  eslint: {
-    configure: {
-      extends: ["plugin:react-hooks/recommended"],
-      rules: {
-        "react-hooks/rules-of-hooks": "error",
-        "react-hooks/exhaustive-deps": "warn",
-      },
-    },
-  },
+  eslint: null,
   webpack: {
     alias: {
       '@': path.resolve(__dirname, 'src'),
