@@ -12464,6 +12464,39 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     if not job:
         raise HTTPException(404, "Not found")
     
+    # Material requirement gate before moving OUT of procurement stage
+    if job.get("stage") == "procurement" and payload.stage != "procurement":
+        style = None
+        if job.get("style_id") and ObjectId.is_valid(str(job["style_id"])):
+            style = await db.styles.find_one({"_id": oid(job["style_id"])})
+        if not style:
+            style = await db.styles.find_one({"code": job.get("style_code")})
+        if not style or not style.get("bom"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot move out of Procurement: Style '{job.get('style_code')}' has no BOM defined in Style Master. Please configure BOM in Styles Master first."
+            )
+        
+        # Trigger auto-consumption if not already consumed
+        if not job.get("inventory_consumed"):
+            try:
+                consumed = await _auto_consume_inventory(job, u["email"])
+                # Re-fetch job to check for inventory_consume_error
+                refreshed_job = await db.production_jobs.find_one({"_id": oid(jid)})
+                if refreshed_job and refreshed_job.get("inventory_consume_error"):
+                    err = refreshed_job.get("inventory_consume_error")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot move out of Procurement: Material requirement / inventory consumption failed — {err}"
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot move out of Procurement: Material requirement failed — {str(e)}"
+                )
+
     # Parallel-completion gate before moving to lasting stage
     if payload.stage == "lasting":
         comp = job.get("components") or {}
@@ -12520,18 +12553,6 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     if job.get("stage") != payload.stage:
         mongo_update["$unset"] = {"ready_for_pickup": ""}
     await db.production_jobs.update_one({"_id": oid(jid)}, mongo_update)
-
-    # auto-consume inventory when moving OUT of procurement (first time only)
-    if job.get("stage") == "procurement" and payload.stage != "procurement":
-        try:
-            await _auto_consume_inventory(await db.production_jobs.find_one({"_id": oid(jid)}), u["email"])
-        except Exception as e:
-            err_msg = str(e)
-            await db.production_jobs.update_one(
-                {"_id": oid(jid)},
-                {"$set": {"inventory_consume_error": err_msg}}
-            )
-            log.warning(f"Auto-consume inventory failed for job {jid}: {e}")
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
 
 
