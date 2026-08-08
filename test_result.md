@@ -859,6 +859,19 @@ agent_communication:
           agent: "main"
           comment: "ENVIRONMENT env var added (development/test/production, default 'development'). Production: ADMIN_PASSWORD is required (raises RuntimeError at startup if missing), skips seeding admin@sskfootcare.com and admin@example.com. Test: seeds env admin + admin@sskfootcare.com. Development: seeds all three. Log statements updated. conftest.py updated to read test admin credentials from env vars. Unit tests in test_seed_admin.py verified all 4 environment modes (production missing password fail, production env admin only, test env+ssk admin, dev all three)."
 
+  - task: "B2B Profitability Analysis & Job Assignment Costing Integration"
+    implemented: true
+    working: true
+    file: "backend/server.py, frontend/src/pages/B2BProfitability.jsx, frontend/src/pages/Costing.jsx, backend/tests/test_b2b_profitability.py, backend/tests/test_assignment_costing.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Implemented GET /api/b2b-profitability endpoint with line-by-line revenue vs total cost breakdown (BOM + labor + packing + overhead), rollups by client, style, and month, and clear distinction between confirmed actual labor vs estimated labor. Integrated actual job assignment rates into style costing (compute_style_costing_async) with worker role rate breakdowns and actual cost recalculation. Added frontend page B2BProfitability.jsx with summary cards, client/style/month rollups, line item filterable table, and updated Costing.jsx with actual labor badges. Unit test suites test_b2b_profitability.py and test_assignment_costing.py passed (100%)."
+
 agent_communication:
     - agent: "main"
-      message: "Environment-gated admin seeding implemented and verified in auth.py. In production mode (ENVIRONMENT=production), missing ADMIN_PASSWORD raises RuntimeError to prevent unauthenticated/weak-credential startup, and hardcoded test accounts (admin@sskfootcare.com and admin@example.com) are skipped. In test mode (ENVIRONMENT=test), env admin + admin@sskfootcare.com are seeded, and admin@example.com is skipped. In development mode (ENVIRONMENT=development), all three accounts are seeded. Conftest.py and test files updated to use env vars. All 4 unit tests in test_seed_admin.py passed."
+      message: "B2B Profitability Analysis and Job Assignment Costing integration complete. Implemented backend endpoint GET /api/b2b-profitability with line-level cost rollups (BOM + labor + packing + overhead), actual vs estimated labor split, client/style/monthly aggregations, and updated compute_style_costing_async to incorporate actual job assignment worker rates. Built frontend dashboard B2BProfitability.jsx at /b2b-profitability and updated Costing.jsx/StylePLM.jsx to display actual labor indicators and worker rate breakdowns. Unit tests verified (3/3 passed)."
+

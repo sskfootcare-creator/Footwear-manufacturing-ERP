@@ -26,6 +26,7 @@ import OnlineStylePipeline from "@/pages/OnlineStylePipeline";
 import ComponentInventory from "@/pages/ComponentInventory";
 import OnlineOrders from "@/pages/OnlineOrders";
 import OnlineProfitability from "@/pages/OnlineProfitability";
+import B2BProfitability from "@/pages/B2BProfitability";
 import ReadyStock from "@/pages/ReadyStock";
 import WarehouseDashboard from "@/pages/WarehouseDashboard";
 import Picklists from "@/pages/Picklists";
@@ -101,6 +102,7 @@ function App() {
             <Route path="ready-stock" element={<ReadyStock />} />
             <Route path="online-orders" element={<OnlineOrders />} />
             <Route path="online-profitability" element={<OnlineProfitability />} />
+            <Route path="b2b-profitability" element={<B2BProfitability />} />
             <Route path="warehouse" element={<WarehouseDashboard />} />
             <Route path="picklists" element={<Picklists />} />
             <Route path="warehouse/reports" element={<WarehouseReports />} />
