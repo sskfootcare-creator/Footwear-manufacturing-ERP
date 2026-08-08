@@ -14107,6 +14107,7 @@ async def _auto_consume_inventory(job: dict, by_email: str):
             yld = float(def_yld)
         else:
             yld = 1.0
+        qty = float(b.get("quantity") or b.get("qty") or 1.0)
         waste = float(b.get("waste_pct", 0) or 0)
         consume = pairs * (qty / yld) * (1 + waste / 100)
         if consume <= 0:
@@ -14129,6 +14130,7 @@ async def _auto_consume_inventory(job: dict, by_email: str):
             return False
         temp_balances[mat_id] -= consume
 
+        rate = float(b.get("rate") or mat.get("cost_per_unit") or mat.get("rate") or 0)
         movements.append({
             "material_id": mat_id,
             "material_code": mat.get("code"),
