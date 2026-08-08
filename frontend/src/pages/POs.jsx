@@ -90,6 +90,15 @@ export default function POs() {
     return new Set(styles.map((s) => s.code.trim().toUpperCase()));
   }, [styles]);
 
+  const openView = async (p) => {
+    try {
+      const res = await http.get(`/pos/${p.id}`);
+      setView(res.data);
+    } catch {
+      setView(p);
+    }
+  };
+
   const startNew = () => {
     setEditId(null);
     setForm(emptyPO);
@@ -485,7 +494,7 @@ export default function POs() {
                           <Package className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => setView(p)}
+                          onClick={() => openView(p)}
                           className="text-slate-600 hover:text-[#2563EB] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                           data-testid={`view-po-${p.po_number}`}
                         >
@@ -852,7 +861,7 @@ export default function POs() {
         <Drawer
           onClose={() => setView(null)}
           title={`PO ${view.po_number}`}
-          width="max-w-3xl"
+          width="max-w-4xl"
         >
           <div className="space-y-4 text-sm">
             <div className="grid grid-cols-2 gap-3">
@@ -874,38 +883,129 @@ export default function POs() {
               <Field label="Billing" value={view.billing_address} />
               <Field label="Shipping" value={view.shipping_address} />
             </div>
-            <table className="w-full text-xs border-2 border-slate-200">
-              <thead className="bg-slate-50">
-                <tr className="text-left">
-                  <th className="px-2 py-2">Style</th>
-                  <th className="px-2 py-2">Desc</th>
-                  <th className="px-2 py-2">Color</th>
-                  <th className="px-2 py-2">Size</th>
-                  <th className="px-2 py-2 text-right">Qty</th>
-                  <th className="px-2 py-2 text-right">Rate</th>
-                  <th className="px-2 py-2 text-right">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {view.line_items.map((li, i) => (
-                  <tr key={i} className="border-t border-slate-200">
-                    <td className="px-2 py-1.5 font-mono">{li.style_code}</td>
-                    <td className="px-2 py-1.5">{li.description}</td>
-                    <td className="px-2 py-1.5">{li.color}</td>
-                    <td className="px-2 py-1.5 font-mono">{li.size}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">
-                      {li.quantity}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono">
-                      {inr(li.unit_price)}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono font-bold">
-                      {inr(li.amount)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+
+            <div className="pt-2">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Line Items &amp; PO Profitability
+                </h3>
+                <span className="text-[11px] text-slate-500 italic">
+                  Profit = PO Rate − (BOM + Labor + Packing)
+                </span>
+              </div>
+              <div className="overflow-x-auto border-2 border-slate-200">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-100 border-b border-slate-200">
+                    <tr className="text-left font-bold text-slate-700 text-[11px]">
+                      <th className="px-2.5 py-2">Style / Desc</th>
+                      <th className="px-2 py-2 text-right">Qty</th>
+                      <th className="px-2 py-2 text-right">PO Rate</th>
+                      <th className="px-2.5 py-2">Cost Breakdown / Pair</th>
+                      <th className="px-2.5 py-2 text-right">Profit / Pair</th>
+                      <th className="px-2.5 py-2 text-right">Line Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {view.line_items.map((li, i) => {
+                      const prof = li.profitability;
+                      const lineProfit =
+                        prof && prof.profit != null
+                          ? prof.profit * Number(li.quantity || 0)
+                          : null;
+                      return (
+                        <tr key={i} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="px-2.5 py-2">
+                            <div className="font-mono font-bold text-slate-900">
+                              {li.style_code}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {li.description ||
+                                `${li.color || ""} ${li.size ? "Sz " + li.size : ""}`}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-semibold">
+                            {li.quantity}
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-slate-800">
+                            {inr(li.unit_price)}
+                          </td>
+                          <td className="px-2.5 py-2 text-[11px]">
+                            {prof ? (
+                              <div className="space-y-0.5">
+                                <div className="flex gap-2 text-slate-600">
+                                  <span>BOM: <strong className="font-mono">{inr(prof.bom_cost)}</strong></span>
+                                  <span>Pack: <strong className="font-mono">{inr(prof.packing_cost)}</strong></span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <span>Labor: <strong className="font-mono">{inr(prof.labor_cost)}</strong></span>
+                                  {prof.is_estimated ? (
+                                    <span
+                                      className="px-1.5 py-0.2 bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-bold uppercase rounded"
+                                      title="No production job data yet; using planned style labor cost."
+                                    >
+                                      Estimated Labor
+                                    </span>
+                                  ) : (
+                                    <span
+                                      className="px-1.5 py-0.2 bg-emerald-100 text-emerald-900 border border-emerald-300 text-[9px] font-bold uppercase rounded"
+                                      title="Computed from real production job assignments for this style."
+                                    >
+                                      Actual Labor
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">—</span>
+                            )}
+                          </td>
+                          <td className="px-2.5 py-2 text-right font-mono">
+                            {prof && prof.profit != null ? (
+                              <div>
+                                <div
+                                  className={`font-bold ${
+                                    prof.profit >= 0 ? "text-emerald-700" : "text-red-600"
+                                  }`}
+                                >
+                                  {prof.profit >= 0 ? "+" : ""}
+                                  {inr(prof.profit)}
+                                </div>
+                                {prof.profit_pct != null && (
+                                  <div
+                                    className={`text-[10px] font-semibold ${
+                                      prof.profit >= 0 ? "text-emerald-600" : "text-red-500"
+                                    }`}
+                                  >
+                                    ({prof.profit_pct}%)
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">—</span>
+                            )}
+                          </td>
+                          <td className="px-2.5 py-2 text-right font-mono font-bold">
+                            {lineProfit != null ? (
+                              <span
+                                className={
+                                  lineProfit >= 0 ? "text-emerald-700" : "text-red-600"
+                                }
+                              >
+                                {lineProfit >= 0 ? "+" : ""}
+                                {inr(lineProfit)}
+                              </span>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div className="bg-slate-50 p-4 grid grid-cols-2 gap-2 text-xs">
               <div>
                 Subtotal:{" "}
@@ -925,10 +1025,12 @@ export default function POs() {
                 IGST:{" "}
                 <span className="font-mono ml-2">{inr(view.igst_amount)}</span>
               </div>
-              <div className="col-span-2 text-lg font-black border-t pt-2">
-                Grand Total:{" "}
-                <span className="font-mono text-[#C27842] ml-2">
-                  {inr(view.grand_total)}
+              <div className="col-span-2 text-lg font-black border-t pt-2 flex justify-between items-baseline">
+                <span>
+                  Grand Total:{" "}
+                  <span className="font-mono text-[#C27842] ml-2">
+                    {inr(view.grand_total)}
+                  </span>
                 </span>
               </div>
             </div>

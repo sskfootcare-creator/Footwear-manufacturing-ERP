@@ -14,6 +14,7 @@ import { Drawer } from "./Materials";
 import ImageUploader, { ImageThumb, SafeImage } from "../components/ImageUploader";
 import BomEditorDrawer from "../components/BomEditorDrawer";
 import SearchableSelect from "../components/SearchableSelect";
+import { useNavigate } from "react-router-dom";
 import {
   Plus,
   Trash2,
@@ -25,6 +26,7 @@ import {
   ArrowLeftRight,
   Globe2,
   Wrench,
+  Folder,
 } from "lucide-react";
 
 const ONLINE_CHANNELS = ["myntra", "flipkart", "nykaa", "website"];
@@ -53,13 +55,7 @@ const emptyStyle = {
   description: "",
   base_size: "7",
   bom: [],
-  labor: [
-    { name: "Cutting", rate: 6 },
-    { name: "Fitting", rate: 12 },
-    { name: "Pasting", rate: 8 },
-    { name: "Finishing", rate: 6 },
-    { name: "Packing", rate: 3 },
-  ],
+  labor: [],
   overhead_pct: 8,
   packing_cost: 12,
   margin_pct: 25,
@@ -68,6 +64,7 @@ const emptyStyle = {
 };
 
 export default function Styles() {
+  const navigate = useNavigate();
   const [styles, setStyles] = useState([]);
   const [bomStyle, setBomStyle] = useState(null);
   const [materials, setMaterials] = useState([]);
@@ -529,7 +526,8 @@ export default function Styles() {
           unit: material.unit,
           rate: material.rate,
           quantity: 1,
-          yield_per_unit: 1,
+          // Prefill from material's default if set; still editable per-line
+          yield_per_unit: material.default_yield_per_unit ?? 1,
           waste_pct: 5,
           section: material.category,
         },
@@ -600,8 +598,12 @@ export default function Styles() {
           (1 + Number(b.waste_pct || 0) / 100)
       );
     }, 0);
-    const labCost = form.labor.reduce((s, l) => s + Number(l.rate), 0);
-    const base = matCost + labCost;
+    const laborKnown = form.labor.length > 0;
+    const labCost = laborKnown
+      ? form.labor.reduce((s, l) => s + Number(l.rate), 0)
+      : 0;
+    // When no labor is set, base excludes labor so Total Cost is not misleadingly understated
+    const base = matCost + (laborKnown ? labCost : 0);
     const oh = (base * Number(form.overhead_pct)) / 100;
     const total = base + oh + Number(form.packing_cost);
     const margin = (total * Number(form.margin_pct)) / 100;
@@ -610,6 +612,7 @@ export default function Styles() {
     return {
       matCost,
       labCost,
+      laborKnown,
       base,
       oh,
       total,
@@ -730,11 +733,14 @@ export default function Styles() {
                       bold
                     />
                     <Row
-                      label={`Selling (+${s.margin_pct}%)`}
-                      value={inr(s.costing.selling_price)}
+                      label={`Target Price (+${s.margin_pct}%)`}
+                      value={inr(s.costing.suggested_target_price || s.costing.selling_price)}
                       bold
                       color="#C27842"
                     />
+                  </div>
+                  <div className="text-[10px] text-slate-500 italic pt-1 flex items-center gap-1" title="To hit target margin, quote around suggested price. For actual profit, see PO Profitability.">
+                    <span>💡 Suggested target price (negotiation aid). For actual profit, see PO Profitability.</span>
                   </div>
                   <div className="flex gap-2 mt-4 pt-3 border-t border-slate-200">
                     <BtnSecondary
@@ -754,6 +760,14 @@ export default function Styles() {
                       }`}
                     >
                       <Globe2 className="w-4 h-4 inline" />
+                    </button>
+                    <button
+                      onClick={() => navigate("/plm")}
+                      title="Digital Style Folder (PLM)"
+                      data-testid={`plm-folder-${s.code}`}
+                      className="px-3 py-2 border-2 border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100 text-xs font-bold min-h-[44px] inline-flex items-center justify-center gap-1 touch-manipulation transition-colors"
+                    >
+                      <Folder className="w-4 h-4 inline text-amber-600" /> PLM
                     </button>
                     <button
                       onClick={() => setBomStyle(s)}
@@ -1038,9 +1052,9 @@ export default function Styles() {
 
               {/* Labor */}
               <div>
-                <div className="flex items-baseline justify-between mt-4 mb-2">
+                <div className="flex items-baseline justify-between mt-4 mb-1">
                   <h3 className="text-sm font-bold uppercase tracking-wider">
-                    Labor (per pair)
+                    Labor Operations
                   </h3>
                   <button
                     onClick={addLabor}
@@ -1050,47 +1064,56 @@ export default function Styles() {
                     + Add operation
                   </button>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-2 border-slate-200">
-                  <tbody>
-                    {form.labor.map((l, i) => (
-                      <tr
-                        key={i}
-                        className="border-t border-slate-200 first:border-t-0"
-                      >
-                        <td className="px-2 py-1.5">
-                          <input
-                            value={l.name}
-                            onChange={(e) =>
-                              updateLabor(i, "name", e.target.value)
-                            }
-                            className="w-full border-0 bg-transparent"
-                          />
-                        </td>
-                        <td className="px-2 py-1.5 w-32">
-                          <input
-                            type="number"
-                            step="0.5"
-                            value={l.rate}
-                            onChange={(e) =>
-                              updateLabor(i, "rate", e.target.value)
-                            }
-                            className="w-full text-right font-mono border border-slate-300 px-1 py-0.5"
-                          />
-                        </td>
-                        <td className="px-2 py-1.5 w-8">
-                          <button
-                            onClick={() => removeLabor(i)}
-                            className="text-slate-500 hover:text-red-600"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                <p className="text-[11px] text-slate-400 italic mb-2">
+                  Optional — actual labor rates are set per-karigar when production starts, not here.
+                </p>
+                {form.labor.length === 0 ? (
+                  <div className="border-2 border-dashed border-slate-200 px-4 py-3 text-xs text-slate-400 italic">
+                    No labor operations added. Use "+ Add operation" above if you want to record standard rates for reference.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-2 border-slate-200">
+                    <tbody>
+                      {form.labor.map((l, i) => (
+                        <tr
+                          key={i}
+                          className="border-t border-slate-200 first:border-t-0"
+                        >
+                          <td className="px-2 py-1.5">
+                            <input
+                              value={l.name}
+                              onChange={(e) =>
+                                updateLabor(i, "name", e.target.value)
+                              }
+                              className="w-full border-0 bg-transparent"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 w-32">
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={l.rate}
+                              onChange={(e) =>
+                                updateLabor(i, "rate", e.target.value)
+                              }
+                              className="w-full text-right font-mono border border-slate-300 px-1 py-0.5"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 w-8">
+                            <button
+                              onClick={() => removeLabor(i)}
+                              className="text-slate-500 hover:text-red-600"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                )}
             </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
@@ -1516,7 +1539,15 @@ export default function Styles() {
                   <CalcIcon className="w-3.5 h-3.5" /> Live Cost Sheet
                 </div>
                 <CostRow label="Materials" value={inr(costing.matCost)} />
-                <CostRow label="Labor" value={inr(costing.labCost)} />
+                <CostRow
+                  label="Labor"
+                  value={
+                    form.labor.length === 0
+                      ? "Not set — will be determined at production"
+                      : inr(costing.labCost)
+                  }
+                  dim={form.labor.length === 0}
+                />
                 <CostRow label="Overhead" value={inr(costing.oh)} />
                 <CostRow label="Packing" value={inr(form.packing_cost)} />
                 <div className="border-t border-dashed border-slate-600 my-2" />
@@ -1888,7 +1919,7 @@ function Row({ label, value, bold, color }) {
     </div>
   );
 }
-function CostRow({ label, value, bold, big, small, accent }) {
+function CostRow({ label, value, bold, big, small, accent, dim }) {
   return (
     <div
       className={`flex justify-between items-baseline ${big ? "py-1" : "py-0.5"}`}
@@ -1899,7 +1930,7 @@ function CostRow({ label, value, bold, big, small, accent }) {
         {label}
       </span>
       <span
-        className={`font-mono ${bold ? "font-bold" : ""} ${big ? "text-xl text-[#C27842]" : "text-sm"} ${accent ? "text-[#C27842]" : "text-white"}`}
+        className={`font-mono ${bold ? "font-bold" : ""} ${big ? "text-xl text-[#C27842]" : "text-sm"} ${accent ? "text-[#C27842]" : dim ? "text-slate-500 italic text-[10px] normal-case tracking-normal" : "text-white"}`}
       >
         {value}
       </span>

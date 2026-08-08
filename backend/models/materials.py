@@ -19,6 +19,7 @@ class MaterialIn(BaseModel):
     with_eva:            Optional[bool] = None
     is_component:       Optional[bool] = False
     component_category: Optional[str] = None
+    default_yield_per_unit: Optional[float] = None
 
 
 class BomItem(BaseModel):

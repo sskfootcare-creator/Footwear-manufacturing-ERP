@@ -105,35 +105,17 @@ function aggregateOverdue(rows) {
   return Math.round(worst * 10) / 10;
 }
 
-const triggerDownload = async (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
+const triggerDownload = (blobData, filename, mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") => {
   const safeFilename = filename.replace(/[\/\\]/g, "-");
   const blob = new Blob([blobData], { type: mimeType });
-  const file = new File([blob], safeFilename, { type: mimeType });
-
-  // Web Share API support (e.g. mobile Chrome/Safari share to WhatsApp / Files)
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try {
-      await navigator.share({
-        files: [file],
-        title: safeFilename,
-      });
-      return;
-    } catch (e) {
-      if (e.name === "AbortError") return;
-    }
-  }
-
   const url = URL.createObjectURL(blob);
-  if (mimeType === "application/pdf" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-    window.open(url, "_blank");
-  } else {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = safeFilename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = safeFilename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 };
 
@@ -221,10 +203,10 @@ export default function Production() {
     return m;
   }, [styles]);
 
-  const printCard = async (group) => {
+  const printCard = async (group, variant = "dual") => {
     try {
-      const res = await http.post("/production/card.pdf",
-        { job_ids: group.rows.map(r => r.id) }, { responseType: "blob" });
+      const res = await http.post(`/production/card.pdf?variant=${variant}`,
+        { job_ids: group.rows.map(r => r.id), variant }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
     } catch (e) { alert("Print failed: " + (e.response?.data?.detail || e.message)); }
   };
@@ -284,8 +266,8 @@ export default function Production() {
   // PDF into the chat (browsers cannot programmatically attach files to wa.me).
   const shareViaWhatsApp = async (group, phone) => {
     try {
-      const res = await http.post("/production/card.pdf",
-        { job_ids: group.rows.map(r => r.id) }, { responseType: "blob" });
+      const res = await http.post("/production/card.pdf?variant=dual",
+        { job_ids: group.rows.map(r => r.id), variant: "dual" }, { responseType: "blob" });
       const blob = new Blob([res.data], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       // trigger download with a descriptive filename

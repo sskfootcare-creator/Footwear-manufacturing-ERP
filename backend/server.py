@@ -36,7 +36,7 @@ from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
 from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list, build_carton_list_xlsx
 from pdf_procurement import build_material_requirement
-from pdf_card import build_production_card
+from pdf_card import build_production_card, build_production_card_dual_a4
 from pdf_carton_label import build_carton_labels
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,6 +47,8 @@ from models import *
 from rate_limiter import upload_rate_limiter, pdf_rate_limiter, bulk_import_rate_limiter
 
 # ---------- DB & app ----------
+from routes.plm import plm_router, DEFAULT_PLM_FOLDERS
+
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
@@ -1041,30 +1043,114 @@ def compute_style_costing(style: dict) -> dict:
     for b in style.get("bom", []):
         rate = float(b.get("rate", 0))
         qty = float(b.get("quantity", 0))
-        yld = float(b.get("yield_per_unit", 1) or 1)
+        raw_yld = b.get("yield_per_unit")
+        def_yld = b.get("default_yield_per_unit")
+        if raw_yld is not None and float(raw_yld) > 0:
+            yld = float(raw_yld)
+        elif def_yld is not None and float(def_yld) > 0:
+            yld = float(def_yld)
+        else:
+            yld = 1.0
         waste = float(b.get("waste_pct", 0) or 0)
         # cost per pair = (rate * qty / yield) * (1 + waste%)
         materials_cost += (rate * qty / yld) * (1 + waste / 100)
-    labor_cost = sum(float(l.get("rate", 0)) for l in style.get("labor", []))
+    labor_items = style.get("labor", [])
+    labor_cost = sum(float(l.get("rate", 0)) for l in labor_items)
+    labor_is_set = len(labor_items) > 0
     base_cost = materials_cost + labor_cost
     overhead_cost = base_cost * (style.get("overhead_pct", 0) / 100)
     packing = style.get("packing_cost", 0)
     total_cost = base_cost + overhead_cost + packing
-    margin_amount = total_cost * (style.get("margin_pct", 0) / 100)
-    selling_price = total_cost + margin_amount
-    gst_amount = selling_price * (style.get("gst_pct", 0) / 100)
-    final_price = selling_price + gst_amount
+    margin_pct = style.get("margin_pct", 0)
+    suggested_margin_amount = total_cost * (margin_pct / 100)
+    suggested_target_price = total_cost + suggested_margin_amount
+    gst_amount = suggested_target_price * (style.get("gst_pct", 0) / 100)
+    suggested_target_price_with_gst = suggested_target_price + gst_amount
     return {
         "materials_cost": round(materials_cost, 2),
         "labor_cost": round(labor_cost, 2),
+        "labor_is_set": labor_is_set,
         "overhead_cost": round(overhead_cost, 2),
         "packing_cost": round(packing, 2),
         "total_cost": round(total_cost, 2),
-        "margin_amount": round(margin_amount, 2),
-        "selling_price": round(selling_price, 2),
+        "suggested_margin_amount": round(suggested_margin_amount, 2),
+        "suggested_target_price": round(suggested_target_price, 2),
         "gst_amount": round(gst_amount, 2),
-        "final_price": round(final_price, 2),
+        "suggested_target_price_with_gst": round(suggested_target_price_with_gst, 2),
+        # Legacy aliases kept for backward compat with any external callers
+        "selling_price": round(suggested_target_price, 2),
+        "final_price": round(suggested_target_price_with_gst, 2),
+        "margin_amount": round(suggested_margin_amount, 2),
     }
+
+
+async def compute_po_profitability(po_line: dict, style_obj: dict, db) -> dict:
+    """Compute real profit for a PO line: unit_price (negotiated) minus actual costs.
+
+    Labor source priority:
+      1. Actual: sum of rate_per_pair from assignments on production jobs for this style.
+      2. Estimated: planned labor from style.labor[] (if no job assignment data exists).
+    Returns labor_source='actual'|'estimated' so the UI can badge accordingly.
+    """
+    c = compute_style_costing(style_obj)
+    bom_cost = float(c.get("materials_cost", 0))
+    overhead = float(c.get("overhead_cost", 0))
+    packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
+
+    style_id = str(style_obj.get("_id", style_obj.get("id", "")))
+    style_code = style_obj.get("code", "")
+    job_rates = []
+
+    if style_id or style_code:
+        query_conditions = []
+        if style_id:
+            query_conditions.append({"style_id": style_id})
+        if style_code:
+            query_conditions.append({"style_code": style_code})
+        jobs = await db.production_jobs.find(
+            {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
+        ).to_list(500)
+        
+        for job in jobs:
+            assignments = job.get("assignments") or {}
+            if isinstance(assignments, dict) and assignments:
+                total_job_rate = 0.0
+                has_valid = False
+                for _role, asgn in assignments.items():
+                    if isinstance(asgn, dict):
+                        rate = float(asgn.get("rate_per_pair") or 0)
+                        if rate > 0:
+                            total_job_rate += rate
+                            has_valid = True
+                if has_valid:
+                    job_rates.append(total_job_rate)
+
+    if job_rates:
+        labor_cost = round(sum(job_rates) / len(job_rates), 2)
+        labor_source = "actual"
+    else:
+        labor_cost = float(c.get("labor_cost", 0))
+        labor_source = "estimated"
+
+    unit_price = float(po_line.get("unit_price", 0))
+    total_cost = round(bom_cost + labor_cost + packing, 2)
+    profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
+    profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
+
+    return {
+        "style_code": style_code,
+        "unit_price": round(unit_price, 2),
+        "bom_cost": round(bom_cost, 2),
+        "labor_cost": round(labor_cost, 2),
+        "labor_source": labor_source,
+        "is_estimated": labor_source == "estimated",
+        "overhead_cost": round(overhead, 2),
+        "packing_cost": round(packing, 2),
+        "total_cost": total_cost,
+        "profit": profit,
+        "profit_pct": profit_pct,
+    }
+
 
 # ---------- SKU MAP ----------
 
@@ -3651,6 +3737,17 @@ async def create_style(payload: StyleIn, request: Request):
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
     doc["costing"] = compute_style_costing(doc)
+    # Auto-initialize Digital Style Folder (23 standardized PLM sub-folders)
+    try:
+        await db.style_folders.insert_one({
+            "style_id": str(res.inserted_id),
+            "style_code": generated_code,
+            "folders": DEFAULT_PLM_FOLDERS,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        })
+    except Exception:
+        pass
     await log_activity("style.create", "styles",
                        f"Created style {generated_code} — {doc.get('name','')}", u["email"])
     return doc
@@ -8298,10 +8395,45 @@ async def costing_preview(payload: StyleIn, request: Request):
 
 
 # ---------- PURCHASE ORDERS ----------
+async def _attach_po_profitability(po_docs: list, db):
+    codes = set()
+    ids = set()
+    for d in po_docs:
+        for item in d.get("line_items", []):
+            if item.get("style_code"):
+                codes.add(item["style_code"].strip())
+            if item.get("style_id"):
+                try:
+                    ids.add(oid(item["style_id"]))
+                except Exception:
+                    pass
+
+    query_or = []
+    if codes:
+        query_or.append({"code": {"$in": list(codes)}})
+    if ids:
+        query_or.append({"_id": {"$in": list(ids)}})
+
+    styles_map = {}
+    if query_or:
+        styles = await db.styles.find({"$or": query_or} if len(query_or) > 1 else query_or[0]).to_list(10000)
+        for s in styles:
+            styles_map[s.get("code", "")] = s
+            styles_map[str(s["_id"])] = s
+
+    for d in po_docs:
+        for item in d.get("line_items", []):
+            code = (item.get("style_code") or "").strip()
+            sid = str(item.get("style_id") or "")
+            style_doc = styles_map.get(code) or styles_map.get(sid)
+            if style_doc:
+                item["profitability"] = await compute_po_profitability(item, style_doc, db)
+
 @api.get("/pos")
 async def list_pos(request: Request):
     await get_current_user(request)
     docs = await db.pos.find({}).sort("created_at", -1).to_list(1000)
+    await _attach_po_profitability(docs, db)
     return [stringify(d) for d in docs]
 
 @api.get("/pos/{pid}")
@@ -8310,6 +8442,7 @@ async def get_po(pid: str, request: Request):
     d = await db.pos.find_one({"_id": oid(pid)})
     if not d:
         raise HTTPException(404, "Not found")
+    await _attach_po_profitability([d], db)
     return stringify(d)
 
 async def resolve_style(
@@ -12277,7 +12410,7 @@ async def my_tasks(request: Request, scope: Optional[str] = "active"):
 
 
 @api.get("/my/tasks/{job_id}/card.pdf", dependencies=[Depends(pdf_rate_limiter)])
-async def my_task_production_card_pdf(job_id: str, request: Request):
+async def my_task_production_card_pdf(job_id: str, request: Request, variant: str = Query("single")):
     """Worker-only: stream the printable A4 Production Card PDF for a job assigned to the calling worker."""
     u = await get_current_user(request)
     if u.get("role") != "worker":
@@ -12341,7 +12474,10 @@ async def my_task_production_card_pdf(job_id: str, request: Request):
 
     style = await db.styles.find_one({"code": j0.get("style_code")})
     style_d = stringify(style) if style else None
-    pdf_bytes = build_production_card(group, style_d)
+    if variant == "dual":
+        pdf_bytes = build_production_card_dual_a4(group, style_d)
+    else:
+        pdf_bytes = build_production_card(group, style_d)
 
     return StreamingResponse(
         BytesIO(pdf_bytes),
@@ -12682,8 +12818,15 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
             code = b.get("material_code") or ""
             name = b.get("material_name") or ""
             unit = b.get("unit") or ""
-            rate = float(b.get("rate", 0))
-            yld = float(b.get("yield_per_unit", 1) or 1)
+            raw_yld = b.get("yield_per_unit")
+            mat_info = mat_map.get(str(mid)) or mat_map.get(code) or {}
+            def_yld = b.get("default_yield_per_unit") or mat_info.get("default_yield_per_unit")
+            if raw_yld is not None and float(raw_yld) > 0:
+                yld = float(raw_yld)
+            elif def_yld is not None and float(def_yld) > 0:
+                yld = float(def_yld)
+            else:
+                yld = 1.0
             qty = float(b.get("quantity", 0))
             waste = float(b.get("waste_pct", 0) or 0)
             # per pair material in unit terms = qty / yield * (1 + waste%)
@@ -13482,9 +13625,15 @@ async def _auto_consume_inventory(job: dict, by_email: str):
     movements = []
     temp_balances = {}
     for b in style_d["bom"]:
-        rate = float(b.get("rate", 0))
-        qty = float(b.get("quantity", 0))
-        yld = float(b.get("yield_per_unit", 1) or 1)
+        mat = by_code.get(b.get("material_code")) or {}
+        raw_yld = b.get("yield_per_unit")
+        def_yld = b.get("default_yield_per_unit") or mat.get("default_yield_per_unit")
+        if raw_yld is not None and float(raw_yld) > 0:
+            yld = float(raw_yld)
+        elif def_yld is not None and float(def_yld) > 0:
+            yld = float(def_yld)
+        else:
+            yld = 1.0
         waste = float(b.get("waste_pct", 0) or 0)
         consume = pairs * (qty / yld) * (1 + waste / 100)
         if consume <= 0:
@@ -13553,9 +13702,10 @@ async def inventory_alerts(request: Request):
 
 
 @api.post("/production/card.pdf", dependencies=[Depends(pdf_rate_limiter)])
-async def production_card_pdf(payload: dict, request: Request):
+async def production_card_pdf(payload: dict, request: Request, variant: str = Query("single")):
     """Generate a printable production card PDF for a (style+color+po) group.
     Accepts {job_ids:[...]} of all jobs belonging to the same style+color+PO.
+    Accepts variant='dual' (query param or body) to generate a dual A4 card (top: shop floor without rates, bottom: admin with rates).
     """
     await get_current_user(request)
     job_ids = payload.get("job_ids", [])
@@ -13601,7 +13751,11 @@ async def production_card_pdf(payload: dict, request: Request):
     }
     style = await db.styles.find_one({"code": j0.get("style_code")})
     style_d = stringify(style) if style else None
-    pdf_bytes = build_production_card(group, style_d)
+    is_dual = variant == "dual" or payload.get("variant") == "dual" or payload.get("dual") is True
+    if is_dual:
+        pdf_bytes = build_production_card_dual_a4(group, style_d)
+    else:
+        pdf_bytes = build_production_card(group, style_d)
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="card-{group["po_number"]}-{group["style_code"]}-{group["color"]}.pdf"'},
@@ -16697,6 +16851,7 @@ async def root():
     }
 
 app.include_router(api)
+app.include_router(plm_router)
 
 
 app.add_middleware(
