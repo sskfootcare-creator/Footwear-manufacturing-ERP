@@ -9297,7 +9297,7 @@ async def extract_po(file: UploadFile = File(...), request: Request = None):
 
 
 async def next_invoice_no() -> str:
-    """Generate SSK<FY>-XXX format like SSK26-27-004. FY based on Apr-Mar split."""
+    """Generate SSK<FY>-XXX format like SSK26-27-016. FY based on Apr-Mar split."""
     today = datetime.now(timezone.utc)
     # Indian FY starts April. If month < 4, FY started prev year.
     yr = today.year
@@ -9307,6 +9307,10 @@ async def next_invoice_no() -> str:
         fy_start = yr
     fy_end = fy_start + 1
     fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
+
+    # Pre-ERP bills 001..015 were issued manually; start sequence at minimum 16 for FY 26-27
+    min_seq = 16 if fy_label == "26-27" else 1
+
     # Atomic counter
     counter = await db.counters.find_one_and_update(
         {"_id": f"invoice_{fy_label}"},
@@ -9315,6 +9319,14 @@ async def next_invoice_no() -> str:
         return_document=True,
     )
     seq = counter.get("seq", 1) if counter else 1
+    if seq < min_seq:
+        await db.counters.update_one(
+            {"_id": f"invoice_{fy_label}"},
+            {"$set": {"seq": min_seq}},
+            upsert=True,
+        )
+        seq = min_seq
+
     return f"SSK{fy_label}-{seq:03d}"
 
 
