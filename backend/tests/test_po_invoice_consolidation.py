@@ -35,8 +35,18 @@ def match_filter(doc, filter_dict):
     for k, v in filter_dict.items():
         if k in ("_id", "$or"):
             continue
-        if doc.get(k) != v:
-            return False
+        val = doc.get(k)
+        if isinstance(v, dict) and "$in" in v:
+            target_list = v["$in"]
+            if isinstance(val, list):
+                if not any(item in target_list for item in val):
+                    return False
+            else:
+                if val not in target_list:
+                    return False
+        else:
+            if val != v:
+                return False
     return True
 
 
@@ -100,6 +110,7 @@ class MockDB:
     def __init__(self):
         self.pos = MockCollection()
         self.invoices = MockCollection()
+        self.dispatch_records = MockCollection()
         self.payments = MockCollection()
         self.grns = MockCollection()
         self.counters = MockCollection()
@@ -125,6 +136,7 @@ def mock_user_override(monkeypatch):
         return {
             "id": "admin_test_id",
             "email": "admin@sskfootcare.com",
+            "role": "admin",
             "roles": ["admin"],
         }
     monkeypatch.setattr(server, "get_current_user", mock_get_current_user)
@@ -280,3 +292,36 @@ async def test_po_invoice_multiple_existing_returns_json(mock_db, mock_user_over
     assert res_list.status_code == 200
     list_data = res_list.json()
     assert len(list_data) == 2
+
+
+@pytest.mark.anyio
+async def test_invoice_for_jobs_idempotency_with_dispatch_record(mock_db, mock_user_override, async_client):
+    """POST /invoices/job returns existing dispatch invoice when job_ids are already in dispatch_records."""
+    po_doc = {
+        "po_number": f"PO-DISPATCH-{ObjectId()}",
+        "po_date": "09/08/2026",
+        "client_name": "Dispatch Client",
+        "line_items": [{"style_code": "STYLE-D", "description": "Shoe D", "color": "Black", "hsn_code": "6403", "quantity": 5, "unit_price": 100.0, "amount": 500.0, "mrp": 150.0}],
+    }
+    res_po = await mock_db.pos.insert_one(po_doc)
+    pid = str(res_po.inserted_id)
+
+    dummy_pdf_b64 = base64.b64encode(b"%PDF-1.4 Dispatch Invoice Content").decode("ascii")
+    dr_doc = {
+        "invoice_no": "SSK26-27-999",
+        "po_id": pid,
+        "job_ids": ["job_dispatch_1"],
+        "invoice_file_b64": dummy_pdf_b64,
+        "dispatched_at": now_iso(),
+    }
+    await mock_db.dispatch_records.insert_one(dr_doc)
+
+    # Calling POST /api/invoices/job for job_dispatch_1 should return the existing dispatch invoice PDF
+    res = await async_client.post("/api/invoices/job", json={"po_id": pid, "job_ids": ["job_dispatch_1"]})
+    assert res.status_code == 200
+    assert res.content == b"%PDF-1.4 Dispatch Invoice Content"
+    assert res.headers.get("X-Invoice-No") == "SSK26-27-999"
+
+    # Confirm count in db.invoices remains 0 (no new invoice generated)
+    count = await mock_db.invoices.count_documents({"po_id": pid})
+    assert count == 0

@@ -9735,9 +9735,37 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
     if not po_doc:
         raise HTTPException(404, "PO not found")
     po = stringify(po_doc)
-    po, line_items = await _generate_invoice_payload(po, payload.job_ids)
-    if not line_items:
-        raise HTTPException(400, "No line items for invoice")
+    import base64 as _b64
+
+    # Defensive check: verify if an invoice was already generated for these job_ids via dispatch_records or invoices
+    if payload.job_ids:
+        dr_existing = await db.dispatch_records.find_one({"job_ids": {"$in": payload.job_ids}})
+        if dr_existing and dr_existing.get("invoice_file_b64"):
+            raw_pdf = _b64.b64decode(dr_existing.get("invoice_file_b64") or "")
+            if raw_pdf:
+                inv_no = dr_existing.get("invoice_no", "invoice")
+                return StreamingResponse(
+                    BytesIO(raw_pdf), media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
+                        "X-Dispatch-Record-Id": str(dr_existing["_id"]),
+                        "X-Invoice-No": inv_no,
+                    },
+                )
+
+        inv_existing = await db.invoices.find_one({"job_ids": {"$in": payload.job_ids}})
+        if inv_existing and inv_existing.get("file_b64"):
+            raw_pdf = _b64.b64decode(inv_existing.get("file_b64") or "")
+            if raw_pdf:
+                inv_no = inv_existing.get("invoice_no", "invoice")
+                return StreamingResponse(
+                    BytesIO(raw_pdf), media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
+                        "X-Invoice-Id": str(inv_existing["_id"]),
+                        "X-Invoice-No": inv_no,
+                    },
+                )
 
     invoice_no = await next_invoice_no()
     invoice_date = datetime.now().strftime("%d/%m/%Y")

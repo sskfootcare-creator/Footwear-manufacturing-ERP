@@ -360,8 +360,34 @@ export default function Production() {
     return next;
   });
   const downloadGroupInvoice = async (group) => {
+    const jobIds = group.rows ? group.rows.map((r) => r.id) : [];
+
+    // 1. Check dispatchRecordByJobId for any matching dispatch records
+    const matchingRecordsMap = new Map();
+    for (const id of jobIds) {
+      const dr = dispatchRecordByJobId[id];
+      if (dr) {
+        matchingRecordsMap.set(dr.id, dr);
+      }
+    }
+
+    if (matchingRecordsMap.size > 1) {
+      console.warn("Multiple distinct dispatch records found for job group:", Array.from(matchingRecordsMap.keys()));
+      alert("Warning: Jobs in this card were dispatched across multiple separate dispatch batches.");
+    }
+
+    const matchedDr = Array.from(matchingRecordsMap.values())[0];
+
+    // 2. If dispatch record is found, re-download the exact dispatch invoice
+    if (matchedDr) {
+      const invNo = matchedDr.invoice_no || "dispatch";
+      await downloadDispatchFile(matchedDr.id, "invoice", `Invoice-${invNo}.pdf`, "application/pdf");
+      return;
+    }
+
+    // 3. Fallback: if no dispatch record is found, call /invoices/job
     try {
-      const res = await http.post("/invoices/job", { po_id: group.po_id, job_ids: group.rows.map(r => r.id) }, { responseType: "blob" });
+      const res = await http.post("/invoices/job", { po_id: group.po_id, job_ids: jobIds }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
     } catch (e) { alert("Invoice failed: " + (e.response?.data?.detail || e.message)); }
   };
