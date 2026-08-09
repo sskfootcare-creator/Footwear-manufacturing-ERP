@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import http from "../api/http";
+import { http, API } from "../lib/api";
 import { Download, FileSpreadsheet, FileText, X, CheckCircle, AlertCircle, Eye } from "lucide-react";
 
 export default function PackingListPreviewModal({ po, isOpen, onClose }) {
@@ -33,12 +33,10 @@ export default function PackingListPreviewModal({ po, isOpen, onClose }) {
   if (!isOpen || !po) return null;
 
   const downloadXlsx = () => {
-    const API = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
     window.open(`${API}/pos/${po.id}/packing-list.xlsx`, "_blank");
   };
 
   const downloadPdf = () => {
-    const API = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
     window.open(`${API}/pos/${po.id}/packing-list.pdf`, "_blank");
   };
 
