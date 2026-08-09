@@ -930,7 +930,16 @@ def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str, optio
         total_gross_wt += c_gross_wt
 
         _set(ws, f"A{row_idx}", box_num_text, size=9, align="center", border=True)
-        _set(ws, f"B{row_idx}", c.get("style_code", ""), size=9, bold=True, align="left", border=True)
+        style_val = (
+            c.get("mapped_from_sku") or
+            c.get("external_sku") or
+            c.get("po_style_code") or
+            c.get("customer_style_code") or
+            c.get("buyer_style_code") or
+            c.get("style_code") or
+            ""
+        )
+        _set(ws, f"B{row_idx}", style_val, size=9, bold=True, align="left", border=True)
         _set(ws, f"C{row_idx}", c.get("description", "") or po.get("description", ""), size=9, align="left", border=True)
         _set(ws, f"D{row_idx}", c.get("color", ""), size=9, align="left", border=True)
         _set(ws, f"E{row_idx}", c.get("size", ""), size=9, align="center", border=True)

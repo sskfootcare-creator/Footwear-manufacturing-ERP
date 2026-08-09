@@ -1,4 +1,4 @@
-"""PDF: Carton Labels — A4, 2 labels per page.
+"""PDF: Carton Labels — A4, 2 labels per page (Monochrome / High Contrast for Laser Printers).
 
 Each label corresponds to one packing_cartons row (one box).
 Layout (per label, top to bottom):
@@ -19,31 +19,27 @@ LABEL_W = PAGE_W - 2 * MARGIN
 LABEL_H = (PAGE_H - 3 * MARGIN) / 2   # 2 labels per page with gap
 
 VENDOR_NAME = "SSK FOOTCARE MANUFACTURING LLP"
-TEAL   = colors.HexColor("#0D9488")
-DARK   = colors.HexColor("#0F172A")
-LIGHT  = colors.HexColor("#F1F5F9")
-MUTED  = colors.HexColor("#64748B")
-WHITE  = colors.white
-BLACK  = colors.black
+BLACK = colors.black
 
 
 def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
                 po_number: str, invoice_no: str) -> None:
     """Draw a single label inside the bounding box (x, y) bottom-left corner."""
     w, h = LABEL_W, LABEL_H
-    r = 2 * mm   # corner radius (approx — PDF has no native rounded rect, use lines)
 
-    # Outer border
-    c.setStrokeColor(DARK)
-    c.setLineWidth(0.8)
+    # Outer border (solid 1pt black line for laser printing)
+    c.setStrokeColor(BLACK)
+    c.setLineWidth(1.0)
     c.rect(x, y, w, h)
 
-    # ── VENDOR STRIP (top 12mm) ──────────────────────────────────────────────
+    # ── VENDOR STRIP (top 12mm) — Clean text, no background fill ─────────────
     strip_h = 12 * mm
-    c.setFillColor(TEAL)
-    c.rect(x, y + h - strip_h, w, strip_h, fill=1, stroke=0)
-    c.setFillColor(WHITE)
-    c.setFont("Helvetica-Bold", 11)
+    c.setStrokeColor(BLACK)
+    c.setLineWidth(0.8)
+    c.line(x, y + h - strip_h, x + w, y + h - strip_h)
+
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 12)
     c.drawCentredString(x + w / 2, y + h - strip_h + 3.5 * mm, VENDOR_NAME)
 
     # ── PO / BOX / INVOICE ROW (next 18mm) ──────────────────────────────────
@@ -52,17 +48,17 @@ def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
     col = w / 3
 
     # Dividers
-    c.setStrokeColor(MUTED)
-    c.setLineWidth(0.4)
+    c.setStrokeColor(BLACK)
+    c.setLineWidth(0.6)
     c.line(x + col, row1_y, x + col, row1_y + row1_h)
     c.line(x + 2 * col, row1_y, x + 2 * col, row1_y + row1_h)
     c.line(x, row1_y, x + w, row1_y)
 
     def _cell(cx, val_text, label_text, big=False):
-        c.setFillColor(MUTED)
-        c.setFont("Helvetica", 6)
-        c.drawCentredString(cx, row1_y + row1_h - 4 * mm, label_text)
-        c.setFillColor(DARK)
+        c.setFillColor(BLACK)
+        c.setFont("Helvetica-Bold", 7)
+        c.drawCentredString(cx, row1_y + row1_h - 4.5 * mm, label_text)
+        c.setFillColor(BLACK)
         c.setFont("Helvetica-Bold", 14 if big else 10)
         c.drawCentredString(cx, row1_y + 3.5 * mm, val_text)
 
@@ -71,20 +67,20 @@ def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
     total = carton.get("total_cartons")
     box_label = f"{box_num}/{total}" if total else str(box_num)
     _cell(x + col + col / 2, box_label, "CARTON No.", big=True)
-    _cell(x + 2*col + col/2, invoice_no or "—",            "INVOICE No.")
+    _cell(x + 2 * col + col / 2, invoice_no or "—",        "INVOICE No.")
 
-    # ── EAN ROW (next 16mm) ──────────────────────────────────────────────────
+    # ── EAN ROW (next 16mm) — Clean white background, black text ─────────────
     ean_y = row1_y - 16 * mm
-    c.setFillColor(LIGHT)
-    c.rect(x, ean_y, w, 16 * mm, fill=1, stroke=0)
-    c.setStrokeColor(MUTED); c.setLineWidth(0.3)
+    c.setStrokeColor(BLACK)
+    c.setLineWidth(0.6)
     c.line(x, ean_y, x + w, ean_y)
-    c.line(x, ean_y + 16 * mm, x + w, ean_y + 16 * mm)
 
     ean_val = carton.get("ean_code") or "—"
-    c.setFillColor(MUTED); c.setFont("Helvetica", 6)
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 7)
     c.drawString(x + 4 * mm, ean_y + 16 * mm - 4.5 * mm, "EAN / BARCODE")
-    c.setFillColor(DARK); c.setFont("Helvetica-Bold", 16)
+    c.setFillColor(BLACK)
+    c.setFont("Helvetica-Bold", 18)
     c.drawCentredString(x + w / 2, ean_y + 3 * mm, ean_val)
 
     # ── GOODS ROW (bottom) ───────────────────────────────────────────────────
@@ -94,20 +90,41 @@ def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
     qcol = w / 4
 
     def _goods(gx, lab, val, font_sz=9):
-        c.setFillColor(MUTED); c.setFont("Helvetica", 6)
+        c.setFillColor(BLACK)
+        c.setFont("Helvetica-Bold", 7)
         c.drawCentredString(gx, goods_y + goods_h - 5 * mm, lab)
-        c.setFillColor(DARK); c.setFont("Helvetica-Bold", font_sz)
+        c.setFillColor(BLACK)
+        c.setFont("Helvetica-Bold", font_sz)
         c.drawCentredString(gx, goods_y + 3 * mm, str(val) if val else "—")
 
     # vertical separators inside goods row
-    c.setStrokeColor(MUTED); c.setLineWidth(0.3)
+    c.setStrokeColor(BLACK)
+    c.setLineWidth(0.6)
     for i in (1, 2, 3):
         c.line(x + i * qcol, goods_y, x + i * qcol, ean_y)
 
-    _goods(x + qcol * 0.5, "STYLE CODE",  carton.get("style_code","—"), 8)
-    _goods(x + qcol * 1.5, "COLOR",        carton.get("color","—"),       9)
-    _goods(x + qcol * 2.5, "SIZE",         carton.get("size","—"),        20)
-    _goods(x + qcol * 3.5, "QTY (PAIRS)",  carton.get("qty","—"),         20)
+    style_val = (
+        carton.get("mapped_from_sku") or
+        carton.get("external_sku") or
+        carton.get("po_style_code") or
+        carton.get("customer_style_code") or
+        carton.get("buyer_style_code") or
+        carton.get("style_code") or
+        "—"
+    )
+    style_str = str(style_val)
+    if len(style_str) > 18:
+        style_font_sz = 6
+    elif len(style_str) > 13:
+        style_font_sz = 7
+    else:
+        style_font_sz = 8
+
+    _goods(x + qcol * 0.5, "STYLE CODE",  style_val,             style_font_sz)
+    _goods(x + qcol * 1.5, "COLOR",        carton.get("color", "—"),       9)
+    _goods(x + qcol * 2.5, "SIZE",         carton.get("size", "—"),        20)
+    _goods(x + qcol * 3.5, "QTY (PAIRS)",  carton.get("qty", "—"),         20)
+
 
 
 def build_carton_labels(cartons: list[dict], po_number: str, invoice_no: str) -> bytes:
