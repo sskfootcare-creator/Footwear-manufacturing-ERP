@@ -12471,7 +12471,7 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
             style = await db.styles.find_one({"_id": oid(job["style_id"])})
         if not style:
             style = await db.styles.find_one({"code": job.get("style_code")})
-        if not style or not style.get("bom"):
+        if not style or style.get("bom") is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot move out of Procurement: Style '{job.get('style_code')}' has no BOM defined in Style Master. Please configure BOM in Styles Master first."
@@ -13079,16 +13079,12 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
     current_stage = job.get("stage", "")
     assigns = job.get("assignments") or {}
     
-    worker_role = None
-    for r, asgn in assigns.items():
-        if asgn.get("worker_id") == caller_wid:
-            worker_role = r
-            break
-
-    if not worker_role:
+    worker_role = current_stage
+    current_asgn = assigns.get(current_stage) or {}
+    if current_asgn.get("worker_id") != caller_wid:
         raise HTTPException(
             status_code=403,
-            detail="You are not assigned to this job"
+            detail="You are not assigned to this job at its current stage"
         )
 
     po_num = job.get("po_number")
@@ -13134,20 +13130,9 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
             "notes": payload.notes or "",
         }
 
-        # Determine next production stage for Kanban & workflow
-        norm_curr = "upper" if current_stage == "cutting" else current_stage
-        try:
-            curr_idx = PRODUCTION_STAGES.index(norm_curr)
-        except ValueError:
-            curr_idx = 1
-        next_idx = min(curr_idx + 1, len(PRODUCTION_STAGES) - 1)
-        next_stage = PRODUCTION_STAGES[next_idx]
-
         update_dict = {
             "ready_for_pickup": rfp,
             "completed_qty": q_val,
-            "stage": next_stage,
-            "stage_entered_at": now,
             "updated_at": now,
             f"components.{current_stage}_done": True,
             f"components.{current_stage}_completed_qty": q_val,
@@ -13323,6 +13308,7 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
                 yld = 1.0
             qty = float(b.get("quantity", 0))
             waste = float(b.get("waste_pct", 0) or 0)
+            rate = float(b.get("rate") or mat_info.get("cost_per_unit") or mat_info.get("rate") or mat_info.get("purchase_rate") or 0)
             # per pair material in unit terms = qty / yield * (1 + waste%)
             per_pair = (qty / yld) * (1 + waste / 100)
             total_qty = per_pair * pairs
@@ -13333,6 +13319,8 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
                     "code": code, "name": name, "category": cat, "unit": unit,
                     "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
                 }
+            elif not requirements[key]["rate"] and rate > 0:
+                requirements[key]["rate"] = rate
             requirements[key]["total_qty_required"] += total_qty
             requirements[key]["total_cost"] += total_qty * rate
 

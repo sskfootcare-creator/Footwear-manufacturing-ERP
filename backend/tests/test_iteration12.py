@@ -339,16 +339,38 @@ class TestMergedPackingList:
         TestMergedPackingList._same_client_jobs = (j1, j2, po_to_client)
 
     def test_merge_cross_client_rejected(self, session):
-        j1, j2, po_to_client = TestMergedPackingList._same_client_jobs
-        # find a job whose client is DIFFERENT from j1's
-        r = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
-        c1 = po_to_client.get(j1["po_id"], "")
+        # Re-fetch jobs and PO mapping independently (class-level state set in test methods
+        # is not reliable across xdist workers). This test is self-contained.
+        r_jobs = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
+        assert r_jobs.status_code == 200
+        all_jobs = r_jobs.json()
+        r_pos = session.get(f"{BASE_URL}/api/pos")
+        assert r_pos.status_code == 200
+        po_to_client = {p["id"]: p.get("client_name", "") for p in r_pos.json()}
+
+        # Group jobs by client
+        buckets: dict = {}
+        for j in all_jobs:
+            c = po_to_client.get(j.get("po_id"), "")
+            buckets.setdefault(c, []).append(j)
+
+        # Find two same-client jobs (should exist after test_merge_same_client seeded them)
+        same_client_pair = next((v for v in buckets.values() if len(v) >= 2), None)
+        if not same_client_pair:
+            pytest.skip("no same-client jobs available to form a cross-client pair")
+
+        j1 = same_client_pair[0]
+        c1 = po_to_client.get(j1.get("po_id"), "")
+
+        # Find a job with a DIFFERENT client
         diff = next(
-            (j for j in r.json() if po_to_client.get(j.get("po_id"), "") and po_to_client.get(j.get("po_id")) != c1),
+            (j for j in all_jobs if po_to_client.get(j.get("po_id"), "") and
+             po_to_client.get(j.get("po_id")) != c1),
             None,
         )
         if not diff:
             pytest.skip("no cross-client job to test rejection")
+
         r = session.post(f"{BASE_URL}/api/packing-lists/merged",
                          json={"job_ids": [j1["id"], diff["id"]]})
         assert r.status_code == 400, f"expected 400 for cross-client; got {r.status_code}: {r.text[:200]}"
