@@ -1,7 +1,7 @@
 """Style & Color Master Pydantic Models."""
 
 from enum import Enum
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
 
@@ -52,6 +52,7 @@ class StyleIn(BaseModel):
     packing_cost: float = 0
     margin_pct: float = 25
     gst_pct: float = 5
+    default_pairs_per_carton: Optional[Dict[str, Any]] = None
 
 
 class PlannedComponent(BaseModel):
