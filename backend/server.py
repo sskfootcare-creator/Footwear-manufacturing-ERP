@@ -34,7 +34,7 @@ from auth import (
 from collections import defaultdict
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
-from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list, build_carton_list_xlsx
+from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list, build_carton_list_xlsx, build_packing_list_pdf, VENDOR, DEFAULT_SIZES
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card, build_production_card_dual_a4
 from pdf_carton_label import build_carton_labels
@@ -11993,11 +11993,197 @@ async def download_packing_list(plid: str, request: Request):
     if not raw:
         raise HTTPException(404, "File not stored for this entry")
     label = "MERGED" if doc.get("merged") else doc.get("po_number", "po")
-    fname = f"PackingList-{label}-{doc.get('created_at','')[:10]}.xlsx"
     return StreamingResponse(
         BytesIO(raw),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@api.post("/packing-list/preview")
+async def preview_packing_list(payload: dict, request: Request):
+    """Generate structured JSON preview of the packing list for pre-generation verification."""
+    u = await get_current_user(request)
+    po_id = payload.get("po_id")
+    po_doc = None
+    if po_id:
+        po_doc = await db.pos.find_one({"_id": oid(po_id)})
+    if not po_doc:
+        po_doc = payload.get("po") or {}
+
+    po = stringify(po_doc) if po_doc else {}
+    line_items = po.get("line_items", [])
+
+    pcs_per_box = int(payload.get("pcs_per_box") or 20)
+    net_wt_unit = float(payload.get("net_wt_per_carton") or 10.8)
+    gross_wt_unit = float(payload.get("gross_wt_per_carton") or 12.0)
+    carton_dim = payload.get("carton_dim") or po.get("carton_dim") or "60x50x30 CMS"
+
+    agg = {}
+    for li in line_items:
+        st = str(li.get("style_code") or "").strip()
+        co = str(li.get("color") or "").strip()
+        slot = agg.setdefault((st, co), {"style": st, "color": co, "by_size": {s: 0 for s in DEFAULT_SIZES}, "total": 0})
+        sz = str(li.get("size") or "").strip()
+        q = int(li.get("quantity") or 0)
+        if sz in slot["by_size"]:
+            slot["by_size"][sz] += q
+        slot["total"] += q
+
+    rows = []
+    total_pcs = 0
+    total_cartons = 0
+    total_net_wt = 0.0
+    total_gross_wt = 0.0
+    ctn_seq = 1
+
+    for (st, co), rec in agg.items():
+        n_boxes = max(1, (rec["total"] + pcs_per_box - 1) // pcs_per_box)
+        c_range = f"{ctn_seq}-{ctn_seq + n_boxes - 1}" if n_boxes > 1 else str(ctn_seq)
+        r_net = round(n_boxes * net_wt_unit, 3)
+        r_gross = round(n_boxes * gross_wt_unit, 3)
+
+        rows.append({
+            "site_code": po.get("site_code") or "ZC_BLR-WH",
+            "style": st,
+            "color": co,
+            "carton_no": c_range,
+            "by_size": rec["by_size"],
+            "pcs_per_carton": rec["total"],
+            "per_carton": pcs_per_box,
+            "total_cartons": n_boxes,
+            "total_pcs": rec["total"],
+            "net_weight": r_net,
+            "gross_weight": r_gross,
+        })
+        ctn_seq += n_boxes
+        total_pcs += rec["total"]
+        total_cartons += n_boxes
+        total_net_wt += r_net
+        total_gross_wt += r_gross
+
+    order_qty_map = {s: 0 for s in DEFAULT_SIZES}
+    for li in line_items:
+        sz = str(li.get("size") or "").strip()
+        if sz in order_qty_map:
+            order_qty_map[sz] += int(li.get("quantity") or 0)
+
+    pack_qty_map = {s: 0 for s in DEFAULT_SIZES}
+    for r in rows:
+        for s in DEFAULT_SIZES:
+            pack_qty_map[s] += r["by_size"].get(s, 0)
+
+    excess_short_map = {s: pack_qty_map[s] - order_qty_map[s] for s in DEFAULT_SIZES}
+    excess_short_pct_map = {}
+    for s in DEFAULT_SIZES:
+        ord_q = order_qty_map[s]
+        excess_short_pct_map[s] = f"{((excess_short_map[s] / ord_q) * 100):.2f}%" if ord_q > 0 else "0.00%"
+
+    tot_order = sum(order_qty_map.values())
+    tot_pack = sum(pack_qty_map.values())
+    tot_diff = tot_pack - tot_order
+    tot_diff_pct = f"{((tot_diff / tot_order) * 100):.2f}%" if tot_order > 0 else "0.00%"
+
+    return {
+        "vendor": VENDOR,
+        "destination": {
+            "name": po.get("client_name") or "ZECODE-BANGLORE-2220 ZECODE-BANGLORE-2220",
+            "address": po.get("client_address") or po.get("shipping_address") or "PLOT NO. 2J/2K, 3RD PHASE KIADB OBEDENAHALLI INDUSTRIAL AREA BANGLORE, KARNATAKA DODDABALLAPUR 561 BENGALURU KARNATAKA 561203",
+            "gstin": po.get("client_gstin") or "29AAACS6995D2ZX",
+        },
+        "po": {
+            "po_number": po.get("po_number", ""),
+            "po_date": po.get("po_date", ""),
+            "total_pcs": total_pcs,
+            "total_cartons": total_cartons,
+            "carton_dimension": carton_dim,
+        },
+        "sizes": DEFAULT_SIZES,
+        "rows": rows,
+        "grand_total": {
+            "size_totals": pack_qty_map,
+            "total_cartons": total_cartons,
+            "total_pcs": total_pcs,
+            "net_weight": round(total_net_wt, 3),
+            "gross_weight": round(total_gross_wt, 3),
+        },
+        "order_summary": {
+            "order_qty": order_qty_map,
+            "pack_qty": pack_qty_map,
+            "excess_short": excess_short_map,
+            "excess_short_pct": excess_short_pct_map,
+            "total_order_qty": tot_order,
+            "total_pack_qty": tot_pack,
+            "total_excess_short": tot_diff,
+            "total_excess_short_pct": tot_diff_pct,
+        }
+    }
+
+
+@api.post("/packing-list/validate")
+async def validate_packing_list(payload: dict, request: Request):
+    """Validate packing list inputs before generation."""
+    await get_current_user(request)
+    errors = []
+
+    po_id = payload.get("po_id")
+    po_doc = None
+    if po_id:
+        po_doc = await db.pos.find_one({"_id": oid(po_id)})
+    if not po_doc:
+        po_doc = payload.get("po")
+    if not po_doc:
+        errors.append("PO not found or invalid PO data.")
+
+    if po_doc:
+        line_items = po_doc.get("line_items", [])
+        if not line_items:
+            errors.append("PO has no line items.")
+        for idx, li in enumerate(line_items):
+            qty = li.get("quantity")
+            if qty is None or int(qty) < 0:
+                errors.append(f"Line item #{idx+1} has invalid quantity: {qty}")
+            if not li.get("style_code"):
+                errors.append(f"Line item #{idx+1} missing style code.")
+
+    carton_dim = payload.get("carton_dim") or (po_doc.get("carton_dim") if po_doc else None) or "60x50x30 CMS"
+    if not carton_dim or not str(carton_dim).strip():
+        errors.append("Carton dimension is required.")
+
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+@api.get("/pos/{pid}/packing-list.pdf")
+async def get_po_packing_list_pdf(pid: str, request: Request):
+    """Generate and stream PDF packing list for a PO matching the master visual reference PDF."""
+    await get_current_user(request)
+    po_doc = await db.pos.find_one({"_id": oid(pid)})
+    if not po_doc:
+        raise HTTPException(404, "PO not found")
+    po = stringify(po_doc)
+    pdf_bytes = build_packing_list_pdf(po)
+    fname = f"PackingList-{po.get('po_number','po')}.pdf"
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'}
+    )
+
+
+@api.get("/pos/{pid}/packing-list.xlsx")
+async def get_po_packing_list_xlsx(pid: str, request: Request):
+    """Generate and stream Excel packing list for a PO matching the master visual reference PDF."""
+    await get_current_user(request)
+    po_doc = await db.pos.find_one({"_id": oid(pid)})
+    if not po_doc:
+        raise HTTPException(404, "PO not found")
+    po = stringify(po_doc)
+    xlsx_bytes = build_default_packing_list(po)
+    fname = f"PackingList-{po.get('po_number','po')}.xlsx"
+    return StreamingResponse(
+        BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
     )
 
 

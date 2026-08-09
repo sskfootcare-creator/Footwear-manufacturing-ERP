@@ -25,6 +25,7 @@ import {
   Package,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
+import PackingListPreviewModal from "../components/PackingListPreviewModal";
 
 import { API } from "../lib/api";
 
@@ -73,6 +74,7 @@ export default function POs() {
   const [selectedPoForInvoices, setSelectedPoForInvoices] = useState(null);
   const [poInvoicesList, setPoInvoicesList] = useState([]);
   const [loadingInvoices, setLoadingInvoices] = useState(false);
+  const [previewPo, setPreviewPo] = useState(null);
   const [invoiceModalOpen, setInvoiceModalOpen] = useState(false);
 
   const handleInvoiceClick = async (po) => {
@@ -352,29 +354,8 @@ export default function POs() {
     });
   };
 
-  const downloadPacking = async (po) => {
-    try {
-      const res = await http.post(
-        "/packing-lists/job",
-        { po_id: po.id },
-        { responseType: "blob" },
-      );
-      const url = URL.createObjectURL(
-        new Blob([res.data], {
-          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }),
-      );
-      const a = document.createElement("a");
-      a.href = url;
-      const safePo = (po.po_number || "").replace(/[\/\\]/g, "-");
-      a.download = `PackingList-${safePo}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      alert("Packing list failed: " + (e.response?.data?.detail || e.message));
-    }
+  const downloadPacking = (po) => {
+    setPreviewPo(po);
   };
 
   return (
@@ -1127,6 +1108,11 @@ export default function POs() {
         message={confirm?.message}
         onConfirm={confirm?.onConfirm}
         onCancel={() => setConfirm(null)}
+      />
+      <PackingListPreviewModal
+        po={previewPo}
+        isOpen={!!previewPo}
+        onClose={() => setPreviewPo(null)}
       />
     </div>
   );
