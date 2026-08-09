@@ -10916,6 +10916,80 @@ async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: O
     return [stringify(c) for c in cartons]
 
 
+async def _enrich_cartons_with_mapped_sku(cartons: list[dict]) -> list[dict]:
+    """Enrich carton dicts with mapped_from_sku / external_sku if available from jobs/pos/sku_map."""
+    if not cartons:
+        return cartons
+
+    job_ids = list({str(c["job_id"]) for c in cartons if c.get("job_id")})
+    job_docs = []
+    if job_ids:
+        valid_oids = [oid(j) for j in job_ids if ObjectId.is_valid(j)]
+        if valid_oids:
+            job_docs = await db.production_jobs.find({"_id": {"$in": valid_oids}}).to_list(10000)
+    job_map = {str(j["_id"]): j for j in job_docs}
+
+    po_ids = list(
+        {str(j.get("po_id")) for j in job_docs if j.get("po_id")} |
+        {str(c.get("po_id")) for c in cartons if c.get("po_id")}
+    )
+    po_docs = []
+    if po_ids:
+        valid_poids = [oid(p) for p in po_ids if ObjectId.is_valid(p)]
+        if valid_poids:
+            po_docs = await db.pos.find({"_id": {"$in": valid_poids}}).to_list(1000)
+    po_map = {str(p["_id"]): p for p in po_docs}
+
+    style_ids = list(
+        {str(j.get("style_id")) for j in job_docs if j.get("style_id")} |
+        {str(c.get("style_id")) for c in cartons if c.get("style_id")}
+    )
+    sku_mappings = []
+    if style_ids:
+        sku_mappings = await db.sku_map.find(
+            {"style_id": {"$in": [s for s in style_ids if s]}}
+        ).to_list(10000)
+    sku_map_by_style_id = {str(m.get("style_id")): m.get("external_sku") for m in sku_mappings if m.get("external_sku")}
+
+    for c in cartons:
+        existing = c.get("mapped_from_sku") or c.get("external_sku")
+        if existing:
+            c["mapped_from_sku"] = existing
+            c["external_sku"] = existing
+            continue
+
+        job = job_map.get(str(c.get("job_id")))
+        if job:
+            mapped_sku = job.get("mapped_from_sku") or job.get("external_sku") or job.get("po_style_code")
+            if mapped_sku:
+                c["mapped_from_sku"] = mapped_sku
+                c["external_sku"] = mapped_sku
+                continue
+
+            po = po_map.get(str(job.get("po_id") or c.get("po_id")))
+            if po and po.get("line_items"):
+                c_style = c.get("style_code")
+                c_color = c.get("color")
+                c_size = str(c.get("size", ""))
+                for li in po.get("line_items", []):
+                    if li.get("style_code") == c_style and li.get("color") == c_color and str(li.get("size", "")) == c_size:
+                        li_mapped = li.get("mapped_from_sku") or li.get("external_sku") or li.get("external_code") or li.get("raw_style_code")
+                        if li_mapped:
+                            c["mapped_from_sku"] = li_mapped
+                            c["external_sku"] = li_mapped
+                            break
+                if c.get("mapped_from_sku"):
+                    continue
+
+            sid = str(job.get("style_id") or c.get("style_id") or "")
+            if sid in sku_map_by_style_id:
+                c["mapped_from_sku"] = sku_map_by_style_id[sid]
+                c["external_sku"] = sku_map_by_style_id[sid]
+                continue
+
+    return cartons
+
+
 @api.get("/production/jobs/carton-labels", dependencies=[Depends(pdf_rate_limiter)])
 async def get_direct_carton_labels(job_ids: str, request: Request):
     """Generate carton labels directly for the given job IDs, even if no dispatch record exists."""
@@ -10937,6 +11011,8 @@ async def get_direct_carton_labels(job_ids: str, request: Request):
     for idx, c in enumerate(cartons):
         c["box_number"] = idx + 1
         c["total_cartons"] = total_cartons
+
+    cartons = await _enrich_cartons_with_mapped_sku(cartons)
 
     # Load first job to find PO and invoice info
     job = await db.production_jobs.find_one({"_id": oid(jids[0])})
@@ -10977,6 +11053,8 @@ async def get_direct_carton_list(job_ids: str, request: Request):
     for idx, c in enumerate(cartons):
         c["box_number"] = idx + 1
         c["total_cartons"] = total_cartons
+
+    cartons = await _enrich_cartons_with_mapped_sku(cartons)
 
     job = await db.production_jobs.find_one({"_id": oid(jids[0])})
     po_doc = await db.pos.find_one({"_id": oid(job["po_id"])}) if (job and job.get("po_id")) else None
@@ -11031,11 +11109,14 @@ async def pack_carton(payload: CartonIn, request: Request):
     })
     ean_code = ean_doc["ean_code"] if ean_doc else ""
     
+    mapped_sku = job.get("mapped_from_sku") or job.get("external_sku")
     doc = {
         "job_id": payload.job_id,
         "po_id": job.get("po_id"),
         "style_id": job.get("style_id"),
         "style_code": job.get("style_code"),
+        "mapped_from_sku": mapped_sku,
+        "external_sku": mapped_sku,
         "color": job.get("color"),
         "size": payload.size,
         "ean_code": ean_code,
@@ -11086,6 +11167,7 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
     style_code = job_objs[0].get("style_code")
     po_id = job_objs[0].get("po_id")
     color = job_objs[0].get("color")
+    job_obj_map = {str(j["_id"]): j for j in job_objs}
     
     for job in job_objs:
         if job.get("style_id") != style_id or job.get("color") != color:
@@ -11118,12 +11200,16 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
         if not job_id:
             raise HTTPException(400, f"Size {size} not found in color group jobs")
         ean_code = ean_map.get(size, "")
+        target_job = job_obj_map.get(job_id, job_objs[0])
+        mapped_sku = target_job.get("mapped_from_sku") or target_job.get("external_sku")
         
         carton_docs.append({
             "job_id": job_id,
             "po_id": str(po_id),
             "style_id": str(style_id),
             "style_code": style_code,
+            "mapped_from_sku": mapped_sku,
+            "external_sku": mapped_sku,
             "color": color,
             "size": size,
             "ean_code": ean_code,
@@ -11215,6 +11301,8 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     # ── 3. Assign box_number 1..N (in-memory; persist after files generated) ─
     for idx, c in enumerate(cartons):
         c["box_number"] = idx + 1
+
+    cartons = await _enrich_cartons_with_mapped_sku(cartons)
 
     # ── 4. Build line items from actual packed qty (SUM per style/color/size) ─
     po_items = po.get("line_items", [])
