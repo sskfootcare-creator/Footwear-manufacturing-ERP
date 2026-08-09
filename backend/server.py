@@ -38,7 +38,7 @@ from packing_list import build_default_packing_list, build_from_template, build_
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card, build_production_card_dual_a4
 from pdf_carton_label import build_carton_labels
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from io import BytesIO
 import uuid
@@ -9612,14 +9612,74 @@ async def _generate_invoice_payload(po: dict, job_ids: list[str] | None) -> tupl
     return po, line_items
 
 
+@api.get("/pos/{pid}/invoices")
+async def list_po_invoices(pid: str, request: Request):
+    await get_current_user(request)
+    doc = await db.pos.find_one({"_id": oid(pid)})
+    if not doc:
+        raise HTTPException(404, "PO not found")
+    po_number = doc.get("po_number")
+    query_or = [{"po_id": pid}]
+    if po_number:
+        query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
+    
+    docs = await db.invoices.find({"$or": query_or}, {"file_b64": 0}).sort("created_at", -1).to_list(100)
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids)
+    grn_map = await _aggregate_grn_adjustments(inv_ids)
+    return [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+
 @api.get("/pos/{pid}/invoice.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def po_invoice(pid: str, request: Request):
-    await get_current_user(request)
+    u = await get_current_user(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
     if not doc:
         raise HTTPException(404, "Not found")
     po = stringify(doc)
-    # auto-issue invoice number on first download (and persist)
+
+    # Check db.invoices as single source of truth
+    po_number = po.get("po_number")
+    query_or = [{"po_id": pid}]
+    if po_number:
+        query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
+    existing = await db.invoices.find({"$or": query_or}).sort("created_at", -1).to_list(100)
+
+    import base64 as _b64
+
+    if len(existing) == 1:
+        inv = existing[0]
+        file_b64 = inv.get("file_b64")
+        if file_b64:
+            pdf_bytes = _b64.b64decode(file_b64)
+        else:
+            inv_no = inv.get("invoice_no") or po.get("invoice_no") or await next_invoice_no()
+            inv_date = inv.get("invoice_date") or po.get("invoice_date") or datetime.now().strftime("%d/%m/%Y")
+            po_payload, line_items = await _generate_invoice_payload(po, None)
+            pdf_bytes = build_invoice(po_payload, inv_no, inv_date, line_items=line_items)
+            encoded = _b64.b64encode(pdf_bytes).decode("ascii")
+            await db.invoices.update_one({"_id": inv["_id"]}, {"$set": {"file_b64": encoded}})
+        inv_no = inv.get("invoice_no") or "invoice"
+        return StreamingResponse(
+            BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{inv_no}.pdf"'},
+        )
+    elif len(existing) > 1:
+        # Multiple invoices exist (partial/batched dispatches)
+        inv_list = [
+            {
+                "id": str(inv["_id"]),
+                "invoice_no": inv.get("invoice_no"),
+                "invoice_date": inv.get("invoice_date"),
+                "job_ids": inv.get("job_ids", []),
+                "grand_total": inv.get("grand_total"),
+                "created_at": inv.get("created_at"),
+            }
+            for inv in existing
+        ]
+        return JSONResponse({"multiple": True, "invoices": inv_list})
+
+    # Zero existing invoices in db.invoices: legitimate first-time generation
     invoice_no = po.get("invoice_no")
     invoice_date = po.get("invoice_date")
     if not invoice_no:
@@ -9627,8 +9687,40 @@ async def po_invoice(pid: str, request: Request):
         invoice_date = datetime.now().strftime("%d/%m/%Y")
         await db.pos.update_one({"_id": oid(pid)}, {"$set": {"invoice_no": invoice_no, "invoice_date": invoice_date}})
         po["invoice_no"] = invoice_no
+        po["invoice_date"] = invoice_date
+
     po, line_items = await _generate_invoice_payload(po, None)
     pdf_bytes = build_invoice(po, invoice_no, invoice_date, line_items=line_items)
+
+    # Insert full record into db.invoices matching invoice_for_jobs shape
+    totals = _compute_invoice_totals(po, line_items)
+    credit_days = _extract_credit_days(po.get("payment_terms", ""))
+    invoice_iso = _invoice_iso_date(invoice_date)
+    due_date = _due_iso(invoice_date, credit_days)
+    user_email = u.get("email", "system") if isinstance(u, dict) else "system"
+    inv_doc = {
+        "invoice_no": invoice_no,
+        "invoice_date": invoice_date,
+        "invoice_iso_date": invoice_iso,
+        "due_date": due_date,
+        "payment_terms_days": credit_days,
+        "po_id": pid,
+        "po_number": po.get("po_number"),
+        "po_numbers": [po.get("po_number")] if po.get("po_number") else [],
+        "client_name": po.get("client_name"),
+        "job_ids": [],
+        "line_items_snapshot": line_items,
+        **totals,
+        "transport_mode": "",
+        "vehicle_no": "",
+        "supply_date": "",
+        "by": user_email,
+        "created_at": now_iso(),
+        "file_b64": _b64.b64encode(pdf_bytes).decode("ascii"),
+        "merged": False,
+    }
+    await db.invoices.insert_one(inv_doc)
+
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{invoice_no}.pdf"'},

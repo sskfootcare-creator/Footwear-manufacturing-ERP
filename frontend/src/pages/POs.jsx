@@ -70,6 +70,30 @@ export default function POs() {
   const [confirm, setConfirm] = useState(null);
   const [formError, setFormError] = useState("");
 
+  const [selectedPoForInvoices, setSelectedPoForInvoices] = useState(null);
+  const [poInvoicesList, setPoInvoicesList] = useState([]);
+  const [loadingInvoices, setLoadingInvoices] = useState(false);
+  const [invoiceModalOpen, setInvoiceModalOpen] = useState(false);
+
+  const handleInvoiceClick = async (po) => {
+    setSelectedPoForInvoices(po);
+    setLoadingInvoices(true);
+    try {
+      const res = await http.get(`/pos/${po.id}/invoices`);
+      const list = res.data || [];
+      setPoInvoicesList(list);
+      if (list.length === 0) {
+        window.open(`${API}/pos/${po.id}/invoice.pdf`, "_blank");
+      } else {
+        setInvoiceModalOpen(true);
+      }
+    } catch {
+      window.open(`${API}/pos/${po.id}/invoice.pdf`, "_blank");
+    } finally {
+      setLoadingInvoices(false);
+    }
+  };
+
   const load = async () => {
     try {
       const [posRes, stylesRes] = await Promise.all([
@@ -465,16 +489,19 @@ export default function POs() {
                         {p.delivery_date || "—"}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <a
-                          href={`${API}/pos/${p.id}/invoice.pdf`}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          onClick={() => handleInvoiceClick(p)}
                           className="text-slate-600 hover:text-[#C27842] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation"
-                          title="Download Tax Invoice"
+                          title="View/Download Tax Invoice"
                           data-testid={`invoice-${p.po_number}`}
+                          disabled={loadingInvoices && selectedPoForInvoices?.id === p.id}
                         >
-                          <FileDown className="w-4 h-4" />
-                        </a>
+                          {loadingInvoices && selectedPoForInvoices?.id === p.id ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-[#C27842]" />
+                          ) : (
+                            <FileDown className="w-4 h-4" />
+                          )}
+                        </button>
                         <a
                           href={`${API}/pos/${p.id}/challan.pdf`}
                           target="_blank"
@@ -1033,6 +1060,63 @@ export default function POs() {
                   </span>
                 </span>
               </div>
+            </div>
+          </div>
+        </Drawer>
+      )}
+      {invoiceModalOpen && (
+        <Drawer
+          title={`Invoices for PO: ${selectedPoForInvoices?.po_number || ""}`}
+          open={invoiceModalOpen}
+          onClose={() => setInvoiceModalOpen(false)}
+        >
+          <div className="space-y-4 p-2">
+            <div className="text-xs text-slate-500 pb-2 border-b border-slate-100">
+              Client: <span className="font-semibold text-slate-800">{selectedPoForInvoices?.client_name}</span> | PO Total: <span className="font-semibold text-slate-800">{inr(selectedPoForInvoices?.grand_total)}</span>
+            </div>
+
+            {poInvoicesList.length === 0 ? (
+              <div className="py-8 text-center text-slate-400 text-sm">
+                No existing invoices found for this PO.
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
+                {poInvoicesList.map((inv) => (
+                  <div key={inv.id} className="p-3.5 bg-white hover:bg-slate-50 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-mono font-bold text-slate-900 text-sm flex items-center gap-2">
+                        <span>{inv.invoice_no}</span>
+                        {inv.status && <Badge>{inv.status.toUpperCase()}</Badge>}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1">
+                        Date: {inv.invoice_date} | Amount: <span className="font-mono font-semibold text-slate-700">{inr(inv.grand_total)}</span>
+                      </div>
+                      {inv.job_ids && inv.job_ids.length > 0 && (
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          Jobs Covered: {inv.job_ids.length} job(s)
+                        </div>
+                      )}
+                    </div>
+                    <a
+                      href={`${API}/invoices/${inv.id}/file`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-3.5 py-2 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded-md inline-flex items-center gap-1.5 min-h-[38px] shadow-sm"
+                    >
+                      <FileDown className="w-4 h-4" /> Download PDF
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="pt-4 border-t border-slate-200 flex justify-between items-center">
+              <span className="text-xs text-slate-400">
+                {poInvoicesList.length} invoice(s) found
+              </span>
+              <BtnSecondary onClick={() => setInvoiceModalOpen(false)}>
+                Close
+              </BtnSecondary>
             </div>
           </div>
         </Drawer>

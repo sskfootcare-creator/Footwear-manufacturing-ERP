@@ -17,12 +17,11 @@ start "SSK ERP Backend (FastAPI)" cmd /k "cd /d %ROOT_DIR%backend && .venv\Scrip
 
 :: Start frontend in a separate terminal window
 echo [3/3] Starting frontend React server...
-start "SSK ERP Frontend (React)" cmd /k "cd /d %ROOT_DIR%frontend && npm start"
+start "SSK ERP Frontend (React)" cmd /k "cd /d %ROOT_DIR%frontend && cmd /c npm start"
 
 echo ==========================================================
 echo All 3 servers (MongoDB, FastAPI Backend, React Frontend) launched!
 echo Backend is running at http://localhost:8000
 echo Frontend is launching at http://localhost:3000
 echo ==========================================================
-pause
 
