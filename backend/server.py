@@ -9492,43 +9492,123 @@ async def next_vendor_po_no() -> str:
 async def _generate_invoice_payload(po: dict, job_ids: list[str] | None) -> tuple[dict, list[dict]]:
     """Returns the (po-augmented, line_items) for invoice generation.
 
-    If job_ids given, filter dispatched jobs and rebuild line items from them — supports merged
-    invoice across multiple dispatched cards.
+    Groups line items by (style_code, color) — 1 row per single style single color,
+    using actual completed quantity (completed_qty if present/completed, else quantity).
     """
-    if not job_ids:
-        return po, po.get("line_items", [])
-
-    # Pull dispatched production_jobs by ids, aggregate per (style_code, color, size)
-    obj_ids = []
-    for jid in job_ids:
-        try:
-            obj_ids.append(oid(jid))
-        except HTTPException:
-            continue
-    jobs = await db.production_jobs.find({"_id": {"$in": obj_ids}}).to_list(2000)
-    # Build map of line items from PO indexed by (style, color, size)
     po_items = po.get("line_items", [])
-    idx = {}
+    po_price_idx = {}
     for li in po_items:
-        idx[(li.get("style_code"), li.get("color"), str(li.get("size", "")))] = li
+        key = (li.get("style_code"), li.get("color"), str(li.get("size", "")))
+        po_price_idx[key] = li
+
+    raw_items = []
+    if job_ids:
+        obj_ids = []
+        for jid in job_ids:
+            try:
+                obj_ids.append(oid(jid))
+            except HTTPException:
+                continue
+        jobs = await db.production_jobs.find({"_id": {"$in": obj_ids}}).to_list(2000)
+        for j in jobs:
+            key = (j.get("style_code"), j.get("color"), str(j.get("size", "")))
+            li_src = po_price_idx.get(key, {})
+            comp = j.get("completed_qty")
+            qty = comp if (comp is not None and comp > 0) else j.get("quantity", 0)
+            unit_price = li_src.get("unit_price") or j.get("unit_price") or 0
+            raw_items.append({
+                "style_code": j.get("style_code", ""),
+                "description": j.get("description") or li_src.get("description", ""),
+                "color": j.get("color", ""),
+                "size": str(j.get("size", "")),
+                "hsn_code": li_src.get("hsn_code", "") or "64029990",
+                "quantity": qty,
+                "unit_price": unit_price,
+                "amount": round(qty * unit_price, 2),
+                "mrp": li_src.get("mrp", ""),
+            })
+    else:
+        pid = str(po.get("_id") or po.get("id") or "")
+        jobs = []
+        if pid:
+            try:
+                jobs = await db.production_jobs.find({"po_id": pid}).to_list(5000)
+            except Exception:
+                jobs = []
+        if jobs:
+            for j in jobs:
+                key = (j.get("style_code"), j.get("color"), str(j.get("size", "")))
+                li_src = po_price_idx.get(key, {})
+                comp = j.get("completed_qty")
+                qty = comp if (comp is not None and comp > 0) else j.get("quantity", 0)
+                unit_price = li_src.get("unit_price") or j.get("unit_price") or 0
+                raw_items.append({
+                    "style_code": j.get("style_code", ""),
+                    "description": j.get("description") or li_src.get("description", ""),
+                    "color": j.get("color", ""),
+                    "size": str(j.get("size", "")),
+                    "hsn_code": li_src.get("hsn_code", "") or "64029990",
+                    "quantity": qty,
+                    "unit_price": unit_price,
+                    "amount": round(qty * unit_price, 2),
+                    "mrp": li_src.get("mrp", ""),
+                })
+        else:
+            for li in po_items:
+                comp = li.get("completed_qty")
+                qty = comp if (comp is not None and comp > 0) else li.get("quantity", 0)
+                unit_price = li.get("unit_price", 0)
+                raw_items.append({
+                    "style_code": li.get("style_code", ""),
+                    "description": li.get("description", ""),
+                    "color": li.get("color", ""),
+                    "size": str(li.get("size", "")),
+                    "hsn_code": li.get("hsn_code", "") or "64029990",
+                    "quantity": qty,
+                    "unit_price": unit_price,
+                    "amount": round(qty * unit_price, 2),
+                    "mrp": li.get("mrp", ""),
+                })
+
+    # Group by (style_code, color) — 1 row per single style single color
+    grouped: dict = {}
+    for item in raw_items:
+        sc = (item.get("style_code") or "").strip()
+        color = (item.get("color") or "").strip()
+        g_key = (sc, color)
+
+        desc = (item.get("description") or "").strip()
+        clean_desc = re.sub(r'(\s+\d+|\s*/?\s*Sz\s*\d+)+$', '', desc, flags=re.IGNORECASE).strip()
+
+        if g_key not in grouped:
+            grouped[g_key] = {
+                "style_code": sc,
+                "description": clean_desc,
+                "color": color,
+                "hsn_code": item.get("hsn_code", "") or "64029990",
+                "quantity": 0,
+                "unit_price": float(item.get("unit_price") or 0),
+                "mrp": item.get("mrp", ""),
+            }
+        grouped[g_key]["quantity"] += int(item.get("quantity", 0) or 0)
+        if clean_desc and not grouped[g_key]["description"]:
+            grouped[g_key]["description"] = clean_desc
 
     line_items = []
-    for j in jobs:
-        key = (j.get("style_code"), j.get("color"), str(j.get("size", "")))
-        li_src = idx.get(key, {})
-        qty = j.get("quantity", 0)
-        unit_price = li_src.get("unit_price", 0)
+    for g in grouped.values():
+        qty = g["quantity"]
+        unit_price = float(g["unit_price"] or 0)
         line_items.append({
-            "style_code": j.get("style_code", ""),
-            "description": j.get("description") or li_src.get("description", ""),
-            "color": j.get("color", ""),
-            "size": str(j.get("size", "")),
-            "hsn_code": li_src.get("hsn_code", "") or "64029990",
+            "style_code": g["style_code"],
+            "description": g["description"],
+            "color": g["color"],
+            "hsn_code": g["hsn_code"],
             "quantity": qty,
             "unit_price": unit_price,
             "amount": round(qty * unit_price, 2),
-            "mrp": li_src.get("mrp", ""),
+            "mrp": g["mrp"],
         })
+
     return po, line_items
 
 
@@ -9547,8 +9627,8 @@ async def po_invoice(pid: str, request: Request):
         invoice_date = datetime.now().strftime("%d/%m/%Y")
         await db.pos.update_one({"_id": oid(pid)}, {"$set": {"invoice_no": invoice_no, "invoice_date": invoice_date}})
         po["invoice_no"] = invoice_no
-        po["invoice_date"] = invoice_date
-    pdf_bytes = build_invoice(po, invoice_no, invoice_date)
+    po, line_items = await _generate_invoice_payload(po, None)
+    pdf_bytes = build_invoice(po, invoice_no, invoice_date, line_items=line_items)
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{invoice_no}.pdf"'},
@@ -9699,6 +9779,20 @@ async def merged_invoice(payload: dict, request: Request):
 
     if not all_items:
         raise HTTPException(400, "No line items found across entries")
+
+    merged_grouped: dict = {}
+    for item in all_items:
+        sc = (item.get("style_code") or "").strip()
+        color = (item.get("color") or "").strip()
+        g_key = (sc, color)
+        if g_key not in merged_grouped:
+            merged_grouped[g_key] = dict(item)
+        else:
+            merged_grouped[g_key]["quantity"] += item.get("quantity", 0)
+            merged_grouped[g_key]["amount"] = round(
+                merged_grouped[g_key]["quantity"] * float(merged_grouped[g_key].get("unit_price") or 0), 2
+            )
+    all_items = list(merged_grouped.values())
 
     invoice_no = await next_invoice_no()
     invoice_date = datetime.now().strftime("%d/%m/%Y")
@@ -11316,27 +11410,25 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
 
     cartons = await _enrich_cartons_with_mapped_sku(cartons)
 
-    # ── 4. Build line items from actual packed qty (SUM per style/color/size) ─
+    # ── 4. Build line items from actual packed qty (SUM per style/color) ──────
     po_items = po.get("line_items", [])
-    po_price_idx = {}
-    for li in po_items:
-        key = (li.get("style_code"), li.get("color"), str(li.get("size", "")))
-        po_price_idx[key] = li
 
-    qty_agg: dict = {}   # (style_code, color, size) → aggregated dict
+    qty_agg: dict = {}   # (style_code, color) → aggregated dict
     for c in cartons:
-        key = (c.get("style_code", ""), c.get("color", ""), str(c.get("size", "")))
+        sc = (c.get("style_code") or "").strip()
+        color = (c.get("color") or "").strip()
+        key = (sc, color)
         if key not in qty_agg:
-            li_src = po_price_idx.get(key, {})
+            li_src = next((li for li in po_items if (li.get("style_code") or "").strip() == sc and (li.get("color") or "").strip() == color), {})
+            desc = (li_src.get("description") or "").strip()
+            clean_desc = re.sub(r'(\s+\d+|\s*/?\s*Sz\s*\d+)+$', '', desc, flags=re.IGNORECASE).strip()
             qty_agg[key] = {
-                "style_code": c.get("style_code", ""),
-                "color": c.get("color", ""),
-                "size": str(c.get("size", "")),
-                "ean_code": c.get("ean_code", ""),
+                "style_code": sc,
+                "color": color,
                 "qty": 0,
-                "unit_price": li_src.get("unit_price", 0),
-                "description": li_src.get("description", ""),
-                "hsn_code": li_src.get("hsn_code", "") or "64029990",
+                "unit_price": float(li_src.get("unit_price") or 0),
+                "description": clean_desc,
+                "hsn_code": li_src.get("hsn_code") or "64029990",
                 "mrp": li_src.get("mrp", ""),
             }
         qty_agg[key]["qty"] += (c.get("qty") or 0)
@@ -11346,7 +11438,6 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
             "style_code": v["style_code"],
             "description": v["description"],
             "color": v["color"],
-            "size": v["size"],
             "hsn_code": v["hsn_code"],
             "quantity": v["qty"],
             "unit_price": v["unit_price"],
