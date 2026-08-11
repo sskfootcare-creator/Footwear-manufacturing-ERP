@@ -538,40 +538,12 @@ export default function SkuMap() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
-  const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState(emptyForm);
-  const [formError, setFormError] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [confirm, setConfirm] = useState(null);
-  const [tab, setTab] = useState("mappings"); // "mappings" | "unmapped"
+  const [activeMapping, setActiveMapping] = useState(null);
 
-  // filters
-  const [filterType, setFilterType] = useState("");
-  const [filterSource, setFilterSource] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (filterType) params.append("source_type", filterType);
-      if (filterSource) params.append("source_name", filterSource);
-      if (searchQuery) params.append("search", searchQuery);
-      const qs = params.toString() ? `?${params}` : "";
-      const [mRes, sRes] = await Promise.all([
-        http.get(`/sku-map${qs}`),
-        http.get("/styles"),
-      ]);
-      setMappings(mRes.data);
-      setStyles(sRes.data);
-    } finally { setLoading(false); }
-  }, [filterType, filterSource, searchQuery]);
-
-  useEffect(() => { load(); }, [load]);
-
-  function openCreate() { setEditId(null); setForm(emptyForm); setFormError(""); setOpen(true); }
+  function openCreate() { setEditId(null); setActiveMapping(null); setForm(emptyForm); setFormError(""); setOpen(true); }
   function openEdit(m) {
     setEditId(m.id);
+    setActiveMapping(m);
     setForm({
       style_id: m.style_id, source_type: m.source_type, source_name: m.source_name,
       external_sku: m.external_sku, external_style_name: m.external_style_name || "",
@@ -705,7 +677,7 @@ export default function SkuMap() {
                 <table className="w-full text-sm" id="sku-map-table">
                   <thead>
                     <tr className="border-b-2 border-slate-200 bg-slate-50 text-left">
-                      {["Internal Style", "Source", "External SKU", "Ext. Style Name", "Color Map", "Size Map", "Actions"].map((h) => (
+                      {["Internal Style", "Source", "External SKU", "Ext. Style Name", "Color Map", "Size Map", "Unmapped Misses", "Actions"].map((h) => (
                         <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-wider font-bold text-slate-500">{h}</th>
                       ))}
                     </tr>
@@ -714,6 +686,9 @@ export default function SkuMap() {
                     {mappings.map((m) => {
                       const colorEntries = Object.entries(m.color_map || {});
                       const sizeEntries = Object.entries(m.size_map || {});
+                      const unmappedSizes = Object.entries(m.unmapped_encountered?.size || {});
+                      const unmappedColors = Object.entries(m.unmapped_encountered?.color || {});
+                      const hasUnmapped = unmappedSizes.length > 0 || unmappedColors.length > 0;
                       return (
                         <tr key={m.id} className="hover:bg-slate-50 transition-colors">
                           <td className="px-4 py-3">
@@ -750,6 +725,22 @@ export default function SkuMap() {
                                     <span className="text-slate-400 mx-1">→</span>
                                     <span className="font-bold">{v}</span>
                                   </div>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            {!hasUnmapped ? <span className="text-slate-300 text-xs">—</span> : (
+                              <div className="space-y-1">
+                                {unmappedSizes.map(([sz, count]) => (
+                                  <span key={sz} className="inline-block bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded mr-1" title={`${count} recent miss(es)`}>
+                                    size "{sz}" ({count}×)
+                                  </span>
+                                ))}
+                                {unmappedColors.map(([col, count]) => (
+                                  <span key={col} className="inline-block bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded mr-1" title={`${count} recent miss(es)`}>
+                                    color "{col}" ({count}×)
+                                  </span>
                                 ))}
                               </div>
                             )}
@@ -853,6 +844,81 @@ export default function SkuMap() {
               placeholder="How this source describes the style"
               value={form.external_style_name}
               onChange={(e) => setForm({ ...form, external_style_name: e.target.value })} />
+
+            {activeMapping?.unmapped_encountered && (
+              (Object.keys(activeMapping.unmapped_encountered.size || {}).length > 0 ||
+               Object.keys(activeMapping.unmapped_encountered.color || {}).length > 0) && (
+                <div className="bg-amber-50 border-2 border-amber-300 p-3.5 space-y-3.5">
+                  <div className="flex items-center justify-between text-amber-900 font-bold text-xs uppercase tracking-wider">
+                    <span className="flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                      Unmapped Values Recently Encountered
+                    </span>
+                    {activeMapping.last_unmapped_at && (
+                      <span className="text-[10px] text-amber-700 font-mono font-normal">
+                        Last: {new Date(activeMapping.last_unmapped_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Sizes */}
+                  {Object.keys(activeMapping.unmapped_encountered.size || {}).length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-amber-800">Unmapped Sizes:</div>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(activeMapping.unmapped_encountered.size).map(([val, count]) => {
+                          const alreadyInForm = form.size_map.some((r) => r.from.trim() === val.trim());
+                          return (
+                            <div key={val} className="inline-flex items-center gap-2 bg-white border border-amber-300 px-2.5 py-1 text-xs font-mono text-amber-900 shadow-sm">
+                              <span>size <strong>"{val}"</strong> ({count}×)</span>
+                              {!alreadyInForm ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setForm((prev) => ({ ...prev, size_map: [...prev.size_map, { from: val, to: val }] }))}
+                                  className="text-[10px] font-bold text-amber-700 hover:text-amber-900 underline ml-1"
+                                >
+                                  + Add to Size Map
+                                </button>
+                              ) : (
+                                <span className="text-[10px] text-green-700 font-bold ml-1">✓ Added</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Colors */}
+                  {Object.keys(activeMapping.unmapped_encountered.color || {}).length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-amber-800">Unmapped Colors:</div>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(activeMapping.unmapped_encountered.color).map(([val, count]) => {
+                          const alreadyInForm = form.color_map.some((r) => r.from.trim() === val.trim());
+                          return (
+                            <div key={val} className="inline-flex items-center gap-2 bg-white border border-amber-300 px-2.5 py-1 text-xs font-mono text-amber-900 shadow-sm">
+                              <span>color <strong>"{val}"</strong> ({count}×)</span>
+                              {!alreadyInForm ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setForm((prev) => ({ ...prev, color_map: [...prev.color_map, { from: val, to: val }] }))}
+                                  className="text-[10px] font-bold text-amber-700 hover:text-amber-900 underline ml-1"
+                                >
+                                  + Add to Color Map
+                                </button>
+                              ) : (
+                                <span className="text-[10px] text-green-700 font-bold ml-1">✓ Added</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            )}
 
             <KVPairs label="Color Map (optional) — external → internal"
               rows={form.color_map} onChange={(rows) => setForm({ ...form, color_map: rows })} />
