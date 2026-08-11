@@ -1038,6 +1038,36 @@ async def delete_material(mid: str, request: Request):
 
 
 # ---------- STYLES ----------
+# ── Footwear GST Rate Threshold Configuration ────────────────────────────────
+# GST rates for footwear in India:
+# - Selling price / target price <= ₹2,500 per pair → 5% GST
+# - Selling price / target price >  ₹2,500 per pair → 18% GST
+# Stored as a single config dictionary so threshold/rates can be changed in 1 line.
+FOOTWEAR_GST_CONFIG = {
+    "threshold": 2500.0,
+    "rate_below_or_equal": 5.0,
+    "rate_above": 18.0,
+}
+
+def suggest_gst_pct(price: Optional[float]) -> float:
+    """Return suggested GST % based on price threshold config."""
+    if price is None:
+        return FOOTWEAR_GST_CONFIG["rate_below_or_equal"]
+    try:
+        p = float(price)
+        if p <= 0:
+            return FOOTWEAR_GST_CONFIG["rate_below_or_equal"]
+        return FOOTWEAR_GST_CONFIG["rate_above"] if p > FOOTWEAR_GST_CONFIG["threshold"] else FOOTWEAR_GST_CONFIG["rate_below_or_equal"]
+    except (ValueError, TypeError):
+        return FOOTWEAR_GST_CONFIG["rate_below_or_equal"]
+
+
+@api.get("/config/gst")
+async def get_gst_config():
+    """Return current footwear GST rate threshold configuration."""
+    return FOOTWEAR_GST_CONFIG
+
+
 def compute_style_costing(style: dict) -> dict:
     materials_cost = 0.0
     for b in style.get("bom", []):
@@ -1064,7 +1094,9 @@ def compute_style_costing(style: dict) -> dict:
     margin_pct = style.get("margin_pct", 0)
     suggested_margin_amount = total_cost * (margin_pct / 100)
     suggested_target_price = total_cost + suggested_margin_amount
-    gst_amount = suggested_target_price * (style.get("gst_pct", 0) / 100)
+    raw_gst_pct = style.get("gst_pct")
+    gst_pct = float(raw_gst_pct) if raw_gst_pct is not None else suggest_gst_pct(suggested_target_price)
+    gst_amount = suggested_target_price * (gst_pct / 100)
     suggested_target_price_with_gst = suggested_target_price + gst_amount
     return {
         "materials_cost": round(materials_cost, 2),
@@ -1945,6 +1977,7 @@ async def list_online_styles(
             "sale_channels":          lc.get("sale_channels", []),
             "mrp":                    lc.get("mrp"),
             "online_selling_price":   lc.get("online_selling_price"),
+            "gst_pct":                s.get("gst_pct", 5),
             "platform_commission_pct": lc.get("platform_commission_pct", {}),
             "planned_min_stock":      lc.get("planned_min_stock", 25),
             "planned_components":     lc.get("planned_components", []),
@@ -5055,7 +5088,7 @@ async def catalogue_export_preview(payload: CatalogueExportRequest, request: Req
 ORDER_CANONICAL_FIELDS = [
     "order_id", "order_item_id", "shipment_id",
     "order_date", "dispatch_by_date",
-    "leaf_sku", "myntra_sku_code",
+    "leaf_sku", "myntra_sku_code", "color", "size",
     "product_title", "qty",
     "selling_price", "invoice_amount",
     "order_state", "tracking_id",
@@ -5789,10 +5822,18 @@ async def _parse_and_resolve_order_row(
             source_type="online_channel",
             source_name=platform,
             external_sku=candidate,
+            external_color=canon.get("color") or None,
+            external_size=canon.get("size") or size_token or None,
         )
-        if r.get("matched"):
+        if r.get("matched") and r.get("matched_exact", True):
             resolved = r
             resolved["resolved_from"] = candidate
+            break
+        elif r.get("matched") and not r.get("matched_exact", True):
+            resolved = r
+            resolved["resolved_from"] = candidate
+            resolved["matched"] = False
+            resolved["unmapped_reason"] = f"Unmapped color/size for SKU '{candidate}': color='{r.get('color')}' (exact={r.get('color_matched_exact')}), size='{r.get('size')}' (exact={r.get('size_matched_exact')})"
             break
 
     canon["style_id"]   = resolved.get("style_id")
@@ -5808,9 +5849,33 @@ async def _parse_and_resolve_order_row(
     canon["size"] = resolved.get("size") or size_token or canon.get("size", "") or ""
     canon["color"] = resolved.get("color") or ""
 
+    # GST Mismatch check at order import time
+    canon["gst_mismatch_warning"] = None
+    if canon["matched"] and canon.get("style_id"):
+        price_val = canon.get("selling_price") or canon.get("invoice_amount") or canon.get("unit_price")
+        if price_val:
+            try:
+                p_float = float(price_val)
+                if p_float > 0:
+                    suggested_gst = suggest_gst_pct(p_float)
+                    style_doc = await db.styles.find_one({"_id": oid(canon["style_id"])})
+                    if style_doc:
+                        style_gst = float(style_doc.get("gst_pct", 5))
+                        if suggested_gst != style_gst:
+                            s_gst_str = f"{int(suggested_gst)}" if suggested_gst == int(suggested_gst) else f"{suggested_gst}"
+                            c_gst_str = f"{int(style_gst)}" if style_gst == int(style_gst) else f"{style_gst}"
+                            canon["gst_mismatch_warning"] = (
+                                f"Order line price ₹{p_float} suggests {s_gst_str}% GST, "
+                                f"currently set to {c_gst_str}% on style '{style_doc.get('code')}' — check before invoicing."
+                            )
+            except (ValueError, TypeError):
+                pass
+
     # Reason for exception queue when not matched
     if not canon["matched"]:
-        if canon["flags"]:
+        if resolved.get("unmapped_reason"):
+            canon["exception_reason"] = resolved.get("unmapped_reason")
+        elif canon["flags"]:
             canon["exception_reason"] = "; ".join(canon["flags"])
         else:
             canon["exception_reason"] = f"leaf_sku '{leaf_stripped}' (and derived group '{group_id}') not in sku_map / styles"
@@ -6145,9 +6210,18 @@ async def _parse_and_resolve_dispatch_row(
             source_type="online_channel",
             source_name=platform,
             external_sku=candidate,
+            external_color=canon.get("color") or None,
+            external_size=canon.get("size") or size_tok or None,
         )
-        if r.get("matched"):
+        if r.get("matched") and r.get("matched_exact", True):
             resolved = r
+            resolved["resolved_from"] = candidate
+            break
+        elif r.get("matched") and not r.get("matched_exact", True):
+            resolved = r
+            resolved["resolved_from"] = candidate
+            resolved["matched"] = False
+            resolved["unmapped_reason"] = f"Unmapped color/size for SKU '{candidate}': color='{r.get('color')}' (exact={r.get('color_matched_exact')}), size='{r.get('size')}' (exact={r.get('size_matched_exact')})"
             break
     canon.update({
         "matched":       bool(resolved.get("matched")),
@@ -6158,7 +6232,7 @@ async def _parse_and_resolve_dispatch_row(
         "size":          resolved.get("size") or size_tok,
     })
     if not canon["matched"]:
-        canon["exception_reason"] = resolved.get("reason") or "no style match in sku_map"
+        canon["exception_reason"] = resolved.get("unmapped_reason") or resolved.get("reason") or "no style match in sku_map"
     return canon
 
 
@@ -6684,9 +6758,18 @@ async def _parse_and_resolve_monthly_row(
             source_type="online_channel",
             source_name=platform,
             external_sku=candidate,
+            external_color=canon.get("color") or None,
+            external_size=canon.get("size") or size_tok or None,
         )
-        if r.get("matched"):
+        if r.get("matched") and r.get("matched_exact", True):
             resolved = r
+            resolved["resolved_from"] = candidate
+            break
+        elif r.get("matched") and not r.get("matched_exact", True):
+            resolved = r
+            resolved["resolved_from"] = candidate
+            resolved["matched"] = False
+            resolved["unmapped_reason"] = f"Unmapped color/size for SKU '{candidate}': color='{r.get('color')}' (exact={r.get('color_matched_exact')}), size='{r.get('size')}' (exact={r.get('size_matched_exact')})"
             break
     canon.update({
         "matched":    bool(resolved.get("matched")),
@@ -6697,7 +6780,7 @@ async def _parse_and_resolve_monthly_row(
         "size":       resolved.get("size") or (canon.get("size") or size_tok),
     })
     if not canon["matched"]:
-        canon["exception_reason"] = resolved.get("reason") or "no style match in sku_map"
+        canon["exception_reason"] = resolved.get("unmapped_reason") or resolved.get("reason") or "no style match in sku_map"
     return canon
 
 
@@ -8938,14 +9021,19 @@ async def resolve_style(
          mapping via the /sku-map UI.
 
     Returns a dict with keys:
-      style_id   – str ObjectId or None
-      style_code – str internal code or None
-      color      – translated internal color string (or original if no mapping)
-      size       – translated internal size  string (or original if no mapping)
-      matched    – bool  (False when nothing resolved)
-      match_via  – "sku_map" | "style_code" | None  (audit trail)
-      mapping_id – str ObjectId of the sku_map doc, or None
-      mapped_from_sku – the original external_sku that triggered a sku_map hit, or None
+      style_id            – str ObjectId or None
+      style_code          – str internal code or None
+      color               – translated internal color string (or original if no mapping)
+      size                – translated internal size  string (or original if no mapping)
+      matched             – bool  (False when style itself is not resolved)
+      matched_exact       – bool  (True if color/size found in map or map empty; False if non-empty map existed but value not in map, or if unmapped)
+      color_matched_exact – bool  (True if color found in map or color_map empty; False if non-empty color_map existed but color not in map)
+      size_matched_exact  – bool  (True if size found in map or size_map empty; False if non-empty size_map existed but size not in map)
+      unmapped_color      – ext_color if not color_matched_exact else None
+      unmapped_size       – ext_size if not size_matched_exact else None
+      match_via           – "sku_map" | "style_code" | None  (audit trail)
+      mapping_id          – str ObjectId of the sku_map doc, or None
+      mapped_from_sku     – the original external_sku that triggered a sku_map hit, or None
     """
     ext_sku    = (external_sku   or "").strip()
     ext_color  = (external_color or "").strip()
@@ -8965,31 +9053,57 @@ async def resolve_style(
         if style:
             color_map: dict = mapping.get("color_map") or {}
             size_map:  dict = mapping.get("size_map")  or {}
-            # Translate: try the external value as-is first, then case-insensitive fallback
-            def translate(m: dict, val: str) -> str:
+            # Translate: try the external value as-is first, then case-insensitive fallback.
+            # NO single-entry fallback: if not in map, return val unchanged and mark exact=False.
+            def translate(m: dict, val: str) -> tuple:
                 val = (val or "").strip()
+                if not m:
+                    # No map configured on sku_map doc for this attribute
+                    return val, True
                 if val and val in m:
-                    return m[val]
+                    return m[val], True
                 if val:
                     val_lower = val.lower()
                     for k, v in m.items():
                         if k.lower() == val_lower:
-                            return v
-                # Fallback: if input val is empty or unmapped, but map has a single entry,
-                # use that single mapped value (e.g. sku_map maps external_sku → single color/size)
-                if len(m) == 1:
-                    return next(iter(m.values()))
-                return val
+                            return v, True
+                return val, False
+
+            trans_color, color_exact = translate(color_map, ext_color)
+            trans_size, size_exact   = translate(size_map,  ext_size)
+            matched_exact = color_exact and size_exact
+
+            if not matched_exact and mapping:
+                inc_fields = {}
+                if not color_exact and ext_color:
+                    safe_col = ext_color.replace(".", "_")
+                    inc_fields[f"unmapped_encountered.color.{safe_col}"] = 1
+                if not size_exact and ext_size:
+                    safe_sz = ext_size.replace(".", "_")
+                    inc_fields[f"unmapped_encountered.size.{safe_sz}"] = 1
+                if inc_fields:
+                    try:
+                        await db.sku_map.update_one(
+                            {"_id": mapping["_id"]},
+                            {"$inc": inc_fields, "$set": {"last_unmapped_at": now_iso()}}
+                        )
+                    except Exception:
+                        pass
 
             return {
-                "style_id":       str(style["_id"]),
-                "style_code":     style["code"],
-                "color":          translate(color_map, ext_color),
-                "size":           translate(size_map,  ext_size),
-                "matched":        True,
-                "match_via":      "sku_map",
-                "mapping_id":     str(mapping["_id"]),
-                "mapped_from_sku": ext_sku,
+                "style_id":            str(style["_id"]),
+                "style_code":          style["code"],
+                "color":               trans_color,
+                "size":                trans_size,
+                "matched":             True,
+                "matched_exact":       matched_exact,
+                "color_matched_exact": color_exact,
+                "size_matched_exact":  size_exact,
+                "unmapped_color":      ext_color if not color_exact else None,
+                "unmapped_size":       ext_size if not size_exact else None,
+                "match_via":           "sku_map",
+                "mapping_id":          str(mapping["_id"]),
+                "mapped_from_sku":     ext_sku,
             }
 
     # ── Pass 2: fallback – exact case-insensitive match on styles.code ──────
@@ -8998,26 +9112,36 @@ async def resolve_style(
     )
     if style:
         return {
-            "style_id":       str(style["_id"]),
-            "style_code":     style["code"],
-            "color":          ext_color,   # no mapping available, pass through
-            "size":           ext_size,
-            "matched":        True,
-            "match_via":      "style_code",
-            "mapping_id":     None,
-            "mapped_from_sku": None,
+            "style_id":            str(style["_id"]),
+            "style_code":          style["code"],
+            "color":               ext_color,   # no mapping available, pass through
+            "size":                ext_size,
+            "matched":             True,
+            "matched_exact":       True,
+            "color_matched_exact": True,
+            "size_matched_exact":  True,
+            "unmapped_color":      None,
+            "unmapped_size":       None,
+            "match_via":           "style_code",
+            "mapping_id":          None,
+            "mapped_from_sku":     None,
         }
 
     # ── Pass 3: nothing found ────────────────────────────────────────────────
     return {
-        "style_id":       None,
-        "style_code":     None,
-        "color":          ext_color,
-        "size":           ext_size,
-        "matched":        False,
-        "match_via":      None,
-        "mapping_id":     None,
-        "mapped_from_sku": None,
+        "style_id":            None,
+        "style_code":          None,
+        "color":               ext_color,
+        "size":                ext_size,
+        "matched":             False,
+        "matched_exact":       False,
+        "color_matched_exact": False,
+        "size_matched_exact":  False,
+        "unmapped_color":      ext_color or None,
+        "unmapped_size":       ext_size or None,
+        "match_via":           None,
+        "mapping_id":          None,
+        "mapped_from_sku":     None,
     }
 
 
@@ -9124,7 +9248,7 @@ async def validate_po_styles(payload: POIn):
             external_color=li_obj.color or None,
             external_size=str(li_obj.size) if li_obj.size else None,
         )
-        if result["matched"] and result["match_via"] == "sku_map":
+        if result["matched"] and result["match_via"] == "sku_map" and result.get("matched_exact", True):
             payload.line_items[i].style_code = result["style_code"]
             if result["color"] and result["color"] != (li_obj.color or ""):
                 payload.line_items[i].color = result["color"]
@@ -9134,7 +9258,7 @@ async def validate_po_styles(payload: POIn):
                 "mapped_from_sku": result["mapped_from_sku"],
                 "mapping_id":      result["mapping_id"],
             }
-        elif result["matched"] and result["match_via"] == "style_code":
+        elif result["matched"] and result["match_via"] == "style_code" and result.get("matched_exact", True):
             payload.line_items[i].style_code = result["style_code"]
         else:
             still_missing.append({
@@ -12679,7 +12803,7 @@ async def import_online_orders(
                 external_color=ext_color or mp_result.get("parsed_color") or None,
                 external_size=ext_size  or mp_result.get("parsed_size")  or None,
             )
-            if legacy["matched"]:
+            if legacy["matched"] and legacy.get("matched_exact", True):
                 result = legacy
 
         if not result:

@@ -45,6 +45,22 @@ const SECTIONS = [
   "Other",
 ];
 
+// Footwear GST Rate Threshold Configuration (India)
+// Threshold: ₹2,500 per pair
+// Price <= 2500 -> 5% GST
+// Price > 2500  -> 18% GST
+export const FOOTWEAR_GST_CONFIG = {
+  threshold: 2500,
+  rate_below_or_equal: 5,
+  rate_above: 18,
+};
+
+export function suggestGstPct(price) {
+  const p = Number(price);
+  if (isNaN(p) || p <= 0) return FOOTWEAR_GST_CONFIG.rate_below_or_equal;
+  return p > FOOTWEAR_GST_CONFIG.threshold ? FOOTWEAR_GST_CONFIG.rate_above : FOOTWEAR_GST_CONFIG.rate_below_or_equal;
+}
+
 const emptyStyle = {
   code: "",
   name: "",
@@ -69,6 +85,7 @@ export default function Styles() {
   const [bomStyle, setBomStyle] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(false);
+  const [isGstOverridden, setIsGstOverridden] = useState(false);
   const [newSizeKey, setNewSizeKey] = useState("");
   const [newSizeQty, setNewSizeQty] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -361,7 +378,8 @@ export default function Styles() {
  
   const startNew = () => {
     setEditId(null);
-    setForm(emptyStyle);
+    setIsGstOverridden(false);
+    setForm({ ...emptyStyle, gst_pct: suggestGstPct(0) });
     setFormError("");
     setStyleMappings([]);
     setAddingMapping(false);
@@ -371,6 +389,10 @@ export default function Styles() {
   };
   const startEdit = (s) => {
     setEditId(s.id);
+    const initialSell = s.costing?.suggested_target_price || s.costing?.selling_price || s.costing?.sell || 0;
+    const suggested = suggestGstPct(initialSell);
+    const isOverride = s.gst_pct != null && Number(s.gst_pct) !== suggested;
+    setIsGstOverridden(isOverride);
     setForm({
       code: s.code,
       name: s.name,
@@ -623,6 +645,19 @@ export default function Styles() {
     };
   }, [form]);
 
+  const suggestedGst = useMemo(() => suggestGstPct(costing.sell), [costing.sell]);
+
+  useEffect(() => {
+    if (open && !isGstOverridden) {
+      setForm((prev) => {
+        if (Number(prev.gst_pct) !== suggestedGst) {
+          return { ...prev, gst_pct: suggestedGst };
+        }
+        return prev;
+      });
+    }
+  }, [costing.sell, suggestedGst, isGstOverridden, open]);
+
   return (
     <div>
       <PageHeader
@@ -701,22 +736,38 @@ export default function Styles() {
                   testId={`style-card-image-${s.code}`}
                 />
                 <div className="p-5">
-                  <div className="flex items-baseline justify-between mb-2">
-                    <div className="font-mono text-xs font-bold text-slate-500">
-                      {s.code}
-                    </div>
-                    <div className="flex gap-2 flex-wrap justify-end">
-                      <Badge color={s.status === "active" ? "green" : "gray"}>
-                        {s.status === "active" ? "Active" : "Inactive"}
-                      </Badge>
-                      <Badge color="orange">{s.category}</Badge>
-                      {s.in_online_pipeline && (
-                        <Badge color="blue" data-testid={`online-badge-${s.code}`}>
-                          <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
+                  {(() => {
+                      const targetPrice = s.costing?.suggested_target_price || s.costing?.selling_price || 0;
+                      const suggestedGstRate = suggestGstPct(targetPrice);
+                      const hasGstMismatch = s.gst_pct != null && Number(s.gst_pct) !== suggestedGstRate;
+                      return (
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="font-mono text-xs font-bold text-slate-500">
+                            {s.code}
+                          </div>
+                          <div className="flex gap-2 flex-wrap justify-end">
+                            <Badge color={s.status === "active" ? "green" : "gray"}>
+                              {s.status === "active" ? "Active" : "Inactive"}
+                            </Badge>
+                            <Badge color="orange">{s.category}</Badge>
+                            {s.in_online_pipeline && (
+                              <Badge color="blue" data-testid={`online-badge-${s.code}`}>
+                                <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
+                              </Badge>
+                            )}
+                            {hasGstMismatch && (
+                              <Badge
+                                color="orange"
+                                title={`Price ₹${targetPrice} suggests ${suggestedGstRate}% GST, currently set to ${s.gst_pct}% — check before invoicing.`}
+                                data-testid={`gst-mismatch-badge-${s.code}`}
+                              >
+                                <AlertTriangle className="w-3 h-3 inline mr-0.5 text-amber-600" /> Price suggests {suggestedGstRate}% GST (currently {s.gst_pct}%)
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   <h3 className="text-lg font-bold mb-1">{s.name}</h3>
                   <p className="text-xs text-slate-500 line-clamp-2 mb-3">
                     {s.description || "—"}
@@ -1147,15 +1198,35 @@ export default function Styles() {
                     setForm({ ...form, margin_pct: e.target.value })
                   }
                 />
-                <Input
-                  label="GST %"
-                  type="number"
-                  step="0.5"
-                  value={form.gst_pct}
-                  onChange={(e) =>
-                    setForm({ ...form, gst_pct: e.target.value })
-                  }
-                />
+                <div className="space-y-1">
+                  <Input
+                    label="GST %"
+                    type="number"
+                    step="0.5"
+                    value={form.gst_pct}
+                    onChange={(e) => {
+                      setIsGstOverridden(true);
+                      setForm({ ...form, gst_pct: e.target.value });
+                    }}
+                  />
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 px-1 font-mono">
+                    <span>
+                      Suggested: <strong>{suggestedGst}%</strong> ({costing.sell > FOOTWEAR_GST_CONFIG.threshold ? `> ₹${FOOTWEAR_GST_CONFIG.threshold.toLocaleString()}` : `≤ ₹${FOOTWEAR_GST_CONFIG.threshold.toLocaleString()}`})
+                    </span>
+                    {isGstOverridden && Number(form.gst_pct) !== suggestedGst && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsGstOverridden(false);
+                          setForm((prev) => ({ ...prev, gst_pct: suggestedGst }));
+                        }}
+                        className="text-blue-600 hover:text-blue-800 font-bold underline text-[10px]"
+                      >
+                        Reset to Suggested ({suggestedGst}%)
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <Input
                   label="Default pairs / carton"
                   type="number"

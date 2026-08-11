@@ -398,10 +398,21 @@ function EditDetailsDrawer({ card, onClose, onDone }) {
 /* ────────────────────────────────────────────────────────────
    Compact card in a kanban column.
    ──────────────────────────────────────────────────────────── */
+const FOOTWEAR_GST_THRESHOLD = 2500;
+function suggestGstPct(price) {
+  const p = Number(price);
+  if (isNaN(p) || p <= 0) return 5;
+  return p > FOOTWEAR_GST_THRESHOLD ? 18 : 5;
+}
+
 function StyleCard({ card, onAdvance, onEdit }) {
   const stage = STAGE_BY_KEY[card.online_status] || STAGES[0];
   const nextKey = nextStageKey(card.online_status);
   const nextLabel = nextKey ? STAGE_BY_KEY[nextKey].label : null;
+  const cardPrice = Number(card.online_selling_price || card.mrp || 0);
+  const suggestedGst = suggestGstPct(cardPrice);
+  const cardGst = card.gst_pct != null ? Number(card.gst_pct) : 5;
+  const hasGstMismatch = cardPrice > 0 && cardGst !== suggestedGst;
   return (
     <div
       className="bg-white border border-slate-200 hover:border-[#C27842] transition-colors flex flex-col"
@@ -473,6 +484,17 @@ function StyleCard({ card, onAdvance, onEdit }) {
             <span className="px-1 border border-slate-200 text-blue-700">{card.sale_channels.join(", ")}</span>
           )}
         </div>
+
+        {hasGstMismatch && (
+          <div
+            className="bg-amber-50 border border-amber-300 text-amber-900 text-[10px] font-mono font-bold px-1.5 py-1 flex items-center gap-1 mt-1 rounded leading-snug"
+            title={`Price ₹${cardPrice} suggests ${suggestedGst}% GST, currently set to ${cardGst}% — check before invoicing.`}
+            data-testid={`pipeline-gst-warning-${card.style_code}`}
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+            <span>Price suggests {suggestedGst}% GST, currently set to {cardGst}% — check before invoicing.</span>
+          </div>
+        )}
 
         {/* Actions */}
         <div className="flex gap-1 mt-1.5">
