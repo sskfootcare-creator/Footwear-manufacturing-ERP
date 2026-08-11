@@ -53,6 +53,16 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
+
+def _norm_key(value: Optional[str]) -> str:
+    """Canonical key for marketplace/order identities: trimmed, case-folded."""
+    return (value or "").strip().casefold()
+
+
+def _norm_marketplace(value: Optional[str]) -> str:
+    """Canonical marketplace/source name used by unique-key guards."""
+    return _norm_key(value)
+
 app = FastAPI(title="SSK Footcare ERP")
 app.add_middleware(
     CORSMiddleware,
@@ -1333,7 +1343,22 @@ async def create_sku_map(payload: SkuMapIn, request: Request):
     style = await db.styles.find_one({"_id": oid(payload.style_id)})
     if not style:
         raise HTTPException(404, f"Style '{payload.style_id}' not found")
+    src_type = (payload.source_type or "").strip()
+    src_name = (payload.source_name or "").strip()
+    ext_sku = (payload.external_sku or "").strip()
+    existing = await db.sku_map.find_one({
+        "source_type": src_type,
+        "source_name_key": _norm_marketplace(src_name),
+        "external_sku_key": _norm_key(ext_sku),
+    })
+    if existing:
+        raise HTTPException(409, f"A mapping for source '{src_name}' / SKU '{ext_sku}' already exists")
     doc = payload.model_dump()
+    doc["source_type"] = src_type
+    doc["source_name"] = src_name
+    doc["external_sku"] = ext_sku
+    doc["source_name_key"] = _norm_marketplace(src_name)
+    doc["external_sku_key"] = _norm_key(ext_sku)
     doc["style_code"] = style["code"]          # denormalised for display
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
@@ -5981,7 +6006,7 @@ async def import_online_orders_configured(
     stats["distinct_orders"] = len(order_ids_seen)
 
     # ── Commit path ─────────────────────────────────────────────────
-    committed = {"orders_created": 0, "items_created": 0, "exceptions_queued": 0}
+    committed = {"orders_created": 0, "items_created": 0, "exceptions_queued": 0, "orders_skipped_duplicate": 0, "items_skipped_duplicate": 0}
     import_batch_id = None
     if not dry_run:
         import_batch_id = f"IMP_{platform_lc}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
@@ -6053,18 +6078,49 @@ async def import_online_orders_configured(
                     "resolved":         False,
                 })
 
+        seen_line_keys: set = set()
         for group_key, order_doc in orders_by_key.items():
-            # Denormalise items into embedded array — small enough per order.
-            res = await db.online_orders.insert_one(order_doc)
-            committed["orders_created"] += 1
-            committed["items_created"]  += len(order_doc["items"])
+            order_doc["platform_key"] = _norm_marketplace(platform_lc)
+            order_doc["order_id_key"] = _norm_key(order_doc.get("order_id") or group_key)
+            existing_order = await db.online_orders.find_one({
+                "platform_key": order_doc["platform_key"],
+                "order_id_key": order_doc["order_id_key"],
+            })
+            if existing_order:
+                committed["orders_skipped_duplicate"] += 1
+                res_id = existing_order["_id"]
+            else:
+                try:
+                    res = await db.online_orders.insert_one(order_doc)
+                    res_id = res.inserted_id
+                    committed["orders_created"] += 1
+                except DuplicateKeyError:
+                    committed["orders_skipped_duplicate"] += 1
+                    existing_order = await db.online_orders.find_one({
+                        "platform_key": order_doc["platform_key"],
+                        "order_id_key": order_doc["order_id_key"],
+                    })
+                    res_id = existing_order["_id"] if existing_order else None
             # Also insert each item as a top-level row for easy filtering later
             for it in order_doc["items"]:
-                it["online_order_id"] = res.inserted_id
+                line_identity = it.get("order_item_id") or it.get("shipment_id") or f"{order_doc.get('order_id') or group_key}:{it.get('leaf_sku')}:{it.get('source_row_index')}"
+                line_key = (order_doc["platform_key"], order_doc["order_id_key"], _norm_key(line_identity))
+                if line_key in seen_line_keys:
+                    committed["items_skipped_duplicate"] += 1
+                    continue
+                seen_line_keys.add(line_key)
+                it["online_order_id"] = res_id
                 it["platform"]        = platform_lc
+                it["platform_key"]    = order_doc["platform_key"]
+                it["order_id_key"]    = order_doc["order_id_key"]
+                it["line_id_key"]     = line_key[2]
                 it["import_batch_id"] = import_batch_id
                 it["created_at"]      = now_iso()
-                await db.online_order_items.insert_one(it)
+                try:
+                    await db.online_order_items.insert_one(it)
+                    committed["items_created"] += 1
+                except DuplicateKeyError:
+                    committed["items_skipped_duplicate"] += 1
 
         if exceptions:
             await db.online_order_exceptions.insert_many(exceptions)
@@ -9044,9 +9100,15 @@ async def resolve_style(
     # ── Pass 1: sku_map lookup ──────────────────────────────────────────────
     mapping = await db.sku_map.find_one({
         "source_type": src_type,
-        "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
-        "external_sku": {"$regex": f"^{re.escape(ext_sku)}$",  "$options": "i"},
+        "source_name_key": _norm_marketplace(src_name),
+        "external_sku_key": _norm_key(ext_sku),
     })
+    if not mapping:
+        mapping = await db.sku_map.find_one({
+            "source_type": src_type,
+            "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
+            "external_sku": {"$regex": f"^{re.escape(ext_sku)}$",  "$options": "i"},
+        })
 
     if mapping:
         style = await db.styles.find_one({"_id": ObjectId(mapping["style_id"])})
@@ -15247,23 +15309,22 @@ async def _deduct_from_specific_location(style_id, color, size, qty, location_co
     """Deduct qty from a specific location. Used by picklist confirm.
     Decrements both physical qty AND reserved_qty (picklist reservation is being fulfilled).
     """
+    qty = int(qty)
     loc_inv = await db.fg_location_inventory.find_one({
         "style_id": ObjectId(style_id), "color": color, "size": size,
         "location_code": location_code,
     })
     if not loc_inv:
         raise HTTPException(400, f"No stock of {color}/{size} at {location_code}")
-    if int(loc_inv.get("qty", 0)) < int(qty):
-        raise HTTPException(400, f"Only {loc_inv['qty']} pairs at {location_code}, need {qty}")
-    new_qty = int(loc_inv["qty"]) - int(qty)
-    new_res = max(0, int(loc_inv.get("reserved_qty", 0)) - int(qty))
-    if new_qty <= 0:
-        await db.fg_location_inventory.delete_one({"_id": loc_inv["_id"]})
-    else:
-        await db.fg_location_inventory.update_one(
-            {"_id": loc_inv["_id"]},
-            {"$set": {"qty": new_qty, "reserved_qty": new_res, "updated_at": now_iso()}},
-        )
+    res = await db.fg_location_inventory.update_one(
+        {"_id": loc_inv["_id"], "qty": {"$gte": qty}, "reserved_qty": {"$gte": qty}},
+        {"$inc": {"qty": -qty, "reserved_qty": -qty}, "$set": {"updated_at": now_iso()}},
+    )
+    if not res.modified_count:
+        latest = await db.fg_location_inventory.find_one({"_id": loc_inv["_id"]})
+        have = int((latest or {}).get("qty", 0) or 0)
+        reserved = int((latest or {}).get("reserved_qty", 0) or 0)
+        raise HTTPException(400, f"Insufficient reserved stock at {location_code}: qty={have}, reserved={reserved}, need {qty}")
     wloc = await db.warehouse_locations.find_one({"location_code": location_code})
     if wloc:
         new_occ = max(0, int(wloc["occupied_pairs"]) - int(qty))
@@ -15629,6 +15690,9 @@ async def _generate_picklist_for_order(order_id: str, channel: str, order_lines:
         async for loc in cur:
             if remaining <= 0:
                 break
+            wloc_check = await db.warehouse_locations.find_one({"location_code": loc.get("location_code")})
+            if wloc_check and wloc_check.get("status") == "blocked":
+                continue
             qty_val = int(loc.get("qty", 0) or 0)
             res_val = int(loc.get("reserved_qty", 0) or 0)
             free_here = qty_val - res_val
@@ -15689,14 +15753,30 @@ async def _generate_picklist_for_order(order_id: str, channel: str, order_lines:
     }
     if items:
         # Book location-level reservations (prevents overlap with future picklists)
+        booked_loc_reservations = []
         for loc_inv_id, take in loc_reservations_to_book:
             try:
-                await db.fg_location_inventory.update_one(
-                    {"_id": loc_inv_id},
-                    {"$inc": {"reserved_qty": int(take)}, "$set": {"updated_at": now_iso()}},
+                take = int(take)
+                res = await db.fg_location_inventory.update_one(
+                    {
+                        "_id": loc_inv_id,
+                        "$expr": {"$gte": [{"$subtract": ["$qty", {"$ifNull": ["$reserved_qty", 0]}]}, take]},
+                    },
+                    {"$inc": {"reserved_qty": take}, "$set": {"updated_at": now_iso()}},
                 )
+                if not res.modified_count:
+                    raise HTTPException(409, "Stock was allocated by another request; retry picklist generation")
+                booked_loc_reservations.append((loc_inv_id, take))
             except Exception as e:
+                for booked_id, booked_qty in booked_loc_reservations:
+                    await db.fg_location_inventory.update_one(
+                        {"_id": booked_id},
+                        {"$inc": {"reserved_qty": -int(booked_qty)}, "$set": {"updated_at": now_iso()}},
+                    )
+                if isinstance(e, HTTPException):
+                    raise
                 log.warning(f"Location reservation increment failed: {e}")
+                raise HTTPException(409, "Could not reserve WMS stock for picklist")
         # Book SKU-level reservations for the covered portion
         for r in reservations_to_book:
             try:
@@ -15804,12 +15884,25 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
         raise HTTPException(404, "Picklist not found")
     if payload.item_index < 0 or payload.item_index >= len(doc.get("items", [])):
         raise HTTPException(400, "Invalid item_index")
+    if doc.get("status") in ("cancelled", "completed"):
+        raise HTTPException(400, f"Cannot pick item from {doc.get('status')} picklist")
     item = doc["items"][payload.item_index]
     if item.get("picked"):
         raise HTTPException(400, "Item already picked")
     if payload.scanned_location.upper().strip() != item["location_code"].upper():
         raise HTTPException(400,
             f"Scan mismatch — expected {item['location_code']}, got {payload.scanned_location}")
+    wloc = await db.warehouse_locations.find_one({"location_code": item["location_code"]})
+    if wloc and wloc.get("status") == "blocked":
+        raise HTTPException(400, f"Location {item['location_code']} is blocked")
+
+    now = now_iso()
+    claim = await db.picklists.update_one(
+        {"_id": ObjectId(pid), "status": {"$nin": ["cancelled", "completed"]}, f"items.{payload.item_index}.picked": {"$ne": True}},
+        {"$set": {f"items.{payload.item_index}.picked": True, f"items.{payload.item_index}.picked_at": now, f"items.{payload.item_index}.picked_by": u["email"], "updated_at": now}},
+    )
+    if not claim.modified_count:
+        raise HTTPException(400, "Item already picked or picklist is closed")
 
     # Deduct qty from that exact location
     await _deduct_from_specific_location(
@@ -15829,12 +15922,7 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
     except Exception as e:
         log.warning(f"Dispatched ledger failed: {e}")
 
-    # Mark this item picked
-    now = now_iso()
-    doc["items"][payload.item_index]["picked"] = True
-    doc["items"][payload.item_index]["picked_at"] = now
-    doc["items"][payload.item_index]["picked_by"] = u["email"]
-
+    doc = await db.picklists.find_one({"_id": ObjectId(pid)})
     all_picked = all(bool(i.get("picked")) for i in doc["items"])
     new_status = "completed" if all_picked else "in_progress"
     upd = {"items": doc["items"], "status": new_status, "updated_at": now}
@@ -16637,11 +16725,18 @@ async def _resolve_marketplace_sku(marketplace: str, sku: str):
 
     # Lookup marketplace_style_color_mapping (case-insensitive)
     mapping = await db.marketplace_style_color_mapping.find_one({
-        "marketplace":            marketplace,
-        "marketplace_style_code": {"$regex": f"^{re.escape(parsed['style'])}$", "$options": "i"},
-        "marketplace_color_code": {"$regex": f"^{re.escape(parsed['color'])}$", "$options": "i"},
-        "active":                 {"$ne": False},
+        "marketplace_key":            _norm_marketplace(marketplace),
+        "marketplace_style_code_key": _norm_key(parsed["style"]),
+        "marketplace_color_code_key": _norm_key(parsed["color"]),
+        "active":                    {"$ne": False},
     })
+    if not mapping:
+        mapping = await db.marketplace_style_color_mapping.find_one({
+            "marketplace":            marketplace,
+            "marketplace_style_code": {"$regex": f"^{re.escape(parsed['style'])}$", "$options": "i"},
+            "marketplace_color_code": {"$regex": f"^{re.escape(parsed['color'])}$", "$options": "i"},
+            "active":                 {"$ne": False},
+        })
     if not mapping:
         out["resolution_status"] = "unmapped"
         return out
@@ -16775,10 +16870,13 @@ async def upsert_marketplace_mapping(request: Request, payload: StyleColorMappin
     if not style:
         raise HTTPException(400, f"ERP style '{payload.erp_style_code}' not found. Create it first.")
 
+    marketplace = (payload.marketplace or "").strip().lower()
+    mp_style = (payload.marketplace_style_code or "").strip()
+    mp_color = (payload.marketplace_color_code or "").strip()
     key = {
-        "marketplace":            payload.marketplace,
-        "marketplace_style_code": payload.marketplace_style_code,
-        "marketplace_color_code": payload.marketplace_color_code,
+        "marketplace_key":            _norm_marketplace(marketplace),
+        "marketplace_style_code_key": _norm_key(mp_style),
+        "marketplace_color_code_key": _norm_key(mp_color),
     }
     now = now_iso()
     doc = {
@@ -16866,10 +16964,13 @@ async def map_and_replay_unresolved(request: Request, payload: UnresolvedMapIn):
     if not style:
         raise HTTPException(400, f"ERP style '{payload.erp_style_code}' not found. Create it first.")
 
+    marketplace = (payload.marketplace or "").strip().lower()
+    mp_style = (payload.marketplace_style_code or "").strip()
+    mp_color = (payload.marketplace_color_code or "").strip()
     key = {
-        "marketplace":            payload.marketplace,
-        "marketplace_style_code": payload.marketplace_style_code,
-        "marketplace_color_code": payload.marketplace_color_code,
+        "marketplace_key":            _norm_marketplace(marketplace),
+        "marketplace_style_code_key": _norm_key(mp_style),
+        "marketplace_color_code_key": _norm_key(mp_color),
     }
     now = now_iso()
     await db.marketplace_style_color_mapping.update_one(
@@ -18031,8 +18132,8 @@ async def on_startup():
     # SKU map indexes: unique compound on (source_type, source_name, external_sku) + style lookup
     try:
         await db.sku_map.create_index(
-            [("source_type", 1), ("source_name", 1), ("external_sku", 1)],
-            unique=True, name="sku_map_unique"
+            [("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)],
+            unique=True, name="sku_map_unique_normalized"
         )
         await db.sku_map.create_index("style_id", name="sku_map_style_id")
     except Exception as e:
@@ -18143,6 +18244,16 @@ async def on_startup():
         await db.picklists.create_index("status",   name="picklists_status")
         await db.picklists.create_index("channel",  name="picklists_channel")
         await db.picklists.create_index("created_at", name="picklists_created")
+        await db.online_orders.create_index(
+            [("platform_key", 1), ("order_id_key", 1)], unique=True,
+            partialFilterExpression={"order_id_key": {"$exists": True, "$type": "string"}},
+            name="online_orders_platform_order_unique",
+        )
+        await db.online_order_items.create_index(
+            [("platform_key", 1), ("order_id_key", 1), ("line_id_key", 1)], unique=True,
+            partialFilterExpression={"line_id_key": {"$exists": True, "$type": "string"}},
+            name="online_order_items_platform_order_line_unique",
+        )
     except Exception as e:
         log.warning(f"Could not create picklists indexes: {e}")
 
@@ -18163,8 +18274,8 @@ async def on_startup():
 
     try:
         await db.marketplace_style_color_mapping.create_index(
-            [("marketplace", 1), ("marketplace_style_code", 1), ("marketplace_color_code", 1)],
-            unique=True, name="mp_scm_unique",
+            [("marketplace_key", 1), ("marketplace_style_code_key", 1), ("marketplace_color_code_key", 1)],
+            unique=True, name="mp_scm_unique_normalized",
         )
         await db.marketplace_style_color_mapping.create_index("erp_style_code", name="mp_scm_erp_style")
     except Exception as e:
