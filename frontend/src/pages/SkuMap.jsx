@@ -533,12 +533,46 @@ TC-002,SSK-MOC-02,Moccasin Navy,,,,`;
 
 // ── main page ─────────────────────────────────────────────
 export default function SkuMap() {
+  const [tab, setTab] = useState("mappings");
   const [mappings, setMappings] = useState([]);
   const [styles, setStyles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [activeMapping, setActiveMapping] = useState(null);
+  const [editId, setEditId] = useState(null);
+  const [form, setForm] = useState(emptyForm);
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(null);
+  const [filterType, setFilterType] = useState("");
+  const [filterSource, setFilterSource] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (filterType) params.append("source_type", filterType);
+      if (filterSource.trim()) params.append("source_name", filterSource.trim());
+      if (searchQuery.trim()) params.append("search", searchQuery.trim());
+
+      const [resMap, resStyles] = await Promise.all([
+        http.get(`/sku-map?${params.toString()}`),
+        http.get("/styles"),
+      ]);
+      setMappings(resMap.data);
+      setStyles(resStyles.data);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  }, [filterType, filterSource, searchQuery]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   function openCreate() { setEditId(null); setActiveMapping(null); setForm(emptyForm); setFormError(""); setOpen(true); }
   function openEdit(m) {
