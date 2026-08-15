@@ -9500,8 +9500,51 @@ async def extract_po(file: UploadFile = File(...), request: Request = None):
         raise HTTPException(500, f"Extraction failed: {e}")
 
 
+async def _get_max_invoice_seq(fy_label: str) -> int:
+    """Find the highest sequence number across db.invoices and db.dispatch_records for given FY."""
+    prefix = f"SSK{fy_label}-"
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_seq = 0
+
+    # 1. Scan db.invoices
+    inv_docs = await db.invoices.find(
+        {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}},
+        {"invoice_no": 1}
+    ).to_list(10000)
+    for doc in inv_docs:
+        ino = str(doc.get("invoice_no") or "")
+        m = pattern.match(ino)
+        if m:
+            try:
+                max_seq = max(max_seq, int(m.group(1)))
+            except ValueError:
+                pass
+
+    # 2. Scan db.dispatch_records
+    dr_docs = await db.dispatch_records.find(
+        {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}},
+        {"invoice_no": 1}
+    ).to_list(10000)
+    for doc in dr_docs:
+        ino = str(doc.get("invoice_no") or "")
+        m = pattern.match(ino)
+        if m:
+            try:
+                max_seq = max(max_seq, int(m.group(1)))
+            except ValueError:
+                pass
+
+    return max_seq
+
+
 async def next_invoice_no() -> str:
-    """Generate SSK<FY>-XXX format like SSK26-27-016. FY based on Apr-Mar split."""
+    """Generate strictly-serial SSK<FY>-XXX format (e.g. SSK26-27-020).
+    
+    Guarantees:
+    - Atomically increments sequence counter.
+    - Synchronizes with existing invoices and dispatch records so it never regresses or creates duplicates.
+    - Minimum start sequence: 16 for FY 26-27 (bills 001..015 were issued manually pre-ERP).
+    """
     today = datetime.now(timezone.utc)
     # Indian FY starts April. If month < 4, FY started prev year.
     yr = today.year
@@ -9512,26 +9555,65 @@ async def next_invoice_no() -> str:
     fy_end = fy_start + 1
     fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
 
-    # Pre-ERP bills 001..015 were issued manually; start sequence at minimum 16 for FY 26-27
     min_seq = 16 if fy_label == "26-27" else 1
 
-    # Atomic counter
-    counter = await db.counters.find_one_and_update(
-        {"_id": f"invoice_{fy_label}"},
-        {"$inc": {"seq": 1}},
-        upsert=True,
-        return_document=True,
-    )
-    seq = counter.get("seq", 1) if counter else 1
-    if seq < min_seq:
+    # Check maximum existing sequence in database to ensure the counter is at least up to date
+    max_existing = await _get_max_invoice_seq(fy_label)
+    baseline = max(min_seq - 1, max_existing)
+
+    # If counter doc does not exist or is lower than baseline, bring it up to baseline first
+    counter_id = f"invoice_{fy_label}"
+    counter_doc = await db.counters.find_one({"_id": counter_id})
+    cur_seq = int(counter_doc.get("seq", 0)) if counter_doc else 0
+    if cur_seq < baseline:
         await db.counters.update_one(
-            {"_id": f"invoice_{fy_label}"},
-            {"$set": {"seq": min_seq}},
+            {"_id": counter_id},
+            {"$set": {"seq": baseline}},
             upsert=True,
         )
-        seq = min_seq
 
+    # Atomically increment counter
+    counter = await db.counters.find_one_and_update(
+        {"_id": counter_id},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    seq = int(counter.get("seq", baseline + 1))
     return f"SSK{fy_label}-{seq:03d}"
+
+
+@api.post("/admin/resync-invoice-sequence")
+async def resync_invoice_sequence(request: Request):
+    """Admin endpoint to audit and synchronize the invoice sequence counter with database records."""
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+
+    today = datetime.now(timezone.utc)
+    yr = today.year
+    fy_start = yr - 1 if today.month < 4 else yr
+    fy_end = fy_start + 1
+    fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
+    min_seq = 16 if fy_label == "26-27" else 1
+
+    max_existing = await _get_max_invoice_seq(fy_label)
+    target_seq = max(min_seq - 1, max_existing)
+
+    counter_id = f"invoice_{fy_label}"
+    await db.counters.update_one(
+        {"_id": counter_id},
+        {"$set": {"seq": target_seq}},
+        upsert=True,
+    )
+
+    return {
+        "ok": True,
+        "fy_label": fy_label,
+        "max_existing_seq": max_existing,
+        "synced_counter_seq": target_seq,
+        "next_invoice_will_be": f"SSK{fy_label}-{target_seq + 1:03d}",
+    }
+
 
 
 # ---------- ACCOUNTS-RECEIVABLE HELPERS ----------
@@ -10066,6 +10148,29 @@ async def delete_invoice(id: str, request: Request):
     
     # Delete the invoice
     await db.invoices.delete_one({"_id": oid(id)})
+
+    # Delete dispatch records for this invoice
+    await db.dispatch_records.delete_many({"$or": [{"invoice_id": id}, {"invoice_no": inv.get("invoice_no")}]})
+
+    # Auto-resync counter to highest remaining sequence to prevent gaps
+    try:
+        today = datetime.now(timezone.utc)
+        yr = today.year
+        fy_start = yr - 1 if today.month < 4 else yr
+        fy_end = fy_start + 1
+        fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
+        min_seq = 16 if fy_label == "26-27" else 1
+
+        max_existing = await _get_max_invoice_seq(fy_label)
+        target_seq = max(min_seq - 1, max_existing)
+        await db.counters.update_one(
+            {"_id": f"invoice_{fy_label}"},
+            {"$set": {"seq": target_seq}},
+            upsert=True,
+        )
+    except Exception as e:
+        log.warning(f"Failed to resync invoice counter after deletion: {e}")
+
     return {"ok": True}
 
 
@@ -11777,8 +11882,13 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         raise HTTPException(400, "No packed quantities found — carton rows may have 0 qty")
 
     # ── 5. Invoice PDF ───────────────────────────────────────────────────────
-    invoice_no = await next_invoice_no()
-    invoice_date = datetime.now().strftime("%d/%m/%Y")
+    existing_inv = await db.invoices.find_one({"job_ids": {"$in": payload.job_ids}})
+    if existing_inv and existing_inv.get("invoice_no"):
+        invoice_no = existing_inv["invoice_no"]
+        invoice_date = existing_inv.get("invoice_date") or datetime.now().strftime("%d/%m/%Y")
+    else:
+        invoice_no = await next_invoice_no()
+        invoice_date = datetime.now().strftime("%d/%m/%Y")
     invoice_pdf = build_invoice(
         po, invoice_no, invoice_date,
         transport_mode=payload.transport_mode or "",
