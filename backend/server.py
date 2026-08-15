@@ -35,6 +35,7 @@ from collections import defaultdict
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
 from packing_list import build_default_packing_list, build_from_template, build_dispatch_packing_list, build_carton_list_xlsx, build_packing_list_pdf, VENDOR, DEFAULT_SIZES
+STANDARD_SIZES = DEFAULT_SIZES
 from pdf_procurement import build_material_requirement
 from pdf_card import build_production_card, build_production_card_dual_a4
 from pdf_carton_label import build_carton_labels
@@ -9970,6 +9971,7 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
                     },
                 )
 
+    po, line_items = await _generate_invoice_payload(po, payload.job_ids)
     invoice_no = await next_invoice_no()
     invoice_date = datetime.now().strftime("%d/%m/%Y")
     pdf_bytes = build_invoice(
@@ -12196,6 +12198,7 @@ async def download_packing_list(plid: str, request: Request):
     if not raw:
         raise HTTPException(404, "File not stored for this entry")
     label = "MERGED" if doc.get("merged") else doc.get("po_number", "po")
+    fname = doc.get("filename") or f"packing_list_{label}.xlsx"
     return StreamingResponse(
         BytesIO(raw),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
