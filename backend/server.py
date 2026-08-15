@@ -64,12 +64,29 @@ def _norm_marketplace(value: Optional[str]) -> str:
     return _norm_key(value)
 
 app = FastAPI(title="SSK Footcare ERP")
+
+# Configure CORS dynamically to allow local development, production domains, Vercel deployments, and custom env vars
+_frontend_url_env = os.getenv("FRONTEND_URL", "").strip()
+_cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
+_raw_origins = [
+    "http://localhost:3000",
+    "https://localhost:3000",
+    "http://localhost:5173",
+    "https://ssk-footcare-manufacturing-erp.vercel.app",
+]
+if _frontend_url_env:
+    _raw_origins.extend([o.strip() for o in _frontend_url_env.split(",") if o.strip()])
+if _cors_origins_env:
+    _raw_origins.extend([o.strip() for o in _cors_origins_env.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=list(set(_raw_origins)),
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app|https://.*\.onrender\.com|http://localhost:\d+|https://localhost:\d+"),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 api = APIRouter(prefix="/api")
 
@@ -18060,18 +18077,7 @@ app.include_router(api)
 app.include_router(plm_router)
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=list(set([
-        "http://localhost:3000",
-        "https://localhost:3000",
-        os.getenv("FRONTEND_URL", "http://localhost:3000")
-    ])),
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+
 
 @app.on_event("startup")
 async def on_startup():
