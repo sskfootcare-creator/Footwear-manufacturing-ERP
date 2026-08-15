@@ -401,7 +401,7 @@ export default function Materials() {
               testId="form-mat-rate"
             />
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1 flex items-center gap-1">
+              <label className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1 flex items-center gap-1">
                 Default Yield
                 <span
                   className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold cursor-help"
