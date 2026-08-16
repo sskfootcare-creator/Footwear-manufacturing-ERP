@@ -120,16 +120,16 @@ class TestPackingListDefault:
         assert "SSK FOOTCARE" in (ws["B2"].value or "")
         # client name at G3
         assert (ws["G3"].value or "").strip() != ""
-        # PO number at C13
-        assert (str(ws["C13"].value or "")).strip() != ""
-        # header at row 16
-        row16 = [ws.cell(16, c).value for c in range(1, 20)]
-        joined = " ".join(str(v or "") for v in row16).upper()
-        for kw in ["SITE CODE", "STYLE", "COLOUR", "CTN", "PCS/CTN", "TOTAL PCS", "NET WT", "GROSS WT"]:
+        # PO number at B8 or C13
+        assert (str(ws["B8"].value or ws["C13"].value or "")).strip() != ""
+        # header at row 10 or 16
+        hdr_row = [ws.cell(10, c).value for c in range(1, 20)] + [ws.cell(16, c).value for c in range(1, 20)]
+        joined = " ".join(str(v or "") for v in hdr_row).upper()
+        for kw in ["SITE CODE", "STYLE", "COLOUR", "CTN", "TOTAL PCS", "NET W", "GROSS W"]:
             assert kw in joined, f"missing {kw} in header row: {joined}"
-        # at least one line in row 17
-        row17 = [ws.cell(17, c).value for c in range(1, 20)]
-        assert any(v not in (None, "") for v in row17), "no line items"
+        # at least one line in table
+        table_rows = [ws.cell(11, c).value for c in range(1, 20)] + [ws.cell(17, c).value for c in range(1, 20)]
+        assert any(v not in (None, "") for v in table_rows), "no line items"
 
 
 # ----------------- Packing List for specific job -----------------

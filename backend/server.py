@@ -10035,6 +10035,7 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
                     headers={
                         "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
                         "X-Dispatch-Record-Id": str(dr_existing["_id"]),
+                        "X-Invoice-Id": str(dr_existing.get("invoice_id") or dr_existing["_id"]),
                         "X-Invoice-No": inv_no,
                     },
                 )
@@ -10237,6 +10238,20 @@ async def merged_invoice(payload: dict, request: Request):
     )
     import base64 as _b64m
     credit_days_m = _extract_credit_days(parent.get("payment_terms", ""))
+    # Renumber packing cartons continuously across all merged jobs and regenerate carton labels
+    cartons_m = await db.packing_cartons.find({"job_id": {"$in": job_ids_all}}).sort([("size", 1), ("_id", 1)]).to_list(10000)
+    cartons_list = [stringify(c) for c in cartons_m]
+    total_cartons = len(cartons_list)
+    for idx, carton in enumerate(cartons_list):
+        carton["box_number"] = idx + 1
+        carton["total_cartons"] = total_cartons
+
+    merged_labels_b64 = None
+    if cartons_list:
+        cartons_list = await _enrich_cartons_with_mapped_sku(cartons_list)
+        merged_labels_pdf = build_carton_labels(cartons_list, parent.get("po_number", ""), invoice_no)
+        merged_labels_b64 = _b64m.b64encode(merged_labels_pdf).decode("ascii")
+
     inv_doc_m = {
         "invoice_no": invoice_no, "invoice_date": invoice_date,
         "invoice_iso_date": _invoice_iso_date(invoice_date),
@@ -10250,13 +10265,14 @@ async def merged_invoice(payload: dict, request: Request):
         **_compute_invoice_totals(parent, all_items),
         "by": u["email"], "created_at": now_iso(),
         "file_b64": _b64m.b64encode(pdf_bytes).decode("ascii"),
+        "carton_labels_file_b64": merged_labels_b64,
     }
     res_m = await db.invoices.insert_one(inv_doc_m)
-    # Map packed cartons to dispatch
-    cartons_m = await db.packing_cartons.find({"job_id": {"$in": job_ids_all}, "status": "packed"}).to_list(10000)
-    for idx, carton in enumerate(cartons_m):
+
+    # Persist updated box numbers and status for all merged cartons
+    for idx, carton in enumerate(cartons_list):
         await db.packing_cartons.update_one(
-            {"_id": carton["_id"]},
+            {"_id": oid(carton["id"])},
             {"$set": {
                 "status": "dispatched",
                 "invoice_id": str(res_m.inserted_id),
@@ -10354,6 +10370,24 @@ async def download_invoice_file(iid: str, request: Request):
     return StreamingResponse(
         BytesIO(raw), media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{fname}"'},
+    )
+
+
+@api.get("/invoices/{iid}/carton-labels", dependencies=[Depends(pdf_rate_limiter)])
+async def download_invoice_carton_labels(iid: str, request: Request):
+    """Re-download the carton labels PDF stored on an invoice (e.g. for merged dispatches) without regeneration."""
+    await get_current_user(request)
+    doc = await db.invoices.find_one({"_id": oid(iid)}, {"carton_labels_file_b64": 1, "invoice_no": 1})
+    if not doc:
+        raise HTTPException(404, "Invoice not found")
+    import base64 as _b
+    raw = _b.b64decode(doc.get("carton_labels_file_b64", "") or b"")
+    if not raw:
+        raise HTTPException(404, "No carton labels stored for this invoice")
+    fname = f"CartonLabels-{doc.get('invoice_no', 'invoice')}.pdf"
+    return StreamingResponse(
+        BytesIO(raw), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
@@ -10999,7 +11033,7 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             "receipt_id": receipt_id,
             "notes": f"Received against PO {po.get('po_number')}",
             "by": u["email"],
-            "date": datetime.now(timezone.utc).date().isoformat(),
+            "date": payload.receipt_date or datetime.now(timezone.utc).date().isoformat(),
             "created_at": now_iso(),
             "auto": True
         })
@@ -11040,7 +11074,7 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             "vendor_po_id": str(po["_id"]),
             "po_number": po.get("po_number"),
             "receipt_id": receipt_id,
-            "receipt_date": datetime.now(timezone.utc).date().isoformat(),
+            "receipt_date": payload.receipt_date or datetime.now(timezone.utc).date().isoformat(),
             "items": [
                 {
                     "material_id": m["material_id"],
@@ -11245,6 +11279,13 @@ async def _build_client_ledger(cid_or_name: str) -> dict:
         else:
             ageing_buckets["days_60_plus"] = round(ageing_buckets["days_60_plus"] + outstanding, 2)
 
+    aging_list = [
+        {"bucket": "0-30", "amount": round(ageing_buckets["days_1_30"] + ageing_buckets["current"], 2), "count": 0},
+        {"bucket": "31-60", "amount": ageing_buckets["days_31_60"], "count": 0},
+        {"bucket": "61-90", "amount": 0.0, "count": 0},
+        {"bucket": "90+", "amount": ageing_buckets["days_60_plus"], "count": 0},
+    ]
+
     return {
         "client_id": client_id,
         "client_name": client_name,
@@ -11257,6 +11298,7 @@ async def _build_client_ledger(cid_or_name: str) -> dict:
         "entries": entries,
         "transactions": transactions,
         "ageing": ageing_buckets,
+        "aging": aging_list,
         "totals": {
             "invoiced": round(tot_invoiced, 2),
             "received": round(tot_received, 2),
@@ -13284,7 +13326,7 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
             style = await db.styles.find_one({"_id": oid(job["style_id"])})
         if not style:
             style = await db.styles.find_one({"code": job.get("style_code")})
-        if not style or style.get("bom") is None:
+        if not style or not style.get("bom"):
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot move out of Procurement: Style '{job.get('style_code')}' has no BOM defined in Style Master. Please configure BOM in Styles Master first."

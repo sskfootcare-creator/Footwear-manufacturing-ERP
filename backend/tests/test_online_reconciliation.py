@@ -91,13 +91,17 @@ def generate_sample_unsettled_excel():
 
 
 def generate_sample_monthly_report_csv():
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone.utc).date()
+    recent_date = (today - timedelta(days=5)).isoformat()
+    aged_date = (today - timedelta(days=60)).isoformat()
     content = (
         "seller order id,order release id,sku id,style id,seller sku code,size,order status,packed on,shipped on,delivered on,cancelled on,rto/return creation date,final amount,seller price\n"
         "SO101,REL101,SKU101,STYLE-A,SKU-STYLE-A,8,Delivered,2026-07-01,2026-07-01,2026-07-03,,,600,600\n"
         "SO102,REL102,SKU102,STYLE-A,SKU-STYLE-A,9,Delivered,2026-07-02,2026-07-02,2026-07-04,,,700,700\n"
         "SO103,REL103,SKU103,STYLE-A,SKU-STYLE-A,8,Returned,2026-07-02,2026-07-02,2026-07-04,,2026-07-05,600,600\n"
-        "SO104,REL104,SKU104,STYLE-B,SKU-STYLE-B,7,Shipped,2026-07-15,2026-07-15,,,,500,500\n"
-        "SO105,REL105,SKU105,STYLE-B,SKU-STYLE-B,8,Shipped,2026-05-10,2026-05-10,,,,500,500\n"
+        f"SO104,REL104,SKU104,STYLE-B,SKU-STYLE-B,7,Shipped,{recent_date},{recent_date},,,,500,500\n"
+        f"SO105,REL105,SKU105,STYLE-B,SKU-STYLE-B,8,Shipped,{aged_date},{aged_date},,,,500,500\n"
         "SO106,REL106,SKU106,STYLE-B,SKU-STYLE-B,9,Delivered,2026-07-10,2026-07-10,2026-07-12,,,500,500\n"
     )
     return content.encode("utf-8")

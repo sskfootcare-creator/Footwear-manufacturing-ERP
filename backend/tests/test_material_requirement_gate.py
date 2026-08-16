@@ -20,7 +20,16 @@ def test_material_requirement_stage_gate():
 
     # Temporarily clear BOM on style to test the gate
     orig_bom = style.get("bom", [])
-    session.patch(f"{BASE_URL}/api/styles/{style['id']}", json={"bom": []})
+    style_payload_no_bom = {
+        "name": style.get("name", "Test Style"),
+        "category": style.get("category", "Footwear"),
+        "base_size": style.get("base_size", "8"),
+        "color": style.get("color", "Black"),
+        "bom": [],
+        "labor": style.get("labor", []),
+    }
+    patch_res = session.patch(f"{BASE_URL}/api/styles/{style['id']}", json=style_payload_no_bom)
+    assert patch_res.status_code == 200, patch_res.text
 
     po_num = f"PO-GATE-TEST-{int(time.time())}"
     try:
@@ -63,4 +72,12 @@ def test_material_requirement_stage_gate():
 
     finally:
         # Restore original BOM
-        session.patch(f"{BASE_URL}/api/styles/{style['id']}", json={"bom": orig_bom})
+        style_payload_restore = {
+            "name": style.get("name", "Test Style"),
+            "category": style.get("category", "Footwear"),
+            "base_size": style.get("base_size", "8"),
+            "color": style.get("color", "Black"),
+            "bom": orig_bom,
+            "labor": style.get("labor", []),
+        }
+        session.patch(f"{BASE_URL}/api/styles/{style['id']}", json=style_payload_restore)

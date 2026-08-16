@@ -44,66 +44,78 @@ def session():
 
 @pytest.fixture(scope="session")
 def dispatched_job(session):
-    """Find one dispatched job we can invoice from."""
-    r = session.get(f"{API}/production/archive", timeout=30)
-    assert r.status_code == 200
-    rows = r.json()
-    # pick a dispatched job (stage == 'dispatched' or similar)
-    cand = None
-    for row in rows:
-        stage = (row.get("stage") or "").lower()
-        if stage in ("dispatched", "dispatch", "ready_to_dispatch"):
-            cand = row
-            break
-    if not cand and rows:
-        # Fallback: first row from archive (already dispatched)
-        cand = rows[0]
+    """Create a fresh dispatched job for isolated invoice tests."""
+    import time
+    m_res = session.post(f"{BASE_URL}/api/materials", json={
+        "name": "Fixture Style Material",
+        "category": "upper",
+        "unit": "sqft",
+        "rate": 50.0,
+    })
+    if m_res.status_code == 200:
+        mat_doc = m_res.json()
+    else:
+        mat_doc = session.get(f"{BASE_URL}/api/materials").json()[0]
+    mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
+    session.post(f"{BASE_URL}/api/inventory/movements", json={
+        "material_id": mat_id,
+        "type": "in",
+        "quantity": 10000.0,
+        "rate": 50.0,
+        "party": "Opening Stock",
+        "notes": "Initial test stock",
+    })
+    style_payload = {
+        "name": "Fixture Style",
+        "category": "Footwear",
+        "base_size": "8",
+        "bom": [{
+            "material_id": mat_id,
+            "material_name": mat_doc.get("name", "Material"),
+            "material_code": mat_doc.get("code", "MAT"),
+            "unit": mat_doc.get("unit", "sqft"),
+            "rate": mat_doc.get("rate", 50.0),
+            "quantity": 1.0,
+        }],
+        "labor": [],
+    }
+    r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
+    assert r_style.status_code == 200, r_style.text
+    style_code = r_style.json()["code"]
     
-    if not cand:
-        import time
-        style_payload = {
-            "name": "Fixture Style",
-            "category": "Footwear",
-            "base_size": "8",
-            "bom": [],
-            "labor": [],
-        }
-        r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
-        assert r_style.status_code == 200, r_style.text
-        style_code = r_style.json()["code"]
-        
-        po_payload = {
-            "po_number": f"PO-FIXTURE-{int(time.time())}",
-            "client_name": "Fixture Client",
-            "po_date": "2026-07-13",
-            "delivery_date": "2026-08-13",
-            "payment_terms": "30 Days Credit",
-            "line_items": [
-                {
-                    "style_code": style_code,
-                    "color": "Black",
-                    "size": "8",
-                    "quantity": 50,
-                    "unit_price": 400.0,
-                    "amount": 20000.0
-                }
-            ]
-        }
-        r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
-        assert r_po.status_code == 200, r_po.text
-        po_id = r_po.json()["id"]
-        
-        r_jobs = session.get(f"{BASE_URL}/api/production/jobs?source_type=all", timeout=15)
-        assert r_jobs.status_code == 200
-        job = next((j for j in r_jobs.json() if j.get("po_id") == po_id), None)
-        assert job, "Job not auto-created"
-        
-        r_patch = session.patch(f"{BASE_URL}/api/production/jobs/{job['id']}", json={"stage": "dispatched", "completed_qty": 50}, timeout=15)
-        assert r_patch.status_code == 200, r_patch.text
-        cand = r_patch.json()
-        cand["id"] = str(cand.get("id") or cand.get("_id"))
-        cand["po_id"] = po_id
-
+    unique_num = f"PO-IT13-{int(time.time()*1000)}"
+    po_payload = {
+        "po_number": unique_num,
+        "client_name": f"Client-{unique_num}",
+        "po_date": "2026-07-13",
+        "delivery_date": "2026-08-13",
+        "payment_terms": "30 Days Credit",
+        "line_items": [
+            {
+                "style_code": style_code,
+                "color": "Black",
+                "size": "8",
+                "quantity": 50,
+                "unit_price": 400.0,
+                "amount": 20000.0
+            }
+        ]
+    }
+    r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
+    assert r_po.status_code == 200, r_po.text
+    po_id = r_po.json()["id"]
+    
+    r_jobs = session.get(f"{BASE_URL}/api/production/jobs?source_type=all", timeout=15)
+    assert r_jobs.status_code == 200
+    job = next((j for j in r_jobs.json() if j.get("po_id") == po_id), None)
+    assert job, "Job not auto-created"
+    
+    r_patch = session.patch(f"{BASE_URL}/api/production/jobs/{job['id']}", json={"stage": "dispatched", "completed_qty": 50}, timeout=15)
+    assert r_patch.status_code == 200, r_patch.text
+    cand = r_patch.json()
+    cand["id"] = str(cand.get("id") or cand.get("_id"))
+    cand["po_id"] = po_id
+    cand["client_name"] = po_payload["client_name"]
     return cand
 
 

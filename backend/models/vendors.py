@@ -93,6 +93,7 @@ class VendorPOReceiveItem(BaseModel):
 
 class VendorPOReceiveIn(BaseModel):
     receipt_id: str
+    receipt_date: Optional[str] = None
     items: List[VendorPOReceiveItem]
 
 
