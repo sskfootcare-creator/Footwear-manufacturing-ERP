@@ -295,6 +295,17 @@ def build_default_packing_list(po: dict, options: dict | None = None) -> bytes:
     cell_sig = ws[f"N{sig_start_row}"]
     cell_sig.alignment = Alignment(horizontal="center", vertical="top")
 
+    # Shipping & Notes Block
+    shipping_row = summary_start_row + 6
+    disp_text = f"DISPATCH: {options.get('dispatch_date', '')} | TRANSPORTER: {options.get('transporter', '')} | VEHICLE: {options.get('vehicle_no', '')} | DRIVER: {options.get('driver_name', '')} {options.get('driver_phone', '')}"
+    dest_text = f"DESTINATION: {options.get('destination', '')} | PORT: {options.get('port', '')}"
+    notes_text = f"NOTES: {options.get('notes', '')}"
+    if any([options.get("transporter"), options.get("vehicle_no"), options.get("dispatch_date"), options.get("notes"), options.get("destination")]):
+        ws.merge_cells(f"A{shipping_row}:Q{shipping_row}")
+        _set_cell(ws, f"A{shipping_row}", disp_text, size=8, bold=True)
+        ws.merge_cells(f"A{shipping_row+1}:Q{shipping_row+1}")
+        _set_cell(ws, f"A{shipping_row+1}", f"{dest_text} | {notes_text}", size=8)
+
     # 8. Column Widths & Print Settings
     col_widths = {
         "A": 14, "B": 22, "C": 14, "D": 12,
@@ -853,6 +864,7 @@ def build_from_template(template_bytes: bytes, po: dict, options: dict | None = 
     }
 
     for ws in wb.worksheets:
+        _expand_lines(ws, po, options, cartons=cartons)
         for row in ws.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str):
@@ -864,6 +876,143 @@ def build_from_template(template_bytes: bytes, po: dict, options: dict | None = 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+def _classify_header_simple(header: str) -> str:
+    """Classify a table header string into known packing-list fields or size columns."""
+    h = (header or "").strip().lower()
+    if h in ["style", "style code", "style_code", "style no", "style_no", "model"]:
+        return "style"
+    if h in ["colour", "color", "shade"]:
+        return "color"
+    if h in ["size", "sizes"]:
+        return "size"
+    if h in ["qty", "quantity", "pairs", "total qty", "total pairs", "total"]:
+        return "quantity"
+    if h in ["ctn no", "ctn", "carton", "carton no", "box no", "box", "carton range"]:
+        return "ctn_no"
+    if h in ["mrp", "rate", "price", "unit price"]:
+        return "price"
+    # Check if header is a numeric size like "39", "42", "8", "8.5"
+    try:
+        float(str(header).strip())
+        return f"size_col:{str(header).strip()}"
+    except (ValueError, AttributeError):
+        pass
+    return "other"
+
+
+def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict] | None = None):
+    """Expand {{lines}} marker in a worksheet into tabular line item or carton rows."""
+    options = options or {}
+    marker_row = None
+    marker_col = None
+    for r_idx, row in enumerate(ws.iter_rows(), start=1):
+        for c_idx, cell in enumerate(row, start=1):
+            if cell.value and isinstance(cell.value, str) and "{{lines}}" in cell.value:
+                marker_row = r_idx
+                marker_col = c_idx
+                break
+        if marker_row:
+            break
+
+    if not marker_row:
+        return
+
+    # Find header row (row above marker_row)
+    header_row_idx = marker_row - 1 if marker_row > 1 else 1
+    col_mapping = {}
+    for c_idx, cell in enumerate(ws[header_row_idx], start=1):
+        val = str(cell.value or "").strip()
+        cls = _classify_header_simple(val)
+        col_mapping[c_idx] = cls
+
+    # Sample style from marker cell
+    sample_cell = ws.cell(row=marker_row, column=marker_col)
+    s_font = copy(sample_cell.font) if sample_cell.font else None
+    s_align = copy(sample_cell.alignment) if sample_cell.alignment else None
+    s_border = copy(sample_cell.border) if sample_cell.border else None
+
+    # Clear marker cell
+    sample_cell.value = ""
+
+    if cartons:
+        grouped_cartons = []
+        for c in sorted(cartons, key=lambda x: x.get("box_number") or 0):
+            sc = c.get("style_code") or ""
+            col = c.get("color") or ""
+            sz = str(c.get("size") or "")
+            q = c.get("qty") or 0
+            box_num = c.get("box_number") or 1
+            if grouped_cartons and grouped_cartons[-1]["key"] == (sc, col, sz, q) and grouped_cartons[-1]["end_box"] + 1 == box_num:
+                grouped_cartons[-1]["count"] += 1
+                grouped_cartons[-1]["end_box"] = box_num
+                grouped_cartons[-1]["total_pairs"] += q
+            else:
+                grouped_cartons.append({
+                    "key": (sc, col, sz, q),
+                    "style_code": sc, "color": col, "size": sz, "qty_per_box": q,
+                    "count": 1, "start_box": box_num, "end_box": box_num, "total_pairs": q
+                })
+
+        for i, grp in enumerate(grouped_cartons):
+            cur_row = marker_row + i
+            if grp["start_box"] == grp["end_box"]:
+                box_str = str(grp["start_box"])
+            else:
+                box_str = f"{grp['start_box']} - {grp['end_box']}"
+
+            for c_idx, cls in col_mapping.items():
+                cell = ws.cell(row=cur_row, column=c_idx)
+                if s_font: cell.font = copy(s_font)
+                if s_align: cell.alignment = copy(s_align)
+                if s_border: cell.border = copy(s_border)
+
+                if cls == "style":
+                    cell.value = grp["style_code"]
+                elif cls == "color":
+                    cell.value = grp["color"]
+                elif cls == "size":
+                    cell.value = grp["size"]
+                elif cls == "quantity":
+                    cell.value = grp["total_pairs"]
+                elif cls == "ctn_no":
+                    cell.value = box_str
+                elif cls.startswith("size_col:"):
+                    sz = cls.split(":", 1)[1]
+                    cell.value = grp["total_pairs"] if sz == grp["size"] else ""
+    else:
+        line_groups = {}
+        for li in po.get("line_items", []):
+            sc = li.get("style_code") or ""
+            col = li.get("color") or ""
+            key = (sc, col)
+            if key not in line_groups:
+                line_groups[key] = {
+                    "style_code": sc, "color": col, "sizes": {}, "total_qty": 0
+                }
+            sz = str(li.get("size") or "")
+            qty = int(li.get("quantity") or 0)
+            line_groups[key]["sizes"][sz] = line_groups[key]["sizes"].get(sz, 0) + qty
+            line_groups[key]["total_qty"] += qty
+
+        for i, (key, grp) in enumerate(line_groups.items()):
+            cur_row = marker_row + i
+            for c_idx, cls in col_mapping.items():
+                cell = ws.cell(row=cur_row, column=c_idx)
+                if s_font: cell.font = copy(s_font)
+                if s_align: cell.alignment = copy(s_align)
+                if s_border: cell.border = copy(s_border)
+
+                if cls == "style":
+                    cell.value = grp["style_code"]
+                elif cls == "color":
+                    cell.value = grp["color"]
+                elif cls == "quantity":
+                    cell.value = grp["total_qty"]
+                elif cls.startswith("size_col:"):
+                    sz = cls.split(":", 1)[1]
+                    cell.value = grp["sizes"].get(sz, "")
 
 
 def build_carton_list_xlsx(cartons: list[dict], po: dict, invoice_no: str = "", options: dict | None = None) -> bytes:

@@ -14,14 +14,32 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
 ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 
+class ApiClient:
+    def __init__(self, base_url, session):
+        self.base_url = base_url.rstrip("/")
+        self.session = session
+        
+    def get(self, path, **kwargs):
+        return self.session.get(f"{self.base_url}{path}", **kwargs)
+        
+    def post(self, path, **kwargs):
+        return self.session.post(f"{self.base_url}{path}", **kwargs)
+        
+    def patch(self, path, **kwargs):
+        return self.session.patch(f"{self.base_url}{path}", **kwargs)
+        
+    def delete(self, path, **kwargs):
+        return self.session.delete(f"{self.base_url}{path}", **kwargs)
+
+
 @pytest.fixture(scope="module")
 def client():
-    from fastapi.testclient import TestClient
-    from server import app
-    with TestClient(app, base_url="http://testserver/api") as tc:
-        r = tc.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
-        assert r.status_code == 200, f"Login failed: {r.text}"
-        yield tc
+    import requests
+    base_url = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8000").rstrip("/") + "/api"
+    s = requests.Session()
+    r = s.post(f"{base_url}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
+    assert r.status_code == 200, f"Login failed: {r.text}"
+    yield ApiClient(base_url, s)
 
 
 def test_vendor_po_receive_partial_payment_ledger_and_ageing(client):
@@ -75,6 +93,7 @@ def test_vendor_po_receive_partial_payment_ledger_and_ageing(client):
     # 4. Receive materials against Vendor PO (Receive 100 @ 200 = 20,000)
     rec_resp = client.post(f"/vendor-pos/{po_id}/receive", json={
         "receipt_id": f"REC-{unique_suffix}",
+        "receipt_date": "2026-07-01",
         "items": [
             {
                 "material_id": material_id,
@@ -100,7 +119,7 @@ def test_vendor_po_receive_partial_payment_ledger_and_ageing(client):
     # 6. Post Partial Payment of 8,000
     pay_resp = client.post(f"/vendors/{vendor_id}/payments", json={
         "amount": 8000.0,
-        "payment_date": "2026-07-22",
+        "payment_date": "2026-08-15",
         "mode": "Bank Transfer",
         "reference": f"UTR-{unique_suffix}",
         "bank": "HDFC Bank",

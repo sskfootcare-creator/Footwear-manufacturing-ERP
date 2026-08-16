@@ -237,9 +237,71 @@ class TestProductionCardPDF:
 # ---------- PRODUCTION STAGE UPDATE -> deadline ----------
 class TestJobStageDeadline:
     def test_stage_update_sets_deadline(self, admin_session):
-        jobs = _ensure_b2b_jobs(admin_session)
-        # pick a non-dispatched job
-        job = next((j for j in jobs if j.get("stage") != "dispatched"), jobs[0])
+        # Ensure a style with BOM and stock exists
+        m_res = admin_session.post(f"{BASE_URL}/api/materials", json={
+            "name": "Iter10 Leather",
+            "category": "upper",
+            "unit": "sqft",
+            "rate": 50.0,
+        })
+        if m_res.status_code == 200:
+            mat_doc = m_res.json()
+        else:
+            mat_doc = admin_session.get(f"{BASE_URL}/api/materials").json()[0]
+        mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
+        admin_session.post(f"{BASE_URL}/api/inventory/movements", json={
+            "material_id": mat_id,
+            "type": "in",
+            "quantity": 1000.0,
+            "rate": 50.0,
+            "party": "Opening Stock",
+            "notes": "Initial test stock",
+        })
+        style_payload = {
+            "name": "Iter10 Deadline Style",
+            "category": "Footwear",
+            "base_size": "8",
+            "bom": [{
+                "material_id": mat_id,
+                "material_name": mat_doc.get("name", "Material"),
+                "material_code": mat_doc.get("code", "MAT"),
+                "unit": mat_doc.get("unit", "sqft"),
+                "rate": mat_doc.get("rate", 50.0),
+                "quantity": 1.0,
+            }],
+            "labor": [],
+        }
+        r_style = admin_session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
+        assert r_style.status_code == 200
+        style_code = r_style.json()["code"]
+        
+        import uuid
+        po_payload = {
+            "po_number": f"PO-DEADLINE-{uuid.uuid4().hex[:8]}",
+            "client_name": "Iter10 Client",
+            "po_date": "2026-07-13",
+            "delivery_date": "2026-08-13",
+            "payment_terms": "30 Days Credit",
+            "line_items": [
+                {
+                    "style_code": style_code,
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 50,
+                    "unit_price": 400.0,
+                    "amount": 20000.0
+                }
+            ]
+        }
+        r_po = admin_session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
+        assert r_po.status_code == 200
+        po_id = r_po.json()["id"]
+        
+        jr = admin_session.get(f"{BASE_URL}/api/production/jobs", timeout=15)
+        assert jr.status_code == 200
+        jobs = [j for j in jr.json() if j.get("po_id") == po_id]
+        assert len(jobs) > 0
+        job = jobs[0]
         jid = job.get("id") or job.get("_id")
         current = job.get("stage", "procurement")
         new_stage = "cutting" if current != "cutting" else "folding"

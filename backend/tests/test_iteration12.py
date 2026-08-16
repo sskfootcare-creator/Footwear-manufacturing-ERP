@@ -158,15 +158,13 @@ class TestPackingListFull:
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
         ws = wb.active
 
-        # Row 15 should contain shipping pairs
-        row15 = " ".join(str(ws.cell(15, c).value or "") for c in range(1, 20)).upper()
-        for kw in ["DISPATCH", "TRANSPORTER", "VEHICLE", "DRIVER"]:
-            assert kw in row15, f"row15 missing {kw}; row15={row15}"
-        # Concrete values populated
+        # Concrete values and shipping pairs populated
         full_text = "\n".join(
             " ".join(str(ws.cell(r_, c).value or "") for c in range(1, 25))
             for r_ in range(1, ws.max_row + 1)
         )
+        for kw in ["DISPATCH", "TRANSPORTER", "VEHICLE", "DRIVER"]:
+            assert kw in full_text.upper(), f"full_text missing {kw}; full_text={full_text}"
         assert "XPRESS LOGISTICS" in full_text.upper(), "transporter value missing"
         assert "MH04AB1234" in full_text.upper(), "vehicle_no missing"
         assert "RAJU PATIL" in full_text.upper(), "driver_name missing"
@@ -208,117 +206,79 @@ class TestPackingListFull:
 # -------------------------------------------------------------------
 class TestMergedPackingList:
     def test_merge_same_client(self, session):
-        # Move 2 production jobs to dispatched, attempt merged generation
-        r = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
-        assert r.status_code == 200
-        all_jobs = r.json()
+        import uuid
+        m_res = session.post(f"{BASE_URL}/api/materials", json={
+            "name": "Merge Style Material",
+            "category": "upper",
+            "unit": "sqft",
+            "rate": 50.0,
+        })
+        if m_res.status_code == 200:
+            mat_doc = m_res.json()
+        else:
+            mat_doc = session.get(f"{BASE_URL}/api/materials").json()[0]
+        mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
+        session.post(f"{BASE_URL}/api/inventory/movements", json={
+            "material_id": mat_id,
+            "type": "in",
+            "quantity": 10000.0,
+            "rate": 50.0,
+            "party": "Opening Stock",
+            "notes": "Initial test stock",
+        })
+        style_payload = {
+            "name": "Merge Style",
+            "category": "Footwear",
+            "base_size": "8",
+            "bom": [{
+                "material_id": mat_id,
+                "material_name": mat_doc.get("name", "Material"),
+                "material_code": mat_doc.get("code", "MAT"),
+                "unit": mat_doc.get("unit", "sqft"),
+                "rate": mat_doc.get("rate", 50.0),
+                "quantity": 1.0,
+            }],
+            "labor": [],
+        }
+        r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
+        assert r_style.status_code == 200, r_style.text
+        style_code = r_style.json()["code"]
         
-        # group by client via PO mapping
-        r_po = session.get(f"{BASE_URL}/api/pos")
-        po_to_client = {p["id"]: p.get("client_name", "") for p in r_po.json()}
+        po_payload = {
+            "po_number": f"PO-MERGE-{uuid.uuid4().hex[:8]}",
+            "client_name": "Merge Client",
+            "po_date": "2026-07-13",
+            "delivery_date": "2026-08-13",
+            "payment_terms": "30 Days Credit",
+            "line_items": [
+                {
+                    "style_code": style_code,
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 50,
+                    "unit_price": 400.0,
+                    "amount": 20000.0
+                },
+                {
+                    "style_code": style_code,
+                    "color": "Black",
+                    "size": "9",
+                    "quantity": 40,
+                    "unit_price": 400.0,
+                    "amount": 16000.0
+                }
+            ]
+        }
+        r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
+        assert r_po.status_code == 200, r_po.text
+        po_id = r_po.json()["id"]
         
-        if len(all_jobs) < 2:
-            import uuid
-            style_payload = {
-                "name": "Merge Style",
-                "category": "Footwear",
-                "base_size": "8",
-                "bom": [],
-                "labor": [],
-            }
-            r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
-            assert r_style.status_code == 200, r_style.text
-            style_code = r_style.json()["code"]
-            
-            po_payload = {
-                "po_number": f"PO-MERGE-{uuid.uuid4().hex[:8]}",
-                "client_name": "Merge Client",
-                "po_date": "2026-07-13",
-                "delivery_date": "2026-08-13",
-                "payment_terms": "30 Days Credit",
-                "line_items": [
-                    {
-                        "style_code": style_code,
-                        "color": "Black",
-                        "size": "8",
-                        "quantity": 50,
-                        "unit_price": 400.0,
-                        "amount": 20000.0
-                    },
-                    {
-                        "style_code": style_code,
-                        "color": "Black",
-                        "size": "9",
-                        "quantity": 40,
-                        "unit_price": 400.0,
-                        "amount": 16000.0
-                    }
-                ]
-            }
-            r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
-            assert r_po.status_code == 200, r_po.text
-            po_id = r_po.json()["id"]
-            po_to_client[po_id] = "Merge Client"
-            
-            r = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
-            assert r.status_code == 200
-            all_jobs = r.json()
-        # group by client via PO mapping
-        r = session.get(f"{BASE_URL}/api/pos")
-        po_to_client = {p["id"]: p.get("client_name", "") for p in r.json()}
-        # bucket jobs by client
-        buckets = {}
-        for j in all_jobs:
-            c = po_to_client.get(j.get("po_id"), "")
-            buckets.setdefault(c, []).append(j)
-        same_client = next((v for v in buckets.values() if len(v) >= 2), None)
-        if not same_client:
-            import uuid
-            style_payload = {
-                "name": "Merge Style",
-                "category": "Footwear",
-                "base_size": "8",
-                "bom": [],
-                "labor": [],
-            }
-            r_style = session.post(f"{BASE_URL}/api/styles", json=style_payload, timeout=15)
-            assert r_style.status_code == 200, r_style.text
-            style_code = r_style.json()["code"]
-            
-            po_payload = {
-                "po_number": f"PO-MERGE-{uuid.uuid4().hex[:8]}",
-                "client_name": "Merge Client",
-                "po_date": "2026-07-13",
-                "delivery_date": "2026-08-13",
-                "payment_terms": "30 Days Credit",
-                "line_items": [
-                    {
-                        "style_code": style_code,
-                        "color": "Black",
-                        "size": "8",
-                        "quantity": 50,
-                        "unit_price": 400.0,
-                        "amount": 20000.0
-                    },
-                    {
-                        "style_code": style_code,
-                        "color": "Black",
-                        "size": "9",
-                        "quantity": 40,
-                        "unit_price": 400.0,
-                        "amount": 16000.0
-                    }
-                ]
-            }
-            r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload, timeout=15)
-            assert r_po.status_code == 200, r_po.text
-            po_id = r_po.json()["id"]
-            
-            r_jobs = session.get(f"{BASE_URL}/api/production/jobs?source_type=all", timeout=15)
-            assert r_jobs.status_code == 200
-            same_client = [j for j in r_jobs.json() if j.get("po_id") == po_id]
-            po_to_client[po_id] = "Merge Client"
-        j1, j2 = same_client[:2]
+        r_jobs = session.get(f"{BASE_URL}/api/production/jobs?source_type=all", timeout=15)
+        assert r_jobs.status_code == 200
+        same_po_jobs = [j for j in r_jobs.json() if j.get("po_id") == po_id]
+        assert len(same_po_jobs) >= 2
+        
+        j1, j2 = same_po_jobs[:2]
         # PATCH both to dispatched (idempotent)
         for j in (j1, j2):
             session.patch(f"{BASE_URL}/api/production/jobs/{j['id']}", json={"stage": "dispatched"})
@@ -336,7 +296,7 @@ class TestMergedPackingList:
         ws = wb.active
         # Validate the file loads & contains data
         assert ws.max_row > 10, f"too few rows: {ws.max_row}"
-        TestMergedPackingList._same_client_jobs = (j1, j2, po_to_client)
+        TestMergedPackingList._same_client_jobs = (j1, j2, {po_id: "Merge Client"})
 
     def test_merge_cross_client_rejected(self, session):
         # Re-fetch jobs and PO mapping independently (class-level state set in test methods

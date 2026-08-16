@@ -4,7 +4,7 @@ import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
@@ -78,6 +78,82 @@ function groupJobsByColor(jobs) {
     assignments: aggregateAssignments(g.rows),
     overdueHours: aggregateOverdue(g.rows),
   }));
+}
+
+/**
+ * Derived clustering pass ONLY for Archived groups.
+ * Clusters archived groups by shared invoice_id (e.g. from merged dispatches).
+ * Groups sharing one invoice_id go into one cluster (cluster.groups = [g1, g2, ...]).
+ * Groups with their own individual invoice (or no invoice) remain as single-item clusters.
+ *
+ * @param {Array} groups - array of job groups from groupJobsByColor(archivedJobs)
+ * @param {Object} dispatchRecordByJobId - map of job_id -> dispatch_record
+ * @param {Array} invoices - array of invoice objects
+ * @returns {Array} array of cluster objects: { id, invoice_id, invoice_no, is_merged, groups: [...] }
+ */
+export function clusterArchivedGroups(groups, dispatchRecordByJobId = {}, invoices = []) {
+  if (!groups || !groups.length) return [];
+
+  // Map job_id -> invoice (specifically accounts for merged: true invoices)
+  const invoiceByJobId = {};
+  for (const inv of invoices || []) {
+    if (inv && Array.isArray(inv.job_ids)) {
+      for (const jid of inv.job_ids) {
+        if (jid) invoiceByJobId[String(jid)] = inv;
+      }
+    }
+  }
+
+  const clustersMap = new Map();
+
+  for (const g of groups) {
+    let resolvedInvoiceId = null;
+    let resolvedInvoiceNo = null;
+    let isMerged = false;
+    let matchedInvoice = null;
+    let matchedDr = null;
+
+    for (const row of g.rows || []) {
+      const inv = invoiceByJobId[String(row.id)];
+      if (inv) {
+        resolvedInvoiceId = inv.id || String(inv._id);
+        resolvedInvoiceNo = inv.invoice_no;
+        isMerged = Boolean(inv.merged);
+        matchedInvoice = inv;
+        break;
+      }
+
+      const dr = dispatchRecordByJobId[row.id];
+      if (dr) {
+        resolvedInvoiceId = dr.invoice_id || dr.id;
+        resolvedInvoiceNo = dr.invoice_no;
+        matchedDr = dr;
+        break;
+      }
+    }
+
+    const clusterKey = resolvedInvoiceId ? `inv:${resolvedInvoiceId}` : `group:${g.key}`;
+
+    if (!clustersMap.has(clusterKey)) {
+      clustersMap.set(clusterKey, {
+        id: clusterKey,
+        invoice_id: resolvedInvoiceId,
+        invoice_no: resolvedInvoiceNo,
+        is_merged: isMerged,
+        invoice: matchedInvoice,
+        dispatch_record: matchedDr,
+        groups: [g],
+      });
+    } else {
+      const cluster = clustersMap.get(clusterKey);
+      cluster.groups.push(g);
+      cluster.is_merged = true; // Multiple groups share this invoice
+      if (matchedInvoice && !cluster.invoice) cluster.invoice = matchedInvoice;
+      if (matchedDr && !cluster.dispatch_record) cluster.dispatch_record = matchedDr;
+    }
+  }
+
+  return Array.from(clustersMap.values());
 }
 
 function aggregateComponents(rows) {
@@ -158,21 +234,24 @@ export default function Production() {
   const [dispatchFor, setDispatchFor] = useState(null);     // group to dispatch
   const [savedPackingLists, setSavedPackingLists] = useState([]);
   const [dispatchRecords, setDispatchRecords] = useState([]);
+  const [invoices, setInvoices] = useState([]);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
   const load = async () => {
-    const [j, w, s, ar, pl, dr] = await Promise.all([
+    const [j, w, s, ar, pl, dr, invs] = await Promise.all([
       http.get("/production/jobs"),
       http.get("/workers"),
       http.get("/styles"),
       http.get("/production/archive"),
       http.get("/packing-lists"),
       http.get("/dispatch-records?limit=1000"),
+      http.get("/invoices").catch(() => ({ data: [] })),
     ]);
     setJobs(j.data); setWorkers(w.data); setStyles(s.data);
     setArchivedJobs(ar.data); setSavedPackingLists(pl.data || []);
     setDispatchRecords(dr.data || []);
+    setInvoices(invs.data || []);
   };
   useEffect(() => { load(); }, []);
 
@@ -613,6 +692,7 @@ export default function Production() {
             dispatchRecordByJobId={dispatchRecordByJobId}
             onDownloadDispatchFile={downloadDispatchFile}
             onDownloadInvoice={downloadGroupInvoice}
+            invoices={invoices}
           />
         ) : (
         <div className="overflow-x-auto pb-4">
@@ -1377,8 +1457,51 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
 
 /* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice }) {
+function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [] }) {
+  const [expandedClusters, setExpandedClusters] = useState({});
+  const toggleExpand = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
+
   const groups = groupJobsByColor(jobs);
+  const clusters = useMemo(() => clusterArchivedGroups(groups, dispatchRecordByJobId, invoices), [groups, dispatchRecordByJobId, invoices]);
+
+  const downloadInvoiceFile = async (invoiceId, invoiceNo) => {
+    try {
+      const res = await http.get(`/invoices/${invoiceId}/file`, { responseType: "blob" });
+      triggerDownload(res.data, `Invoice-${invoiceNo || "merged"}.pdf`, "application/pdf");
+    } catch (e) {
+      alert("Invoice download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const downloadInvoiceCartonLabels = async (invoiceId, invoiceNo, fallbackJobIds = []) => {
+    try {
+      if (invoiceId) {
+        try {
+          const res = await http.get(`/invoices/${invoiceId}/carton-labels`, { responseType: "blob" });
+          triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
+          return;
+        } catch (err) {
+          // fallback to job_ids endpoint
+        }
+      }
+      if (fallbackJobIds.length) {
+        const res = await http.get(`/production/jobs/carton-labels?job_ids=${fallbackJobIds.join(",")}`, { responseType: "blob" });
+        triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
+      }
+    } catch (e) {
+      alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const downloadCombinedCartonList = async (jobIds, invoiceNo) => {
+    try {
+      const res = await http.get(`/production/jobs/carton-list?job_ids=${jobIds.join(",")}`, { responseType: "blob" });
+      triggerDownload(res.data, `CartonList-${invoiceNo || "merged"}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    } catch (e) {
+      alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
   return (
     <div className="space-y-5" data-testid="archive-list">
       <Card className="bg-slate-50 border-2 border-slate-200 p-4">
@@ -1388,18 +1511,227 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
             <p className="text-xs text-slate-600 mt-1">Cards that have both invoice + packing list generated land here. Click <b>View details</b> to inspect full production history.</p>
           </div>
           <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
-            {groups.length} group{groups.length !== 1 ? "s" : ""} · {jobs.length} job{jobs.length !== 1 ? "s" : ""}
+            {clusters.length} card{clusters.length !== 1 ? "s" : ""} ({groups.length} group{groups.length !== 1 ? "s" : ""}) · {jobs.length} job{jobs.length !== 1 ? "s" : ""}
           </div>
         </div>
       </Card>
 
-      {groups.length === 0 ? (
+      {clusters.length === 0 ? (
         <Card className="p-12 text-center text-slate-400 text-sm" data-testid="archive-empty">
           Nothing archived yet — once both <b>Invoice</b> and <b>Packing List</b> are generated for a card it moves here automatically.
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4" data-testid="archive-grid">
-          {groups.map(g => {
+          {clusters.map(cluster => {
+            if (cluster.is_merged && cluster.groups.length > 1) {
+              const isExpanded = !!expandedClusters[cluster.id];
+              const allJobIds = cluster.groups.flatMap(g => g.rows.map(r => r.id));
+              const totalClusterQty = cluster.groups.reduce((sum, g) => sum + (g.totalQty || 0), 0);
+              const poNumbers = Array.from(new Set(cluster.groups.map(g => g.po_number).filter(Boolean)));
+              const clientName = cluster.groups[0]?.client_name;
+
+              return (
+                <Card key={cluster.id} className="border-l-4 border-[#0F172A] hover:border-blue-600 transition-colors shadow-sm" data-testid={`archive-merged-card-${cluster.id}`}>
+                  <div className="p-4 space-y-3">
+                    {/* Header */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                          <span className="font-mono text-xs text-slate-500 font-bold">PO {poNumbers.join(" + ") || "—"}</span>
+                          <span className="bg-[#0F172A] text-white text-[9px] font-bold px-2 py-0.5 uppercase tracking-wider rounded flex items-center gap-1">
+                            <Layers className="w-2.5 h-2.5" /> Merged Dispatch ({cluster.groups.length} Styles)
+                          </span>
+                        </div>
+                        <div className="font-mono text-sm font-bold text-slate-800">
+                          Invoice: <span className="text-[#C27842]">{cluster.invoice_no || "—"}</span>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Total Qty</div>
+                        <div className="font-mono font-bold text-xl text-[#C27842]">{totalClusterQty}</div>
+                      </div>
+                    </div>
+
+                    {clientName && (
+                      <div className="text-xs text-slate-600">
+                        <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {clientName}
+                      </div>
+                    )}
+
+                    {/* Constituent Styles & Colors List */}
+                    <div className="bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1.5">
+                      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                        Constituent Styles &amp; Quantities:
+                      </div>
+                      <div className="divide-y divide-slate-200">
+                        {cluster.groups.map(g => (
+                          <div key={g.key} className="py-1.5 flex items-center justify-between text-xs gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              {(styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url) && (
+                                <img
+                                  src={styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url}
+                                  alt=""
+                                  className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0"
+                                />
+                              )}
+                              <div className="truncate">
+                                <span className="font-bold text-slate-900">{g.style_code}</span>
+                                <span className="text-slate-600 ml-1 font-semibold">({g.color})</span>
+                                <div className="text-[10px] text-slate-500 truncate">
+                                  Sizes: <span className="font-mono">{g.sizes.join(" · ")}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="font-mono font-bold text-slate-700 text-sm whitespace-nowrap">{g.totalQty} prs</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Collapsed/Primary Action Bar */}
+                    <div className="flex gap-1.5 flex-wrap pt-2 border-t border-slate-200 items-center">
+                      <button
+                        onClick={() => toggleExpand(cluster.id)}
+                        className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
+                        data-testid={`archive-merged-details-btn-${cluster.id}`}
+                      >
+                        <Eye className="w-3 h-3" /> {isExpanded ? "Hide Details" : "View Details"}
+                        {isExpanded ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
+                      </button>
+
+                      {cluster.invoice_id && (
+                        <button
+                          onClick={() => downloadInvoiceFile(cluster.invoice_id, cluster.invoice_no)}
+                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                          data-testid={`archive-merged-invoice-btn-${cluster.id}`}
+                        >
+                          <FileDown className="w-3 h-3" /> Invoice
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => downloadInvoiceCartonLabels(cluster.invoice_id, cluster.invoice_no, allJobIds)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        data-testid={`archive-merged-labels-btn-${cluster.id}`}
+                      >
+                        <FileDown className="w-3 h-3" /> Labels
+                      </button>
+
+                      <button
+                        onClick={() => downloadCombinedCartonList(allJobIds, cluster.invoice_no)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        data-testid={`archive-merged-cartonlist-btn-${cluster.id}`}
+                      >
+                        <FileDown className="w-3 h-3" /> Carton List
+                      </button>
+                    </div>
+
+                    {/* Expanded Drill-down for individual constituent cards and pre-merge documents */}
+                    {isExpanded && (
+                      <div className="mt-3 pt-3 border-t-2 border-dashed border-slate-300 space-y-2.5 bg-slate-100/80 p-3 rounded" data-testid={`archive-merged-drilldown-${cluster.id}`}>
+                        <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                          Individual Pre-Merge Cards &amp; Original Documents:
+                        </div>
+                        {cluster.groups.map(g => {
+                          let drec = null;
+                          if (dispatchRecordByJobId) {
+                            for (const row of g.rows || []) {
+                              if (dispatchRecordByJobId[row.id]) {
+                                drec = dispatchRecordByJobId[row.id];
+                                break;
+                              }
+                            }
+                          }
+                          return (
+                            <div key={`drill-${g.key}`} className="bg-white p-2.5 rounded border border-slate-200 shadow-2xs space-y-2">
+                              <div className="flex items-baseline justify-between">
+                                <div>
+                                  <span className="font-bold text-xs text-slate-900">{g.style_code}</span>
+                                  <span className="text-[11px] text-slate-600 ml-1.5 font-bold">({g.color})</span>
+                                  <div className="text-[10px] text-slate-500 font-mono">Sizes: {g.sizes.join(" · ")}</div>
+                                </div>
+                                <div className="font-mono font-bold text-xs text-[#C27842]">{g.totalQty} prs</div>
+                              </div>
+                              <div className="flex gap-1 flex-wrap pt-1.5 border-t border-slate-100">
+                                <button onClick={() => onViewDetails(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-1.5 py-0.5 flex items-center gap-1">
+                                  <Eye className="w-2.5 h-2.5" /> Details Modal
+                                </button>
+                                <button onClick={() => onPrint(g)} className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1">
+                                  <Printer className="w-2.5 h-2.5" /> Card PDF
+                                </button>
+                                <button onClick={() => onPacking(g)} className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1">
+                                  <Package className="w-2.5 h-2.5" /> Packing List (New)
+                                </button>
+                                {drec ? (
+                                  <>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Invoice
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Packing List
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Labels
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button
+                                      onClick={async () => {
+                                        try {
+                                          const res = await http.get(`/production/jobs/carton-labels?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                                          triggerDownload(res.data, `CartonLabels-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.pdf`, "application/pdf");
+                                        } catch (e) {
+                                          alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
+                                        }
+                                      }}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Labels
+                                    </button>
+                                    <button
+                                      onClick={async () => {
+                                        try {
+                                          const res = await http.get(`/production/jobs/carton-list?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
+                                          triggerDownload(res.data, `CartonList-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                                        } catch (e) {
+                                          alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
+                                        }
+                                      }}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            }
+
+            // Non-merged single-item cluster — render EXACTLY as before
+            const g = cluster.groups[0];
             let drec = null;
             if (dispatchRecordByJobId) {
               for (const row of g.rows || []) {

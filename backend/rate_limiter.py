@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from functools import wraps
 import inspect
 import logging
+import os
 from fastapi import HTTPException, Request
 
 log = logging.getLogger("ssk.rate_limiter")
@@ -56,6 +57,8 @@ class RateLimiter:
         return f"ip:{client_ip}"
 
     def check(self, request: Request):
+        if (os.environ.get("RATE_LIMIT_DISABLED") == "1" or os.environ.get("TESTING") == "1") and not request.headers.get("x-test-rate-limit-client-ip"):
+            return
         key = self.get_client_key(request)
         now_ts = datetime.now(timezone.utc).timestamp()
         

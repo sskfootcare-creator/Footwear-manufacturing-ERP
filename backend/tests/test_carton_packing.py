@@ -62,19 +62,53 @@ def test_ean_mapping_workflow(session):
     assert codes[0]["ean_code"] == "8901234567890"
 
 
-def test_carton_packing_and_invoice_workflow(session):
-    # 1. Create a dummy style first
+def _create_style_with_bom(session, name, default_pairs_per_carton, base_size="8"):
+    m_res = session.post(f"{BASE_URL}/api/materials", json={
+        "name": f"{name} Material",
+        "category": "upper",
+        "unit": "sqft",
+        "rate": 50.0,
+    })
+    if m_res.status_code == 200:
+        mat_doc = m_res.json()
+    else:
+        mat_doc = session.get(f"{BASE_URL}/api/materials").json()[0]
+    mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
+    session.post(f"{BASE_URL}/api/inventory/movements", json={
+        "material_id": mat_id,
+        "type": "in",
+        "quantity": 10000.0,
+        "rate": 50.0,
+        "party": "Opening Stock",
+        "notes": "Initial test stock",
+    })
     style_payload = {
-        "name": "Carton Packing Style",
+        "name": name,
         "category": "Footwear",
-        "base_size": "8",
-        "bom": [],
+        "base_size": base_size,
+        "bom": [{
+            "material_id": mat_id,
+            "material_name": mat_doc.get("name", "Material"),
+            "material_code": mat_doc.get("code", "MAT"),
+            "unit": mat_doc.get("unit", "sqft"),
+            "rate": mat_doc.get("rate", 50.0),
+            "quantity": 1.0,
+        }],
         "labor": [],
-        "default_pairs_per_carton": {"default": 30}
+        "overhead_pct": 5.0,
+        "packing_cost": 10.0,
+        "margin_pct": 20.0,
+        "gst_pct": 5.0,
+        "default_pairs_per_carton": default_pairs_per_carton
     }
     r = session.post(f"{BASE_URL}/api/styles", json=style_payload)
     assert r.status_code == 200, r.text
-    style = r.json()
+    return r.json()
+
+
+def test_carton_packing_and_invoice_workflow(session):
+    # 1. Create a dummy style first
+    style = _create_style_with_bom(session, "Carton Packing Style", {"default": 30}, base_size="8")
     style_id = style["id"]
     style_code = style["code"]
 
@@ -183,17 +217,7 @@ def test_carton_packing_and_invoice_workflow(session):
 
 def test_bulk_confirm_qc_pack_flow(session):
     # 1. Create style
-    style_payload = {
-        "name": "Bulk Confirm Style",
-        "category": "Footwear",
-        "base_size": "7",
-        "bom": [],
-        "labor": [],
-        "default_pairs_per_carton": {"default": 30}
-    }
-    r = session.post(f"{BASE_URL}/api/styles", json=style_payload)
-    assert r.status_code == 200, r.text
-    style = r.json()
+    style = _create_style_with_bom(session, "Bulk Confirm Style", {"default": 30}, base_size="7")
     style_id = style["id"]
     style_code = style["code"]
 
@@ -330,15 +354,8 @@ def test_dispatch_documents_flow(session):
     import zipfile, io, time
 
     # ── 1. Create style ────────────────────────────────────────────────────────
-    r = session.post(f"{BASE_URL}/api/styles", json={
-        "code": "", "name": "DispatchTestStyle",
-        "category": "Footwear", "base_size": "7",
-        "bom": [], "labor": [], "overhead_pct": 5.0,
-        "packing_cost": 10.0, "margin_pct": 20.0, "gst_pct": 5.0,
-        "default_pairs_per_carton": {"default": 40},
-    })
-    assert r.status_code == 200, r.text
-    style = r.json(); style_id = style["id"]; style_code = style["code"]
+    style = _create_style_with_bom(session, "DispatchTestStyle", {"default": 40}, base_size="7")
+    style_id = style["id"]; style_code = style["code"]
 
     # ── 2. Create client ───────────────────────────────────────────────────────
     r = session.post(f"{BASE_URL}/api/clients", json={

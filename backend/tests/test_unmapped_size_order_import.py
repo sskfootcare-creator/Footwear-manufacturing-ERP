@@ -122,7 +122,9 @@ def test_configured_import_unmapped_size_routes_to_exceptions():
         mock_file.read = AsyncMock(return_value=csv_content)
 
         mock_db.order_import_format_configs.find_one = AsyncMock(return_value=cfg_doc)
+        mock_db.online_orders.find_one = AsyncMock(return_value=None)
         mock_db.online_orders.insert_one = AsyncMock(return_value=MagicMock(inserted_id=ObjectId()))
+        mock_db.online_order_items.find_one = AsyncMock(return_value=None)
         mock_db.online_order_items.insert_one = AsyncMock()
         mock_db.online_order_exceptions.insert_many = AsyncMock()
         mock_db.activity_logs.insert_one = AsyncMock()

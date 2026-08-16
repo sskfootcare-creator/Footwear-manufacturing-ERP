@@ -96,10 +96,43 @@ def production_job(admin_session, worker_token, second_worker):
     """
     actual_wid = worker_token["worker_id"]
 
-    # Find or create a style code
-    r_styles = admin_session.get(f"{API_URL}/styles")
-    styles    = r_styles.json() if r_styles.status_code == 200 else []
-    style_code = styles[0]["code"] if styles else "TEST-STYLE"
+    # Create a style with BOM and stock
+    m_res = admin_session.post(f"{API_URL}/materials", json={
+        "name": "Worker Style Material",
+        "category": "upper",
+        "unit": "sqft",
+        "rate": 50.0,
+    })
+    if m_res.status_code == 200:
+        mat_doc = m_res.json()
+    else:
+        mat_doc = admin_session.get(f"{API_URL}/materials").json()[0]
+    mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
+    admin_session.post(f"{API_URL}/inventory/movements", json={
+        "material_id": mat_id,
+        "type": "in",
+        "quantity": 10000.0,
+        "rate": 50.0,
+        "party": "Opening Stock",
+        "notes": "Initial test stock",
+    })
+    style_payload = {
+        "name": "Worker Role Style",
+        "category": "Footwear",
+        "base_size": "8",
+        "bom": [{
+            "material_id": mat_id,
+            "material_name": mat_doc.get("name", "Material"),
+            "material_code": mat_doc.get("code", "MAT"),
+            "unit": mat_doc.get("unit", "sqft"),
+            "rate": mat_doc.get("rate", 50.0),
+            "quantity": 1.0,
+        }],
+        "labor": [],
+    }
+    r_style = admin_session.post(f"{API_URL}/styles", json=style_payload, timeout=15)
+    assert r_style.status_code == 200, r_style.text
+    style_code = r_style.json()["code"]
 
     # Create a PO
     import time as _time
