@@ -971,18 +971,16 @@ export default function POs() {
                             {prof && prof.profit != null ? (
                               <div>
                                 <div
-                                  className={`font-bold ${
-                                    prof.profit >= 0 ? "text-emerald-700" : "text-red-600"
-                                  }`}
+                                  className={`font-bold ${prof.profit >= 0 ? "text-emerald-700" : "text-red-600"
+                                    }`}
                                 >
                                   {prof.profit >= 0 ? "+" : ""}
                                   {inr(prof.profit)}
                                 </div>
                                 {prof.profit_pct != null && (
                                   <div
-                                    className={`text-[10px] font-semibold ${
-                                      prof.profit >= 0 ? "text-emerald-600" : "text-red-500"
-                                    }`}
+                                    className={`text-[10px] font-semibold ${prof.profit >= 0 ? "text-emerald-600" : "text-red-500"
+                                      }`}
                                   >
                                     ({prof.profit_pct}%)
                                   </div>

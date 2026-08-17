@@ -11,6 +11,10 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure .env is loaded if po_extractor is imported directly or in workers
+load_dotenv(Path(__file__).parent / ".env")
 
 from po_extractor_free import (
     ExtractionFailed,
@@ -20,7 +24,19 @@ from po_extractor_free import (
 )
 
 
-_USE_LLM_FALLBACK = os.environ.get("PO_EXTRACTOR_LLM_FALLBACK", "true").lower() == "true"
+def _use_llm_fallback() -> bool:
+    return os.environ.get("PO_EXTRACTOR_LLM_FALLBACK", "true").lower() == "true"
+
+
+def _get_gemini_model() -> str:
+    return os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+
+
+def _get_candidate_models() -> list[str]:
+    primary = _get_gemini_model()
+    defaults = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.7-flash"]
+    candidates = [primary] + [m for m in defaults if m != primary]
+    return candidates
 
 
 EXTRACTION_PROMPT = """You are an expert at extracting structured data from Purchase Order documents for footwear manufacturing.
@@ -131,7 +147,15 @@ def _is_low_confidence(data: dict) -> bool:
 
 
 # ---------------------- PUBLIC API (async) ----------------------
-async def extract_po_from_pdf(file_bytes: bytes) -> dict:
+async def extract_po_from_pdf(file_bytes: bytes, force_ai: bool = False) -> dict:
+    # 0) Direct AI extraction if explicitly requested
+    if force_ai:
+        llm_data = await _llm_extract_pdf(file_bytes)
+        if isinstance(llm_data, dict):
+            llm_data["extraction_method"] = "gemini_direct"
+            llm_data["confidence"] = "high"
+        return llm_data
+
     # 1) try the free local pipeline
     data = None
     try:
@@ -144,7 +168,7 @@ async def extract_po_from_pdf(file_bytes: bytes) -> dict:
         data = None
 
     # 2) optional LLM fallback (triggered if local failed OR result was low confidence)
-    if _USE_LLM_FALLBACK and os.environ.get("GEMINI_API_KEY"):
+    if _use_llm_fallback() and os.environ.get("GEMINI_API_KEY"):
         try:
             llm_data = await _llm_extract_pdf(file_bytes)
             if isinstance(llm_data, dict):
@@ -177,7 +201,15 @@ async def extract_po_from_pdf(file_bytes: bytes) -> dict:
     )
 
 
-async def extract_po_from_xlsx(file_bytes: bytes) -> dict:
+async def extract_po_from_xlsx(file_bytes: bytes, force_ai: bool = False) -> dict:
+    # 0) Direct AI extraction if explicitly requested
+    if force_ai:
+        llm_data = await _llm_extract_xlsx(file_bytes)
+        if isinstance(llm_data, dict):
+            llm_data["extraction_method"] = "gemini_direct"
+            llm_data["confidence"] = "high"
+        return llm_data
+
     data = None
     try:
         data = extract_po_from_xlsx_local(file_bytes)
@@ -188,7 +220,7 @@ async def extract_po_from_xlsx(file_bytes: bytes) -> dict:
     except ExtractionFailed:
         data = None
 
-    if _USE_LLM_FALLBACK and os.environ.get("GEMINI_API_KEY"):
+    if _use_llm_fallback() and os.environ.get("GEMINI_API_KEY"):
         try:
             llm_data = await _llm_extract_xlsx(file_bytes)
             if isinstance(llm_data, dict):
@@ -216,26 +248,36 @@ async def extract_po_from_xlsx(file_bytes: bytes) -> dict:
 
 
 # ---------------------- LLM FALLBACK (lazy import) ----------------------
+
+
 async def _llm_extract_pdf(file_bytes: bytes) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable.")
+        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable in backend/.env")
     from google import genai
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[
-            genai.types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
-            EXTRACTION_PROMPT,
-        ],
-    )
-    return _post_process_extracted_data(json.loads(_clean_json(response.text)))
+    
+    last_err = None
+    for model_name in _get_candidate_models():
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    genai.types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
+                    EXTRACTION_PROMPT,
+                ],
+            )
+            return _post_process_extracted_data(json.loads(_clean_json(response.text)))
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Gemini API extraction failed across candidate models: {last_err}") from last_err
 
 
 async def _llm_extract_xlsx(file_bytes: bytes) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable.")
+        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable in backend/.env")
     from google import genai
     import openpyxl
     client = genai.Client(api_key=api_key)
@@ -252,11 +294,19 @@ async def _llm_extract_xlsx(file_bytes: bytes) -> dict:
                 if any(c.strip() for c in cells):
                     parts.append(" | ".join(cells))
         text_content = "\n".join(parts)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"{EXTRACTION_PROMPT}\n\n--- Document Content ---\n{text_content}",
-        )
-        return _post_process_extracted_data(json.loads(_clean_json(response.text)))
+        
+        last_err = None
+        for model_name in _get_candidate_models():
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=f"{EXTRACTION_PROMPT}\n\n--- Document Content ---\n{text_content}",
+                )
+                return _post_process_extracted_data(json.loads(_clean_json(response.text)))
+            except Exception as e:
+                last_err = e
+                continue
+        raise RuntimeError(f"Gemini API extraction failed across candidate models: {last_err}") from last_err
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
