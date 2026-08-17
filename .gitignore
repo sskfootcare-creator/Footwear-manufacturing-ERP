@@ -560,3 +560,9 @@ backend/uploads/images/7e9441511117481cbbd18fd281584065/thumb.jpg
 backend/uploads/images/8b75f105cdce445a82d4769a3466305c/display.jpg
 backend/uploads/images/8b75f105cdce445a82d4769a3466305c/original.jpg
 backend/uploads/images/8b75f105cdce445a82d4769a3466305c/thumb.jpg
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/vcruntime140.dll
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/concrt140.dll
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140_1.dll
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140_codecvt_ids.dll
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140.dll
+mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/vcruntime140_1.dll
