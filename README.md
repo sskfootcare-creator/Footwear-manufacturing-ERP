@@ -31,4 +31,12 @@ JWT_SECRET=your_secure_jwt_secret_here
 ADMIN_EMAIL=admin@yourdomain.com
 ADMIN_PASSWORD=your_secure_admin_password
 COOKIE_SECURE=true
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+### AI Fallback for Purchase Order Extraction (`GEMINI_API_KEY`)
+
+- **`GEMINI_API_KEY`** (optional): Google Gemini API key used as an AI fallback for PO extraction when local PDF/Excel parsing is insufficient (e.g. image-only PDFs or unusual tabular formats).
+  - Get a free API key at [aistudio.google.com](https://aistudio.google.com) (no credit card required).
+  - Uses the current official Google GenAI SDK (`google-genai`).
+

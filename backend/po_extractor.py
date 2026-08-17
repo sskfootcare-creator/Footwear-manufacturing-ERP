@@ -3,7 +3,7 @@
 The local extractor (pdfplumber + openpyxl, in `po_extractor_free.py`) handles
 nearly every footwear PO format the user uploads. If it fails because the PDF
 is purely image-based or the layout is too exotic, we fall back to the
-Emergent-LLM Gemini call (only if `EMERGENT_LLM_KEY` is configured AND the
+Google Gemini LLM call (only if `GEMINI_API_KEY` is configured AND the
 fallback is enabled).
 """
 import json
@@ -92,82 +92,156 @@ def _validate(data: dict) -> bool:
     return any((li.get("quantity") or 0) > 0 for li in items)
 
 
+def _is_low_confidence(data: dict) -> bool:
+    """Detect if locally extracted PO data is incomplete or low confidence.
+    
+    A result is considered low confidence if:
+    1. It has no valid line items with quantity > 0.
+    2. All line items are missing 'color' or all are missing 'size' (e.g., neither
+       recognized local format where variant splitting silently failed).
+    3. More than 50% of items are missing color or size attributes.
+    4. All line items are missing an item identifier (style_code, item_code, or description).
+    """
+    if not isinstance(data, dict):
+        return True
+    items = data.get("line_items") or []
+    valid_items = [li for li in items if (li.get("quantity") or 0) > 0]
+    if not valid_items:
+        return True
+
+    total = len(valid_items)
+    empty_color = sum(1 for li in valid_items if not str(li.get("color") or "").strip())
+    empty_size = sum(1 for li in valid_items if not str(li.get("size") or "").strip())
+    empty_identifier = sum(
+        1 for li in valid_items
+        if not str(li.get("style_code") or "").strip()
+        and not str(li.get("item_code") or "").strip()
+        and not str(li.get("description") or "").strip()
+    )
+
+    # If any essential footwear variant attribute is completely missing across all items
+    if empty_color == total or empty_size == total or empty_identifier == total:
+        return True
+
+    # If more than half of items have missing color or missing size
+    if empty_color > total / 2 or empty_size > total / 2:
+        return True
+
+    return False
+
+
 # ---------------------- PUBLIC API (async) ----------------------
 async def extract_po_from_pdf(file_bytes: bytes) -> dict:
     # 1) try the free local pipeline
+    data = None
     try:
         data = extract_po_from_pdf_local(file_bytes)
-        if _validate(data):
+        if _validate(data) and not _is_low_confidence(data):
+            data["extraction_method"] = "local"
+            data["confidence"] = "high"
             return data
     except ExtractionFailed:
         data = None
 
-    # 2) optional LLM fallback
-    if _USE_LLM_FALLBACK and os.environ.get("EMERGENT_LLM_KEY"):
+    # 2) optional LLM fallback (triggered if local failed OR result was low confidence)
+    if _USE_LLM_FALLBACK and os.environ.get("GEMINI_API_KEY"):
         try:
-            return await _llm_extract_pdf(file_bytes)
+            llm_data = await _llm_extract_pdf(file_bytes)
+            if isinstance(llm_data, dict):
+                llm_data["extraction_method"] = "gemini_fallback"
+                llm_data["confidence"] = "high"
+                llm_data["confidence_warning"] = (
+                    "Local parser had low confidence (unrecognized format / missing color/size); "
+                    "extracted via Gemini AI fallback."
+                )
+            return llm_data
         except Exception as e:
             # Bubble the local-parser result if we have one even though it's weak
-            if data:
+            if data and _validate(data):
+                data["extraction_method"] = "local_low_confidence"
+                data["confidence"] = "low"
+                data["confidence_warning"] = f"AI fallback failed ({e}); using weak local parse result."
                 return data
             raise RuntimeError(f"PO extraction failed (local + LLM): {e}") from e
 
-    # 3) nothing worked
-    if data:
+    # 3) nothing worked (or fallback disabled/unavailable)
+    if data and _validate(data):
+        data["extraction_method"] = "local_low_confidence"
+        data["confidence"] = "low"
+        data["confidence_warning"] = "Low confidence extraction: color/size could not be determined from this format."
         return data
     raise RuntimeError(
         "Could not extract PO from this PDF locally and the LLM fallback is disabled. "
-        "Try uploading an Excel version of the PO, or set EMERGENT_LLM_KEY and "
+        "Try uploading an Excel version of the PO, or set GEMINI_API_KEY and "
         "PO_EXTRACTOR_LLM_FALLBACK=true to enable AI fallback."
     )
 
 
 async def extract_po_from_xlsx(file_bytes: bytes) -> dict:
+    data = None
     try:
         data = extract_po_from_xlsx_local(file_bytes)
-        if _validate(data):
+        if _validate(data) and not _is_low_confidence(data):
+            data["extraction_method"] = "local"
+            data["confidence"] = "high"
             return data
     except ExtractionFailed:
         data = None
 
-    if _USE_LLM_FALLBACK and os.environ.get("EMERGENT_LLM_KEY"):
+    if _USE_LLM_FALLBACK and os.environ.get("GEMINI_API_KEY"):
         try:
-            return await _llm_extract_xlsx(file_bytes)
+            llm_data = await _llm_extract_xlsx(file_bytes)
+            if isinstance(llm_data, dict):
+                llm_data["extraction_method"] = "gemini_fallback"
+                llm_data["confidence"] = "high"
+                llm_data["confidence_warning"] = (
+                    "Local parser had low confidence (unrecognized format / missing color/size); "
+                    "extracted via Gemini AI fallback."
+                )
+            return llm_data
         except Exception as e:
-            if data:
+            if data and _validate(data):
+                data["extraction_method"] = "local_low_confidence"
+                data["confidence"] = "low"
+                data["confidence_warning"] = f"AI fallback failed ({e}); using weak local parse result."
                 return data
             raise RuntimeError(f"PO extraction failed (local + LLM): {e}") from e
 
-    if data:
+    if data and _validate(data):
+        data["extraction_method"] = "local_low_confidence"
+        data["confidence"] = "low"
+        data["confidence_warning"] = "Low confidence extraction: color/size could not be determined from this format."
         return data
     raise RuntimeError("Could not extract PO from this Excel file (no recognisable line items).")
 
 
 # ---------------------- LLM FALLBACK (lazy import) ----------------------
 async def _llm_extract_pdf(file_bytes: bytes) -> dict:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType
-    api_key = os.environ["EMERGENT_LLM_KEY"]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file_bytes); tmp_path = tmp.name
-    try:
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"po-extract-{os.urandom(8).hex()}",
-            system_message="You extract structured data from purchase orders and return strict JSON.",
-        ).with_model("gemini", "gemini-2.5-flash")
-        attach = FileContentWithMimeType(file_path=tmp_path, mime_type="application/pdf")
-        resp = await chat.send_message(UserMessage(text=EXTRACTION_PROMPT, file_contents=[attach]))
-        return _post_process_extracted_data(json.loads(_clean_json(resp)))
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable.")
+    from google import genai
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            genai.types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
+            EXTRACTION_PROMPT,
+        ],
+    )
+    return _post_process_extracted_data(json.loads(_clean_json(response.text)))
 
 
 async def _llm_extract_xlsx(file_bytes: bytes) -> dict:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable.")
+    from google import genai
     import openpyxl
-    api_key = os.environ["EMERGENT_LLM_KEY"]
+    client = genai.Client(api_key=api_key)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-        tmp.write(file_bytes); tmp_path = tmp.name
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
     try:
         wb = openpyxl.load_workbook(tmp_path, data_only=True)
         parts = []
@@ -178,13 +252,11 @@ async def _llm_extract_xlsx(file_bytes: bytes) -> dict:
                 if any(c.strip() for c in cells):
                     parts.append(" | ".join(cells))
         text_content = "\n".join(parts)
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"po-extract-{os.urandom(8).hex()}",
-            system_message="You extract structured data from purchase orders and return strict JSON.",
-        ).with_model("gemini", "gemini-2.5-flash")
-        resp = await chat.send_message(UserMessage(text=f"{EXTRACTION_PROMPT}\n\n--- Document Content ---\n{text_content}"))
-        return _post_process_extracted_data(json.loads(_clean_json(resp)))
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"{EXTRACTION_PROMPT}\n\n--- Document Content ---\n{text_content}",
+        )
+        return _post_process_extracted_data(json.loads(_clean_json(response.text)))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -202,3 +274,4 @@ def _post_process_extracted_data(data: dict) -> dict:
             if not data.get("client_state"):
                 data["client_state"] = STATE_CODE_MAP.get(cg[:2], "")
     return data
+

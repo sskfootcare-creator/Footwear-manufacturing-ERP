@@ -617,7 +617,8 @@ def build_packing_list_pdf(po: dict, options: dict | None = None, cartons: list[
     elements.append(header_table)
 
     # 2. Vendor & Destination Info
-    vendor_text = f"<b>VENDOR NAME :</b> {VENDOR['name']}<br/>{VENDOR['address'].replace('\n', ' ')}<br/><b>GSTIN:-</b> {VENDOR['gstin']}"
+    vendor_addr = VENDOR['address'].replace('\n', ' ')
+    vendor_text = f"<b>VENDOR NAME :</b> {VENDOR['name']}<br/>{vendor_addr}<br/><b>GSTIN:-</b> {VENDOR['gstin']}"
     client_name = po.get("client_name") or "ZECODE-BANGLORE-2220 ZECODE-BANGLORE-2220"
     client_addr = po.get("client_address") or po.get("shipping_address") or "PLOT NO. 2J/2K, 3RD PHASE KIADB OBEDENAHALLI INDUSTRIAL AREA BANGLORE, KARNATAKA DODDABALLAPUR 561 BENGALURU KARNATAKA 561203"
     client_gstin = po.get("client_gstin") or "29AAACS6995D2ZX"
