@@ -17,6 +17,16 @@ import {
   IndianRupee,
   AlertCircle,
   Trash2,
+  Calendar,
+  TrendingUp,
+  Clock,
+  ChevronDown,
+  ChevronUp,
+  ArrowRight,
+  Sparkles,
+  CheckCircle2,
+  CalendarDays,
+  Coins,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -37,27 +47,43 @@ const PAYMENT_MODES = [
 
 export default function Invoices() {
   const [rows, setRows] = useState([]);
+  const [forecast, setForecast] = useState(null);
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [view, setView] = useState(null);
   const [grnFor, setGrnFor] = useState(null);
   const [paymentFor, setPaymentFor] = useState(null);
   const [deleteFor, setDeleteFor] = useState(null);
+  const [showForecast, setShowForecast] = useState(true);
 
   const load = async () => {
-    const { data } = await http.get("/invoices");
-    setRows(data || []);
+    try {
+      const [{ data: invData }, { data: forecastData }] = await Promise.all([
+        http.get("/invoices"),
+        http.get("/invoices/cash-forecast").catch(() => ({ data: null })),
+      ]);
+      setRows(invData || []);
+      setForecast(forecastData || null);
+    } catch (err) {
+      console.error("Failed to load invoices or forecast", err);
+    }
   };
   useEffect(() => {
     load();
   }, []);
 
   const filtered = rows.filter((r) => {
-    if (filter !== "all" && r.status !== filter) return false;
+    if (filter === "grn_recorded") {
+      if (!r.grn_recorded && !r.grn_date) return false;
+    } else if (filter === "awaiting_grn") {
+      if (r.grn_recorded || r.grn_date) return false;
+    } else if (filter !== "all" && r.status !== filter) {
+      return false;
+    }
     if (search) {
       const q = search.toLowerCase();
       if (
-        !`${r.invoice_no} ${r.client_name} ${r.po_number}`
+        !`${r.invoice_no} ${r.client_name} ${r.po_number} ${r.grn_no || ""} ${r.grn_date || ""}`
           .toLowerCase()
           .includes(q)
       )
@@ -70,6 +96,8 @@ export default function Invoices() {
   const partial = rows.filter((r) => r.status === "partial");
   const paid = rows.filter((r) => r.status === "paid");
   const pending = rows.filter((r) => r.status === "pending");
+  const grnRecorded = rows.filter((r) => r.grn_recorded || r.grn_date);
+  const awaitingGrn = rows.filter((r) => !r.grn_recorded && !r.grn_date);
   const totalOutstanding = rows.reduce((s, r) => s + (r.outstanding || 0), 0);
 
   const openInvoice = async (id) => {
@@ -159,23 +187,91 @@ export default function Invoices() {
           />
         </div>
 
+        {/* Weekly Cash Inflow Forecast & Vendor Payment Schedule */}
+        {forecast && (
+          <WeeklyCashInflowForecast
+            forecast={forecast}
+            onSelectInvoice={(invId) => openInvoice(invId)}
+            onRecordGRN={(invSummary) => {
+              const fullRow = rows.find((r) => r.id === invSummary.id) || invSummary;
+              setGrnFor(fullRow);
+            }}
+          />
+        )}
+
         <Card className="overflow-hidden" data-testid="invoices-card">
-          <div className="px-5 py-3 border-b-2 border-slate-200 flex items-baseline justify-between gap-4">
-            <h2 className="text-sm font-bold uppercase tracking-wider flex items-center gap-2">
-              <FileText className="w-4 h-4 text-[#C27842]" />
-              {filter === "all"
-                ? "All invoices"
-                : `${filter.charAt(0).toUpperCase() + filter.slice(1)} invoices`}
-              <span className="text-slate-500 font-mono ml-1">
-                ({filtered.length})
-              </span>
-            </h2>
+          <div className="px-5 py-3 border-b-2 border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-bold uppercase tracking-wider flex items-center gap-2 mr-2">
+                <FileText className="w-4 h-4 text-[#C27842]" />
+                Invoices
+                <span className="text-slate-500 font-mono ml-1">
+                  ({filtered.length})
+                </span>
+              </h2>
+
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <button
+                  onClick={() => setFilter("all")}
+                  className={`px-2.5 py-1 rounded font-semibold transition-colors ${
+                    filter === "all"
+                      ? "bg-slate-900 text-white"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  All ({rows.length})
+                </button>
+                <button
+                  onClick={() => setFilter("grn_recorded")}
+                  className={`px-2.5 py-1 rounded font-semibold flex items-center gap-1 transition-colors ${
+                    filter === "grn_recorded"
+                      ? "bg-purple-700 text-white"
+                      : "bg-purple-50 text-purple-800 border border-purple-200 hover:bg-purple-100"
+                  }`}
+                >
+                  <ClipboardCheck className="w-3.5 h-3.5" />
+                  GRN Recorded ({grnRecorded.length})
+                </button>
+                <button
+                  onClick={() => setFilter("awaiting_grn")}
+                  className={`px-2.5 py-1 rounded font-semibold flex items-center gap-1 transition-colors ${
+                    filter === "awaiting_grn"
+                      ? "bg-amber-600 text-white"
+                      : "bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  Awaiting GRN ({awaitingGrn.length})
+                </button>
+                <button
+                  onClick={() => setFilter("overdue")}
+                  className={`px-2.5 py-1 rounded font-semibold transition-colors ${
+                    filter === "overdue"
+                      ? "bg-red-600 text-white"
+                      : "bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
+                  }`}
+                >
+                  Overdue ({overdue.length})
+                </button>
+                <button
+                  onClick={() => setFilter("paid")}
+                  className={`px-2.5 py-1 rounded font-semibold transition-colors ${
+                    filter === "paid"
+                      ? "bg-green-600 text-white"
+                      : "bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+                  }`}
+                >
+                  Paid ({paid.length})
+                </button>
+              </div>
+            </div>
+
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search invoice / PO / client"
+              placeholder="Search invoice / PO / client / GRN"
               data-testid="invoices-search"
-              className="border-2 border-slate-300 px-3 py-1.5 text-sm focus:border-[#C27842] outline-none w-72"
+              className="border-2 border-slate-300 px-3 py-1.5 text-sm focus:border-[#C27842] outline-none w-full md:w-72"
             />
           </div>
           <div className="overflow-x-auto">
@@ -191,7 +287,8 @@ export default function Invoices() {
                   <th className="px-4 py-2 font-bold text-right">
                     Outstanding
                   </th>
-                  <th className="px-4 py-2 font-bold">Due</th>
+                  <th className="px-4 py-2 font-bold">GRN Status</th>
+                  <th className="px-4 py-2 font-bold">Due (45d)</th>
                   <th className="px-4 py-2 font-bold">Status</th>
                   <th className="px-4 py-2 font-bold text-right">Action</th>
                 </tr>
@@ -200,7 +297,7 @@ export default function Invoices() {
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="10"
+                      colSpan="11"
                       className="text-center text-slate-400 py-12 text-sm"
                     >
                       No invoices match.
@@ -232,23 +329,53 @@ export default function Invoices() {
                       <td className="px-4 py-2 text-right font-mono font-bold">
                         {inr(r.outstanding || 0)}
                       </td>
-                      <td className="px-4 py-2 text-xs">
-                        <span
-                          className={
-                            r.status === "overdue"
-                              ? "text-red-600 font-bold"
-                              : "text-slate-600"
-                          }
-                        >
-                          {r.due_date || "—"}
-                        </span>
-                        {r.status !== "paid" && r.days_to_due != null && (
-                          <div
-                            className={`text-[10px] ${r.days_to_due < 0 ? "text-red-600 font-bold" : r.days_to_due < 7 ? "text-amber-600" : "text-slate-500"}`}
-                          >
-                            {r.days_to_due < 0
-                              ? `${-r.days_to_due}d overdue`
-                              : `${r.days_to_due}d to go`}
+                      <td className="px-4 py-2 whitespace-nowrap">
+                        {r.grn_recorded || r.grn_date ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-300">
+                              <ClipboardCheck className="w-3.5 h-3.5 text-purple-700" />
+                              GRN Recorded
+                            </span>
+                            <div className="text-[10px] font-mono text-purple-700 mt-0.5">
+                              {r.grn_date} {r.grn_no ? `· ${r.grn_no}` : ""}
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                              <Clock className="w-3.5 h-3.5 text-amber-600" />
+                              Awaiting GRN
+                            </span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-xs whitespace-nowrap">
+                        {r.due_date ? (
+                          <>
+                            <span
+                              className={
+                                r.status === "overdue"
+                                  ? "text-red-600 font-bold font-mono"
+                                  : "text-slate-800 font-bold font-mono"
+                              }
+                            >
+                              {r.due_date}
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                              {r.status !== "paid" && r.days_to_due != null && (
+                                <span
+                                  className={`text-[10px] font-semibold ${r.days_to_due < 0 ? "text-red-600 font-bold" : r.days_to_due < 7 ? "text-amber-600" : "text-slate-500"}`}
+                                >
+                                  {r.days_to_due < 0
+                                    ? `${-r.days_to_due}d overdue`
+                                    : `${r.days_to_due}d to go`}
+                                </span>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-[10px] text-slate-400">
+                            {r.payment_terms_days || 45}d from GRN
                           </div>
                         )}
                       </td>
@@ -280,8 +407,12 @@ export default function Invoices() {
                           <>
                             <button
                               onClick={() => setGrnFor(r)}
-                              className="text-slate-600 hover:text-[#7C3AED] p-1.5"
-                              title="Record GRN"
+                              className={`p-1.5 rounded inline-block ${
+                                r.grn_recorded || r.grn_date
+                                  ? "text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200"
+                                  : "text-slate-600 hover:text-[#7C3AED]"
+                              }`}
+                              title={r.grn_recorded || r.grn_date ? "GRN Recorded: click to view or add details" : "Record GRN"}
                               data-testid={`inv-grn-${r.invoice_no}`}
                             >
                               <ClipboardCheck className="w-4 h-4" />
@@ -337,7 +468,7 @@ export default function Invoices() {
                       )}
                     </td>
                     <td
-                      colSpan="3"
+                      colSpan="4"
                       className="px-4 py-2.5 text-right font-mono text-xs text-slate-300"
                     >
                       Grand Total Outstanding ·{" "}
@@ -445,16 +576,65 @@ function InvoiceDetailModal({ inv, onClose }) {
           </button>
         </div>
         <div className="p-6 space-y-5">
+          {/* Prominent GRN Recording Status Banner */}
+          {inv.grn_recorded || inv.grn_date ? (
+            <div className="bg-purple-50 border-2 border-purple-300 p-3.5 rounded-lg flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-purple-600 text-white rounded-lg">
+                  <ClipboardCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-purple-950 flex items-center gap-2">
+                    <span>GRN Recorded</span>
+                    <span className="font-mono text-purple-700 bg-purple-200/70 px-2 py-0.5 rounded text-[11px]">
+                      {inv.grn_no ? `${inv.grn_no} · ` : ""}Date: {inv.grn_date}
+                    </span>
+                  </div>
+                  <div className="text-xs text-purple-800 mt-0.5">
+                    Goods received & accepted. 45-day payment term ends on <b className="font-mono">{inv.due_date}</b>.
+                  </div>
+                </div>
+              </div>
+              <span className="text-[10px] uppercase font-bold tracking-wider bg-purple-200 text-purple-900 px-2.5 py-1 rounded">
+                Clock Running
+              </span>
+            </div>
+          ) : (
+            <div className="bg-amber-50 border-2 border-amber-300 p-3.5 rounded-lg flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-500 text-white rounded-lg">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-amber-950">
+                    Awaiting Client GRN Confirmation
+                  </div>
+                  <div className="text-xs text-amber-800 mt-0.5">
+                    Goods dispatched. The 45-day payment due date will be calculated as soon as the GRN date is recorded.
+                  </div>
+                </div>
+              </div>
+              <span className="text-[10px] uppercase font-bold tracking-wider bg-amber-200 text-amber-900 px-2.5 py-1 rounded">
+                Awaiting GRN
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
             <DLPair label="Invoice Date" value={inv.invoice_date} />
             <DLPair
+              label="GRN Date"
+              value={inv.grn_date || "Awaiting GRN"}
+              highlight={!inv.grn_date}
+            />
+            <DLPair
               label="Due Date"
-              value={inv.due_date}
+              value={inv.due_date || "Calculates 45d from GRN"}
               highlight={inv.status === "overdue"}
             />
             <DLPair
               label="Payment Terms"
-              value={`${inv.payment_terms_days || 45} days`}
+              value={`${inv.payment_terms_days || 45} days from GRN`}
             />
             <DLPair
               label="PO #"
@@ -787,6 +967,32 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
             </div>
           </div>
 
+          {form.grn_date && (
+            <div className="text-xs bg-purple-50 border border-purple-200 px-3 py-2 text-purple-900 rounded flex items-center justify-between font-mono">
+              <span className="flex items-center gap-1.5">
+                <span>🗓️</span>
+                <span>
+                  <b>Payment Due Date:</b>{" "}
+                  {(() => {
+                    try {
+                      const d = new Date(form.grn_date);
+                      d.setDate(d.getDate() + (invoiceMeta.payment_terms_days || 45));
+                      return d.toISOString().slice(0, 10);
+                    } catch {
+                      return "—";
+                    }
+                  })()}{" "}
+                  <span className="text-slate-600 font-sans text-[11px]">
+                    ({invoiceMeta.payment_terms_days || 45} days credit from GRN Date)
+                  </span>
+                </span>
+              </span>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-purple-200 text-purple-800 px-2 py-0.5 rounded font-sans">
+                Payment Clock Starts
+              </span>
+            </div>
+          )}
+
           <table className="w-full text-xs border-2 border-slate-200">
             <thead className="bg-slate-50">
               <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
@@ -1113,5 +1319,418 @@ function DeleteConfirmDialog({ invoice, onClose, onDeleted }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ------------------- WEEKLY CASH INFLOW FORECAST WIDGET ------------------- */
+function WeeklyCashInflowForecast({ forecast, onSelectInvoice, onRecordGRN }) {
+  const [viewMode, setViewMode] = useState("weekly"); // 'weekly' | 'date'
+  const [selectedWeekIdx, setSelectedWeekIdx] = useState(() => {
+    // default to first non-empty week if available
+    const firstActive = (forecast.weeks || []).findIndex((w) => w.total_amount > 0);
+    return firstActive !== -1 ? firstActive : 0;
+  });
+  const [isCollapsed, setIsCollapsed] = useState(false);
+
+  const weeks = forecast.weeks || [];
+  const selectedWeek = weeks[selectedWeekIdx] || weeks[0];
+  const overdue = forecast.overdue || { total_amount: 0, invoices: [] };
+  const awaitingGrn = forecast.awaiting_grn || { total_amount: 0, invoices: [] };
+  const byDate = forecast.by_date || [];
+
+  return (
+    <Card className="overflow-hidden border-2 border-purple-300 shadow-md" data-testid="cash-inflow-forecast-card">
+      {/* Header Banner */}
+      <div className="bg-gradient-to-r from-slate-900 via-purple-950 to-slate-900 text-white px-5 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-b border-purple-900/50">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 bg-purple-600/30 border border-purple-400/40 rounded-lg text-purple-300">
+            <CalendarDays className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold text-white tracking-wide flex items-center gap-2">
+                Cash Inflow & Vendor Payment Planning Schedule
+              </h2>
+              <span className="text-[10px] uppercase font-bold tracking-wider bg-purple-500/30 text-purple-200 border border-purple-400/30 px-2 py-0.5 rounded">
+                GRN 45-Day Clock
+              </span>
+            </div>
+            <p className="text-xs text-purple-200/80 mt-0.5">
+              Exact weekly dates & expected client receivables so you know when cash arrives and can safely commit vendor payments.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2.5 self-end md:self-auto">
+          <div className="flex bg-slate-800/80 p-0.5 rounded border border-slate-700 text-xs">
+            <button
+              onClick={() => setViewMode("weekly")}
+              className={`px-3 py-1 font-semibold rounded transition-colors ${
+                viewMode === "weekly"
+                  ? "bg-purple-600 text-white"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              Weekly Forecast
+            </button>
+            <button
+              onClick={() => setViewMode("date")}
+              className={`px-3 py-1 font-semibold rounded transition-colors ${
+                viewMode === "date"
+                  ? "bg-purple-600 text-white"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              Exact Date Timeline ({byDate.length})
+            </button>
+          </div>
+
+          <button
+            onClick={() => setIsCollapsed(!isCollapsed)}
+            className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800"
+            title={isCollapsed ? "Expand" : "Collapse"}
+          >
+            {isCollapsed ? <ChevronDown className="w-5 h-5" /> : <ChevronUp className="w-5 h-5" />}
+          </button>
+        </div>
+      </div>
+
+      {!isCollapsed && (
+        <div className="p-4 sm:p-5 space-y-5 bg-slate-50/50">
+          {/* Summary Stats Row */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="bg-white border-2 border-slate-200 p-3 rounded-lg flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                  Total Scheduled Inflows
+                </div>
+                <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">
+                  {inr(forecast.total_scheduled || 0)}
+                </div>
+                <div className="text-[11px] text-[#16A34A] font-semibold mt-0.5 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  GRN verified & locked into 45-day cycle
+                </div>
+              </div>
+              <div className="p-2.5 bg-green-50 rounded-full text-[#16A34A]">
+                <IndianRupee className="w-5 h-5" />
+              </div>
+            </div>
+
+            <div className="bg-white border-2 border-slate-200 p-3 rounded-lg flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                  Dispatched · Awaiting GRN
+                </div>
+                <div className="text-xl font-bold font-mono text-amber-600 mt-0.5">
+                  {inr(awaitingGrn.total_amount || 0)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  {awaitingGrn.invoice_count} invoice{awaitingGrn.invoice_count !== 1 ? "s" : ""} pending client receipt
+                </div>
+              </div>
+              <div className="p-2.5 bg-amber-50 rounded-full text-amber-600">
+                <Clock className="w-5 h-5" />
+              </div>
+            </div>
+
+            <div className="bg-white border-2 border-slate-200 p-3 rounded-lg flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                  Total AR Pipeline
+                </div>
+                <div className="text-xl font-bold font-mono text-[#7C3AED] mt-0.5">
+                  {inr(forecast.total_pipeline || 0)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  Scheduled + Awaiting GRN
+                </div>
+              </div>
+              <div className="p-2.5 bg-purple-50 rounded-full text-[#7C3AED]">
+                <TrendingUp className="w-5 h-5" />
+              </div>
+            </div>
+          </div>
+
+          {/* VIEW MODE 1: WEEKLY FORECAST BUCKETS */}
+          {viewMode === "weekly" && (
+            <div className="space-y-4">
+              {/* Weekly Tabs / Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                {weeks.map((w, idx) => {
+                  const isSelected = selectedWeekIdx === idx;
+                  const hasAmount = w.total_amount > 0;
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => setSelectedWeekIdx(idx)}
+                      className={`text-left p-3 rounded-lg border-2 transition-all flex flex-col justify-between relative ${
+                        isSelected
+                          ? "bg-purple-900 text-white border-purple-900 shadow-md ring-2 ring-purple-400/50"
+                          : hasAmount
+                          ? "bg-white border-purple-200 hover:border-purple-400 text-slate-800"
+                          : "bg-slate-100/70 border-slate-200 text-slate-400 hover:border-slate-300"
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider ${
+                              isSelected ? "text-purple-200" : hasAmount ? "text-purple-700" : "text-slate-400"
+                            }`}
+                          >
+                            {w.label}
+                          </span>
+                          {hasAmount && (
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                isSelected ? "bg-green-400" : "bg-purple-500"
+                              }`}
+                            />
+                          )}
+                        </div>
+                        <div className={`text-[10px] font-mono mt-0.5 ${isSelected ? "text-purple-300" : "text-slate-500"}`}>
+                          {w.display_range}
+                        </div>
+                      </div>
+
+                      <div className="mt-3">
+                        <div className="font-mono text-sm sm:text-base font-bold truncate">
+                          {inr(w.total_amount)}
+                        </div>
+                        <div className={`text-[10px] ${isSelected ? "text-purple-200" : "text-slate-400"}`}>
+                          {w.invoice_count} inv
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Selected Week Detailed Inflow Table & Vendor Promise Recommendation */}
+              {selectedWeek && (
+                <div className="bg-white border-2 border-purple-200 rounded-lg p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-200 gap-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-wider font-bold text-purple-700">
+                        {selectedWeek.label} · {selectedWeek.display_range}
+                      </div>
+                      <div className="text-lg font-bold text-slate-900 mt-0.5">
+                        Expected Inflow: <span className="text-purple-700 font-mono">{inr(selectedWeek.total_amount)}</span>{" "}
+                        <span className="text-xs font-normal text-slate-500">
+                          ({selectedWeek.invoice_count} invoice{selectedWeek.invoice_count !== 1 ? "s" : ""} due)
+                        </span>
+                      </div>
+                    </div>
+
+                    {selectedWeek.total_amount > 0 && (
+                      <div className="bg-purple-50 border border-purple-200 px-3 py-1.5 rounded-md text-xs text-purple-900 flex items-center gap-2">
+                        <span>🤝</span>
+                        <span>
+                          <b>Vendor Promise Safe Amount:</b> You can promise up to{" "}
+                          <b className="font-mono text-[#16A34A]">{inr(selectedWeek.total_amount)}</b> during this week.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {selectedWeek.invoices.length === 0 ? (
+                    <div className="text-center py-8 text-sm text-slate-400">
+                      No client invoices are scheduled to mature during {selectedWeek.label} ({selectedWeek.display_range}).
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase text-[10px] tracking-wider">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-bold">Expected Inflow Date</th>
+                            <th className="px-3 py-2 text-left font-bold">Timeline</th>
+                            <th className="px-3 py-2 text-left font-bold">Invoice #</th>
+                            <th className="px-3 py-2 text-left font-bold">Client Name</th>
+                            <th className="px-3 py-2 text-left font-bold">GRN Date</th>
+                            <th className="px-3 py-2 text-right font-bold">Expected Cash Inflow</th>
+                            <th className="px-3 py-2 text-left font-bold">Vendor Payment Recommendation</th>
+                            <th className="px-3 py-2 text-right font-bold">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {selectedWeek.invoices.map((inv, i) => (
+                            <tr key={i} className="hover:bg-purple-50/40">
+                              <td className="px-3 py-2 font-mono font-bold text-slate-900">
+                                {inv.due_date}
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                  inv.days_to_due < 0
+                                    ? "bg-red-100 text-red-700"
+                                    : inv.days_to_due <= 7
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-slate-100 text-slate-700"
+                                }`}>
+                                  {inv.days_to_due < 0
+                                    ? `${-inv.days_to_due}d overdue`
+                                    : `in ${inv.days_to_due} days`}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 font-mono font-bold text-purple-700">
+                                {inv.invoice_no}
+                              </td>
+                              <td className="px-3 py-2 font-medium text-slate-800">
+                                {inv.client_name}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-slate-600">
+                                <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200">
+                                  {inv.grn_date} (+45d)
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-[#16A34A] text-sm">
+                                {inr(inv.outstanding)}
+                              </td>
+                              <td className="px-3 py-2 text-[11px] text-slate-600">
+                                Safe to promise vendors on or after <b>{inv.due_date}</b>
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <button
+                                  onClick={() => onSelectInvoice(inv.id)}
+                                  className="text-slate-500 hover:text-purple-700 p-1"
+                                  title="View Invoice"
+                                >
+                                  <Eye className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-purple-50/70 border-t border-purple-200 font-bold">
+                          <tr>
+                            <td colSpan="5" className="px-3 py-2 text-purple-900 uppercase text-[10px] tracking-wider">
+                              Week Total Inflow
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono text-purple-900 text-sm">
+                              {inr(selectedWeek.total_amount)}
+                            </td>
+                            <td colSpan="2" className="px-3 py-2 text-[10px] text-purple-700">
+                              Available for supplier payments
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* VIEW MODE 2: EXACT DATE TIMELINE */}
+          {viewMode === "date" && (
+            <div className="bg-white border-2 border-purple-200 rounded-lg p-4 space-y-4">
+              <div className="text-xs uppercase tracking-wider font-bold text-purple-700 border-b border-slate-200 pb-2 flex items-center justify-between">
+                <span>Exact Due Dates & Inflow Amounts</span>
+                <span className="text-slate-500 font-normal">Sorted chronologically by GRN maturity date</span>
+              </div>
+
+              {byDate.length === 0 ? (
+                <div className="text-center py-8 text-sm text-slate-400">
+                  No scheduled due dates available. Record GRNs for pending invoices to populate the timeline.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {byDate.map((group, idx) => (
+                    <div key={idx} className="border-2 border-slate-200 rounded-lg overflow-hidden hover:border-purple-300 transition-colors">
+                      <div className="bg-slate-50 px-4 py-2.5 flex items-center justify-between border-b border-slate-200">
+                        <div className="flex items-center gap-3">
+                          <div className="p-1.5 bg-purple-100 text-purple-700 rounded font-mono font-bold text-xs">
+                            {group.date}
+                          </div>
+                          <div>
+                            <span className="font-bold text-slate-900 text-sm">{group.formatted_date}</span>
+                            <span className="text-xs text-slate-500 ml-2">
+                              ({group.days_to_go < 0 ? `${-group.days_to_go} days overdue` : `in ${group.days_to_go} days`})
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <span className="text-[10px] uppercase font-bold text-slate-500 mr-2">Inflow On This Date:</span>
+                          <span className="font-mono font-bold text-base text-[#16A34A]">
+                            {inr(group.total_amount)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 bg-white">
+                        <div className="text-[11px] text-slate-600 mb-2 flex items-center gap-1.5">
+                          <Coins className="w-3.5 h-3.5 text-purple-600" />
+                          <span>
+                            <b>Vendor Payment Promise:</b> You will receive <b>{inr(group.total_amount)}</b> from{" "}
+                            {group.invoices.map((i) => i.client_name).join(", ")}. You can promise vendors payment for{" "}
+                            <b>{group.formatted_date}</b>.
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                          {group.invoices.map((inv, invIdx) => (
+                            <div
+                              key={invIdx}
+                              onClick={() => onSelectInvoice(inv.id)}
+                              className="p-2.5 rounded border border-slate-200 bg-slate-50/50 hover:bg-purple-50 hover:border-purple-300 cursor-pointer flex items-center justify-between"
+                            >
+                              <div>
+                                <div className="font-mono font-bold text-purple-700 text-xs">{inv.invoice_no}</div>
+                                <div className="text-[11px] text-slate-600 truncate max-w-[180px]">{inv.client_name}</div>
+                                <div className="text-[10px] text-slate-400 font-mono">GRN: {inv.grn_date}</div>
+                              </div>
+                              <div className="text-right font-mono font-bold text-xs text-[#16A34A]">
+                                {inr(inv.outstanding)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* AWAITING GRN UNSCHEDULED SECTION */}
+          {awaitingGrn.invoices.length > 0 && (
+            <div className="bg-amber-50/80 border border-amber-200 rounded-lg p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-bold text-amber-900">
+                    {awaitingGrn.invoices.length} Dispatched Invoice{awaitingGrn.invoices.length !== 1 ? "s" : ""} ({inr(awaitingGrn.total_amount)}) Awaiting GRN
+                  </div>
+                  <div className="text-[11px] text-amber-800/80 mt-0.5">
+                    As soon as you enter the GRN date from the client's confirmation email, their 45-day payment due date will automatically appear in the weekly schedule above.
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {awaitingGrn.invoices.slice(0, 3).map((inv, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => onRecordGRN(inv)}
+                    className="px-2.5 py-1 text-[11px] bg-white border border-amber-300 hover:bg-amber-100 text-amber-900 rounded font-mono flex items-center gap-1"
+                  >
+                    <ClipboardCheck className="w-3.5 h-3.5 text-amber-700" />
+                    Record GRN: {inv.invoice_no}
+                  </button>
+                ))}
+                {awaitingGrn.invoices.length > 3 && (
+                  <span className="text-[11px] text-amber-700 font-semibold px-1">
+                    +{awaitingGrn.invoices.length - 3} more
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
