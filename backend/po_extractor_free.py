@@ -477,46 +477,59 @@ def _parse_line_items_from_text(text: str) -> list[dict]:
 
 # ---------- Siyaram-style multi-page block parser ----------
 # Siyaram POs have line items that span multiple pages, where the table header
+# Siyaram PO text-block extractor
+# Siyaram POs (e.g. from SIYARAM SILK MILLS LTD.) have a layout where the header
 # row only appears on page 1 and individual rows are visually split across
 # multiple lines (Material code on its own line, description on another, the
 # numeric row with qty / rate / amount, then a ``DlvrQty: ... HSN: ...`` block).
 # pdfplumber's table detection often fails for pages 2+, so we parse straight
 # from the text stream by detecting numeric rows of the shape
-#   ``<SR> [<INLINE_MAT>] <QTY> PCS <RATE> <DISC> <CGST_AMT> <CGST%> <SGST%> <AMOUNT>``
+#   ``[<SR>] [<INLINE_MAT>] <QTY> PCS <RATE> <DISC> <CGST_AMT> <CGST%> <SGST%> <AMOUNT>``
 # and scanning neighbouring lines for description (``STYLE COLOR SIZE``),
 # material code chunks, and the HSN code.
 
 _SIYARAM_NUMERIC_RE = re.compile(
-    r"^(\d+)(?:\s+([A-Z0-9]{4,20}))?\s+(\d+)\s+PCS\s+([\d.,]+)\s+\d+\s+([\d.,]+)\s+\d+\s+\d+\s+([\d,]+(?:\.\d+)?)\s*$"
+    r"^(?:(\d+)\s+)?(?:([A-Z0-9_-]{4,25})\s+)?(\d+)\s+PCS\s+([\d.,]+)\s+(?:\d+\s+)?([\d.,]+)\s+\d+\s+\d+\s+([\d,]+(?:\.\d+)?)\s*$",
+    re.I,
 )
 _SIYARAM_DESC_RE = re.compile(
-    r"^([A-Z][A-Z0-9_-]{4,})\s+([A-Z][A-Z ]{1,20}?)\s+(\d{1,2}(?:\.\d)?)\s*$"
+    r"^(?:([A-Z0-9_-]{4,25})\s+)?([A-Z][A-Z\s]{0,20}[A-Z])\.?\s+(\d{1,2}(?:\.\d)?)\s*$",
+    re.I,
 )
 # Variant where a material-code chunk and the description live on the same
 # physical line (Siyaram page-break behaviour for the first item of a new
 # page): ``FLTM7128455 ZFLWWWFLTM71 TAN 5``.
 _SIYARAM_MAT_PLUS_DESC_RE = re.compile(
-    r"^([A-Z0-9]{5,20})\s+([A-Z][A-Z0-9_-]{4,})\s+([A-Z][A-Z ]{1,20}?)\s+(\d{1,2}(?:\.\d)?)\s*$"
+    r"^([A-Z0-9]{5,20})\s+([A-Z][A-Z0-9_-]{4,})\s+([A-Z][A-Z ]{1,20}?)\s+(\d{1,2}(?:\.\d)?)\s*$",
+    re.I,
 )
-_SIYARAM_MAT_RE = re.compile(r"^(?=[A-Z0-9]*[A-Z])[A-Z0-9]{5,20}$")
-_SIYARAM_HSN_RE = re.compile(r"HSN[:\s]+(\d{4,10})")
+_SIYARAM_MAT_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{1,24}$", re.I)
+_SIYARAM_HSN_RE = re.compile(r"HSN[:\s]+(\d{4,10})", re.I)
+
+_SIYARAM_JUNK_LINES = {
+    "ITEM", "MATERIAL", "MATERIAL DESCRIPTION", "QTY", "UOM", "RATE", "DISC",
+    "CGST/IGST", "SGST/UGST", "TOTAL NET VALUE", "PCS", "INR", "PURCHASE ORDER",
+    "VENDOR", "BROKER", "SIYARAM", "MILLS", "LTD", "LIMITED", "DATE", "PO", "P.O.",
+    "REGISTERED", "OFFICE", "CORPORATE", "DELIVERY", "BILLING", "ADDRESS", "GST"
+}
 
 
 def _looks_like_siyaram(text: str) -> bool:
     """Heuristic detector for the Siyaram multi-line PO layout.
 
-    Returns True when the text has at least two ``DlvrQty:`` and ``HSN:``
-    markers AND at least two numeric rows shaped like
-    ``<sr> <qty> PCS <rate> ...`` — these are exclusive to that layout.
+    Returns True when the text mentions SIYARAM or has at least two ``DlvrQty:``
+    markers along with multiple numeric PCS rows.
     """
-    if len(re.findall(r"DlvrQty\s*:\s*[\d.]+", text)) < 2:
-        return False
-    if len(re.findall(r"\bHSN\s*[:\-]\s*\d", text)) < 2:
-        return False
-    numeric_rows = sum(
-        1 for ln in text.splitlines() if _SIYARAM_NUMERIC_RE.match(_norm(ln))
-    )
-    return numeric_rows >= 2
+    if "SIYARAM" in text.upper() and len(re.findall(r"\bPCS\b", text, re.I)) >= 2:
+        return True
+    if len(re.findall(r"DlvrQty\s*:\s*[\d.]+", text, re.I)) >= 2:
+        return True
+    if len(re.findall(r"\bHSN\s*[:\-]\s*\d", text, re.I)) >= 2:
+        numeric_rows = sum(
+            1 for ln in text.splitlines() if _SIYARAM_NUMERIC_RE.match(_norm(ln))
+        )
+        return numeric_rows >= 2
+    return False
 
 
 def _siyaram_text_block_parse(text: str) -> list[dict]:
@@ -524,10 +537,11 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
 
     For each numeric data row, scan a small window of surrounding lines for
     the description (``STYLE COLOR SIZE``), material code chunks (typically
-    two short alphanumeric tokens that concatenate to the full style code),
+    two to three alphanumeric tokens that concatenate to the full style code),
     and the HSN code. Returns one dict per line item.
     """
     lines = [_norm(ln) for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
     n = len(lines)
     items: list[dict] = []
     used_desc: set[int] = set()
@@ -555,16 +569,11 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
         # grab description / material lines that belong to another item.
         prev_i = numeric_idx[slot - 1] if slot > 0 else -1
         next_i = numeric_idx[slot + 1] if slot + 1 < len(numeric_idx) else n
-        lo = max(prev_i + 1, i - 6)
-        hi = min(next_i, i + 7)
+        lo = max(prev_i + 1, i - 8)
+        hi = min(next_i, i + 8)
 
         # --- description: prefer the *closest BACKWARD* line, then forward.
-        # In Siyaram POs the description normally sits 1-2 lines ABOVE the
-        # numeric row. Without this preference, the description for the next
-        # item (which can be just below ours) gets consumed by our slot.
-        # Also support the page-break variant where material + description
-        # share one line (e.g. ``FLTM7128455 ZFLWWWFLTM71 TAN 5``).
-        desc, color, size = "", "", ""
+        desc_style, color, size = "", "", ""
         consumed_desc_dj = -1
         consumed_mat_from_desc_dj = -1
         mat_from_desc = ""
@@ -574,15 +583,28 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
             if dj in used_desc:
                 continue
             ln = lines[dj]
+            if "DLVRQTY" in ln.upper() or "HSN:" in ln.upper():
+                continue
             dm = _SIYARAM_DESC_RE.match(ln)
             if dm:
-                desc, color, size = dm.group(1), dm.group(2).strip(), dm.group(3)
+                desc_style = dm.group(1) or ""
+                color = dm.group(2).strip().rstrip(".")
+                size = dm.group(3)
                 consumed_desc_dj = dj
+                # Check if preceding line has a color modifier like "OFF", "DARK", "LIGHT"
+                if dj > lo:
+                    prev_ln = lines[dj - 1].strip()
+                    for c_mod in ["OFF", "DARK", "LIGHT", "NAVY", "OLIVE"]:
+                        if prev_ln.upper().endswith(f" {c_mod}") or prev_ln.upper() == c_mod:
+                            color = f"{c_mod} {color}"
+                            break
                 break
             mm = _SIYARAM_MAT_PLUS_DESC_RE.match(ln)
             if mm:
                 mat_from_desc = mm.group(1)
-                desc, color, size = mm.group(2), mm.group(3).strip(), mm.group(4)
+                desc_style = mm.group(2) or ""
+                color = mm.group(3).strip().rstrip(".")
+                size = mm.group(4)
                 consumed_desc_dj = dj
                 consumed_mat_from_desc_dj = dj
                 break
@@ -593,15 +615,21 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
                 if dj in used_desc:
                     continue
                 ln = lines[dj]
+                if "DLVRQTY" in ln.upper() or "HSN:" in ln.upper():
+                    continue
                 dm = _SIYARAM_DESC_RE.match(ln)
                 if dm:
-                    desc, color, size = dm.group(1), dm.group(2).strip(), dm.group(3)
+                    desc_style = dm.group(1) or ""
+                    color = dm.group(2).strip().rstrip(".")
+                    size = dm.group(3)
                     consumed_desc_dj = dj
                     break
                 mm = _SIYARAM_MAT_PLUS_DESC_RE.match(ln)
                 if mm:
                     mat_from_desc = mm.group(1)
-                    desc, color, size = mm.group(2), mm.group(3).strip(), mm.group(4)
+                    desc_style = mm.group(2) or ""
+                    color = mm.group(3).strip().rstrip(".")
+                    size = mm.group(4)
                     consumed_desc_dj = dj
                     consumed_mat_from_desc_dj = dj
                     break
@@ -610,23 +638,40 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
             used_desc.add(consumed_desc_dj)
         if consumed_mat_from_desc_dj >= 0:
             used_mat.add(consumed_mat_from_desc_dj)
-        best_dj = consumed_desc_dj  # for downstream skip in material loop
 
-        # --- material chunks (up to 2 short alphanumeric tokens) ---
-        material_chunks: list[str] = []
-        if inline_mat and _SIYARAM_MAT_RE.match(inline_mat):
-            material_chunks.append(inline_mat)
-        if mat_from_desc and mat_from_desc not in material_chunks:
-            material_chunks.append(mat_from_desc)
+        # --- material chunks ---
+        mat_chunks: list[str] = []
+        if inline_mat:
+            mat_chunks.append(inline_mat)
+        if mat_from_desc and mat_from_desc not in mat_chunks:
+            mat_chunks.append(mat_from_desc)
+
         for dj in range(lo, hi):
-            if dj == i or dj == best_dj or dj in used_mat:
+            if dj == i or dj == consumed_desc_dj or dj in used_mat:
                 continue
             ln = lines[dj]
-            if _SIYARAM_MAT_RE.match(ln) and ln not in material_chunks:
-                material_chunks.append(ln)
+            if ln.upper() in _SIYARAM_JUNK_LINES or "DLVRQTY" in ln.upper() or "HSN:" in ln.upper() or ln.isdigit():
+                continue
+            cleaned_ln = re.sub(r"^\d+\s+", "", ln).strip()
+            if _SIYARAM_MAT_RE.match(cleaned_ln):
+                if cleaned_ln.upper() in ["WHITE", "OFF", "BROWN", "GOLD", "SILVER", "BLACK", "TAN", "CREAM", "BLUE", "RED", "GREY", "GRAY"]:
+                    continue
+                if any(cleaned_ln in existing for existing in mat_chunks):
+                    continue
+                to_remove = [ex for ex in mat_chunks if ex in cleaned_ln]
+                for ex in to_remove:
+                    mat_chunks.remove(ex)
+                
+                # Check if adding this chunk would exceed max style code length (25)
+                current_len = sum(len(c) for c in mat_chunks)
+                if current_len + len(cleaned_ln) > 25 and len(mat_chunks) >= 2:
+                    continue
+
+                mat_chunks.append(cleaned_ln)
                 used_mat.add(dj)
-                if len(material_chunks) >= 2:
-                    break
+                if sum(len(c) for c in mat_chunks) >= 20 and len(mat_chunks) >= 2:
+                    if sum(len(c) for c in mat_chunks) >= 24 or len(mat_chunks) >= 3:
+                        break
 
         # --- HSN ---
         hsn = ""
@@ -636,8 +681,24 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
                 hsn = hm.group(1)
                 break
 
-        style_code = "".join(material_chunks)
-        full_desc = " ".join(p for p in (desc, color, size) if p).strip()
+        def _merge_overlapping(chunks: list[str]) -> str:
+            if not chunks:
+                return ""
+            res = chunks[0]
+            for ch in chunks[1:]:
+                max_ol = 0
+                for ol in range(min(len(res), len(ch)), 2, -1):
+                    if res.endswith(ch[:ol]):
+                        max_ol = ol
+                        break
+                if max_ol > 0:
+                    res = res + ch[max_ol:]
+                else:
+                    res = res + ch
+            return res
+
+        style_code = _merge_overlapping(mat_chunks) if mat_chunks else desc_style
+        full_desc = f"{desc_style} {color} {size}".strip() if desc_style else f"{color} {size}".strip()
         items.append({
             "style_code": style_code,
             "description": full_desc,
@@ -669,7 +730,10 @@ def _finalise_totals(data: dict, full_text: str) -> None:
 
     # 1. Try Siyaram net total pattern:
     # "NET TOTAL 2,088 16,672 0 333,440" -> Qty, Tax1, Tax2, Taxable Subtotal
-    siyaram_net_total = re.search(r"(?im)^\s*NET\s*TOTAL\s*([\d,]+)\s*([\d,]+)\s*([\d,]+)\s*([\d,]+)", full_text)
+    siyaram_net_total = re.search(
+        r"(?im)^\s*NET\s*TOTAL\s*([\d,]+(?:\.\d+)?)\s*([\d,]+(?:\.\d+)?)\s*([\d,]+(?:\.\d+)?)\s*([\d,]+(?:\.\d+)?)",
+        full_text,
+    )
     
     cgst_amt = 0.0
     sgst_amt = 0.0
@@ -682,10 +746,14 @@ def _finalise_totals(data: dict, full_text: str) -> None:
         if subtotal_val > 0:
             subtotal = subtotal_val
 
-        # Check if interstate
+        # Check if interstate: SSK (27 MH) vs Client
         is_interstate = False
         vendor_state = "27"  # Maharashtra (SSK)
         client_state = data.get("client_state_code", "")
+        if not client_state:
+            gst_m = re.search(r"Our\s*GST\s*No:\s*(\d{2})[A-Z0-9]+", full_text, re.I)
+            if gst_m:
+                client_state = gst_m.group(1)
         if client_state and client_state != vendor_state:
             is_interstate = True
 
@@ -699,7 +767,6 @@ def _finalise_totals(data: dict, full_text: str) -> None:
             igst_amt = 0.0
     else:
         # Fall back to explicit tax info with tighter regexes
-        # CGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?) ensures we don't skip letters (like CGST/IGST % headers)
         cgst_amt = _to_number(_find_first(r"CGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?)", full_text))
         sgst_amt = _to_number(_find_first(r"SGST[^A-Za-z\n]{0,20}?([0-9,]+(?:\.\d+)?)", full_text))
         igst_amt = _to_number(_find_first(r"\bTOTAL\s*IGST[\s:\-|]+(?:INR|Rs\.?)?[\s]*([0-9][0-9.,]+)", full_text))
