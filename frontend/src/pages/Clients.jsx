@@ -333,15 +333,21 @@ function LedgerModal({ ledger, onClose }) {
                             {i.invoice_date}
                           </td>
                           <td className="px-3 py-2">
-                            <span
-                              className={
-                                i.status === "overdue"
-                                  ? "text-red-600 font-bold"
-                                  : ""
-                              }
-                            >
-                              {i.due_date}
-                            </span>
+                            {i.due_date ? (
+                              <span
+                                className={
+                                  i.status === "overdue"
+                                    ? "text-red-600 font-bold font-mono"
+                                    : "font-mono"
+                                }
+                              >
+                                {i.due_date}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                Awaiting GRN
+                              </span>
+                            )}
                           </td>
                           <td className="px-3 py-2 text-right font-mono">
                             {inr(i.net_amount || 0)}

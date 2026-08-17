@@ -9677,7 +9677,17 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
     inv = stringify(doc)
     iid = inv.get("id")
     paid = float((payments_map or {}).get(iid, 0))
-    grn_adj = float((grns_map or {}).get(iid, 0))  # value of short / rejected
+    
+    grn_entry = (grns_map or {}).get(iid, 0)
+    if isinstance(grn_entry, dict):
+        grn_adj = float(grn_entry.get("adjustment", 0))
+        grn_date = grn_entry.get("grn_date") or inv.get("grn_date")
+        grn_no = grn_entry.get("grn_no") or inv.get("grn_no")
+    else:
+        grn_adj = float(grn_entry or 0)
+        grn_date = inv.get("grn_date")
+        grn_no = inv.get("grn_no")
+
     grand = float(inv.get("grand_total") or 0)
     net_after_grn = max(0.0, round(grand - grn_adj, 2))
     outstanding = max(0.0, round(net_after_grn - paid, 2))
@@ -9685,8 +9695,19 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
     inv["grn_adjustment"] = round(grn_adj, 2)
     inv["net_amount"] = net_after_grn
     inv["outstanding"] = outstanding
+    inv["grn_date"] = grn_date
+    inv["grn_no"] = grn_no
+    inv["grn_recorded"] = bool(grn_date)
+
+    credit_days = int(inv.get("payment_terms_days") or 45)
+    if grn_date:
+        due = _due_iso(grn_date, credit_days)
+        inv["due_date"] = due
+    else:
+        due = None
+        inv["due_date"] = None
+
     today_iso = datetime.now().date().isoformat()
-    due = inv.get("due_date") or ""
     if outstanding <= 0.01:
         inv["status"] = "paid"
     elif paid > 0.01:
@@ -9695,12 +9716,16 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
         inv["status"] = "overdue"
     else:
         inv["status"] = "pending"
+
     if due:
         try:
-            days = (datetime.fromisoformat(due) - datetime.now()).days
+            days = (datetime.fromisoformat(due).date() - datetime.now().date()).days
             inv["days_to_due"] = days
         except Exception:
             inv["days_to_due"] = None
+    else:
+        inv["days_to_due"] = None
+
     return inv
 
 
@@ -9727,17 +9752,23 @@ async def _aggregate_payments_for_invoices(invoice_ids: list[str]) -> dict[str, 
     return out
 
 
-async def _aggregate_grn_adjustments(invoice_ids: list[str]) -> dict[str, float]:
-    """Returns invoice_id -> rupee value of short/rejected qty across all GRNs."""
+async def _aggregate_grn_adjustments(invoice_ids: list[str]) -> dict[str, dict]:
+    """Returns invoice_id -> {adjustment: float, grn_date: str, grn_no: str} across all GRNs."""
     if not invoice_ids:
         return {}
-    grns = await db.grns.find({"invoice_id": {"$in": invoice_ids}}).to_list(5000)
-    out: dict[str, float] = {iid: 0.0 for iid in invoice_ids}
+    grns = await db.grns.find({"invoice_id": {"$in": invoice_ids}}).sort("grn_date", 1).to_list(5000)
+    out: dict[str, dict] = {iid: {"adjustment": 0.0, "grn_date": None, "grn_no": None} for iid in invoice_ids}
     # Fetch parent invoices to get unit prices for adjustment
     invoices = await db.invoices.find({"_id": {"$in": [oid(i) for i in invoice_ids]}}).to_list(5000)
     inv_by_id = {str(d["_id"]): d for d in invoices}
     for g in grns:
-        inv = inv_by_id.get(g.get("invoice_id"))
+        iid = g.get("invoice_id")
+        if iid in out:
+            if g.get("grn_date"):
+                out[iid]["grn_date"] = g.get("grn_date")
+            if g.get("grn_no"):
+                out[iid]["grn_no"] = g.get("grn_no")
+        inv = inv_by_id.get(iid)
         if not inv:
             continue
         # Build a price map: (style, color, size) -> unit_price
@@ -9747,7 +9778,8 @@ async def _aggregate_grn_adjustments(invoice_ids: list[str]) -> dict[str, float]
             short = max(0, int(ln.get("dispatched_qty", 0)) - int(ln.get("accepted_qty", 0)))
             key = (ln.get("style_code"), ln.get("color"), str(ln.get("size") or ""))
             unit = prices.get(key) or 0
-            out[g["invoice_id"]] += short * unit
+            if iid in out:
+                out[iid]["adjustment"] += short * unit
     return out
 
 
@@ -9982,13 +10014,14 @@ async def po_invoice(pid: str, request: Request):
     totals = _compute_invoice_totals(po, line_items)
     credit_days = _extract_credit_days(po.get("payment_terms", ""))
     invoice_iso = _invoice_iso_date(invoice_date)
-    due_date = _due_iso(invoice_date, credit_days)
     user_email = u.get("email", "system") if isinstance(u, dict) else "system"
     inv_doc = {
         "invoice_no": invoice_no,
         "invoice_date": invoice_date,
         "invoice_iso_date": invoice_iso,
-        "due_date": due_date,
+        "due_date": None,
+        "grn_date": None,
+        "grn_recorded": False,
         "payment_terms_days": credit_days,
         "po_id": pid,
         "po_number": po.get("po_number"),
@@ -10068,13 +10101,13 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
     totals = _compute_invoice_totals(po, line_items)
     credit_days = _extract_credit_days(po.get("payment_terms", ""))
     invoice_iso = _invoice_iso_date(invoice_date)
-    due_date = _due_iso(invoice_date, credit_days)
     import base64 as _b64
     # Store invoice record (includes file bytes for re-download)
     inv_doc = {
         "invoice_no": invoice_no, "invoice_date": invoice_date,
         "invoice_iso_date": invoice_iso,
-        "due_date": due_date, "payment_terms_days": credit_days,
+        "due_date": None, "payment_terms_days": credit_days,
+        "grn_date": None, "grn_recorded": False,
         "po_id": payload.po_id, "po_number": po.get("po_number"),
         "po_numbers": [po.get("po_number")],
         "client_name": po.get("client_name"),
@@ -10255,8 +10288,9 @@ async def merged_invoice(payload: dict, request: Request):
     inv_doc_m = {
         "invoice_no": invoice_no, "invoice_date": invoice_date,
         "invoice_iso_date": _invoice_iso_date(invoice_date),
-        "due_date": _due_iso(invoice_date, credit_days_m),
+        "due_date": None,
         "payment_terms_days": credit_days_m,
+        "grn_date": None, "grn_recorded": False,
         "merged": True, "po_numbers": po_numbers, "job_ids": job_ids_all,
         "po_id": str(first_po.get("_id")),
         "po_number": " + ".join(po_numbers),
@@ -10306,6 +10340,148 @@ async def po_challan(pid: str, request: Request, dispatch_qty: Optional[int] = N
 
 
 # ---------- INVOICE ARCHIVE & ACCOUNTS RECEIVABLE ----------
+@api.get("/invoices/cash-forecast")
+async def get_inflow_cash_forecast(request: Request):
+    """Weekly cash inflow forecast based on GRN-calculated due dates for vendor payment planning."""
+    await get_current_user(request)
+    docs = await db.invoices.find({"legacy": {"$ne": True}}, {"file_b64": 0}).sort("created_at", -1).to_list(1000)
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids)
+    grn_map = await _aggregate_grn_adjustments(inv_ids)
+    rows = [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    today = datetime.now().date()
+    start_of_week = today - timedelta(days=today.weekday())
+
+    weeks = []
+    for w in range(8):
+        w_start = start_of_week + timedelta(days=w * 7)
+        w_end = w_start + timedelta(days=6)
+        label = "This Week" if w == 0 else ("Next Week" if w == 1 else f"Week {w+1}")
+        weeks.append({
+            "week_index": w,
+            "label": label,
+            "start_date": w_start.isoformat(),
+            "end_date": w_end.isoformat(),
+            "display_range": f"{w_start.strftime('%d %b')} – {w_end.strftime('%d %b')}",
+            "total_amount": 0.0,
+            "invoice_count": 0,
+            "invoices": [],
+        })
+
+    overdue_bucket = {
+        "label": "Overdue / Immediate",
+        "total_amount": 0.0,
+        "invoice_count": 0,
+        "invoices": [],
+    }
+    awaiting_grn_bucket = {
+        "label": "Awaiting GRN",
+        "total_amount": 0.0,
+        "invoice_count": 0,
+        "invoices": [],
+    }
+    future_bucket = {
+        "label": "8+ Weeks Out",
+        "total_amount": 0.0,
+        "invoice_count": 0,
+        "invoices": [],
+    }
+
+    by_date_map: dict[str, dict] = {}
+
+    for r in rows:
+        outstanding = float(r.get("outstanding") or 0)
+        if outstanding <= 0.01:
+            continue
+        
+        due_str = r.get("due_date")
+        if not due_str:
+            awaiting_grn_bucket["total_amount"] += outstanding
+            awaiting_grn_bucket["invoice_count"] += 1
+            awaiting_grn_bucket["invoices"].append({
+                "id": r.get("id"),
+                "invoice_no": r.get("invoice_no"),
+                "client_name": r.get("client_name"),
+                "invoice_date": r.get("invoice_date"),
+                "outstanding": outstanding,
+                "status": r.get("status"),
+                "payment_terms_days": r.get("payment_terms_days", 45),
+            })
+            continue
+
+        try:
+            due_d = datetime.strptime(str(due_str)[:10], "%Y-%m-%d").date()
+        except Exception:
+            awaiting_grn_bucket["total_amount"] += outstanding
+            awaiting_grn_bucket["invoice_count"] += 1
+            awaiting_grn_bucket["invoices"].append(r)
+            continue
+
+        inv_summary = {
+            "id": r.get("id"),
+            "invoice_no": r.get("invoice_no"),
+            "client_name": r.get("client_name"),
+            "due_date": due_str,
+            "grn_date": r.get("grn_date"),
+            "grn_no": r.get("grn_no"),
+            "outstanding": outstanding,
+            "status": r.get("status"),
+            "days_to_due": r.get("days_to_due"),
+        }
+
+        if due_str not in by_date_map:
+            by_date_map[due_str] = {
+                "date": due_str,
+                "formatted_date": due_d.strftime("%a, %d %b %Y"),
+                "days_to_go": (due_d - today).days,
+                "total_amount": 0.0,
+                "invoices": [],
+            }
+        by_date_map[due_str]["total_amount"] += outstanding
+        by_date_map[due_str]["invoices"].append(inv_summary)
+
+        if due_d < today:
+            overdue_bucket["total_amount"] += outstanding
+            overdue_bucket["invoice_count"] += 1
+            overdue_bucket["invoices"].append(inv_summary)
+        else:
+            diff_days = (due_d - start_of_week).days
+            w_idx = diff_days // 7
+            if 0 <= w_idx < len(weeks):
+                weeks[w_idx]["total_amount"] += outstanding
+                weeks[w_idx]["invoice_count"] += 1
+                weeks[w_idx]["invoices"].append(inv_summary)
+            else:
+                future_bucket["total_amount"] += outstanding
+                future_bucket["invoice_count"] += 1
+                future_bucket["invoices"].append(inv_summary)
+
+    overdue_bucket["total_amount"] = round(overdue_bucket["total_amount"], 2)
+    awaiting_grn_bucket["total_amount"] = round(awaiting_grn_bucket["total_amount"], 2)
+    future_bucket["total_amount"] = round(future_bucket["total_amount"], 2)
+    for w in weeks:
+        w["total_amount"] = round(w["total_amount"], 2)
+
+    by_date_list = sorted(by_date_map.values(), key=lambda x: x["date"])
+    for d_item in by_date_list:
+        d_item["total_amount"] = round(d_item["total_amount"], 2)
+
+    total_scheduled = sum(w["total_amount"] for w in weeks) + overdue_bucket["total_amount"] + future_bucket["total_amount"]
+    total_pipeline = total_scheduled + awaiting_grn_bucket["total_amount"]
+
+    return {
+        "as_of_date": today.isoformat(),
+        "total_scheduled": round(total_scheduled, 2),
+        "total_pipeline": round(total_pipeline, 2),
+        "overdue": overdue_bucket,
+        "weeks": [w for w in weeks if w["total_amount"] > 0 or w["week_index"] < 4],
+        "future": future_bucket,
+        "awaiting_grn": awaiting_grn_bucket,
+        "by_date": by_date_list,
+    }
+
+
 @api.get("/invoices")
 async def list_invoices(request: Request, client: Optional[str] = None,
                         status: Optional[str] = None, include_legacy: bool = False,
@@ -10429,6 +10605,21 @@ async def create_grn(payload: GRNIn, request: Request):
     }
     res = await db.grns.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Update invoice with grn_date and calculated due_date (45 days from GRN date)
+    credit_days = int(inv.get("payment_terms_days") or 45)
+    due_date = _due_iso(payload.grn_date, credit_days)
+    await db.invoices.update_one(
+        {"_id": inv["_id"]},
+        {
+            "$set": {
+                "grn_date": payload.grn_date,
+                "grn_no": grn_no,
+                "grn_recorded": True,
+                "due_date": due_date,
+            }
+        }
+    )
     return stringify(doc)
 
 
@@ -10457,9 +10648,45 @@ async def get_grn(gid: str, request: Request):
 @api.delete("/grns/{gid}")
 async def delete_grn(gid: str, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    grn_doc = await db.grns.find_one({"_id": oid(gid)})
+    if not grn_doc:
+        raise HTTPException(404, "GRN not found")
+    invoice_id = grn_doc.get("invoice_id")
     r = await db.grns.delete_one({"_id": oid(gid)})
     if not r.deleted_count:
         raise HTTPException(404, "GRN not found")
+
+    # Recalculate remaining GRNs for this invoice if any
+    if invoice_id:
+        remaining_grn = await db.grns.find_one({"invoice_id": invoice_id}, sort=[("grn_date", -1)])
+        inv = await db.invoices.find_one({"_id": oid(invoice_id)})
+        if inv:
+            if remaining_grn:
+                credit_days = int(inv.get("payment_terms_days") or 45)
+                due_date = _due_iso(remaining_grn["grn_date"], credit_days)
+                await db.invoices.update_one(
+                    {"_id": inv["_id"]},
+                    {
+                        "$set": {
+                            "grn_date": remaining_grn["grn_date"],
+                            "grn_no": remaining_grn.get("grn_no"),
+                            "grn_recorded": True,
+                            "due_date": due_date,
+                        }
+                    }
+                )
+            else:
+                await db.invoices.update_one(
+                    {"_id": inv["_id"]},
+                    {
+                        "$set": {
+                            "grn_date": None,
+                            "grn_no": None,
+                            "grn_recorded": False,
+                            "due_date": None,
+                        }
+                    }
+                )
     return {"ok": True}
 
 
@@ -11174,6 +11401,7 @@ async def _build_client_ledger(cid_or_name: str) -> dict:
     for inv in invs:
         d = inv.get("invoice_iso_date") or _invoice_iso_date(inv.get("invoice_date", ""))
         grand = float(inv.get("grand_total") or inv.get("net_amount") or 0)
+        due_date = _due_iso(inv["grn_date"], int(inv.get("payment_terms_days") or 45)) if inv.get("grn_date") else inv.get("due_date")
         entries.append({
             "date": d,
             "vch_type": "Invoice",
@@ -11182,7 +11410,8 @@ async def _build_client_ledger(cid_or_name: str) -> dict:
             "debit": grand,
             "credit": 0.0,
             "ref_id": str(inv["_id"]),
-            "due_date": inv.get("due_date"),
+            "due_date": due_date,
+            "grn_date": inv.get("grn_date"),
         })
 
     for g in grns:
@@ -11984,8 +12213,10 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "invoice_no": invoice_no,
         "invoice_date": invoice_date,
         "invoice_iso_date": _invoice_iso_date(invoice_date),
-        "due_date": _due_iso(invoice_date, credit_days),
+        "due_date": None,
         "payment_terms_days": credit_days,
+        "grn_date": None,
+        "grn_recorded": False,
         "po_id": payload.po_id,
         "po_number": po.get("po_number"),
         "po_numbers": [po.get("po_number")],
