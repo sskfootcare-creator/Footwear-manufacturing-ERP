@@ -9478,7 +9478,7 @@ async def delete_po(pid: str, request: Request):
     return {"ok": True}
 
 @api.post("/pos/extract", dependencies=[Depends(upload_rate_limiter)])
-async def extract_po(file: UploadFile = File(...), request: Request = None):
+async def extract_po(file: UploadFile = File(...), force_ai: bool = False, request: Request = None):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
     content = await file.read(MAX_FILE_SIZE + 1)
@@ -9487,9 +9487,9 @@ async def extract_po(file: UploadFile = File(...), request: Request = None):
     fname = (file.filename or "").lower()
     try:
         if fname.endswith(".pdf"):
-            data = await extract_po_from_pdf(content)
+            data = await extract_po_from_pdf(content, force_ai=force_ai)
         elif fname.endswith(".xlsx") or fname.endswith(".xls"):
-            data = await extract_po_from_xlsx(content)
+            data = await extract_po_from_xlsx(content, force_ai=force_ai)
         else:
             raise HTTPException(400, "Only PDF or Excel (xlsx) files are supported")
         return data

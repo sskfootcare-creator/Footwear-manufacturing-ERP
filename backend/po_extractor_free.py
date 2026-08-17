@@ -453,6 +453,7 @@ def _parse_line_items_from_tables(tables: list, po_no: str) -> list[dict]:
     return items
 
 
+
 # ---------- text fallback for line items ----------
 def _parse_line_items_from_text(text: str) -> list[dict]:
     """Lightweight fallback: look for repeating rows like 'STYLECODE  DESC  COLOR  SIZE  QTY  PRICE  AMOUNT'."""
@@ -492,8 +493,17 @@ _SIYARAM_NUMERIC_RE = re.compile(
     r"^(?:(\d+)\s+)?(?:([A-Z0-9_-]{4,25})\s+)?(\d+)\s+PCS\s+([\d.,]+)\s+(?:\d+\s+)?([\d.,]+)\s+\d+\s+\d+\s+([\d,]+(?:\.\d+)?)\s*$",
     re.I,
 )
+# Matches lines that are just "COLOR SIZE" or "COLOR. SIZE" (no mat-code prefix).
+# Used for new Siyaram layout where description column is split across two lines:
+#   line 1: "5ZE1026WFFLT-0-0445" (or "5ZE1026WFFLT-0-0445 OFF")
+#   line 2: "BROWN. 4" (or "WHITE 4")
 _SIYARAM_DESC_RE = re.compile(
     r"^(?:([A-Z0-9_-]{4,25})\s+)?([A-Z][A-Z\s]{0,20}[A-Z])\.?\s+(\d{1,2}(?:\.\d)?)\s*$",
+    re.I,
+)
+# Bare "COLOR SIZE" line — no mat code, no prefix (e.g. "BROWN. 4", "OFF WHITE 5")
+_SIYARAM_COLOR_SIZE_RE = re.compile(
+    r"^([A-Z][A-Z ]{1,20}?[A-Z])\.?\s+(\d{1,2}(?:\.\d)?)\s*$",
     re.I,
 )
 # Variant where a material-code chunk and the description live on the same
@@ -505,6 +515,9 @@ _SIYARAM_MAT_PLUS_DESC_RE = re.compile(
 )
 _SIYARAM_MAT_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{1,24}$", re.I)
 _SIYARAM_HSN_RE = re.compile(r"HSN[:\s]+(\d{4,10})", re.I)
+
+# Color modifiers that can appear at the end of a description prefix line.
+_SIYARAM_COLOR_MODS = ["OFF", "DARK", "LIGHT", "NAVY", "OLIVE"]
 
 _SIYARAM_JUNK_LINES = {
     "ITEM", "MATERIAL", "MATERIAL DESCRIPTION", "QTY", "UOM", "RATE", "DISC",
@@ -535,10 +548,29 @@ def _looks_like_siyaram(text: str) -> bool:
 def _siyaram_text_block_parse(text: str) -> list[dict]:
     """Parse Siyaram-style POs from a free-form text stream.
 
-    For each numeric data row, scan a small window of surrounding lines for
-    the description (``STYLE COLOR SIZE``), material code chunks (typically
-    two to three alphanumeric tokens that concatenate to the full style code),
-    and the HSN code. Returns one dict per line item.
+    Handles two Siyaram layout variants:
+
+    **Old layout** (original PO 2220008835):
+      Material chunks on preceding lines, then ``COLOR SIZE`` on one line,
+      then the numeric row ``QTY PCS RATE DISC CGST% SGST% AMOUNT``.
+
+    **New layout** (PO 2220011189+, new delivery destinations):
+      The description column is split across TWO lines —
+        line A: full article code (``5ZE1026WFFLT-0-0445``) sometimes
+                ending with a colour-modifier word (``... OFF``)
+        line B: bare colour+size token (``BROWN. 4`` / ``WHITE 4``)
+      Three material column chunks (``5ZE1026WFF``, ``LT-0-0445BR``, ``WN4``)
+      appear on separate lines before the description pair.
+
+    For each numeric data row the function:
+      1. Detects the ``COLOR SIZE`` line (backward search, then forward).
+      2. Checks whether the line immediately before the colour+size line
+         ends with a colour-modifier word (``OFF``, ``DARK``, …) to handle
+         split two-word colours.
+      3. Looks for the longest alphanumeric material code in the surrounding
+         window to use as the primary ``style_code`` (prefer the full article
+         code like ``5ZE1026WFFLT-0-0445`` over assembled short chunks).
+      4. Falls back to assembling material chunks when no long code is found.
     """
     lines = [_norm(ln) for ln in text.splitlines()]
     lines = [ln for ln in lines if ln]
@@ -548,11 +580,23 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
     used_mat: set[int] = set()
 
     # Indexes of every numeric row, so the per-row material search can stop
-    # at the boundary of the previous/next item and not steal codes that
-    # belong to another row.
+    # at the boundary of the previous/next item.
     numeric_idx = [i for i, ln in enumerate(lines) if _SIYARAM_NUMERIC_RE.match(ln)]
     if not numeric_idx:
         return []
+
+    def _merge_overlapping(chunks: list[str]) -> str:
+        if not chunks:
+            return ""
+        res = chunks[0]
+        for ch in chunks[1:]:
+            max_ol = 0
+            for ol in range(min(len(res), len(ch)), 2, -1):
+                if res.endswith(ch[:ol]):
+                    max_ol = ol
+                    break
+            res = (res + ch[max_ol:]) if max_ol > 0 else (res + ch)
+        return res
 
     for slot, i in enumerate(numeric_idx):
         nm = _SIYARAM_NUMERIC_RE.match(lines[i])
@@ -565,51 +609,99 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
         if qty <= 0 or rate <= 0:
             continue
 
-        # Bound the search window by neighbouring numeric rows so we never
-        # grab description / material lines that belong to another item.
+        # Bound the search window by neighbouring numeric rows.
         prev_i = numeric_idx[slot - 1] if slot > 0 else -1
         next_i = numeric_idx[slot + 1] if slot + 1 < len(numeric_idx) else n
-        lo = max(prev_i + 1, i - 8)
+        lo = max(prev_i + 1, i - 10)
         hi = min(next_i, i + 8)
 
-        # --- description: prefer the *closest BACKWARD* line, then forward.
+        # ------------------------------------------------------------------ #
+        # STEP 1 — find colour + size                                         #
+        # ------------------------------------------------------------------ #
         desc_style, color, size = "", "", ""
-        consumed_desc_dj = -1
+        consumed_desc_dj = -1          # index of the colour+size line
+        consumed_prefix_dj = -1       # index of the description-prefix line (new layout)
         consumed_mat_from_desc_dj = -1
         mat_from_desc = ""
 
-        # 1. Try backward first (numeric row -> back to lo)
+        def _try_desc(ln, dj, search_backward=True):
+            """Try to extract desc_style/color/size from line `ln` at index `dj`.
+            Returns (desc_style, color, size, consumed_desc_dj, consumed_prefix_dj,
+                     consumed_mat_from_desc_dj, mat_from_desc, prefix_article_code) or None.
+            """
+            nonlocal consumed_prefix_dj
+            # --- Pattern A: mat_code? + COLOR + SIZE on one line ---
+            dm = _SIYARAM_DESC_RE.match(ln)
+            if dm:
+                _ds = dm.group(1) or ""
+                _col = dm.group(2).strip().rstrip(".")
+                _sz = dm.group(3)
+                _prefix_dj = -1
+                _prefix_art = ""
+                # Check if the line immediately before ends with a colour modifier
+                # (new layout: "... OFF" on description-prefix line, "WHITE 4" here)
+                if search_backward and dj > lo:
+                    prev_ln = lines[dj - 1]
+                    upper_prev = prev_ln.upper()
+                    for c_mod in _SIYARAM_COLOR_MODS:
+                        if upper_prev.endswith(f" {c_mod}") or upper_prev == c_mod:
+                            _col = f"{c_mod} {_col}"
+                            _prefix_dj = dj - 1
+                            # Extract article code from prefix line by removing the trailing modifier
+                            _prefix_art = re.sub(r"\s+" + c_mod + r"\s*$", "", prev_ln, flags=re.I).strip()
+                            if not _SIYARAM_MAT_RE.match(_prefix_art):
+                                _prefix_art = ""
+                            break
+                return _ds, _col, _sz, dj, _prefix_dj, -1, "", _prefix_art
+
+            # --- Pattern B: mat_code + mat_code2 + COLOR + SIZE on one line ---
+            mm = _SIYARAM_MAT_PLUS_DESC_RE.match(ln)
+            if mm:
+                return (
+                    mm.group(2) or "",
+                    mm.group(3).strip().rstrip("."),
+                    mm.group(4),
+                    dj, -1, dj, mm.group(1), "",
+                )
+
+            # --- Pattern C (new layout): bare "COLOR. SIZE" line with NO mat prefix ---
+            # e.g. "BROWN. 4", "WHITE 4", "OFF WHITE 6"
+            cs = _SIYARAM_COLOR_SIZE_RE.match(ln)
+            if cs:
+                _col = cs.group(1).strip().rstrip(".")
+                _sz = cs.group(2)
+                _prefix_dj = -1
+                _prefix_art = ""
+                if search_backward and dj > lo:
+                    prev_ln = lines[dj - 1]
+                    upper_prev = prev_ln.upper()
+                    for c_mod in _SIYARAM_COLOR_MODS:
+                        if upper_prev.endswith(f" {c_mod}") or upper_prev == c_mod:
+                            _col = f"{c_mod} {_col}"
+                            _prefix_dj = dj - 1
+                            # Extract article code from prefix line by removing the trailing modifier
+                            _prefix_art = re.sub(r"\s+" + c_mod + r"\s*$", "", prev_ln, flags=re.I).strip()
+                            if not _SIYARAM_MAT_RE.match(_prefix_art):
+                                _prefix_art = ""
+                            break
+                return "", _col, _sz, dj, _prefix_dj, -1, "", _prefix_art
+
+            return None
+
+        # 1a. Backward search (preferred — description is almost always above the numeric row)
+        prefix_article_code = ""
         for dj in range(i - 1, lo - 1, -1):
             if dj in used_desc:
                 continue
             ln = lines[dj]
             if "DLVRQTY" in ln.upper() or "HSN:" in ln.upper():
                 continue
-            dm = _SIYARAM_DESC_RE.match(ln)
-            if dm:
-                desc_style = dm.group(1) or ""
-                color = dm.group(2).strip().rstrip(".")
-                size = dm.group(3)
-                consumed_desc_dj = dj
-                # Check if preceding line has a color modifier like "OFF", "DARK", "LIGHT"
-                if dj > lo:
-                    prev_ln = lines[dj - 1].strip()
-                    for c_mod in ["OFF", "DARK", "LIGHT", "NAVY", "OLIVE"]:
-                        if prev_ln.upper().endswith(f" {c_mod}") or prev_ln.upper() == c_mod:
-                            color = f"{c_mod} {color}"
-                            break
-                break
-            mm = _SIYARAM_MAT_PLUS_DESC_RE.match(ln)
-            if mm:
-                mat_from_desc = mm.group(1)
-                desc_style = mm.group(2) or ""
-                color = mm.group(3).strip().rstrip(".")
-                size = mm.group(4)
-                consumed_desc_dj = dj
-                consumed_mat_from_desc_dj = dj
+            result = _try_desc(ln, dj, search_backward=True)
+            if result:
+                desc_style, color, size, consumed_desc_dj, consumed_prefix_dj, consumed_mat_from_desc_dj, mat_from_desc, prefix_article_code = result
                 break
 
-        # 2. Fallback to forward search
+        # 1b. Forward fallback
         if consumed_desc_dj < 0:
             for dj in range(i + 1, hi):
                 if dj in used_desc:
@@ -617,63 +709,92 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
                 ln = lines[dj]
                 if "DLVRQTY" in ln.upper() or "HSN:" in ln.upper():
                     continue
-                dm = _SIYARAM_DESC_RE.match(ln)
-                if dm:
-                    desc_style = dm.group(1) or ""
-                    color = dm.group(2).strip().rstrip(".")
-                    size = dm.group(3)
-                    consumed_desc_dj = dj
-                    break
-                mm = _SIYARAM_MAT_PLUS_DESC_RE.match(ln)
-                if mm:
-                    mat_from_desc = mm.group(1)
-                    desc_style = mm.group(2) or ""
-                    color = mm.group(3).strip().rstrip(".")
-                    size = mm.group(4)
-                    consumed_desc_dj = dj
-                    consumed_mat_from_desc_dj = dj
+                result = _try_desc(ln, dj, search_backward=False)
+                if result:
+                    desc_style, color, size, consumed_desc_dj, consumed_prefix_dj, consumed_mat_from_desc_dj, mat_from_desc, prefix_article_code = result
                     break
 
         if consumed_desc_dj >= 0:
             used_desc.add(consumed_desc_dj)
+        if consumed_prefix_dj >= 0:
+            used_desc.add(consumed_prefix_dj)   # mark prefix line as consumed too
+            used_mat.add(consumed_prefix_dj)     # also exclude from mat chunk search
         if consumed_mat_from_desc_dj >= 0:
             used_mat.add(consumed_mat_from_desc_dj)
 
-        # --- material chunks ---
+        # ------------------------------------------------------------------ #
+        # STEP 2 — collect material / article code candidates                 #
+        # ------------------------------------------------------------------ #
         mat_chunks: list[str] = []
         if inline_mat:
             mat_chunks.append(inline_mat)
         if mat_from_desc and mat_from_desc not in mat_chunks:
             mat_chunks.append(mat_from_desc)
 
+        # Primary article code: look for the longest alphanumeric token in the
+        # window that looks like a full article code (12+ chars, contains digits).
+        # In the new layout this is the "5ZE1026WFFLT-0-0445" line from the
+        # Material Description column — use it directly as the style code.
+        # prefix_article_code was already extracted from the description-prefix line
+        # (e.g. "5ZE1026WFFLT-0-0445" stripped from "5ZE1026WFFLT-0-0445 OFF").
+        primary_article_code = prefix_article_code  # may be "" for non-split layouts
         for dj in range(lo, hi):
-            if dj == i or dj == consumed_desc_dj or dj in used_mat:
+            if dj == i or dj in used_mat:
                 continue
             ln = lines[dj]
-            if ln.upper() in _SIYARAM_JUNK_LINES or "DLVRQTY" in ln.upper() or "HSN:" in ln.upper() or ln.isdigit():
+            if ln.upper() in _SIYARAM_JUNK_LINES or "DLVRQTY" in ln.upper() or "HSN:" in ln.upper():
                 continue
+            # Strip a leading item-number prefix (e.g. "220 LT-0-0446SIL" -> "LT-0-0446SIL")
             cleaned_ln = re.sub(r"^\d+\s+", "", ln).strip()
-            if _SIYARAM_MAT_RE.match(cleaned_ln):
-                if cleaned_ln.upper() in ["WHITE", "OFF", "BROWN", "GOLD", "SILVER", "BLACK", "TAN", "CREAM", "BLUE", "RED", "GREY", "GRAY"]:
-                    continue
-                if any(cleaned_ln in existing for existing in mat_chunks):
-                    continue
-                to_remove = [ex for ex in mat_chunks if ex in cleaned_ln]
-                for ex in to_remove:
-                    mat_chunks.remove(ex)
-                
-                # Check if adding this chunk would exceed max style code length (25)
-                current_len = sum(len(c) for c in mat_chunks)
-                if current_len + len(cleaned_ln) > 25 and len(mat_chunks) >= 2:
-                    continue
+            # Full article code: long token (≥12 chars) with both letters and digits
+            if (_SIYARAM_MAT_RE.match(cleaned_ln)
+                    and len(cleaned_ln) >= 12
+                    and re.search(r"\d", cleaned_ln)
+                    and re.search(r"[A-Z]", cleaned_ln, re.I)):
+                if len(cleaned_ln) > len(primary_article_code):
+                    primary_article_code = cleaned_ln
+                    used_mat.add(dj)
 
-                mat_chunks.append(cleaned_ln)
-                used_mat.add(dj)
-                if sum(len(c) for c in mat_chunks) >= 20 and len(mat_chunks) >= 2:
-                    if sum(len(c) for c in mat_chunks) >= 24 or len(mat_chunks) >= 3:
-                        break
+        if not primary_article_code:
+            # Fallback: assemble short mat chunks as before
+            for dj in range(lo, hi):
+                if dj == i or dj == consumed_desc_dj or dj == consumed_prefix_dj or dj in used_mat:
+                    continue
+                ln = lines[dj]
+                if ln.upper() in _SIYARAM_JUNK_LINES or "DLVRQTY" in ln.upper() or "HSN:" in ln.upper() or ln.isdigit():
+                    continue
+                cleaned_ln = re.sub(r"^\d+\s+", "", ln).strip()
+                if _SIYARAM_MAT_RE.match(cleaned_ln):
+                    if cleaned_ln.upper() in ["WHITE", "OFF", "BROWN", "GOLD", "SILVER",
+                                               "BLACK", "TAN", "CREAM", "BLUE", "RED", "GREY", "GRAY"]:
+                        continue
+                    if any(cleaned_ln in existing for existing in mat_chunks):
+                        continue
+                    to_remove = [ex for ex in mat_chunks if ex in cleaned_ln]
+                    for ex in to_remove:
+                        mat_chunks.remove(ex)
+                    current_len = sum(len(c) for c in mat_chunks)
+                    if current_len + len(cleaned_ln) > 25 and len(mat_chunks) >= 2:
+                        continue
+                    mat_chunks.append(cleaned_ln)
+                    used_mat.add(dj)
+                    if sum(len(c) for c in mat_chunks) >= 20 and len(mat_chunks) >= 2:
+                        if sum(len(c) for c in mat_chunks) >= 24 or len(mat_chunks) >= 3:
+                            break
 
-        # --- HSN ---
+        # ------------------------------------------------------------------ #
+        # STEP 3 — build style code                                           #
+        # ------------------------------------------------------------------ #
+        if primary_article_code:
+            style_code = primary_article_code
+        elif mat_chunks:
+            style_code = _merge_overlapping(mat_chunks)
+        else:
+            style_code = desc_style
+
+        # ------------------------------------------------------------------ #
+        # STEP 4 — HSN                                                        #
+        # ------------------------------------------------------------------ #
         hsn = ""
         for dj in range(lo, hi):
             hm = _SIYARAM_HSN_RE.search(lines[dj])
@@ -681,24 +802,7 @@ def _siyaram_text_block_parse(text: str) -> list[dict]:
                 hsn = hm.group(1)
                 break
 
-        def _merge_overlapping(chunks: list[str]) -> str:
-            if not chunks:
-                return ""
-            res = chunks[0]
-            for ch in chunks[1:]:
-                max_ol = 0
-                for ol in range(min(len(res), len(ch)), 2, -1):
-                    if res.endswith(ch[:ol]):
-                        max_ol = ol
-                        break
-                if max_ol > 0:
-                    res = res + ch[max_ol:]
-                else:
-                    res = res + ch
-            return res
-
-        style_code = _merge_overlapping(mat_chunks) if mat_chunks else desc_style
-        full_desc = f"{desc_style} {color} {size}".strip() if desc_style else f"{color} {size}".strip()
+        full_desc = f"{style_code} {color} {size}".strip() if style_code else f"{color} {size}".strip()
         items.append({
             "style_code": style_code,
             "description": full_desc,
