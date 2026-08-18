@@ -19,12 +19,14 @@ class SkuMapIn(BaseModel):
     external_style_name: Optional[str] = ""
     color_map: Optional[Dict[str, str]] = {}
     size_map:  Optional[Dict[str, str]] = {}
+    image_url: Optional[str] = ""
 
 
 class SkuMapUpdate(BaseModel):
     external_style_name: Optional[str] = None
     color_map: Optional[Dict[str, str]] = None
     size_map:  Optional[Dict[str, str]] = None
+    image_url: Optional[str] = None  # None = do not update; "" = clear
 
 
 class ParserTemplateIn(BaseModel):

@@ -14,6 +14,7 @@ import { Drawer } from "./Materials";
 import {
   Plus, Trash2, Pencil, Save, X, ArrowLeftRight,
   Upload, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight,
+  Download, Copy, Check, FileSpreadsheet, RefreshCw, FileText, ExternalLink, Image as ImageIcon,
 } from "lucide-react";
 
 // ── constants ──────────────────────────────────────────────
@@ -22,7 +23,7 @@ const SOURCE_TYPE_LABELS = { b2b_client: "B2B Client", online_channel: "Online C
 
 const emptyForm = {
   style_id: "", source_type: "b2b_client", source_name: "",
-  external_sku: "", external_style_name: "",
+  external_sku: "", external_style_name: "", image_url: "",
   color_map: [], size_map: [],
 };
 
@@ -67,464 +68,345 @@ function KVPairs({ label, rows, onChange }) {
   );
 }
 
-// ── Unmapped tab ──────────────────────────────────────────
-function UnmappedTab({ styles, onDone }) {
-  const [groups, setGroups] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState({});
+// ── Bulk import drawer ────────────────────────────────────
+function BulkImportDrawer({ onClose, onDone }) {
+  const [file, setFile] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const fileRef = useRef();
 
-  // Map modal states
-  const [mappingTarget, setMappingTarget] = useState(null);
-  const [mapMode, setMapMode] = useState("existing"); // "existing" | "new"
-  const [selectedStyleId, setSelectedStyleId] = useState("");
-  const [newStyleForm, setNewStyleForm] = useState({
-    code: "", name: "", category: "Footwear", description: "",
-    base_size: "7", overhead_pct: 8, packing_cost: 12, margin_pct: 25, gst_pct: 5,
-    default_pairs_per_carton: {}
-  });
-  const [styleSearch, setStyleSearch] = useState("");
-  const [submitError, setSubmitError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const STAGE2_CSV_SAMPLE = `style_code,color,size,external_sku,source_type,source_name,external_style_name,image_url
+SSK-OXF-01,Tan,8 UK,MYN-OXF-TAN-8,online_channel,myntra,Classic Oxford Formal Shoes,https://www.dropbox.com/s/sample/shoe.jpg?dl=0
+SSK-OXF-01,Tan,9 UK,MYN-OXF-TAN-9,online_channel,myntra,Classic Oxford Formal Shoes,
+SSK-OXF-01,Black,8 UK,MYN-OXF-BLK-8,online_channel,myntra,Classic Oxford Formal Shoes,
+SSK-MOC-02,Navy,7 UK,BAT-MOC-NAV-7,b2b_client,Bata India Ltd,Navy Suede Moccasin,`;
 
-  const reload = useCallback(async () => {
-    setLoading(true);
+  function downloadCsvTemplate() {
+    const blob = new Blob([STAGE2_CSV_SAMPLE], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "sku_mapping_template.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function downloadXlsxTemplate() {
     try {
-      const r = await http.get("/sku-map/unmapped");
-      setGroups(r.data);
-    } finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { reload(); }, [reload]);
-
-  useEffect(() => {
-    if (mappingTarget) {
-      setNewStyleForm({
-        code: mappingTarget.external_sku,
-        name: `Style ${mappingTarget.external_sku}`,
-        category: "Footwear",
-        description: `Created from unmapped SKU ${mappingTarget.external_sku}`,
-        base_size: "7",
-        overhead_pct: 8,
-        packing_cost: 12,
-        margin_pct: 25,
-        gst_pct: 5,
-        default_pairs_per_carton: {}
-      });
-      setSubmitError("");
-      setSelectedStyleId("");
-      setMapMode("existing");
+      const res = await http.get("/sku-map/template?format=xlsx", { responseType: "blob" });
+      const blob = new Blob([res.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "sku_mapping_template.xlsx";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      // Fallback to CSV if network fails
+      downloadCsvTemplate();
     }
-  }, [mappingTarget]);
+  }
 
-  const filteredStylesList = useMemo(() => {
-    if (!styleSearch) return styles;
-    const s = styleSearch.toLowerCase();
-    return styles.filter((st) =>
-      st.code.toLowerCase().includes(s) ||
-      st.name.toLowerCase().includes(s)
-    );
-  }, [styles, styleSearch]);
-
-  const handleConfirmMapping = async () => {
-    setSubmitError("");
-    setSubmitting(true);
+  async function submit() {
+    setError("");
+    if (!file) return setError("Please choose a .xlsx or .csv template file to upload.");
+    setUploading(true);
     try {
-      let styleId = selectedStyleId;
-
-      if (mapMode === "new") {
-        if (!newStyleForm.code.trim() || !newStyleForm.name.trim()) {
-          setSubmitError("Style Code and Name are required.");
-          setSubmitting(false);
-          return;
-        }
-        const styleRes = await http.post("/styles", {
-          code: newStyleForm.code.trim(),
-          name: newStyleForm.name.trim(),
-          category: newStyleForm.category,
-          description: newStyleForm.description,
-          base_size: newStyleForm.base_size,
-          overhead_pct: Number(newStyleForm.overhead_pct),
-          packing_cost: Number(newStyleForm.packing_cost),
-          margin_pct: Number(newStyleForm.margin_pct),
-          gst_pct: Number(newStyleForm.gst_pct),
-          default_pairs_per_carton: newStyleForm.default_pairs_per_carton || {}
-        });
-        styleId = styleRes.data.id;
-      }
-
-      if (!styleId) {
-        setSubmitError("Please select a style to map.");
-        setSubmitting(false);
-        return;
-      }
-
-      await http.post("/sku-map", {
-        style_id: styleId,
-        source_type: mappingTarget.source_type,
-        source_name: mappingTarget.source_name,
-        external_sku: mappingTarget.external_sku,
-        external_style_name: "",
-        color_map: {},
-        size_map: {},
-      });
-
-      setMappingTarget(null);
-      reload();
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await http.post("/sku-map/bulk", fd);
+      setResult(r.data);
       if (onDone) onDone();
     } catch (e) {
-      setSubmitError(e.response?.data?.detail || "Mapping failed.");
+      setError(formatApiError(e.response?.data?.detail) || "Upload failed.");
     } finally {
-      setSubmitting(false);
+      setUploading(false);
     }
-  };
+  }
 
-  if (loading) return <div className="text-center py-20 text-slate-400">Loading unmapped items…</div>;
+  function handleDrop(e) {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer?.files?.[0]) {
+      const f = e.dataTransfer.files[0];
+      const name = f.name.toLowerCase();
+      if (name.endsWith(".xlsx") || name.endsWith(".xlsm") || name.endsWith(".csv")) {
+        setFile(f);
+        setError("");
+      } else {
+        setError("Only .xlsx or .csv files are supported.");
+      }
+    }
+  }
 
-  if (groups.length === 0)
-    return (
-      <Card className="p-10 text-center">
-        <CheckCircle2 className="w-10 h-10 text-green-400 mx-auto mb-3" />
-        <div className="text-slate-600 font-semibold mb-1">All styles are mapped!</div>
-        <div className="text-xs text-slate-400">No production jobs have unresolved style codes.</div>
-      </Card>
-    );
+  function copyErrorsToClipboard() {
+    if (!result?.errors?.length) return;
+    const text = result.errors.map((e) => `Row ${e.row}: ${e.reason}`).join("\n");
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  function downloadErrorReport() {
+    if (!result?.errors?.length) return;
+    let csvContent = "row,reason\n";
+    result.errors.forEach((e) => {
+      csvContent += `${e.row},"${(e.reason || "").replace(/"/g, '""')}"\n`;
+    });
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `sku_map_upload_errors_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function resetForNewUpload() {
+    setFile(null);
+    setResult(null);
+    setError("");
+    if (fileRef.current) fileRef.current.value = "";
+  }
 
   return (
-    <div className="space-y-3">
-      {groups.map((g) => {
-        const key = `${g.source_type}:${g.source_name}`;
-        const isOpen = !!expanded[key];
-        return (
-          <Card key={key} className="overflow-hidden">
+    <Drawer onClose={onClose} title="Bulk Import SKU Mappings (Stage 2)">
+      <div className="space-y-5">
+        {/* Template Instructions & Downloads */}
+        <div className="bg-slate-900 text-white p-4 border border-slate-800 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wider font-bold text-amber-400">Stage 2 Template Format</div>
+              <div className="text-xs text-slate-300 mt-1">
+                Upload your marketplace or client SKU sheets (.xlsx or .csv). Rows are grouped by <span className="text-white font-semibold font-mono">style + source + color</span> into mapping documents.
+              </div>
+            </div>
+          </div>
+
+          <div className="text-[11px] text-slate-300 font-mono bg-slate-950/60 p-2.5 border border-slate-800 rounded space-y-1">
+            <div><span className="text-emerald-400 font-bold">Required:</span> style_code, color, size, external_sku, source_type, source_name</div>
+            <div><span className="text-blue-400 font-bold">Optional:</span> external_style_name, image_url</div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-1">
             <button
-              className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-slate-50 transition-colors"
-              onClick={() => setExpanded((e) => ({ ...e, [key]: !isOpen }))}
+              type="button"
+              id="btn-download-xlsx-template"
+              onClick={downloadXlsxTemplate}
+              className="inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs px-3 py-1.5 transition-colors shadow-sm"
             >
-              <div className="flex items-center gap-3">
-                <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
-                <div>
-                  <div className="font-bold text-slate-900">{g.source_name}</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    <Badge color="blue">{SOURCE_TYPE_LABELS[g.source_type] || g.source_type}</Badge>
-                    <span className="ml-2">{g.job_count} job{g.job_count !== 1 ? "s" : ""} unresolved</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="text-right hidden sm:block">
-                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">External SKUs</div>
-                  <div className="text-xs font-mono text-slate-700 truncate max-w-[220px]">
-                    {g.external_skus.slice(0, 4).join(", ")}{g.external_skus.length > 4 ? ` +${g.external_skus.length - 4} more` : ""}
-                  </div>
-                </div>
-                {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-              </div>
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              Download Template (.xlsx)
             </button>
-            {isOpen && (
-              <div className="border-t border-slate-100 p-4 space-y-4">
-                <div className="bg-slate-50 p-3 border border-slate-200">
-                  <div className="text-[10px] uppercase font-bold text-slate-500 mb-2">Unresolved SKUs:</div>
-                  <div className="flex flex-wrap gap-2">
-                    {g.external_skus.map((sku) => (
-                      <div key={sku} className="flex items-center gap-2 bg-white border border-slate-300 px-2.5 py-1.5 font-mono text-xs">
-                        <span className="font-bold text-slate-800">{sku}</span>
-                        <button
-                          onClick={() => setMappingTarget({
-                            source_type: g.source_type,
-                            source_name: g.source_name,
-                            external_sku: sku,
-                          })}
-                          className="bg-[#0F172A] hover:bg-slate-800 text-white text-[10px] uppercase font-bold px-2 py-1 transition-colors"
-                        >
-                          Map to Style
-                        </button>
-                      </div>
-                    ))}
+            <button
+              type="button"
+              id="btn-download-csv-template"
+              onClick={downloadCsvTemplate}
+              className="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs px-3 py-1.5 transition-colors border border-slate-700"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download (.csv)
+            </button>
+          </div>
+        </div>
+
+        {/* Upload Dropzone */}
+        {!result && (
+          <div className="space-y-3">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Select or Drag File *</div>
+            <div
+              className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-all ${
+                isDragging
+                  ? "border-amber-500 bg-amber-50"
+                  : file
+                  ? "border-emerald-500 bg-emerald-50/40"
+                  : "border-slate-300 hover:border-slate-500 bg-white"
+              }`}
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileRef.current?.click()}
+            >
+              <Upload className={`w-8 h-8 mx-auto mb-2 ${file ? "text-emerald-600" : "text-slate-400"}`} />
+              {file ? (
+                <div className="space-y-1">
+                  <div className="text-sm font-mono font-bold text-slate-900">{file.name}</div>
+                  <div className="text-xs text-slate-500 font-mono">
+                    {(file.size / 1024).toFixed(1)} KB · Ready to import
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); resetForNewUpload(); }}
+                    className="text-xs text-red-600 hover:underline font-semibold mt-2"
+                  >
+                    Change file
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="text-sm font-semibold text-slate-700">Click to browse or drag file here</div>
+                  <div className="text-xs text-slate-400">Supports .xlsx, .xlsm, or .csv</div>
+                </div>
+              )}
+            </div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".xlsx,.xlsm,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.[0]) {
+                  setFile(e.target.files[0]);
+                  setError("");
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {/* Global Error Banner */}
+        {error && (
+          <div className="bg-red-50 border-2 border-red-300 p-3 text-xs text-red-700 font-semibold flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+            <div>{error}</div>
+          </div>
+        )}
+
+        {/* Upload Results Summary View */}
+        {result && (
+          <div className="space-y-4 bg-slate-50 p-4 border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div className="text-xs uppercase tracking-wider font-bold text-slate-700">Import Results</div>
+              <button
+                type="button"
+                onClick={resetForNewUpload}
+                className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Upload Another
+              </button>
+            </div>
+
+            {/* Counts Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="bg-emerald-50 border border-emerald-300 p-2.5 text-center">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">Created</div>
+                <div className="text-2xl font-bold font-mono text-emerald-700">{result.created}</div>
+              </div>
+              <div className="bg-blue-50 border border-blue-300 p-2.5 text-center">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-blue-800">Updated</div>
+                <div className="text-2xl font-bold font-mono text-blue-700">{result.updated}</div>
+              </div>
+              <div className={`p-2.5 text-center border ${result.warnings?.length ? "bg-amber-50 border-amber-300" : "bg-slate-100 border-slate-200"}`}>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-amber-800">Warnings</div>
+                <div className="text-2xl font-bold font-mono text-amber-700">{result.warnings?.length || 0}</div>
+              </div>
+              <div className={`p-2.5 text-center border ${result.errors?.length ? "bg-red-50 border-red-300" : "bg-slate-100 border-slate-200"}`}>
+                <div className="text-[10px] uppercase tracking-wider font-bold text-red-800">Errors</div>
+                <div className="text-2xl font-bold font-mono text-red-700">{result.errors?.length || 0}</div>
+              </div>
+            </div>
+
+            {/* Warnings Section */}
+            {result.warnings?.length > 0 && (
+              <div className="bg-amber-50 border border-amber-300 p-3 space-y-2">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                  <span>{result.warnings.length} Warning{result.warnings.length !== 1 ? "s" : ""}</span>
+                </div>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto text-xs font-mono text-amber-900 pr-1">
+                  {result.warnings.map((w, i) => (
+                    <div key={i} className="bg-white/80 p-1.5 border border-amber-200 rounded">
+                      <span className="font-bold text-amber-700">Row {w.row}:</span> {w.reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Errors Section */}
+            {result.errors?.length > 0 ? (
+              <div className="bg-red-50 border border-red-300 p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-red-900">
+                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0" />
+                    <span>{result.errors.length} Error{result.errors.length !== 1 ? "s" : ""} (Action Required)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={copyErrorsToClipboard}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold bg-white text-slate-700 hover:bg-slate-100 px-2 py-1 border border-slate-300 shadow-sm"
+                      title="Copy errors to clipboard"
+                    >
+                      {copied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                      {copied ? "Copied!" : "Copy Errors"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={downloadErrorReport}
+                      className="inline-flex items-center gap-1 text-[11px] font-bold bg-white text-slate-700 hover:bg-slate-100 px-2 py-1 border border-slate-300 shadow-sm"
+                      title="Download CSV report of error rows"
+                    >
+                      <Download className="w-3 h-3" />
+                      Export CSV
+                    </button>
                   </div>
                 </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-left">
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">PO #</th>
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">External SKU</th>
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">Color</th>
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">Size</th>
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">Qty</th>
-                        <th className="px-4 py-2 text-[10px] uppercase tracking-wider font-bold text-slate-500">Stage</th>
+                <div className="overflow-x-auto max-h-52 overflow-y-auto border border-red-200 bg-white">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-red-100 text-red-900 sticky top-0 font-sans font-bold text-[10px] uppercase tracking-wider">
+                      <tr>
+                        <th className="px-3 py-1.5 w-16">Row</th>
+                        <th className="px-3 py-1.5">Problem / Reason</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {g.jobs.map((j) => (
-                        <tr key={j.id} className="hover:bg-amber-50 transition-colors">
-                          <td className="px-4 py-2 font-mono text-xs">{j.po_number}</td>
-                          <td className="px-4 py-2 font-mono font-bold text-red-700">{j.style_code}</td>
-                          <td className="px-4 py-2 text-xs text-slate-600">{j.color || "—"}</td>
-                          <td className="px-4 py-2 text-xs text-slate-600">{j.size || "—"}</td>
-                          <td className="px-4 py-2 text-xs">{j.quantity}</td>
-                          <td className="px-4 py-2">
-                            <Badge color="yellow">{j.stage}</Badge>
-                          </td>
+                    <tbody className="divide-y divide-red-100">
+                      {result.errors.map((e, i) => (
+                        <tr key={i} className="hover:bg-red-50/60">
+                          <td className="px-3 py-1.5 font-bold text-red-700 align-top">#{e.row}</td>
+                          <td className="px-3 py-1.5 text-slate-800">{e.reason}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-              </div>
-            )}
-          </Card>
-        );
-      })}
-
-      {mappingTarget && (
-        <Drawer onClose={() => setMappingTarget(null)} title="Map External Code to Style">
-          <div className="space-y-4">
-            <div className="bg-slate-100 p-3 border border-slate-200 font-mono text-xs space-y-1">
-              <div><span className="text-slate-400 font-bold">SOURCE TYPE:</span> {SOURCE_TYPE_LABELS[mappingTarget.source_type]}</div>
-              <div><span className="text-slate-400 font-bold">SOURCE NAME:</span> {mappingTarget.source_name}</div>
-              <div><span className="text-slate-400 font-bold">EXTERNAL SKU:</span> {mappingTarget.external_sku}</div>
-            </div>
-
-            <div className="flex gap-4 border-b border-slate-200 pb-2">
-              <button
-                type="button"
-                className={`text-xs uppercase tracking-wider font-bold pb-1 border-b-2 ${mapMode === "existing" ? "border-slate-900 text-slate-900" : "border-transparent text-slate-400"}`}
-                onClick={() => setMapMode("existing")}
-              >
-                Map to Existing Style
-              </button>
-              <button
-                type="button"
-                className={`text-xs uppercase tracking-wider font-bold pb-1 border-b-2 ${mapMode === "new" ? "border-slate-900 text-slate-900" : "border-transparent text-slate-400"}`}
-                onClick={() => setMapMode("new")}
-              >
-                Create New Style
-              </button>
-            </div>
-
-            {mapMode === "existing" ? (
-              <div className="space-y-3">
-                <Input
-                  label="Search Styles"
-                  placeholder="Type style code or name..."
-                  value={styleSearch}
-                  onChange={(e) => setStyleSearch(e.target.value)}
-                />
-                <div className="space-y-1">
-                  <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Select Style *</div>
-                  <select
-                    className="w-full border-2 border-slate-300 p-2 text-sm focus:outline-none bg-white"
-                    value={selectedStyleId}
-                    onChange={(e) => setSelectedStyleId(e.target.value)}
-                  >
-                    <option value="">— Select Style —</option>
-                    {filteredStylesList.map((s) => (
-                      <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
-                    ))}
-                  </select>
+                <div className="text-[11px] text-slate-600 italic">
+                  Tip: Fix the highlighted rows in your sheet and re-upload. Existing valid mappings will automatically merge and update without duplicate entries.
                 </div>
               </div>
             ) : (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <Input
-                    label="Style Code *"
-                    value={newStyleForm.code}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, code: e.target.value })}
-                  />
-                  <Input
-                    label="Style Name *"
-                    value={newStyleForm.name}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, name: e.target.value })}
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <Input
-                    label="Category"
-                    value={newStyleForm.category}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, category: e.target.value })}
-                  />
-                  <Input
-                    label="Base Size"
-                    value={newStyleForm.base_size}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, base_size: e.target.value })}
-                  />
-                </div>
-                <Input
-                  label="Description"
-                  value={newStyleForm.description}
-                  onChange={(e) => setNewStyleForm({ ...newStyleForm, description: e.target.value })}
-                />
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <Input
-                    label="Overhead%"
-                    type="number"
-                    value={newStyleForm.overhead_pct}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, overhead_pct: e.target.value })}
-                  />
-                  <Input
-                    label="Packing₹"
-                    type="number"
-                    value={newStyleForm.packing_cost}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, packing_cost: e.target.value })}
-                  />
-                  <Input
-                    label="Margin%"
-                    type="number"
-                    value={newStyleForm.margin_pct}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, margin_pct: e.target.value })}
-                  />
-                  <Input
-                    label="GST%"
-                    type="number"
-                    value={newStyleForm.gst_pct}
-                    onChange={(e) => setNewStyleForm({ ...newStyleForm, gst_pct: e.target.value })}
-                  />
-                </div>
-              </div>
-            )}
-
-            {submitError && (
-              <div className="bg-red-50 border border-red-300 p-2 text-xs text-red-700 font-semibold">{submitError}</div>
-            )}
-
-            <div className="flex gap-2 pt-2">
-              <BtnPrimary onClick={handleConfirmMapping} disabled={submitting} className="flex-1">
-                {submitting ? "Processing..." : "Confirm & Map"}
-              </BtnPrimary>
-              <BtnSecondary onClick={() => setMappingTarget(null)} disabled={submitting}>Cancel</BtnSecondary>
-            </div>
-          </div>
-        </Drawer>
-      )}
-    </div>
-  );
-}
-
-// ── Bulk import drawer ────────────────────────────────────
-function BulkImportDrawer({ onClose, onDone }) {
-  const [srcType, setSrcType] = useState("b2b_client");
-  const [srcName, setSrcName] = useState("");
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
-  const fileRef = useRef();
-
-  const CSV_TEMPLATE = `external_sku,style_code,external_style_name,color_from,color_to,size_from,size_to
-TC-001,SSK-OXF-01,Classic Oxford Brown,Tan,TAN01,8 UK,8
-TC-002,SSK-MOC-02,Moccasin Navy,,,,`;
-
-  async function submit() {
-    setError(""); setResult(null);
-    if (!file) return setError("Please select a CSV file.");
-    if (!srcName.trim()) return setError("Source name is required.");
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("source_type", srcType);
-      fd.append("source_name", srcName.trim());
-      const r = await http.post("/sku-map/bulk", fd);
-      setResult(r.data);
-      onDone();
-    } catch (e) {
-      setError(formatApiError(e.response?.data?.detail) || "Upload failed.");
-    } finally { setUploading(false); }
-  }
-
-  function downloadTemplate() {
-    const blob = new Blob([CSV_TEMPLATE], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "sku_map_template.csv";
-    a.click();
-  }
-
-  return (
-    <Drawer onClose={onClose} title="Bulk Import SKU Mappings">
-      <div className="space-y-5">
-        <div className="bg-blue-50 border-2 border-blue-200 px-4 py-3 text-sm text-blue-800">
-          Upload a CSV with columns: <span className="font-mono font-bold">external_sku</span>,{" "}
-          <span className="font-mono font-bold">style_code</span> (required) +{" "}
-          <span className="font-mono">external_style_name, color_from, color_to, size_from, size_to</span> (optional).{" "}
-          <button onClick={downloadTemplate} className="underline font-bold ml-1">Download template</button>
-        </div>
-
-        {/* Source type */}
-        <div className="space-y-2">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Source Type *</div>
-          <div className="flex gap-4">
-            {[["b2b_client", "B2B Client"], ["online_channel", "Online Channel"]].map(([val, label]) => (
-              <label key={val} className="flex items-center gap-2 cursor-pointer">
-                <input type="radio" name="bulk-source-type" value={val} checked={srcType === val}
-                  onChange={() => { setSrcType(val); setSrcName(""); }} className="accent-slate-900" />
-                <span className="text-sm font-semibold text-slate-700">{label}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-
-        {/* Source name */}
-        {srcType === "online_channel" ? (
-          <Select label="Channel *" id="bulk-source-name-channel" value={srcName}
-            onChange={(e) => setSrcName(e.target.value)}>
-            <option value="">— Select channel —</option>
-            {ONLINE_CHANNELS.map((ch) => (
-              <option key={ch} value={ch}>{ch.charAt(0).toUpperCase() + ch.slice(1)}</option>
-            ))}
-          </Select>
-        ) : (
-          <Input label="Client Name *" id="bulk-source-name"
-            placeholder="e.g. Bata India Ltd — applies to all rows unless CSV has source_name column"
-            value={srcName} onChange={(e) => setSrcName(e.target.value)} />
-        )}
-
-        {/* File picker */}
-        <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">CSV File *</div>
-          <div
-            className="border-2 border-dashed border-slate-300 hover:border-slate-500 px-4 py-6 text-center cursor-pointer transition-colors"
-            onClick={() => fileRef.current?.click()}
-          >
-            <Upload className="w-6 h-6 text-slate-400 mx-auto mb-2" />
-            {file
-              ? <div className="text-sm font-mono font-bold text-slate-700">{file.name}</div>
-              : <div className="text-sm text-slate-500">Click to choose a .csv file</div>}
-          </div>
-          <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
-            onChange={(e) => setFile(e.target.files[0] || null)} />
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border-2 border-red-300 px-4 py-3 text-sm text-red-700 font-semibold">{error}</div>
-        )}
-
-        {result && (
-          <div className="space-y-2">
-            <div className="bg-green-50 border-2 border-green-300 px-4 py-3 text-sm text-green-800 font-semibold">
-              ✓ {result.created} created · {result.skipped_duplicate} duplicates skipped
-            </div>
-            {result.errors.length > 0 && (
-              <div className="bg-amber-50 border-2 border-amber-300 px-4 py-3 text-sm text-amber-800 space-y-1 max-h-40 overflow-y-auto">
-                <div className="font-bold">{result.errors.length} row error{result.errors.length !== 1 ? "s" : ""}:</div>
-                {result.errors.map((e, i) => (
-                  <div key={i} className="font-mono text-xs">Row {e.row}: {e.reason}</div>
-                ))}
+              <div className="bg-emerald-50 border border-emerald-300 p-3 text-xs text-emerald-800 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                <span>All valid rows were processed smoothly with 0 errors!</span>
               </div>
             )}
           </div>
         )}
 
+        {/* Action Buttons */}
         <div className="flex gap-3 pt-2">
-          <BtnPrimary id="btn-bulk-upload" onClick={submit} disabled={uploading} className="flex-1">
-            <span className="flex items-center justify-center gap-2">
-              <Upload className="w-4 h-4" />
-              {uploading ? "Uploading…" : "Upload & Import"}
-            </span>
-          </BtnPrimary>
-          <BtnSecondary onClick={onClose} disabled={uploading}>Cancel</BtnSecondary>
+          {!result ? (
+            <BtnPrimary id="btn-bulk-upload" onClick={submit} disabled={uploading || !file} className="flex-1">
+              <span className="flex items-center justify-center gap-2">
+                <Upload className="w-4 h-4" />
+                {uploading ? "Importing…" : "Upload & Import"}
+              </span>
+            </BtnPrimary>
+          ) : (
+            <BtnPrimary
+              id="btn-done-refresh"
+              onClick={() => { if (onDone) onDone(); onClose(); }}
+              className="flex-1"
+            >
+              <span className="flex items-center justify-center gap-2">
+                <Check className="w-4 h-4" /> Done & View Mappings
+              </span>
+            </BtnPrimary>
+          )}
+          <BtnSecondary onClick={onClose} disabled={uploading}>
+            {result ? "Close" : "Cancel"}
+          </BtnSecondary>
         </div>
       </div>
     </Drawer>
@@ -581,6 +463,7 @@ export default function SkuMap() {
     setForm({
       style_id: m.style_id, source_type: m.source_type, source_name: m.source_name,
       external_sku: m.external_sku, external_style_name: m.external_style_name || "",
+      image_url: m.image_url || "",
       color_map: dictToRows(m.color_map), size_map: dictToRows(m.size_map),
     });
     setFormError(""); setOpen(true);
@@ -596,6 +479,7 @@ export default function SkuMap() {
       if (editId) {
         await http.put(`/sku-map/${editId}`, {
           external_style_name: form.external_style_name,
+          image_url: form.image_url.trim(),
           color_map: rowsToDict(form.color_map),
           size_map: rowsToDict(form.size_map),
         });
@@ -604,6 +488,7 @@ export default function SkuMap() {
           style_id: form.style_id, source_type: form.source_type,
           source_name: form.source_name.trim(), external_sku: form.external_sku.trim(),
           external_style_name: form.external_style_name.trim(),
+          image_url: form.image_url.trim(),
           color_map: rowsToDict(form.color_map), size_map: rowsToDict(form.size_map),
         });
       }
@@ -616,7 +501,7 @@ export default function SkuMap() {
   function askDelete(m) {
     setConfirm({
       title: "Delete Mapping",
-      message: `Remove the mapping for "${m.external_sku}" (${m.source_name})? This cannot be undone.`,
+      message: `Remove the mapping for "${m.external_sku || m.style_code}" (${m.source_name})? This cannot be undone.`,
       onConfirm: async () => { await http.delete(`/sku-map/${m.id}`); setConfirm(null); load(); },
       onCancel: () => setConfirm(null),
     });
@@ -703,7 +588,7 @@ export default function SkuMap() {
                 <ArrowLeftRight className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                 <div className="text-slate-500 font-semibold mb-1">No mappings found</div>
                 <div className="text-xs text-slate-400">
-                  Add a mapping to link a client's SKU code to an internal style.
+                  Add a mapping or use Bulk Import to link client/channel SKUs to internal styles.
                 </div>
               </Card>
             ) : (
@@ -711,7 +596,7 @@ export default function SkuMap() {
                 <table className="w-full text-sm" id="sku-map-table">
                   <thead>
                     <tr className="border-b-2 border-slate-200 bg-slate-50 text-left">
-                      {["Internal Style", "Source", "External SKU", "Ext. Style Name", "Color Map", "Size Map", "Unmapped Misses", "Actions"].map((h) => (
+                      {["Internal Style", "Source", "External SKU / Group", "Ext. Style Name", "Color / Color Map", "Size Map", "Unmapped Misses", "Actions"].map((h) => (
                         <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-wider font-bold text-slate-500">{h}</th>
                       ))}
                     </tr>
@@ -726,8 +611,32 @@ export default function SkuMap() {
                       return (
                         <tr key={m.id} className="hover:bg-slate-50 transition-colors">
                           <td className="px-4 py-3">
-                            <div className="font-mono font-bold text-slate-900">{m.style_code}</div>
-                            <div className="text-[10px] text-slate-400 font-mono">{m.style_id}</div>
+                            <div className="flex items-center gap-3">
+                              {m.image_url ? (
+                                <a
+                                  href={m.image_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="w-10 h-10 rounded border border-slate-200 overflow-hidden bg-slate-100 flex-shrink-0 flex items-center justify-center hover:opacity-80 transition-opacity"
+                                  title="View full image"
+                                >
+                                  <img
+                                    src={m.image_url}
+                                    alt={m.style_code}
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => { e.target.style.display = "none"; }}
+                                  />
+                                </a>
+                              ) : (
+                                <div className="w-10 h-10 rounded border border-slate-200 bg-slate-50 flex-shrink-0 flex items-center justify-center text-slate-300">
+                                  <ImageIcon className="w-4 h-4" />
+                                </div>
+                              )}
+                              <div>
+                                <div className="font-mono font-bold text-slate-900">{m.style_code}</div>
+                                <div className="text-[10px] text-slate-400 font-mono">{m.style_id}</div>
+                              </div>
+                            </div>
                           </td>
                           <td className="px-4 py-3">
                             <Badge color={m.source_type === "b2b_client" ? "blue" : "orange"}>
@@ -735,10 +644,25 @@ export default function SkuMap() {
                             </Badge>
                             <div className="text-xs text-slate-600 mt-1 font-semibold">{m.source_name}</div>
                           </td>
-                          <td className="px-4 py-3 font-mono font-bold text-slate-900">{m.external_sku}</td>
+                          <td className="px-4 py-3">
+                            <div className="font-mono font-bold text-slate-900">
+                              {m.external_sku || (m.color ? `${m.color} Group` : "—")}
+                            </div>
+                            {m.color && (
+                              <div className="text-[11px] text-slate-500 mt-0.5">
+                                Color: <span className="font-semibold text-slate-700">{m.color}</span>
+                              </div>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-xs text-slate-600">{m.external_style_name || <span className="text-slate-300">—</span>}</td>
                           <td className="px-4 py-3">
-                            {colorEntries.length === 0 ? <span className="text-slate-300 text-xs">—</span> : (
+                            {m.color ? (
+                              <span className="inline-block bg-slate-100 text-slate-800 text-xs font-semibold px-2 py-0.5 rounded border border-slate-200">
+                                {m.color}
+                              </span>
+                            ) : colorEntries.length === 0 ? (
+                              <span className="text-slate-300 text-xs">—</span>
+                            ) : (
                               <div className="space-y-0.5">
                                 {colorEntries.map(([k, v]) => (
                                   <div key={k} className="text-[11px] font-mono text-slate-600">
@@ -752,14 +676,19 @@ export default function SkuMap() {
                           </td>
                           <td className="px-4 py-3">
                             {sizeEntries.length === 0 ? <span className="text-slate-300 text-xs">—</span> : (
-                              <div className="space-y-0.5">
-                                {sizeEntries.map(([k, v]) => (
+                              <div className="space-y-0.5 max-w-[200px]">
+                                {sizeEntries.slice(0, 4).map(([k, v]) => (
                                   <div key={k} className="text-[11px] font-mono text-slate-600">
-                                    <span className="text-slate-400">{k}</span>
+                                    <span className="text-slate-500 font-semibold">{k}</span>
                                     <span className="text-slate-400 mx-1">→</span>
-                                    <span className="font-bold">{v}</span>
+                                    <span className="font-bold text-slate-800">{v}</span>
                                   </div>
                                 ))}
+                                {sizeEntries.length > 4 && (
+                                  <div className="text-[10px] text-slate-400 italic">
+                                    +{sizeEntries.length - 4} more sizes
+                                  </div>
+                                )}
                               </div>
                             )}
                           </td>
@@ -878,6 +807,37 @@ export default function SkuMap() {
               placeholder="How this source describes the style"
               value={form.external_style_name}
               onChange={(e) => setForm({ ...form, external_style_name: e.target.value })} />
+
+            <div className="space-y-1">
+              <Input
+                label="Image URL (optional — Dropbox / Google Drive / Direct link)"
+                id="form-image-url"
+                placeholder="https://www.dropbox.com/... or https://drive.google.com/..."
+                value={form.image_url}
+                onChange={(e) => setForm({ ...form, image_url: e.target.value })}
+              />
+              {form.image_url && (
+                <div className="flex items-center gap-2 pt-1">
+                  <div className="w-8 h-8 rounded border border-slate-300 overflow-hidden bg-slate-100 flex-shrink-0">
+                    <img
+                      src={form.image_url}
+                      alt="Preview"
+                      className="w-full h-full object-cover"
+                      onError={(e) => { e.target.style.display = "none"; }}
+                    />
+                  </div>
+                  <a
+                    href={form.image_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline flex items-center gap-1 font-mono truncate max-w-xs"
+                  >
+                    <span>Test image link</span>
+                    <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                  </a>
+                </div>
+              )}
+            </div>
 
             {activeMapping?.unmapped_encountered && (
               (Object.keys(activeMapping.unmapped_encountered.size || {}).length > 0 ||
