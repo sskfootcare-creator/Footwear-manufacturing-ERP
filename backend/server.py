@@ -1378,6 +1378,9 @@ async def create_sku_map(payload: SkuMapIn, request: Request):
     doc["source_name_key"] = _norm_marketplace(src_name)
     doc["external_sku_key"] = _norm_key(ext_sku)
     doc["style_code"] = style["code"]          # denormalised for display
+    # Normalize share-link URLs (Dropbox/OneDrive/Drive) so the stored URL is
+    # always a direct-download/embed URL — same logic used for style photos.
+    doc["image_url"] = normalize_image_url(payload.image_url or "")
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
     doc["created_by"] = u["email"]
@@ -1406,6 +1409,10 @@ async def update_sku_map(mid: str, payload: SkuMapUpdate, request: Request):
         update["color_map"] = payload.color_map
     if payload.size_map is not None:
         update["size_map"] = payload.size_map
+    if payload.image_url is not None:
+        # Normalize share-link URLs (Dropbox/OneDrive/Drive) — same function
+        # used for style photos; empty string is a valid "clear" value.
+        update["image_url"] = normalize_image_url(payload.image_url)
     await db.sku_map.update_one({"_id": oid(mid)}, {"$set": update})
     await log_activity("UPDATE", "sku_map", f"Updated mapping {mid}", u["email"])
     updated_doc = await db.sku_map.find_one({"_id": oid(mid)})
@@ -1425,115 +1432,297 @@ async def delete_sku_map(mid: str, request: Request):
     return {"ok": True}
 
 
+@api.get("/sku-map/template")
+async def download_sku_map_template(format: str = "xlsx", request: Request = None):
+    """Download the Stage 2 SKU Mapping template in .xlsx or .csv format with sample rows."""
+    await get_current_user(request)
+    headers = [
+        "style_code", "color", "size", "external_sku",
+        "source_type", "source_name", "external_style_name", "image_url"
+    ]
+    sample_rows = [
+        ["SSK-OXF-01", "Tan", "8 UK", "MYN-OXF-TAN-8", "online_channel", "myntra", "Classic Oxford Formal Shoes", "https://www.dropbox.com/s/sample/shoe.jpg?dl=0"],
+        ["SSK-OXF-01", "Tan", "9 UK", "MYN-OXF-TAN-9", "online_channel", "myntra", "Classic Oxford Formal Shoes", ""],
+        ["SSK-OXF-01", "Black", "8 UK", "MYN-OXF-BLK-8", "online_channel", "myntra", "Classic Oxford Formal Shoes", ""],
+        ["SSK-MOC-02", "Navy", "7 UK", "BAT-MOC-NAV-7", "b2b_client", "Bata India Ltd", "Navy Suede Moccasin", ""],
+    ]
+    if format.lower() == "csv":
+        import io as _io
+        import csv as _csv
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(headers)
+        for r in sample_rows:
+            w.writerow(r)
+        return Response(
+            content=buf.getvalue().encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="sku_mapping_template.csv"'}
+        )
+    else:
+        import io as _io
+        import openpyxl as _openpyxl
+        wb = _openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "SKU Mapping Template"
+        ws.append(headers)
+        for r in sample_rows:
+            ws.append(r)
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = _openpyxl.utils.get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="sku_mapping_template.xlsx"'}
+        )
+
+
 @api.post("/sku-map/bulk", dependencies=[Depends(upload_rate_limiter)])
 async def bulk_create_sku_map(
     file: UploadFile = File(...),
-    source_type: str = "b2b_client",
-    source_name: str = "",
     request: Request = None,
 ):
-    """Bulk-import SKU mappings from a CSV file.
+    """Bulk-import SKU mappings from the Stage 2 template (.xlsx or .csv).
 
-    The CSV must contain at minimum the columns:
-      external_sku  — the code the client / platform uses          (required)
-      style_code    — our internal styles.code to map it to        (required)
+    Template columns (header row must use these exact names, case-insensitive):
+      style_code    — our internal styles.code                      (required)
+      color         — the color label for this row                  (required)
+      size          — the size label for this row                   (required)
+      external_sku  — the SKU the source uses for this size/color   (required)
+      source_type   — "b2b_client" or "online_channel"              (required)
+      source_name   — name of the client / channel                  (required)
+      external_style_name — human-readable label from the source    (optional)
+      image_url     — product image URL (Dropbox/Drive/plain)       (optional)
 
-    Optional columns (any absent column is silently skipped):
-      external_style_name — human-readable description from that source
-      color_from / color_to  — one color translation pair per row
-      size_from  / size_to   — one size  translation pair per row
+    Grouping logic:
+      Rows are grouped by (style_code, source_type, source_name, color).
+      Color comparison is case/whitespace-insensitive when grouping, but
+      original casing from the first row in each group is preserved for storage.
+      One sku_map document is created/updated per group, with size_map = {size: external_sku}.
 
-    source_type and source_name can be supplied either as form fields or as
-    columns inside the CSV (CSV columns take priority per row).
+    Duplicate handling:
+      If a mapping for (source_type, source_name_key, style_id, color_key) already
+      exists, the new size_map entries are MERGED into the existing document rather
+      than rejected — re-uploading an extended template is a normal workflow.
 
-    Returns a summary: {created, skipped_duplicate, errors: [{row, reason}]}
+    Returns:
+      {created: N, updated: N, errors: [{row, reason}], warnings: [{row, reason}]}
     """
     import io
     import csv
+    import openpyxl
 
-    u = await get_current_user(request); require_roles("admin", "manager")(u)
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
 
     content = await file.read()
-    try:
-        text = content.decode("utf-8-sig")   # strip BOM if present
-    except UnicodeDecodeError:
-        text = content.decode("latin-1")
+    filename = (file.filename or "").lower()
 
-    reader = csv.DictReader(io.StringIO(text))
+    # ── 1. Parse rows from .xlsx or .csv ─────────────────────────────────────
+    raw_rows: list[dict] = []
 
-    # Normalise column names: strip whitespace, lower-case
-    def norm_row(row: dict) -> dict:
-        return {k.strip().lower().replace(" ", "_"): (v or "").strip() for k, v in row.items()}
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            ws = wb.active
+            headers = None
+            for row_cells in ws.iter_rows(values_only=True):
+                if headers is None:
+                    # First non-empty row is the header
+                    if any(c is not None for c in row_cells):
+                        headers = [str(c or "").strip().lower().replace(" ", "_") for c in row_cells]
+                    continue
+                if all(c is None for c in row_cells):
+                    continue  # skip blank rows
+                raw_rows.append(dict(zip(headers, [str(c).strip() if c is not None else "" for c in row_cells])))
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read .xlsx file: {exc}")
+    else:
+        # CSV fallback
+        try:
+            try:
+                text = content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = content.decode("latin-1")
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                raw_rows.append({k.strip().lower().replace(" ", "_"): (v or "").strip()
+                                 for k, v in row.items()})
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read CSV file: {exc}")
 
-    created = 0
-    skipped_duplicate = 0
-    errors = []
+    if not raw_rows:
+        raise HTTPException(400, "File is empty or has no data rows")
 
-    # Pre-fetch all style codes for fast lookup (code.upper() → ObjectId str)
-    all_styles_cursor = await db.styles.find({}, {"code": 1}).to_list(10000)
-    style_code_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles_cursor}
+    # ── 2. Pre-fetch style master (code.upper() → {id, code}) ─────────────────
+    all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
+    style_map: dict[str, dict] = {s["code"].strip().upper(): {"id": str(s["_id"]), "code": s["code"]}
+                                   for s in all_styles}
 
-    for idx, raw_row in enumerate(reader, start=2):   # row 1 = header
-        row = norm_row(raw_row)
+    # ── 3. Validate rows and collect groups ───────────────────────────────────
+    REQUIRED = ("style_code", "color", "size", "external_sku", "source_type", "source_name")
 
-        # Resolve source_type / source_name: CSV column > form field
-        row_src_type = row.get("source_type", "") or source_type
-        row_src_name = row.get("source_name", "") or source_name
+    errors:   list[dict] = []
+    warnings: list[dict] = []
 
-        ext_sku   = row.get("external_sku", "").strip()
-        s_code    = row.get("style_code", "").strip()
+    # group_key → {meta, rows: [(row_idx, size, external_sku, image_url)]}
+    groups: dict[tuple, dict] = {}
 
-        if not ext_sku:
-            errors.append({"row": idx, "reason": "external_sku is empty"})
+    for idx, row in enumerate(raw_rows, start=2):  # row 1 = header
+        # Validate required fields
+        missing = [f for f in REQUIRED if not row.get(f, "").strip()]
+        if missing:
+            errors.append({"row": idx, "reason": f"Missing required field(s): {', '.join(missing)}"})
             continue
-        if not s_code:
-            errors.append({"row": idx, "reason": "style_code is empty"})
-            continue
-        if not row_src_name:
-            errors.append({"row": idx, "reason": "source_name is empty (not in CSV and not provided as form field)"})
-            continue
 
-        style_id = style_code_map.get(s_code.upper())
-        if not style_id:
+        s_code    = row["style_code"].strip()
+        color     = row["color"].strip()
+        size      = row["size"].strip()
+        ext_sku   = row["external_sku"].strip()
+        src_type  = row["source_type"].strip()
+        src_name  = row["source_name"].strip()
+        ext_style = row.get("external_style_name", "").strip()
+        img_url   = row.get("image_url", "").strip()
+
+        # Validate style_code exists
+        style_entry = style_map.get(s_code.upper())
+        if not style_entry:
             errors.append({"row": idx, "reason": f"style_code '{s_code}' not found in Style Master"})
             continue
 
-        # Build optional color_map / size_map from per-row from/to columns
-        color_map: dict = {}
-        size_map:  dict = {}
-        cf = row.get("color_from", ""); ct = row.get("color_to", "")
-        sf = row.get("size_from",  ""); st = row.get("size_to",  "")
-        if cf and ct:
-            color_map[cf] = ct
-        if sf and st:
-            size_map[sf] = st
+        # Group key: color compared case/whitespace-insensitively
+        color_key = color.strip().casefold()
+        gk = (s_code.upper(), src_type.casefold(), _norm_marketplace(src_name), color_key)
 
-        doc = {
-            "style_id":           style_id,
-            "style_code":         s_code,
-            "source_type":        row_src_type,
-            "source_name":        row_src_name,
-            "external_sku":       ext_sku,
-            "external_style_name": row.get("external_style_name", ""),
-            "color_map":          color_map,
-            "size_map":           size_map,
-            "created_at":         now_iso(),
-            "updated_at":         now_iso(),
-            "created_by":         u["email"],
-        }
-        try:
-            res = await db.sku_map.insert_one(doc)
-            created += 1
-            await _update_unmatched_jobs_for_sku_mapping(res.inserted_id, doc)
-        except DuplicateKeyError:
-            skipped_duplicate += 1
+        if gk not in groups:
+            groups[gk] = {
+                "style_id":           style_entry["id"],
+                "style_code":         style_entry["code"],       # canonical from DB
+                "source_type":        src_type,
+                "source_name":        src_name,
+                "source_name_key":    _norm_marketplace(src_name),
+                "color":              color,                      # preserve first-seen casing
+                "color_key":          color_key,
+                "external_style_name": ext_style,
+                "image_url_raw":      img_url,
+                "size_rows":          [],                         # [(row_idx, size, ext_sku)]
+                "image_url_rows":     [],                         # [(row_idx, img_url)] non-empty
+            }
+        else:
+            # Warn on conflicting image_url within the same group
+            existing_img = groups[gk]["image_url_raw"]
+            if img_url and existing_img and img_url != existing_img:
+                warnings.append({
+                    "row": idx,
+                    "reason": (
+                        f"Row has image_url '{img_url}' but group "
+                        f"({s_code}, {src_name}, {color}) already has a different image_url "
+                        f"'{existing_img}'. First non-empty value will be used."
+                    ),
+                })
+            elif img_url and not existing_img:
+                groups[gk]["image_url_raw"] = img_url
+
+        if img_url:
+            groups[gk]["image_url_rows"].append((idx, img_url))
+
+        groups[gk]["size_rows"].append((idx, size, ext_sku))
+
+    # ── 4. Upsert one sku_map doc per group ───────────────────────────────────
+    created = 0
+    updated = 0
+
+    for gk, g in groups.items():
+        # Build size_map from all rows in this group
+        new_size_map: dict[str, str] = {}
+        for (_idx, sz, ext_sku) in g["size_rows"]:
+            new_size_map[sz] = ext_sku
+
+        # Normalize image_url (first non-empty wins within the group)
+        raw_img = g["image_url_raw"] or ""
+        norm_img = normalize_image_url(raw_img)
+
+        # Check for existing mapping: match on source_type + source_name_key + style_id + color_key
+        # We store color_key for exact duplicate detection
+        existing = await db.sku_map.find_one({
+            "source_type":     g["source_type"],
+            "source_name_key": g["source_name_key"],
+            "style_id":        g["style_id"],
+            "color_key":       g["color_key"],
+        })
+
+        if existing:
+            # MERGE: fold new size entries into existing size_map
+            merged_size_map = {**(existing.get("size_map") or {}), **new_size_map}
+            upd: dict = {
+                "size_map":   merged_size_map,
+                "updated_at": now_iso(),
+                "updated_by": u["email"],
+            }
+            if g.get("external_style_name"):
+                upd["external_style_name"] = g["external_style_name"]
+            if norm_img:
+                upd["image_url"] = norm_img
+            await db.sku_map.update_one({"_id": existing["_id"]}, {"$set": upd})
+            updated_doc = {**existing, **upd}
+            await _update_unmatched_jobs_for_sku_mapping(existing["_id"], updated_doc)
+            updated += 1
+        else:
+            # CREATE new document
+            doc = {
+                "style_id":            g["style_id"],
+                "style_code":          g["style_code"],
+                "source_type":         g["source_type"],
+                "source_name":         g["source_name"],
+                "source_name_key":     g["source_name_key"],
+                "color":               g["color"],
+                "color_key":           g["color_key"],
+                "external_style_name": g["external_style_name"],
+                "external_sku":        next(iter(new_size_map.values()), g["style_code"]),
+                "size_map":            new_size_map,
+                "color_map":           {},
+                "image_url":           norm_img,
+                "created_at":          now_iso(),
+                "updated_at":          now_iso(),
+                "created_by":          u["email"],
+            }
+            try:
+                res = await db.sku_map.insert_one(doc)
+                await _update_unmatched_jobs_for_sku_mapping(res.inserted_id, doc)
+                created += 1
+            except DuplicateKeyError:
+                # Race condition: another request inserted between our find and insert.
+                # Treat as update via a second lookup.
+                existing2 = await db.sku_map.find_one({
+                    "source_type":     g["source_type"],
+                    "source_name_key": g["source_name_key"],
+                    "style_id":        g["style_id"],
+                    "color_key":       g["color_key"],
+                })
+                if existing2:
+                    merged = {**(existing2.get("size_map") or {}), **new_size_map}
+                    await db.sku_map.update_one(
+                        {"_id": existing2["_id"]},
+                        {"$set": {"size_map": merged, "updated_at": now_iso()}},
+                    )
+                    updated += 1
 
     await log_activity(
         "BULK_CREATE", "sku_map",
-        f"Bulk import: {created} created, {skipped_duplicate} duplicates, {len(errors)} errors (source: {source_name or 'per-row'})",
+        f"Bulk import: {created} created, {updated} updated, "
+        f"{len(errors)} errors, {len(warnings)} warnings",
         u["email"],
     )
-    return {"created": created, "skipped_duplicate": skipped_duplicate, "errors": errors}
+    return {
+        "created":  created,
+        "updated":  updated,
+        "errors":   errors,
+        "warnings": warnings,
+    }
 
 
 @api.get("/sku-map/unmapped")
