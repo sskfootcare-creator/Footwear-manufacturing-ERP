@@ -71,6 +71,8 @@ const emptyStyle = {
   image_thumbnail_url: "",
   description: "",
   base_size: "7",
+  insole_mould_name: "",
+  sole_mould_name: "",
   bom: [],
   labor: [],
   overhead_pct: 8,
@@ -352,6 +354,8 @@ export default function Styles() {
           image_thumbnail_url: styleToEdit.image_thumbnail_url || "",
           description: styleToEdit.description || "",
           base_size: styleToEdit.base_size || "7",
+          insole_mould_name: styleToEdit.insole_mould_name || "",
+          sole_mould_name: styleToEdit.sole_mould_name || "",
           bom: styleToEdit.bom || [],
           labor: styleToEdit.labor || [],          overhead_pct: styleToEdit.overhead_pct,
           packing_cost: styleToEdit.packing_cost,
@@ -403,6 +407,8 @@ export default function Styles() {
       image_thumbnail_url: s.image_thumbnail_url || "",
       description: s.description || "",
       base_size: s.base_size || "7",
+      insole_mould_name: s.insole_mould_name || "",
+      sole_mould_name: s.sole_mould_name || "",
       bom: s.bom || [],
       labor: s.labor || [],
       overhead_pct: s.overhead_pct,
@@ -425,6 +431,8 @@ export default function Styles() {
     try {
       const body = {
         ...form,
+        insole_mould_name: form.insole_mould_name ? form.insole_mould_name.trim() : null,
+        sole_mould_name: form.sole_mould_name ? form.sole_mould_name.trim() : null,
         overhead_pct: Number(form.overhead_pct),
         packing_cost: Number(form.packing_cost),
         margin_pct: Number(form.margin_pct),
@@ -553,6 +561,7 @@ export default function Styles() {
           yield_per_unit: material.default_yield_per_unit ?? 1,
           waste_pct: 5,
           section: material.category,
+          color: "",
         },
       ],
     }));
@@ -770,9 +779,25 @@ export default function Styles() {
                       );
                     })()}
                   <h3 className="text-lg font-bold mb-1">{s.name}</h3>
-                  <p className="text-xs text-slate-500 line-clamp-2 mb-3">
+                  <p className="text-xs text-slate-500 line-clamp-2 mb-2">
                     {s.description || "—"}
                   </p>
+                  {(s.insole_mould_name || s.sole_mould_name) && (
+                    <div className="flex flex-wrap gap-2 my-2 py-1.5 px-2 bg-slate-50 border border-slate-200 rounded text-xs">
+                      {s.insole_mould_name && (
+                        <div data-testid={`style-insole-mould-${s.code}`}>
+                          <span className="font-semibold text-slate-700">Insole Mold:</span>{" "}
+                          <span className="font-mono text-slate-900">{s.insole_mould_name}</span>
+                        </div>
+                      )}
+                      {s.sole_mould_name && (
+                        <div data-testid={`style-sole-mould-${s.code}`}>
+                          <span className="font-semibold text-slate-700">Sole Mold:</span>{" "}
+                          <span className="font-mono text-slate-900">{s.sole_mould_name}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="border-t border-dashed border-slate-200 pt-3 space-y-1 text-xs">
                     <Row
                       label="Materials"
@@ -916,6 +941,26 @@ export default function Styles() {
                   }
                 />
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Input
+                  label="Insole Mold Name"
+                  placeholder="e.g. INS-M01 / Flat Die"
+                  value={form.insole_mould_name || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, insole_mould_name: e.target.value })
+                  }
+                  testId="form-style-insole-mould"
+                />
+                <Input
+                  label="Sole Mold Name"
+                  placeholder="e.g. SL-M05 / Runner Cup"
+                  value={form.sole_mould_name || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, sole_mould_name: e.target.value })
+                  }
+                  testId="form-style-sole-mould"
+                />
+              </div>
               <Input
                 label="Description"
                 value={form.description}
@@ -965,6 +1010,7 @@ export default function Styles() {
                     <tr className="text-left">
                       <th className="px-2 py-2 font-bold">Material</th>
                       <th className="px-2 py-2 font-bold">Section</th>
+                      <th className="px-2 py-2 font-bold">Color</th>
                       <th className="px-2 py-2 font-bold text-right">Rate</th>
                       <th
                         className="px-2 py-2 font-bold text-right"
@@ -989,7 +1035,7 @@ export default function Styles() {
                     {form.bom.length === 0 && (
                       <tr>
                         <td
-                          colSpan="8"
+                          colSpan="9"
                           className="px-2 py-6 text-center text-slate-400"
                         >
                           No items. Add from dropdown above.
@@ -1040,6 +1086,18 @@ export default function Styles() {
                               }
                               data-testid={`bom-section-${i}`}
                               placeholder="type or pick…"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="text"
+                              className="border border-slate-300 px-1 py-0.5 text-xs w-28 placeholder:text-slate-400"
+                              value={b.color || ""}
+                              onChange={(e) =>
+                                updateBom(i, "color", e.target.value)
+                              }
+                              data-testid={`bom-color-${i}`}
+                              placeholder="e.g. Tan, Navy…"
                             />
                           </td>
                           <td className="px-2 py-1.5 text-right font-mono">

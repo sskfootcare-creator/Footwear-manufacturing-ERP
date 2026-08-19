@@ -28,22 +28,49 @@ def _fmt(n, d=2):
 SWATCH_CATEGORIES = {"upper", "lining", "sole", "insole", "bottom"}
 
 
-def _make_swatch_box():
-    t = Table([[""]], colWidths=[16 * mm], rowHeights=[12 * mm])
-    t.setStyle(TableStyle([
+def _make_swatch_box(color_text: str = ""):
+    box = Table([[""]], colWidths=[14 * mm], rowHeights=[9 * mm])
+    box.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, BLACK),
         ("BACKGROUND", (0, 0), (-1, -1), colors.white),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]))
-    return t
+    clean_color = (color_text or "").strip()
+    if clean_color:
+        color_p = Paragraph(
+            clean_color,
+            ParagraphStyle(
+                "swatch_color",
+                fontName="Helvetica-Bold",
+                fontSize=6.5,
+                leading=7.5,
+                alignment=1,
+                textColor=colors.HexColor("#0F172A"),
+            )
+        )
+        cell_table = Table([[box], [color_p]], colWidths=[18 * mm])
+        cell_table.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ]))
+        return cell_table
+    return box
 
 
 def build_material_requirement(scope_label: str, jobs_summary: list[dict],
                                material_lines: list[dict], notes: str = "") -> bytes:
     """
     jobs_summary: [{po_number, style_code, color, total_pairs, sizes_text}]
-    material_lines: [{code, name, category, unit, rate, total_qty_required, total_cost}]
+    material_lines: [{code, name, category, unit, rate, total_qty_required, total_cost, color}]
     """
     S = getSampleStyleSheet()
     title_style = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=16, textColor=BLACK, leading=18)
@@ -131,9 +158,10 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
     total_cost = 0.0
     for i, m in enumerate(material_lines, 1):
         cat = (m.get("category") or "").strip().lower()
+        color_val = (m.get("color") or "").strip()
         if cat in SWATCH_CATEGORIES:
-            swatch_cell = _make_swatch_box()
-            row_heights.append(14 * mm)
+            swatch_cell = _make_swatch_box(color_val)
+            row_heights.append(15 * mm if color_val else 13 * mm)
         else:
             swatch_cell = "—"
             row_heights.append(None)
