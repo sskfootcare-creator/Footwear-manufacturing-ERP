@@ -46,6 +46,8 @@ class StyleIn(BaseModel):
     image_thumbnail_url: Optional[str] = ""
     description: Optional[str] = ""
     base_size: Optional[str] = "7"
+    insole_mould_name: Optional[str] = None   # die/mold used to cut insole pieces
+    sole_mould_name:   Optional[str] = None   # mold used for the sole
     bom: List[BomItem] = []
     labor: List[LaborItem] = []
     overhead_pct: float = 0

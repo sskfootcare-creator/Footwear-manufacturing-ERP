@@ -1558,6 +1558,57 @@ async def bulk_create_sku_map(
     if not raw_rows:
         raise HTTPException(400, "File is empty or has no data rows")
 
+    # Normalise column keys and handle aliases
+    ALIAS_MAP = {
+        "style": "style_code",
+        "stylecode": "style_code",
+        "internal_style": "style_code",
+        "internal_style_code": "style_code",
+        "internal_code": "style_code",
+        "colour": "color",
+        "color_name": "color",
+        "colour_name": "color",
+        "color_from": "color",
+        "color_to": "color",
+        "uk_size": "size",
+        "size_uk": "size",
+        "size_name": "size",
+        "size_from": "size",
+        "size_to": "size",
+        "sku": "external_sku",
+        "marketplace_sku": "external_sku",
+        "client_sku": "external_sku",
+        "vendor_sku": "external_sku",
+        "seller_sku": "external_sku",
+        "channel_sku": "external_sku",
+        "client": "source_name",
+        "client_name": "source_name",
+        "channel": "source_name",
+        "marketplace": "source_name",
+        "channel_name": "source_name",
+        "type": "source_type",
+        "channel_type": "source_type",
+        "style_name": "external_style_name",
+        "product_name": "external_style_name",
+        "title": "external_style_name",
+        "photo": "image_url",
+        "photo_url": "image_url",
+        "image": "image_url",
+        "img_url": "image_url",
+    }
+
+    def clean_row(r: dict) -> dict:
+        out = {}
+        for k, v in r.items():
+            norm_k = str(k or "").strip().lower().replace(" ", "_").replace("-", "_")
+            canonical_k = ALIAS_MAP.get(norm_k, norm_k)
+            val = str(v).strip() if v is not None else ""
+            if canonical_k not in out or not out[canonical_k]:
+                out[canonical_k] = val
+        return out
+
+    cleaned_rows = [clean_row(r) for r in raw_rows]
+
     # ── 2. Pre-fetch style master (code.upper() → {id, code}) ─────────────────
     all_styles = await db.styles.find({}, {"code": 1}).to_list(10000)
     style_map: dict[str, dict] = {s["code"].strip().upper(): {"id": str(s["_id"]), "code": s["code"]}
@@ -1572,7 +1623,15 @@ async def bulk_create_sku_map(
     # group_key → {meta, rows: [(row_idx, size, external_sku, image_url)]}
     groups: dict[tuple, dict] = {}
 
-    for idx, row in enumerate(raw_rows, start=2):  # row 1 = header
+    for idx, row in enumerate(cleaned_rows, start=2):  # row 1 = header
+        # Auto-infer source_type if only source_name is provided
+        if not row.get("source_type") and row.get("source_name"):
+            src_nm = row["source_name"].lower()
+            if any(ch in src_nm for ch in ["myntra", "flipkart", "nykaa", "ajio", "amazon", "website"]):
+                row["source_type"] = "online_channel"
+            else:
+                row["source_type"] = "b2b_client"
+
         # Validate required fields
         missing = [f for f in REQUIRED if not row.get(f, "").strip()]
         if missing:
@@ -14572,6 +14631,7 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
             code = b.get("material_code") or ""
             name = b.get("material_name") or ""
             unit = b.get("unit") or ""
+            color = (b.get("color") or "").strip()
             raw_yld = b.get("yield_per_unit")
             mat_info = mat_map.get(str(mid)) or mat_map.get(code) or {}
             def_yld = b.get("default_yield_per_unit") or mat_info.get("default_yield_per_unit")
@@ -14587,11 +14647,11 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
             # per pair material in unit terms = qty / yield * (1 + waste%)
             per_pair = (qty / yld) * (1 + waste / 100)
             total_qty = per_pair * pairs
-            key = code or mid
+            key = (code or mid, color)
             if key not in requirements:
                 cat = mat_map.get(str(mid), {}).get("category", b.get("section", "other"))
                 requirements[key] = {
-                    "code": code, "name": name, "category": cat, "unit": unit,
+                    "code": code, "name": name, "category": cat, "unit": unit, "color": color,
                     "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
                 }
             elif not requirements[key]["rate"] and rate > 0:
@@ -14605,7 +14665,7 @@ async def _compute_material_requirement(job_ids: list[str]) -> dict:
         v["total_qty_required"] = round(v["total_qty_required"], 2)
         v["total_cost"] = round(v["total_cost"], 2)
         material_lines.append(v)
-    material_lines.sort(key=lambda m: (m["category"], m["code"]))
+    material_lines.sort(key=lambda m: (m["category"], m["code"], m.get("color", "")))
 
     # Merge jobs_summary for same (style+color) so summary is one row per card
     merged = {}

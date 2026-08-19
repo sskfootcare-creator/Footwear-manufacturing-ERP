@@ -34,6 +34,8 @@ class BomItem(BaseModel):
     section: str = "Other"
     component: Optional[str] = None
     with_eva: Optional[bool] = None
+    color: Optional[str] = ""   # the specific color chosen for THIS style's BOM line — free text
+
 
 
 class LaborItem(BaseModel):
