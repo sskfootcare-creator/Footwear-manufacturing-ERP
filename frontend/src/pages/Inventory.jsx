@@ -206,6 +206,7 @@ export default function Inventory() {
                   <th className="px-3 py-3 font-bold">Code</th>
                   <th className="px-3 py-3 font-bold">Material</th>
                   <th className="px-3 py-3 font-bold">Category</th>
+                  <th className="px-3 py-3 font-bold">Color</th>
                   <th className="px-3 py-3 font-bold">Unit</th>
                   <th className="px-3 py-3 font-bold text-right">In</th>
                   <th className="px-3 py-3 font-bold text-right">Out</th>
@@ -219,7 +220,7 @@ export default function Inventory() {
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="11"
+                      colSpan="12"
                       className="px-6 py-10 text-center text-slate-400"
                     >
                       No inventory data. Click "Stock In" to record your first
@@ -249,6 +250,15 @@ export default function Inventory() {
                       <td className="px-3 py-2">{r.name}</td>
                       <td className="px-3 py-2">
                         <Badge color="slate">{r.category}</Badge>
+                      </td>
+                      <td className="px-3 py-2">
+                        {r.color ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200 font-mono">
+                            {r.color}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 text-xs">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-xs uppercase tracking-wider">
                         {r.unit}
