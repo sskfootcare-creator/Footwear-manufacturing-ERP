@@ -20,6 +20,7 @@ class MaterialIn(BaseModel):
     is_component:       Optional[bool] = False
     component_category: Optional[str] = None
     default_yield_per_unit: Optional[float] = None
+    color:               Optional[str] = ""
 
 
 class BomItem(BaseModel):

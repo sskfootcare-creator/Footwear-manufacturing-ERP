@@ -54,6 +54,7 @@ const emptyForm = {
   code: "",
   name: "",
   category: "upper",
+  color: "",
   unit: "sqft",
   rate: 0,
   reorder_level: 0,
@@ -104,6 +105,7 @@ export default function Materials() {
       code: m.code,
       name: m.name,
       category: m.category,
+      color: m.color || "",
       unit: m.unit,
       rate: m.rate,
       reorder_level: m.reorder_level || 0,
@@ -125,6 +127,7 @@ export default function Materials() {
     try {
       const body = {
         ...form,
+        color: (form.color || "").trim(),
         rate: Number(form.rate),
         reorder_level: Number(form.reorder_level || 0),
         default_yield_per_unit:
@@ -157,7 +160,7 @@ export default function Materials() {
     if (filterCat && m.category !== filterCat) return false;
     if (
       filter &&
-      !`${m.code} ${m.name}`.toLowerCase().includes(filter.toLowerCase())
+      !`${m.code} ${m.name} ${m.color || ""}`.toLowerCase().includes(filter.toLowerCase())
     )
       return false;
     return true;
@@ -224,6 +227,7 @@ export default function Materials() {
                   <th className="px-4 py-3 font-bold">Code</th>
                   <th className="px-4 py-3 font-bold">Name</th>
                   <th className="px-4 py-3 font-bold">Category</th>
+                  <th className="px-4 py-3 font-bold">Color</th>
                   <th className="px-4 py-3 font-bold">Unit</th>
                   <th className="px-4 py-3 font-bold text-right">Rate (₹)</th>
                   <th className="px-4 py-3 font-bold text-right">Actions</th>
@@ -233,7 +237,7 @@ export default function Materials() {
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="7"
+                      colSpan="8"
                       className="px-6 py-10 text-center text-slate-400"
                     >
                       No materials yet. Click &quot;Add Material&quot; to start.
@@ -271,6 +275,18 @@ export default function Materials() {
                             </Badge>
                           )}
                         </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {m.color ? (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200"
+                            data-testid={`material-color-${m.code}`}
+                          >
+                            {m.color}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 text-xs">—</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-xs uppercase tracking-wider">
                         {m.unit}
@@ -380,6 +396,15 @@ export default function Materials() {
                   </option>
                 ))}
               </Select>
+              <Input
+                label="Color"
+                placeholder="e.g. Black, Brown, Tan"
+                value={form.color}
+                onChange={(e) => setForm({ ...form, color: e.target.value })}
+                testId="form-mat-color"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <Select
                 label="Unit"
                 value={form.unit}
@@ -391,15 +416,15 @@ export default function Materials() {
                   </option>
                 ))}
               </Select>
+              <Input
+                label="Rate (INR)"
+                type="number"
+                step="0.01"
+                value={form.rate}
+                onChange={(e) => setForm({ ...form, rate: e.target.value })}
+                testId="form-mat-rate"
+              />
             </div>
-            <Input
-              label="Rate (INR)"
-              type="number"
-              step="0.01"
-              value={form.rate}
-              onChange={(e) => setForm({ ...form, rate: e.target.value })}
-              testId="form-mat-rate"
-            />
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1 flex items-center gap-1">
                 Default Yield

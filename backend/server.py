@@ -973,6 +973,7 @@ async def _sync_material_to_component(mat_doc: dict):
     unit = mat_doc.get("unit", "pair")
     vendor = mat_doc.get("preferred_vendor_id", "")
     reorder = int(mat_doc.get("reorder_level", 0))
+    color = mat_doc.get("color", "")
 
     existing = await db.component_master.find({"component_code": code}).to_list(1000)
     if existing:
@@ -982,6 +983,7 @@ async def _sync_material_to_component(mat_doc: dict):
                 "material_id": mat_id,
                 "component_name": name,
                 "component_category": comp_cat,
+                "color": color,
                 "image_url": image_url,
                 "image_display_url": image_display_url,
                 "image_thumbnail_url": image_thumbnail_url,
@@ -993,7 +995,7 @@ async def _sync_material_to_component(mat_doc: dict):
             "component_code": code,
             "component_name": name,
             "component_category": comp_cat,
-            "color": "",
+            "color": color,
             "size": "",
             "vendor": vendor,
             "unit": unit,
@@ -3944,15 +3946,18 @@ async def get_styles_template():
     import pandas as pd
     
     columns = [
-        "Style Code", "Name", "Category", "Description", "Base Size",
+        "Name", "Category", "Description", "Base Size",
+        "Insole Mould Name", "Sole Mould Name", "Default Pairs Per Carton",
         "Overhead %", "Packing Cost", "Margin %", "GST %", "Image URL",
         "Labor: Cutting", "Labor: Fitting", "Labor: Pasting", "Labor: Finishing", "Labor: Packing"
     ]
     
     sample_data = [
         {
-            "Style Code": "SAMPLE-01", "Name": "Classic Oxford", "Category": "Footwear", "Description": "Men's leather shoe",
-            "Base Size": 8, "Overhead %": 10, "Packing Cost": 15, "Margin %": 25, "GST %": 5, "Image URL": "",
+            "Name": "Classic Oxford", "Category": "Footwear", "Description": "Men's leather shoe",
+            "Base Size": 7, "Insole Mould Name": "INSOLE-OX-01", "Sole Mould Name": "SOLE-OX-01",
+            "Default Pairs Per Carton": 12,
+            "Overhead %": 10, "Packing Cost": 15, "Margin %": 25, "GST %": 5, "Image URL": "",
             "Labor: Cutting": 12, "Labor: Fitting": 18, "Labor: Pasting": 10, "Labor: Finishing": 8, "Labor: Packing": 5
         }
     ]
@@ -3974,78 +3979,176 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
     u = await get_current_user(request); require_roles("admin", "manager")(u)
     import pandas as pd
     import io
+    import json
+    
     content = await file.read()
+    filename = (file.filename or "").lower()
     try:
-        df = pd.read_excel(io.BytesIO(content))
+        if filename.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content))
+        else:
+            df = pd.read_excel(io.BytesIO(content))
     except Exception as e:
-        raise HTTPException(400, "Invalid Excel file")
+        raise HTTPException(400, f"Invalid Excel/CSV file: {str(e)}")
+
+    col_map = {}
+    labor_cols = []
+    for col in df.columns:
+        c_str = str(col).strip()
+        c_lower = c_str.lower()
+        norm = re.sub(r'[\s_]+', ' ', c_lower)
         
-    col_map = {
-        "Style Code": "code",
-        "Name": "name",
-        "Category": "category",
-        "Description": "description",
-        "Base Size": "base_size",
-        "Overhead %": "overhead_pct",
-        "Packing Cost": "packing_cost",
-        "Margin %": "margin_pct",
-        "GST %": "gst_pct",
-        "Image URL": "image_url"
-    }
+        if c_lower.startswith("labor:"):
+            labor_cols.append(col)
+        elif norm in ("name", "style name", "stylename"):
+            col_map[col] = "name"
+        elif norm in ("category", "cat"):
+            col_map[col] = "category"
+        elif norm in ("description", "desc"):
+            col_map[col] = "description"
+        elif norm in ("base size", "basesize", "base_size", "size"):
+            col_map[col] = "base_size"
+        elif norm in ("insole mould name", "insole mould", "insole mold name", "insole mold", "insole_mould_name", "insole_mould"):
+            col_map[col] = "insole_mould_name"
+        elif norm in ("sole mould name", "sole mould", "sole mold name", "sole mold", "sole_mould_name", "sole_mould"):
+            col_map[col] = "sole_mould_name"
+        elif norm in ("default pairs per carton", "pairs per carton", "default_pairs_per_carton", "pairs_per_carton", "carton pairs", "default pairs"):
+            col_map[col] = "default_pairs_per_carton"
+        elif norm in ("overhead %", "overhead pct", "overhead percentage", "overhead", "overhead_pct"):
+            col_map[col] = "overhead_pct"
+        elif norm in ("packing cost", "packing_cost", "packing"):
+            col_map[col] = "packing_cost"
+        elif norm in ("margin %", "margin pct", "margin percentage", "margin", "margin_pct"):
+            col_map[col] = "margin_pct"
+        elif norm in ("gst %", "gst pct", "gst percentage", "gst", "gst_pct"):
+            col_map[col] = "gst_pct"
+        elif norm in ("image url", "image_url", "image", "image link", "photo url", "photo_url"):
+            col_map[col] = "image_url"
+
+    if "name" not in col_map.values():
+        raise HTTPException(400, "Missing required column: Name")
+
     df = df.rename(columns=col_map)
-    if "code" not in df.columns or "name" not in df.columns:
-        raise HTTPException(400, "Missing required columns (Style Code, Name)")
-        
-    labor_cols = [c for c in df.columns if str(c).strip().lower().startswith("labor:")]
     
+    def _parse_float(val, default: float) -> float:
+        if pd.isna(val):
+            return default
+        try:
+            s = str(val).strip().rstrip("%")
+            if not s or s.lower() == "nan":
+                return default
+            return float(s)
+        except Exception:
+            return default
+
+    def _parse_str(val, default: str = "") -> str:
+        if pd.isna(val):
+            return default
+        s = str(val).strip()
+        if not s or s.lower() == "nan":
+            return default
+        if s.endswith(".0"):
+            try:
+                f = float(s)
+                if f.is_integer():
+                    return str(int(f))
+            except Exception:
+                pass
+        return s
+
+    def _parse_pairs_per_carton(val) -> Optional[Dict[str, Any]]:
+        if pd.isna(val):
+            return None
+        if isinstance(val, (int, float)):
+            if float(val) > 0:
+                return {"default": int(val) if float(val).is_integer() else float(val)}
+            return None
+        s = str(val).strip()
+        if not s or s.lower() == "nan":
+            return None
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        try:
+            f = float(s)
+            if f > 0:
+                return {"default": int(f) if f.is_integer() else f}
+        except Exception:
+            pass
+        return None
+
     preview = []
-    
+    errors = []
+    total_rows = len(df)
+
     for idx, row in df.iterrows():
-        code = str(row.get("code", "")).strip()
-        if not code or code == "nan":
+        row_num = idx + 2  # Excel row numbering (1-indexed + header)
+        name = _parse_str(row.get("name"), "")
+        if not name:
+            errors.append(f"Row {row_num}: Missing Name")
             continue
-            
-        name = str(row.get("name", "")).strip()
-        if not name or name == "nan": continue
-        
-        labor = None
-        if labor_cols:
-            labor = []
-            for lc in labor_cols:
-                op_name = lc.split(":", 1)[1].strip()
-                val = row.get(lc)
-                if pd.notna(val) and str(val).strip() != "":
-                    try:
-                        rate = float(val)
-                        labor.append({"name": op_name, "rate": rate})
-                    except:
-                        pass
-                        
-        _raw_url = str(row.get("image_url", "")).strip() if pd.notna(row.get("image_url")) else ""
-        _norm_url = normalize_image_url(_raw_url)
+
+        category = _parse_str(row.get("category"), "Footwear")
+        description = _parse_str(row.get("description"), "")
+        base_size = _parse_str(row.get("base_size"), "7")
+        insole_mould = _parse_str(row.get("insole_mould_name"), "") or None
+        sole_mould = _parse_str(row.get("sole_mould_name"), "") or None
+        default_pairs = _parse_pairs_per_carton(row.get("default_pairs_per_carton"))
+
+        overhead_pct = _parse_float(row.get("overhead_pct"), 0.0)
+        packing_cost = _parse_float(row.get("packing_cost"), 0.0)
+        margin_pct = _parse_float(row.get("margin_pct"), 25.0)
+        gst_pct = _parse_float(row.get("gst_pct"), 5.0)
+
+        raw_img = _parse_str(row.get("image_url"), "")
+        norm_img = normalize_image_url(raw_img) if raw_img else ""
+
+        labor = []
+        for lc in labor_cols:
+            op_name = str(lc).split(":", 1)[1].strip()
+            val = row.get(lc)
+            if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "nan":
+                try:
+                    rate = float(str(val).strip().rstrip("%"))
+                    labor.append({"name": op_name, "rate": rate})
+                except Exception:
+                    pass
+
         preview.append({
-            "code": code,
+            "row_number": row_num,
             "name": name,
-            "category": str(row.get("category", "Footwear")).strip() if pd.notna(row.get("category")) else "Footwear",
-            "description": str(row.get("description", "")).strip() if pd.notna(row.get("description")) else "",
-            "base_size": str(row.get("base_size", "7")).strip() if pd.notna(row.get("base_size")) else "7",
-            "overhead_pct": float(row.get("overhead_pct", 0)) if pd.notna(row.get("overhead_pct")) else 0,
-            "packing_cost": float(row.get("packing_cost", 0)) if pd.notna(row.get("packing_cost")) else 0,
-            "margin_pct": float(row.get("margin_pct", 25)) if pd.notna(row.get("margin_pct")) else 25,
-            "gst_pct": float(row.get("gst_pct", 5)) if pd.notna(row.get("gst_pct")) else 5,
-            "image_url": _norm_url,
-            # Preview mirrors bulk-import: raw URL is echoed into all three
-            # variants for the frontend's SafeImage fallback chain.
-            "image_display_url":   _norm_url,
-            "image_thumbnail_url": _norm_url,
-            "labor": labor
+            "category": category or "Footwear",
+            "description": description,
+            "base_size": base_size or "7",
+            "insole_mould_name": insole_mould,
+            "sole_mould_name": sole_mould,
+            "default_pairs_per_carton": default_pairs,
+            "overhead_pct": overhead_pct,
+            "packing_cost": packing_cost,
+            "margin_pct": margin_pct,
+            "gst_pct": gst_pct,
+            "image_url": norm_img,
+            "image_display_url": norm_img,
+            "image_thumbnail_url": norm_img,
+            "labor": labor,
+            "bom": [],
         })
-                    
-    return {"preview": preview}
+
+    return {
+        "preview": preview,
+        "total_rows": total_rows,
+        "valid_rows": len(preview),
+        "errors": errors,
+    }
 
 @api.post("/styles/bulk")
 async def bulk_upload_styles(payload: dict, request: Request = None):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    user_email = u.get("email", "") if isinstance(u, dict) else getattr(u, "email", "")
     
     styles_list = payload.get("styles", [])
     if not styles_list:
@@ -4053,58 +4156,146 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
     
     success = 0
     errors = []
+    created = []
     
     for idx, row in enumerate(styles_list):
+        row_num = row.get("row_number") or row.get("row") or (idx + 2)
         try:
-            code = row.get("code", "").strip()
-            name = row.get("name", "").strip()
-            if not code or not name:
-                errors.append(f"Row {idx+1}: Missing code or name")
+            # 1. Validate name is present
+            name = str(row.get("name") or "").strip()
+            if not name:
+                errors.append(f"Row {row_num}: Missing Name")
                 continue
-                
+
+            category = str(row.get("category") or "Footwear").strip() or "Footwear"
+            description = str(row.get("description") or "").strip()
+            base_size = str(row.get("base_size") or "7").strip() or "7"
+            insole_mould_name = row.get("insole_mould_name") or None
+            sole_mould_name = row.get("sole_mould_name") or None
+
+            try:
+                overhead_pct = float(row.get("overhead_pct", 0) or 0)
+            except Exception:
+                overhead_pct = 0.0
+
+            try:
+                packing_cost = float(row.get("packing_cost", 0) or 0)
+            except Exception:
+                packing_cost = 0.0
+
+            try:
+                margin_pct = float(row.get("margin_pct", 25) if row.get("margin_pct") is not None else 25)
+            except Exception:
+                margin_pct = 25.0
+
+            try:
+                gst_pct = float(row.get("gst_pct", 5) if row.get("gst_pct") is not None else 5)
+            except Exception:
+                gst_pct = 5.0
+
+            # 2. Image URL normalization
+            raw_img = str(row.get("image_url") or "").strip()
+            norm_img = normalize_image_url(raw_img) if raw_img else ""
+            raw_display = str(row.get("image_display_url") or "").strip()
+            raw_thumb = str(row.get("image_thumbnail_url") or "").strip()
+            image_display = normalize_image_url(raw_display) if raw_display else norm_img
+            image_thumb = normalize_image_url(raw_thumb) if raw_thumb else norm_img
+
+            default_pairs_per_carton = row.get("default_pairs_per_carton")
+            labor = row.get("labor") or []
+
+            # 3. Auto-generate code with retry loop (max 5 attempts)
+            generated_code = None
+            for _ in range(5):
+                candidate = await _next_style_code()
+                if not await db.styles.find_one({"code": candidate}):
+                    generated_code = candidate
+                    break
+            if not generated_code:
+                errors.append(f"Row {row_num}: Failed to generate a unique style code")
+                continue
+
+            # 4. Build full document with ALL StyleIn fields
             doc = {
-                "code": code,
+                "code": generated_code,
                 "name": name,
-                "category": row.get("category", "Footwear"),
-                "description": row.get("description", ""),
-                "base_size": row.get("base_size", "7"),
-                "overhead_pct": float(row.get("overhead_pct", 0)),
-                "packing_cost": float(row.get("packing_cost", 0)),
-                "margin_pct": float(row.get("margin_pct", 25)),
-                "gst_pct": float(row.get("gst_pct", 5)),
-                "image_url": normalize_image_url(row.get("image_url", "")),
-                # Bulk / CSV imports carry a single externally-supplied URL —
-                # no Pillow re-encode was run on it. Mirror the raw URL into
-                # display_url and thumbnail_url so the frontend's fallback
-                # chain still finds *something* to render (Phase 3 spec).
-                "image_display_url":   normalize_image_url(row.get("image_display_url")   or row.get("image_url", "")),
-                "image_thumbnail_url": normalize_image_url(row.get("image_thumbnail_url") or row.get("image_url", "")),
+                "category": category,
+                "description": description,
+                "base_size": base_size,
+                "insole_mould_name": insole_mould_name,
+                "sole_mould_name": sole_mould_name,
+                "overhead_pct": overhead_pct,
+                "packing_cost": packing_cost,
+                "margin_pct": margin_pct,
+                "gst_pct": gst_pct,
+                "image_url": norm_img,
+                "image_display_url": image_display,
+                "image_thumbnail_url": image_thumb,
+                "default_pairs_per_carton": default_pairs_per_carton,
+                "bom": [],
+                "labor": labor,
+                "status": "inactive",
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
             }
-            if row.get("labor") is not None: doc["labor"] = row.get("labor")
-            else: doc["labor"] = []
-                
-            existing = await db.styles.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}})
-            
-            if existing:
-                doc.pop("created_at")
-                if row.get("labor") is None:
-                    doc["labor"] = existing.get("labor", [])
-                
-                doc["bom"] = existing.get("bom", [])
-                doc["status"] = "active" if len(doc["bom"]) > 0 else "inactive"
-                await db.styles.update_one({"_id": existing["_id"]}, {"$set": doc})
-            else:
-                doc["bom"] = []
-                doc["status"] = "inactive"
-                await db.styles.insert_one(doc)
-            
+
+            # 5. Insert into db.styles
+            try:
+                res = await db.styles.insert_one(doc)
+            except DuplicateKeyError:
+                errors.append(f"Row {row_num}: Style code '{generated_code}' collision")
+                continue
+
+            # 6. Auto-create PLM folders
+            try:
+                await db.style_folders.insert_one({
+                    "style_id": str(res.inserted_id),
+                    "style_code": generated_code,
+                    "folders": DEFAULT_PLM_FOLDERS,
+                    "created_at": now_iso(),
+                    "updated_at": now_iso(),
+                })
+            except Exception:
+                pass
+
+            # 7. Compute costing
+            doc.pop("_id", None)
+            doc["id"] = str(res.inserted_id)
+            costing = await compute_style_costing_async(doc, db)
+            doc["costing"] = costing
+
+            # 8. Log activity
+            await log_activity(
+                "style.create",
+                "styles",
+                f"Bulk created style {generated_code} — {name}",
+                user_email,
+            )
+
+            created.append({
+                "row": row_num,
+                "code": generated_code,
+                "name": name,
+                "costing": costing,
+            })
             success += 1
         except Exception as e:
-            errors.append(f"Row {idx+1}: {str(e)}")
-            
-    return {"ok": True, "success_count": success, "errors": errors}
+            errors.append(f"Row {row_num}: {str(e)}")
+
+    # Log bulk summary
+    await log_activity(
+        "BULK_CREATE",
+        "styles",
+        f"Bulk import: {success} created, {len(errors)} errors",
+        user_email,
+    )
+
+    return {
+        "ok": True,
+        "success_count": success,
+        "errors": errors,
+        "created": created,
+    }
 
 @api.get("/styles/{sid}")
 async def get_style(sid: str, request: Request):
@@ -14802,6 +14993,7 @@ async def list_inventory(request: Request):
             "code": mat.get("code"),
             "name": mat.get("name"),
             "category": mat.get("category"),
+            "color": mat.get("color", ""),
             "unit": mat.get("unit"),
             "current_rate": mat.get("rate"),
             "last_purchase_rate": b["last_rate"],
