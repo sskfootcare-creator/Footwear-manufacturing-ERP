@@ -17,16 +17,24 @@ class SkuMapIn(BaseModel):
     source_name: str
     external_sku: str
     external_style_name: Optional[str] = ""
+    external_style_id: Optional[str] = ""   # Marketplace-assigned per-style-color ID (e.g. Myntra Style Id)
     color_map: Optional[Dict[str, str]] = {}
     size_map:  Optional[Dict[str, str]] = {}
     image_url: Optional[str] = ""
+    brand: Optional[str] = ""
+    mrp: Optional[float] = None
+    price: Optional[float] = None
 
 
 class SkuMapUpdate(BaseModel):
     external_style_name: Optional[str] = None
+    external_style_id: Optional[str] = None  # None = do not update; "" = clear
     color_map: Optional[Dict[str, str]] = None
     size_map:  Optional[Dict[str, str]] = None
     image_url: Optional[str] = None  # None = do not update; "" = clear
+    brand: Optional[str] = None
+    mrp: Optional[float] = None
+    price: Optional[float] = None
 
 
 class ParserTemplateIn(BaseModel):
@@ -214,3 +222,43 @@ class OnlineOrderImportResult(BaseModel):
     imported: int
     unresolved: int
     errors: List[dict]
+
+
+class ListingImportDecision(BaseModel):
+    """A single per-group linking decision made by the user in Stage 2."""
+    group_key: str
+    style_id: Optional[str] = None   # None = leave unlinked (needs_style_code: true)
+
+
+class ListingImportCommitIn(BaseModel):
+    """Payload sent when committing a listing import session after Stage 2 linking."""
+    decisions: List[ListingImportDecision]
+
+
+class MyntraConfirmedGroupIn(BaseModel):
+    """A confirmed group payload from Stage 2 linking for Myntra/marketplace import."""
+    group_key: Optional[str] = None
+    style_id: Optional[str] = None
+    style_code: Optional[str] = None
+    external_sku: Optional[str] = None
+    external_style_id: Optional[str] = ""   # e.g. Myntra Style Id
+    external_style_name: Optional[str] = ""
+    color: Optional[str] = ""
+    color_map: Optional[Dict[str, str]] = Field(default_factory=dict)
+    size_map: Optional[Dict[str, str]] = Field(default_factory=dict)
+    image_url: Optional[str] = ""
+    brand: Optional[str] = ""
+    mrp: Optional[float] = None
+    price: Optional[float] = None
+    source_type: Optional[SourceType] = "online_channel"
+    source_name: Optional[str] = "myntra"
+    already_mapped: Optional[bool] = False
+    rows: Optional[List[Dict[str, Any]]] = None
+
+
+class MyntraImportConfirmIn(BaseModel):
+    """Payload sent to POST /myntra/import/confirm."""
+    groups: Optional[List[MyntraConfirmedGroupIn]] = None
+    confirmed_groups: Optional[List[MyntraConfirmedGroupIn]] = None
+    session_id: Optional[str] = None
+

@@ -47,7 +47,7 @@ from models.sku_map import (
     UnresolvedMapIn, ExportColumn, ExportTemplate, SheetLocator, HeaderLocator,
     ListingFormatConfigIn, ListingFormatConfigUpdate, CatalogueExportRequest,
     OrderImportFormatConfigIn, OrderImportFormatConfigUpdate, OrderImportConfiguredRequest,
-    OnlineOrderImportResult
+    OnlineOrderImportResult, ListingImportDecision, ListingImportCommitIn
 )
 from models.settings import (
     StageDurationsIn
@@ -99,7 +99,7 @@ __all__ = [
     "UnresolvedMapIn", "ExportColumn", "ExportTemplate", "SheetLocator", "HeaderLocator",
     "ListingFormatConfigIn", "ListingFormatConfigUpdate", "CatalogueExportRequest",
     "OrderImportFormatConfigIn", "OrderImportFormatConfigUpdate", "OrderImportConfiguredRequest",
-    "OnlineOrderImportResult",
+    "OnlineOrderImportResult", "ListingImportDecision", "ListingImportCommitIn",
     # Settings
     "StageDurationsIn",
     # Expenses

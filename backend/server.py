@@ -1305,6 +1305,7 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db) -> dict:
 
 # ---------- SKU MAP ----------
 
+
 @api.get("/sku-map")
 async def list_sku_map(
     request: Request,
@@ -1312,6 +1313,7 @@ async def list_sku_map(
     source_type: Optional[str] = None,
     source_name: Optional[str] = None,
     search: Optional[str] = None,
+    needs_style_code: Optional[bool] = None,
 ):
     await get_current_user(request)
     query: dict = {}
@@ -1321,6 +1323,10 @@ async def list_sku_map(
         query["source_type"] = source_type
     if source_name:
         query["source_name"] = {"$regex": re.escape(source_name), "$options": "i"}
+    if needs_style_code is True:
+        query["needs_style_code"] = True
+    elif needs_style_code is False:
+        query["needs_style_code"] = {"$ne": True}
     if search:
         query["$or"] = [
             {"external_sku": {"$regex": re.escape(search), "$options": "i"}},
@@ -1330,6 +1336,7 @@ async def list_sku_map(
         ]
     docs = await db.sku_map.find(query).sort("created_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
+
 
 
 @api.get("/sku-map/resolve")
@@ -1407,6 +1414,8 @@ async def update_sku_map(mid: str, payload: SkuMapUpdate, request: Request):
     update: dict = {"updated_at": now_iso()}
     if payload.external_style_name is not None:
         update["external_style_name"] = payload.external_style_name
+    if payload.external_style_id is not None:
+        update["external_style_id"] = payload.external_style_id
     if payload.color_map is not None:
         update["color_map"] = payload.color_map
     if payload.size_map is not None:
@@ -1841,6 +1850,588 @@ async def sku_map_unmapped(request: Request):
     result = list(groups.values())
     result.sort(key=lambda g: -g["job_count"])
     return result
+
+
+# ── split_leaf_sku helper ────────────────────────────────────────────
+# Splits a leaf SKU like "CC-050-BE-8" or "2504-FAKC-001-GO-37" into
+# (group_id, size_token, flags). Used both by listing-import and order-import.
+DEFAULT_SIZE_LABELS = ["XS", "S", "M", "L", "XL", "XXL", "Free Size", "FreeSize", "FS"]
+NUMERIC_SIZE_RE     = re.compile(r"^\d{1,2}$")
+
+
+def split_leaf_sku(
+    leaf_sku: str,
+    size_labels: Optional[List[str]] = None,
+) -> Tuple[str, Optional[str], List[str]]:
+    """Split leaf_sku into (group_id, size_token, flags).
+
+    Strategy: find the LAST "-" or "_" (whichever is closer to the end),
+    treat everything after as the candidate size token. Accept only if
+    the token matches ^\\d{1,2}$ OR appears in size_labels (case-insensitive).
+    """
+    raw = (leaf_sku or "").strip()
+    if not raw:
+        return "", None, ["empty_leaf_sku"]
+
+    labels = size_labels or DEFAULT_SIZE_LABELS
+    labels_lc = {s.lower() for s in labels}
+
+    # Find the rightmost dash/underscore
+    last_dash  = raw.rfind("-")
+    last_under = raw.rfind("_")
+    cut = max(last_dash, last_under)
+    if cut <= 0 or cut == len(raw) - 1:
+        return raw, None, ["group_id_derivation_failed"]
+
+    head = raw[:cut]
+    tail = raw[cut + 1:]
+
+    is_numeric_size = bool(NUMERIC_SIZE_RE.match(tail))
+    is_label_size   = tail.lower() in labels_lc
+
+    if is_numeric_size or is_label_size:
+        return head, tail, []
+
+    return raw, None, ["group_id_derivation_failed"]
+
+
+# ---------- LISTING IMPORT (Stage 1 parse → Stage 2 link) ----------
+#
+# This is a two-stage flow for mapping external marketplace / client SKUs to
+# internal styles *without* auto-creating styles.
+#
+# Stage 1 (/parse):  Upload a raw listing file → parse into groups → store
+#                    a session with suggested_style_ids per group → return to UI.
+# Stage 2 (/commit): User explicitly links each group to an existing style_id
+#                    (or leaves it "unlinked").  Unlinked groups are written to
+#                    db.sku_map with needs_style_code=True so they're visible
+#                    in the main table and can be resolved via the edit drawer.
+#
+# Sessions are stored in db.listing_import_sessions.
+# Style creation is NOT part of this flow.
+
+@api.post("/sku-map/listing-import/parse", dependencies=[Depends(upload_rate_limiter)])
+async def listing_import_parse(
+    file: UploadFile = File(...),
+    platform: str = "other",
+    source_type: str = "online_channel",
+    request: Request = None,
+):
+    """Stage 1 — Parse a raw marketplace/client listing file into SKU groups.
+
+    Accepts .xlsx, .xlsm, or .csv files.  Tries to auto-detect columns using
+    broad aliases for common marketplace export formats.  Groups rows by a
+    composite key of (external_style_name or external_style_id, colour_label).
+
+    For each group it fuzzy-matches against db.styles (by code prefix similarity)
+    to produce a suggested_style_ids hint list — these are NEVER auto-applied.
+
+    Sibling groups that share the same external_style_name base (i.e. differ only
+    by colour) are listed in each group's sibling_group_keys so the UI can offer
+    "link all same-base colours to the same style?" hints.
+
+    Returns:
+      { session_id, filename, platform, group_count, sku_count, groups[] }
+    """
+    import io
+    import csv
+    import openpyxl
+    import difflib
+
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+
+    content = await file.read()
+    filename = (file.filename or "").lower()
+
+    # ── 1. Parse raw rows ──────────────────────────────────────────────────
+    raw_rows: list[dict] = []
+
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            ws = wb.active
+            headers = None
+            for row_cells in ws.iter_rows(values_only=True):
+                if headers is None:
+                    if any(c is not None for c in row_cells):
+                        headers = [str(c or "").strip().lower().replace(" ", "_") for c in row_cells]
+                    continue
+                if all(c is None for c in row_cells):
+                    continue
+                raw_rows.append(dict(zip(headers, [str(c).strip() if c is not None else "" for c in row_cells])))
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read .xlsx file: {exc}")
+    else:
+        try:
+            try:
+                text = content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = content.decode("latin-1")
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                raw_rows.append({k.strip().lower().replace(" ", "_"): (v or "").strip()
+                                 for k, v in row.items()})
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read CSV file: {exc}")
+
+    if not raw_rows:
+        raise HTTPException(400, "File is empty or has no data rows")
+
+    # ── 2. Column alias normalisation ──────────────────────────────────────
+    # Extended alias map covering common marketplace export formats
+    ALIAS_MAP = {
+        # style identity (marketplace style ID / group identity)
+        "style_id": "external_style_id",
+        "styleid": "external_style_id",
+        "style_no": "external_style_id",
+        "styleno": "external_style_id",
+        "style_number": "external_style_id",
+        "stylenumber": "external_style_id",
+        "article_id": "external_style_id",
+        "articleid": "external_style_id",
+        "article_no": "external_style_id",
+        "articleno": "external_style_id",
+        "article_number": "external_style_id",
+        "articlenumber": "external_style_id",
+        "vendor_style_id": "external_style_id",
+        "vendorstyleid": "external_style_id",
+        "vendor_style": "external_style_id",
+        "vendorstyle": "external_style_id",
+        "brand_style_id": "external_style_id",
+        "brandstyleid": "external_style_id",
+        "brand_style": "external_style_id",
+        "brandstyle": "external_style_id",
+        "myntra_style_id": "external_style_id",
+        "myntrastyleid": "external_style_id",
+        "myntra_style": "external_style_id",
+        "myntrastyle": "external_style_id",
+        "channel_style_id": "external_style_id",
+        "channelstyleid": "external_style_id",
+        "marketplace_style_id": "external_style_id",
+        "marketplacestyleid": "external_style_id",
+        "parent_style_id": "external_style_id",
+        "parentstyleid": "external_style_id",
+        "parent_style": "external_style_id",
+        "parentstyle": "external_style_id",
+        "parent_sku": "external_style_id",
+        "parentsku": "external_style_id",
+        "fk_style_id": "external_style_id",
+        "fkstyleid": "external_style_id",
+        "product_id": "external_style_id",
+        "productid": "external_style_id",
+        "listing_id": "external_style_id",
+        "listingid": "external_style_id",
+        "asin": "external_style_id",
+        "fsnid": "external_style_id",
+        "fsn_id": "external_style_id",
+        "fsn": "external_style_id",
+
+        # style name / product title
+        "style_name": "external_style_name",
+        "stylename": "external_style_name",
+        "product_name": "external_style_name",
+        "productname": "external_style_name",
+        "article_name": "external_style_name",
+        "articlename": "external_style_name",
+        "article_type": "external_style_name",
+        "articletype": "external_style_name",
+        "title": "external_style_name",
+        "name": "external_style_name",
+        "product_title": "external_style_name",
+        "producttitle": "external_style_name",
+
+        # colour
+        "colour": "color",
+        "color": "color",
+        "color_name": "color",
+        "colorname": "color",
+        "colour_name": "color",
+        "colourname": "color",
+        "color_label": "color",
+        "colorlabel": "color",
+        "colour_label": "color",
+        "colourlabel": "color",
+        "color_description": "color",
+        "colordescription": "color",
+        "colour_description": "color",
+        "colourdescription": "color",
+        "primary_colour": "color",
+        "primarycolour": "color",
+        "primary_color": "color",
+        "primarycolor": "color",
+        "article_color": "color",
+        "articlecolor": "color",
+
+        # size
+        "size": "size",
+        "uk_size": "size",
+        "uksize": "size",
+        "size_uk": "size",
+        "sizeuk": "size",
+        "standard_size": "size",
+        "standardsize": "size",
+        "size_name": "size",
+        "sizename": "size",
+
+        # external per-size SKU (SellerSkuCode / SKU Code / leaf SKU)
+        "sku": "external_sku",
+        "sellerskucode": "external_sku",
+        "seller_sku_code": "external_sku",
+        "sellersku": "external_sku",
+        "seller_sku": "external_sku",
+        "seller_sku_id": "external_sku",
+        "sellerskuid": "external_sku",
+        "sku_code": "external_sku",
+        "skucode": "external_sku",
+        "item_sku": "external_sku",
+        "itemsku": "external_sku",
+        "*item_sku": "external_sku",
+        "*itemsku": "external_sku",
+        "marketplace_sku": "external_sku",
+        "marketplacesku": "external_sku",
+        "channel_sku": "external_sku",
+        "channelsku": "external_sku",
+        "channel_sku_code": "external_sku",
+        "channelskucode": "external_sku",
+        "vendor_sku": "external_sku",
+        "vendorsku": "external_sku",
+        "vendor_sku_code": "external_sku",
+        "vendorskucode": "external_sku",
+        "myntra_sku": "external_sku",
+        "myntrasku": "external_sku",
+        "leaf_sku": "external_sku",
+        "leafsku": "external_sku",
+
+        # image
+        "image_url": "image_url",
+        "imageurl": "image_url",
+        "image": "image_url",
+        "image_link": "image_url",
+        "imagelink": "image_url",
+        "photo": "image_url",
+        "photo_url": "image_url",
+        "photourl": "image_url",
+        "front_image": "image_url",
+        "frontimage": "image_url",
+        "image1": "image_url",
+        "image_1": "image_url",
+    }
+
+    def clean_row(r: dict) -> dict:
+        out = {}
+        for k, v in r.items():
+            raw_key = str(k or "").strip().lower()
+            norm_k = raw_key.replace(" ", "_").replace("-", "_")
+            compact_k = raw_key.replace(" ", "").replace("_", "").replace("-", "")
+            canonical_k = ALIAS_MAP.get(norm_k) or ALIAS_MAP.get(compact_k) or norm_k
+            val = str(v).strip() if v is not None else ""
+            if canonical_k not in out or not out[canonical_k]:
+                out[canonical_k] = val
+        return out
+
+    cleaned_rows = [clean_row(r) for r in raw_rows]
+
+    # ── 3. Group rows by (external_style_key, colour) ─────────────────────
+    groups: dict[str, dict] = {}
+
+    for row in cleaned_rows:
+        ext_style_name = row.get("external_style_name", "").strip()
+        ext_style_id   = row.get("external_style_id", "").strip()
+        color_label    = row.get("color", "").strip()
+        ext_sku        = row.get("external_sku", "").strip()
+        size_label     = row.get("size", "").strip()
+        image_url      = row.get("image_url", "").strip()
+
+        # If size_label is missing but ext_sku has an embedded size (e.g. CC-069-BR-37), derive it
+        if not size_label and ext_sku:
+            _, derived_size, flags = split_leaf_sku(ext_sku)
+            if derived_size and not flags:
+                size_label = derived_size
+
+        # Fallback if still no size_label but ext_sku is present
+        effective_size = size_label if size_label else ("One Size" if ext_sku else "")
+
+        # Derive a stable base key for grouping (prefer style_id over name)
+        base_key = ext_style_id if ext_style_id else ext_style_name
+        if not base_key:
+            continue  # skip rows with no style identity at all
+
+        # Group key: base_key + "/" + normalised colour
+        color_norm = color_label.strip().casefold()
+        gk = f"{base_key}/{color_norm}"
+
+        if gk not in groups:
+            groups[gk] = {
+                "group_key":            gk,
+                "external_style_name":  ext_style_name,
+                "external_style_id":    ext_style_id,
+                "base_key":             base_key,
+                "color_label":          color_label or color_norm,
+                "platform":             platform,
+                "source_type":          source_type,
+                "source_name":          platform,
+                "sku_count":            0,
+                "sample_skus":          [],
+                "size_sku_map":         {},
+                "image_url":            image_url,
+            }
+        g = groups[gk]
+        g["sku_count"] += 1
+        if effective_size and ext_sku:
+            g["size_sku_map"][effective_size] = ext_sku
+        if ext_sku and ext_sku not in g["sample_skus"]:
+            g["sample_skus"].append(ext_sku)
+        if not g["image_url"] and image_url:
+            g["image_url"] = image_url
+
+    if not groups:
+        raise HTTPException(400, "Could not identify any SKU groups from this file — check that it contains columns for style name/ID and colour.")
+
+    # Truncate sample_skus to first 5 for response size
+    for g in groups.values():
+        g["sample_skus"] = g["sample_skus"][:5]
+
+    # ── 4. Sibling detection: groups sharing the same base_key or style_name ──
+    from collections import defaultdict
+    base_to_groups: dict[str, list] = defaultdict(list)
+    name_to_groups: dict[str, list] = defaultdict(list)
+    for gk, g in groups.items():
+        base_to_groups[g["base_key"]].append(gk)
+        if g.get("external_style_name"):
+            name_to_groups[g["external_style_name"].strip().casefold()].append(gk)
+
+    for gk, g in groups.items():
+        sibs = set(base_to_groups[g["base_key"]])
+        if g.get("external_style_name"):
+            sibs.update(name_to_groups[g["external_style_name"].strip().casefold()])
+        sibs.discard(gk)
+        g["sibling_group_keys"] = sorted(list(sibs))
+
+    # ── 5. Fuzzy style suggestion against db.styles ───────────────────────
+    all_styles = await db.styles.find({}, {"code": 1, "name": 1}).to_list(10000)
+    style_codes_upper = {s["code"].upper(): {"id": str(s["_id"]), "code": s["code"], "name": s.get("name", "")}
+                         for s in all_styles}
+    all_codes_list = list(style_codes_upper.keys())
+
+    def suggest_styles(base: str) -> list[str]:
+        """Return up to 3 internal style IDs whose codes closely match `base`."""
+        if not base:
+            return []
+        # Strip common prefixes / numeric suffixes for a cleaner match target
+        clean = re.sub(r'[^A-Za-z0-9]', '', base).upper()
+        matches = difflib.get_close_matches(clean, all_codes_list, n=3, cutoff=0.4)
+        return [style_codes_upper[m]["id"] for m in matches]
+
+    groups_list = []
+    for gk, g in groups.items():
+        suggested = suggest_styles(g["base_key"])
+        # suggested_base_match: the code of the top suggestion (for display)
+        suggested_base_match = None
+        if suggested:
+            top_id = suggested[0]
+            for s in all_styles:
+                if str(s["_id"]) == top_id:
+                    suggested_base_match = s["code"]
+                    break
+        g["suggested_style_ids"] = suggested
+        g["suggested_base_match"] = suggested_base_match
+        groups_list.append(g)
+
+    # ── 6. Persist session in db.listing_import_sessions ──────────────────
+    session_id = str(uuid.uuid4())
+    session_doc = {
+        "session_id":   session_id,
+        "filename":     file.filename,
+        "platform":     platform,
+        "source_type":  source_type,
+        "status":       "pending_link",
+        "groups":       groups_list,
+        "group_count":  len(groups_list),
+        "sku_count":    sum(g["sku_count"] for g in groups_list),
+        "created_at":   now_iso(),
+        "created_by":   u["email"],
+        "committed_at": None,
+    }
+    await db.listing_import_sessions.insert_one(session_doc)
+
+    return {
+        "session_id":  session_id,
+        "filename":    file.filename,
+        "platform":    platform,
+        "group_count": len(groups_list),
+        "sku_count":   session_doc["sku_count"],
+        "groups":      groups_list,
+    }
+
+
+@api.get("/sku-map/listing-import/sessions")
+async def listing_import_list_sessions(request: Request):
+    """List all listing import sessions (most recent first)."""
+    await get_current_user(request)
+    docs = await db.listing_import_sessions.find(
+        {}, {"groups": 0}   # exclude bulky groups array from list view
+    ).sort("created_at", -1).to_list(200)
+    return [stringify(d) for d in docs]
+
+
+@api.get("/sku-map/listing-import/sessions/{session_id}")
+async def listing_import_get_session(session_id: str, request: Request):
+    """Fetch a specific listing import session including its groups (for resuming Stage 2)."""
+    await get_current_user(request)
+    doc = await db.listing_import_sessions.find_one({"session_id": session_id})
+    if not doc:
+        raise HTTPException(404, f"No listing import session '{session_id}'")
+    return stringify(doc)
+
+
+@api.post("/sku-map/listing-import/sessions/{session_id}/commit")
+async def listing_import_commit(
+    session_id: str,
+    payload: ListingImportCommitIn,
+    request: Request,
+):
+    """Stage 2 — Commit per-group linking decisions.
+
+    For each decision:
+      - style_id provided  → upsert into db.sku_map (same logic as /sku-map/bulk)
+      - style_id is null   → write to db.sku_map with needs_style_code=True
+                             so the group is visible for follow-up in the main table.
+
+    Unlinked groups do NOT block the batch; they are flagged, not dropped.
+
+    Returns: { linked: N, unlinked: N, errors: [{group_key, reason}] }
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+
+    # Fetch session to get group data
+    session_doc = await db.listing_import_sessions.find_one({"session_id": session_id})
+    if not session_doc:
+        raise HTTPException(404, f"No listing import session '{session_id}'")
+    if session_doc.get("status") == "committed":
+        raise HTTPException(409, "This import session has already been committed.")
+
+    groups_by_key: dict[str, dict] = {g["group_key"]: g for g in (session_doc.get("groups") or [])}
+
+    linked_count = 0
+    unlinked_count = 0
+    errors: list[dict] = []
+
+    for decision in payload.decisions:
+        gk = decision.group_key
+        group = groups_by_key.get(gk)
+        if not group:
+            errors.append({"group_key": gk, "reason": "Group key not found in session"})
+            continue
+
+        style_id = (decision.style_id or "").strip() or None
+        style_code = None
+        style_doc = None
+
+        if style_id:
+            # Validate the linked style exists
+            try:
+                style_doc = await db.styles.find_one({"_id": oid(style_id)})
+            except Exception:
+                style_doc = None
+            if not style_doc:
+                errors.append({"group_key": gk, "reason": f"style_id '{style_id}' not found"})
+                continue
+            style_code = style_doc.get("code", "")
+
+        # Build the sku_map document
+        size_sku_map = group.get("size_sku_map", {})
+        color_label  = group.get("color_label", "")
+        color_key    = color_label.strip().casefold()
+        source_type  = group.get("source_type", "online_channel")
+        source_name  = group.get("source_name", group.get("platform", ""))
+        src_name_key = _norm_marketplace(source_name)
+
+        # Representative external_sku for legacy / flat lookups: prefer first real leaf SKU from size_sku_map or sample_skus, never style_id
+        sample_skus = group.get("sample_skus", [])
+        group_ext_sku = next(iter(size_sku_map.values()), None) or (sample_skus[0] if sample_skus else "")
+
+        # Check for existing mapping for this (source, style_id / needs_style_code, colour)
+        # Duplicate check: same source_name + colour + (style_id if linked, else base_key)
+        if style_id:
+            existing = await db.sku_map.find_one({
+                "source_type":     source_type,
+                "source_name_key": src_name_key,
+                "style_id":        style_id,
+                "color_key":       color_key,
+            })
+        else:
+            existing = await db.sku_map.find_one({
+                "source_type":              source_type,
+                "source_name_key":          src_name_key,
+                "needs_style_code":         True,
+                "external_style_name_key":  _norm_key(group.get("external_style_name", group.get("base_key", gk))),
+                "color_key":                color_key,
+            })
+
+        doc_base = {
+            "source_type":        source_type,
+            "source_name":        source_name,
+            "source_name_key":    src_name_key,
+            "color":              color_label,
+            "color_key":          color_key,
+            "external_style_name": group.get("external_style_name", ""),
+            "external_style_id":  group.get("external_style_id", ""),
+            "external_style_name_key": _norm_key(group.get("external_style_name", group.get("base_key", gk))),
+            "external_sku":       group_ext_sku,
+            "external_sku_key":   _norm_key(group_ext_sku),
+            "size_map":           size_sku_map,
+            "color_map":          {},
+            "image_url":          normalize_image_url(group.get("image_url", "")),
+            "needs_style_code":   style_id is None,
+            "listing_session_id": session_id,
+            "updated_at":         now_iso(),
+            "updated_by":         u["email"],
+        }
+        if style_id:
+            doc_base["style_id"]   = style_id
+            doc_base["style_code"] = style_code
+
+        if existing:
+            # Merge size_map entries rather than overwriting
+            merged_size_map = dict(existing.get("size_map") or {})
+            merged_size_map.update(size_sku_map)
+            doc_base["size_map"] = merged_size_map
+            await db.sku_map.update_one(
+                {"_id": existing["_id"]},
+                {"$set": doc_base},
+            )
+        else:
+            doc_base["created_at"] = now_iso()
+            doc_base["created_by"] = u["email"]
+            await db.sku_map.insert_one(doc_base)
+
+        if style_id:
+            linked_count += 1
+        else:
+            unlinked_count += 1
+
+        # Log activity
+        label = f"{source_name} / {group.get('external_style_name', gk)} / {color_label}"
+        if style_id:
+            await log_activity("CREATE", "sku_map",
+                               f"Listing import: linked {label} → {style_code}", u["email"])
+        else:
+            await log_activity("CREATE", "sku_map",
+                               f"Listing import: unlinked {label} (needs_style_code)", u["email"])
+
+    # Mark session committed
+    await db.listing_import_sessions.update_one(
+        {"session_id": session_id},
+        {"$set": {"status": "committed", "committed_at": now_iso(), "committed_by": u["email"]}},
+    )
+
+    return {
+        "linked":   linked_count,
+        "unlinked": unlinked_count,
+        "errors":   errors,
+    }
 
 
 # ---------- STYLE LIFECYCLE (Online branch) ----------
