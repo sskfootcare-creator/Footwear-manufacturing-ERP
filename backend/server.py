@@ -1243,45 +1243,12 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db) -> dict:
       2. Estimated: planned labor from style.labor[] (if no job assignment data exists).
     Returns labor_source='actual'|'estimated' so the UI can badge accordingly.
     """
-    c = compute_style_costing(style_obj)
+    c = await compute_style_costing_async(style_obj, db)
     bom_cost = float(c.get("materials_cost", 0))
     overhead = float(c.get("overhead_cost", 0))
     packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
-
-    style_id = str(style_obj.get("_id", style_obj.get("id", "")))
-    style_code = style_obj.get("code", "")
-    job_rates = []
-
-    if style_id or style_code:
-        query_conditions = []
-        if style_id:
-            query_conditions.append({"style_id": style_id})
-        if style_code:
-            query_conditions.append({"style_code": style_code})
-        jobs = await db.production_jobs.find(
-            {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
-        ).to_list(500)
-        
-        for job in jobs:
-            assignments = job.get("assignments") or {}
-            if isinstance(assignments, dict) and assignments:
-                total_job_rate = 0.0
-                has_valid = False
-                for _role, asgn in assignments.items():
-                    if isinstance(asgn, dict):
-                        rate = float(asgn.get("rate_per_pair") or 0)
-                        if rate > 0:
-                            total_job_rate += rate
-                            has_valid = True
-                if has_valid:
-                    job_rates.append(total_job_rate)
-
-    if job_rates:
-        labor_cost = round(sum(job_rates) / len(job_rates), 2)
-        labor_source = "actual"
-    else:
-        labor_cost = float(c.get("labor_cost", 0))
-        labor_source = "estimated"
+    labor_cost = float(c.get("labor_cost", 0))
+    labor_source = c.get("labor_source", "estimated")
 
     unit_price = float(po_line.get("unit_price", 0))
     total_cost = round(bom_cost + labor_cost + packing, 2)
@@ -1289,7 +1256,7 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db) -> dict:
     profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
 
     return {
-        "style_code": style_code,
+        "style_code": style_obj.get("code", "") or po_line.get("style_code", ""),
         "unit_price": round(unit_price, 2),
         "bom_cost": round(bom_cost, 2),
         "labor_cost": round(labor_cost, 2),
@@ -8899,18 +8866,28 @@ async def _compute_online_profitability(
         style_docs = await db.styles.find({"_id": {"$in": style_ids}}).to_list(len(style_ids))
         for s in style_docs:
             try:
-                c = compute_style_costing(s)
+                c = await compute_style_costing_async(s, db)
                 style_cost_map[str(s["_id"])] = {
-                    "style_code": s.get("code") or s.get("style_code"),
-                    "unit_cogs":  c.get("total_cost") or 0,
-                    "materials_cost": c.get("materials_cost"),
-                    "labor_cost":     c.get("labor_cost"),
-                    "overhead_cost":  c.get("overhead_cost"),
-                    "packing_cost":   c.get("packing_cost"),
+                    "style_code":        s.get("code") or s.get("style_code"),
+                    "unit_cogs":         c.get("total_cost") or 0,
+                    "materials_cost":    c.get("materials_cost"),
+                    "labor_cost":        c.get("labor_cost"),
+                    "labor_source":      c.get("labor_source", "estimated"),
+                    "cost_is_estimated": c.get("labor_source", "estimated") == "estimated",
+                    "is_assigned":       c.get("is_assigned", False),
+                    "actual_labor_cost": c.get("actual_labor_cost"),
+                    "planned_labor_cost": c.get("planned_labor_cost"),
+                    "overhead_cost":     c.get("overhead_cost"),
+                    "packing_cost":      c.get("packing_cost"),
                 }
             except Exception as e:
-                log.warning(f"compute_style_costing failed for style {s.get('_id')}: {e}")
-                style_cost_map[str(s["_id"])] = {"style_code": s.get("code"), "unit_cogs": 0}
+                log.warning(f"compute_style_costing_async failed for style {s.get('_id')}: {e}")
+                style_cost_map[str(s["_id"])] = {
+                    "style_code":        s.get("code"),
+                    "unit_cogs":         0,
+                    "labor_source":      "estimated",
+                    "cost_is_estimated": True,
+                }
         missing = [str(sid) for sid in style_ids if str(sid) not in style_cost_map]
         if missing:
             notes.append(f"{len(missing)} style_id(s) referenced by net-sold rows have no styles doc — COGS treated as 0 for these.")
@@ -9019,23 +8996,33 @@ async def _compute_online_profitability(
         sid_str = str(sid) if sid else None
         units_sold = int(r.get("units_sold") or 0)
         returned_units = int(returned_by_style.get(sid_str, 0)) if sid_str else 0
-        unit_cogs = float(style_cost_map.get(sid_str, {}).get("unit_cogs", 0)) if sid_str else 0.0
+        cost_info = style_cost_map.get(sid_str, {})
+        unit_cogs = float(cost_info.get("unit_cogs", 0)) if sid_str else 0.0
         style_cogs = unit_cogs * units_sold
         item_revenue = float(r.get("item_final_amount") or 0)
 
         total_touch = returned_units + units_sold
         return_rate = (returned_units / total_touch * 100) if total_touch > 0 else 0.0
 
+        row_labor_source = cost_info.get("labor_source", "estimated")
+        row_cost_is_estimated = (row_labor_source == "estimated")
+
         by_style.append({
-            "style_id":        sid_str,
-            "style_code":      style_cost_map.get(sid_str, {}).get("style_code") or r.get("style_code"),
-            "color":           r.get("color"),
-            "units_sold":      units_sold,
-            "returned_units":  returned_units,
-            "unit_cogs":       round(unit_cogs, 2),
-            "cogs":            round(style_cogs, 2),
+            "style_id":          sid_str,
+            "style_code":        cost_info.get("style_code") or r.get("style_code"),
+            "color":             r.get("color"),
+            "units_sold":        units_sold,
+            "returned_units":    returned_units,
+            "unit_cogs":         round(unit_cogs, 2),
+            "cogs":              round(style_cogs, 2),
+            "materials_cost":    cost_info.get("materials_cost"),
+            "labor_cost":        cost_info.get("labor_cost"),
+            "labor_source":      row_labor_source,
+            "cost_is_estimated": row_cost_is_estimated,
+            "overhead_cost":     cost_info.get("overhead_cost"),
+            "packing_cost":      cost_info.get("packing_cost"),
             "item_revenue_fallback": round(item_revenue, 2),
-            "return_rate_pct": round(return_rate, 2),
+            "return_rate_pct":   round(return_rate, 2),
         })
         total_units_sold += units_sold
         total_net_cogs   += style_cogs
@@ -9064,7 +9051,10 @@ async def _compute_online_profitability(
         revenue_used_for_profit = total_revenue_settled
         revenue_source = "settlement_forward - settlement_reverse"
 
-    gross_profit = revenue_used_for_profit - total_net_cogs
+    if "final_amount" in revenue_source:
+        gross_profit = revenue_used_for_profit - total_net_cogs - total_platform_fees
+    else:
+        gross_profit = revenue_used_for_profit - total_net_cogs
     gross_margin_pct = ((gross_profit / revenue_used_for_profit) * 100) if revenue_used_for_profit else 0.0
 
     for row in by_style:
@@ -9093,16 +9083,25 @@ async def _compute_online_profitability(
             row["revenue_source"] = "item_final_amount (estimated)"
             row["is_estimated"] = True
 
+        row_fees = round(float(per_style_fees.get(sid_str, 0.0)), 2)
         row["revenue_settled"] = round(row_rev, 2)
-        row["platform_fees"]   = round(float(per_style_fees.get(sid_str, 0.0)), 2)
-        row["profit"]          = round(row_rev - row["cogs"], 2)
+        row["platform_fees"]   = row_fees
+        row_rev_source = row.get("revenue_source", "")
+        if "final_amount" in row_rev_source:
+            row_profit = row_rev - row["cogs"] - row_fees
+        else:
+            row_profit = row_rev - row["cogs"]
+        row["profit"]          = round(row_profit, 2)
         row["margin_pct"]      = round(((row["profit"] / row_rev) * 100) if row_rev else 0.0, 2)
+
+    cost_is_estimated = any(row.get("cost_is_estimated", False) for row in by_style) if by_style else False
 
     return {
         "period":                    {"from": date_from, "to": date_to},
         "platform":                  platform,
         "style_id":                  style_id,
         "is_estimated":              is_estimated,
+        "cost_is_estimated":         cost_is_estimated,
         "reconciled_units_count":    reconciled_units,
         "unreconciled_units_count":  max(0, total_units_sold - reconciled_units),
         "net_units_sold":            total_units_sold,
@@ -9483,8 +9482,11 @@ async def online_profitability_trend(
             style_docs = await db.styles.find({"_id": {"$in": style_ids}}).to_list(len(style_ids))
             unit_cost_map = {}
             for s in style_docs:
-                try: unit_cost_map[str(s["_id"])] = float(compute_style_costing(s).get("total_cost") or 0)
-                except Exception: unit_cost_map[str(s["_id"])] = 0.0
+                try:
+                    c_async = await compute_style_costing_async(s, db)
+                    unit_cost_map[str(s["_id"])] = float(c_async.get("total_cost") or 0)
+                except Exception:
+                    unit_cost_map[str(s["_id"])] = 0.0
             for r in net_rows:
                 sid = str(r.get("_id"))
                 cogs += unit_cost_map.get(sid, 0.0) * int(r.get("n") or 0)

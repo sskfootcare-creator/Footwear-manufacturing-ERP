@@ -52,18 +52,19 @@ const isoDaysAgo = (n) => {
 
 export default function OnlineProfitability() {
   // Navigation tabs: 'overview', 'reconciliation', 'import', 'returns_deductions', 'unreconciled'
-  const [activeTab, setActiveTab] = useState("reconciliation");
+  const [activeTab, setActiveTab] = useState("overview");
 
   // Filters & State
   const [platform, setPlatform] = useState("myntra");
   const [dateFrom, setDateFrom] = useState(isoDaysAgo(30));
   const [dateTo, setDateTo] = useState(isoToday());
   const [styleId, setStyleId] = useState("");
-  const [bucket, setBucket] = useState("day");
   const [styles, setStyles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [settlementOpen, setSettlementOpen] = useState(false);
+
+  // Profitability report state
+  const [profitData, setProfitData] = useState(null);
 
   // Reconciliation summary state
   const [recSummary, setRecSummary] = useState(null);
@@ -96,6 +97,28 @@ export default function OnlineProfitability() {
       .catch(() => setStyles([]));
   }, []);
 
+  // Load Phase 4 Online Profitability Report Data
+  const loadProfitability = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await http.get("/reports/online-profitability", {
+        params: {
+          platform: platform || undefined,
+          date_from: dateFrom || undefined,
+          date_to: dateTo || undefined,
+          style_id: styleId || undefined,
+        },
+      });
+      setProfitData(data);
+    } catch (err) {
+      console.error("Failed to load online profitability:", err);
+      setError("Failed to load online profitability report.");
+    } finally {
+      setLoading(false);
+    }
+  }, [platform, dateFrom, dateTo, styleId]);
+
   // Load Reconciliation Engine Data
   const loadReconciliation = useCallback(async () => {
     setRecLoading(true);
@@ -114,8 +137,33 @@ export default function OnlineProfitability() {
   }, [dateFrom, dateTo]);
 
   useEffect(() => {
+    loadProfitability();
     loadReconciliation();
-  }, [loadReconciliation]);
+  }, [loadProfitability, loadReconciliation]);
+
+  // Excel Export Handler
+  const handleExportExcel = async () => {
+    try {
+      const res = await http.get("/reports/online-profitability/export", {
+        params: {
+          platform: platform || undefined,
+          date_from: dateFrom || undefined,
+          date_to: dateTo || undefined,
+          style_id: styleId || undefined,
+        },
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `Online_Profitability_${platform || "all"}_${dateFrom}_to_${dateTo}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      alert("Failed to export Excel report: " + (err?.response?.data?.detail || err?.message));
+    }
+  };
 
   // File import handlers
   const handleFileUpload = async (endpoint, file, stateKey) => {
@@ -128,6 +176,7 @@ export default function OnlineProfitability() {
       const res = await http.post(`/online-reconciliation/${endpoint}`, formData);
       setUploadMessage(`Successfully imported ${res.data.filename || file.name}`);
       loadReconciliation();
+      loadProfitability();
     } catch (err) {
       setUploadMessage(`Error: ${err?.response?.data?.detail || err?.message || "Import failed"}`);
     } finally {
@@ -152,6 +201,7 @@ export default function OnlineProfitability() {
       });
       setSnapshotModalOpen(false);
       loadReconciliation();
+      loadProfitability();
     } catch (err) {
       alert(err?.response?.data?.detail || "Failed to create cost snapshot");
     }
@@ -170,6 +220,16 @@ export default function OnlineProfitability() {
         <div className="bg-white p-2 border border-slate-200 shadow-sm flex flex-wrap gap-2 items-center justify-between">
           <div className="flex flex-wrap gap-1">
             <button
+              onClick={() => setActiveTab("overview")}
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "overview"
+                  ? "bg-[#0F172A] text-white"
+                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              data-testid="tab-overview"
+            >
+              <TrendingUp className="w-3.5 h-3.5 text-[#C27842]" /> Profitability Engine
+            </button>
+            <button
               onClick={() => setActiveTab("reconciliation")}
               className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "reconciliation"
                   ? "bg-[#0F172A] text-white"
@@ -177,7 +237,7 @@ export default function OnlineProfitability() {
                 }`}
               data-testid="tab-reconciliation"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> Reconciliation Engine
+              <RefreshCw className="w-3.5 h-3.5" /> 5-Report Reconciler
             </button>
             <button
               onClick={() => setActiveTab("import")}
@@ -187,7 +247,7 @@ export default function OnlineProfitability() {
                 }`}
               data-testid="tab-import"
             >
-              <Upload className="w-3.5 h-3.5" /> File Import Suite (5 Reports)
+              <Upload className="w-3.5 h-3.5" /> File Import Suite
             </button>
             <button
               onClick={() => setActiveTab("returns_deductions")}
@@ -215,9 +275,18 @@ export default function OnlineProfitability() {
             <BtnSecondary onClick={() => setSnapshotModalOpen(true)} className="flex items-center gap-1.5 text-xs">
               <Plus className="w-3.5 h-3.5 text-[#C27842]" /> Cost Snapshot
             </BtnSecondary>
-            <BtnSecondary onClick={loadReconciliation} disabled={recLoading} className="flex items-center gap-1.5 text-xs">
-              <RefreshCw className={`w-3.5 h-3.5 ${recLoading ? "animate-spin" : ""}`} /> Refresh Engine
+            <BtnSecondary
+              onClick={() => { loadProfitability(); loadReconciliation(); }}
+              disabled={loading || recLoading}
+              className="flex items-center gap-1.5 text-xs"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading || recLoading ? "animate-spin" : ""}`} /> Refresh
             </BtnSecondary>
+            {activeTab === "overview" && (
+              <BtnPrimary onClick={handleExportExcel} className="flex items-center gap-1.5 text-xs">
+                <Download className="w-3.5 h-3.5" /> Export Excel
+              </BtnPrimary>
+            )}
           </div>
         </div>
 
@@ -227,6 +296,233 @@ export default function OnlineProfitability() {
             <button onClick={() => setUploadMessage("")} className="text-slate-400 hover:text-white">
               <X className="w-4 h-4" />
             </button>
+          </div>
+        )}
+
+        {/* ── FILTER TOOLBAR FOR OVERVIEW TAB ────────────────────────────────── */}
+        {activeTab === "overview" && (
+          <Card className="p-4 bg-slate-50 border border-slate-200">
+            <div className="flex flex-wrap gap-4 items-end justify-between">
+              <div className="flex flex-wrap gap-4 items-end">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Platform</label>
+                  <select
+                    value={platform}
+                    onChange={(e) => setPlatform(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-semibold bg-white text-slate-800"
+                    data-testid="filter-platform"
+                  >
+                    <option value="">All Platforms</option>
+                    <option value="myntra">Myntra</option>
+                    <option value="ajio">Ajio</option>
+                    <option value="flipkart">Flipkart</option>
+                    <option value="amazon">Amazon</option>
+                    <option value="nykaa">Nykaa</option>
+                    <option value="tatacliq">Tata CLiQ</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">From Date</label>
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-semibold bg-white text-slate-800"
+                    data-testid="filter-date-from"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">To Date</label>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-semibold bg-white text-slate-800"
+                    data-testid="filter-date-to"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Style Filter</label>
+                  <select
+                    value={styleId}
+                    onChange={(e) => setStyleId(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-semibold bg-white text-slate-800 max-w-xs"
+                    data-testid="filter-style"
+                  >
+                    <option value="">All Styles</option>
+                    {styles.map((s) => (
+                      <option key={s._id} value={s._id}>
+                        {s.code} - {s.name || s.category}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <BtnSecondary onClick={loadProfitability} disabled={loading} className="text-xs">
+                Apply Filters
+              </BtnSecondary>
+            </div>
+          </Card>
+        )}
+
+        {/* ── TAB 0: PROFITABILITY ENGINE (PHASE 4 COST VS REVENUE RECONCILIATION) ── */}
+        {activeTab === "overview" && profitData && (
+          <div className="space-y-6" data-testid="profitability-engine-overview">
+            {/* Status & Signal Banner */}
+            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-6 text-white rounded-sm border-2 border-slate-700 shadow-md">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-black text-base uppercase tracking-wider text-white">
+                      Online Commerce Profitability Reconciliation
+                    </h3>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-1">
+                    Revenue Source: <strong className="text-amber-300">{profitData.revenue_source_used}</strong>
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 items-center" data-testid="top-level-status-badges">
+                  {/* Distinct Revenue Status Badge */}
+                  {profitData.is_estimated ? (
+                    <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded bg-amber-500/20 text-amber-300 border border-amber-500/40" title="Revenue incorporates un-reconciled order item fallback estimates" data-testid="badge-top-revenue-estimated">
+                      <Clock className="w-3.5 h-3.5 text-amber-400" /> Revenue: Estimated
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" title="Revenue 100% confirmed from settled payments" data-testid="badge-top-revenue-confirmed">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> Revenue: Confirmed
+                    </span>
+                  )}
+                  {/* Distinct Cost Status Badge */}
+                  {profitData.cost_is_estimated ? (
+                    <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded bg-amber-500/20 text-amber-300 border border-amber-500/40" title="One or more styles use planned/estimated labor costs" data-testid="badge-top-cost-estimated">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" /> Cost: Estimated
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" title="All styles use confirmed actual production job assignment rates" data-testid="badge-top-cost-actual">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> Cost: Actual
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* KPI Headline Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="profitability-kpi-grid">
+              <Card className="p-5 border-l-4 border-l-blue-600">
+                <div className="text-xs uppercase tracking-wider font-bold text-slate-500 mb-1">Net Units Sold</div>
+                <div className="text-2xl font-black text-slate-900" data-testid="net-units-sold-value">
+                  {profitData.net_units_sold}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Reconciled: {profitData.reconciled_units_count} | Unreconciled: {profitData.unreconciled_units_count}
+                </div>
+              </Card>
+
+              <Card className="p-5 border-l-4 border-l-emerald-600">
+                <div className="text-xs uppercase tracking-wider font-bold text-slate-500 mb-1">Total Revenue</div>
+                <div className="text-2xl font-black text-emerald-700" data-testid="total-revenue-value">
+                  {inr(profitData.total_revenue_settled)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Pending: {inr(profitData.total_revenue_pending)} | Fees: {inr(profitData.total_platform_fees)}
+                </div>
+              </Card>
+
+              <Card className="p-5 border-l-4 border-l-amber-600">
+                <div className="text-xs uppercase tracking-wider font-bold text-slate-500 mb-1">Total Net COGS</div>
+                <div className="text-2xl font-black text-amber-700" data-testid="total-cogs-value">
+                  {inr(profitData.total_net_cogs)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1">
+                  From BOM + Job Assignment Costing
+                </div>
+              </Card>
+
+              <Card className={`p-5 border-l-4 ${profitData.gross_profit >= 0 ? "border-l-emerald-600" : "border-l-rose-600"}`}>
+                <div className="text-xs uppercase tracking-wider font-bold text-slate-500 mb-1">Gross Profit / Margin</div>
+                <div className={`text-2xl font-black ${profitData.gross_profit >= 0 ? "text-emerald-700" : "text-rose-700"}`} data-testid="gross-profit-value">
+                  {inr(profitData.gross_profit)}
+                </div>
+                <div className="text-[11px] font-bold text-slate-600 mt-1">
+                  Margin: {profitData.gross_margin_pct}%
+                </div>
+              </Card>
+            </div>
+
+            {/* Per-Style Breakdown Table with Independent Badges */}
+            <Card className="overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4 text-[#C27842]" /> Per-Style Cost & Profitability Breakdown
+                </h4>
+                <div className="text-xs text-slate-500 font-semibold">
+                  {profitData.by_style?.length || 0} style(s) sold
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse" data-testid="by-style-table">
+                  <thead>
+                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
+                      <th className="p-3">Style Code</th>
+                      <th className="p-3 text-center">Units Sold</th>
+                      <th className="p-3 text-right">Revenue</th>
+                      <th className="p-3 text-right">Platform Fees</th>
+                      <th className="p-3 text-right">Unit COGS</th>
+                      <th className="p-3 text-right">Total COGS</th>
+                      <th className="p-3 text-right">Net Profit</th>
+                      <th className="p-3 text-right">Margin %</th>
+                      <th className="p-3 text-center">Revenue Status</th>
+                      <th className="p-3 text-center">Cost Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {profitData.by_style && profitData.by_style.map((row) => (
+                      <tr key={row.style_id || row.style_code} className="hover:bg-slate-50">
+                        <td className="p-3 font-bold font-mono text-slate-900">
+                          {row.style_code}
+                          {row.color && <span className="text-slate-400 font-normal ml-1">({row.color})</span>}
+                        </td>
+                        <td className="p-3 text-center font-semibold text-slate-700">{row.units_sold}</td>
+                        <td className="p-3 text-right font-bold text-slate-900">{inr(row.revenue_settled)}</td>
+                        <td className="p-3 text-right text-rose-600 font-semibold">{inr(row.platform_fees)}</td>
+                        <td className="p-3 text-right font-mono text-slate-700">{inr(row.unit_cogs)}</td>
+                        <td className="p-3 text-right font-bold text-amber-800">{inr(row.cogs)}</td>
+                        <td className={`p-3 text-right font-black ${row.profit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {inr(row.profit)}
+                        </td>
+                        <td className={`p-3 text-right font-bold ${row.margin_pct >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                          {row.margin_pct}%
+                        </td>
+                        {/* Distinct Independent Revenue Badge */}
+                        <td className="p-3 text-center">
+                          {row.is_estimated ? (
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title={row.revenue_source || "Estimated revenue"} data-testid={`badge-rev-est-${row.style_code}`}>
+                              Revenue: Estimated
+                            </span>
+                          ) : (
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300" title={row.revenue_source || "Confirmed revenue"} data-testid={`badge-rev-conf-${row.style_code}`}>
+                              Revenue: Confirmed
+                            </span>
+                          )}
+                        </td>
+                        {/* Distinct Independent Cost Badge */}
+                        <td className="p-3 text-center">
+                          {row.cost_is_estimated ? (
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title="Cost: planned style BOM estimate" data-testid={`badge-cost-est-${row.style_code}`}>
+                              Cost: Estimated
+                            </span>
+                          ) : (
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300" title="Cost: actual worker job assignment rate" data-testid={`badge-cost-act-${row.style_code}`}>
+                              Cost: Actual
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
           </div>
         )}
 
@@ -332,11 +628,11 @@ export default function OnlineProfitability() {
               </Card>
             )}
 
-            {/* Profitability Table by Style */}
+            {/* Profitability Table by Style with Distinct Badges */}
             <Card className="overflow-hidden">
               <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h4 className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-[#C27842]" /> Per-Style Online Profitability (Real Settlement + Actual COGS)
+                  <TrendingUp className="w-4 h-4 text-[#C27842]" /> Per-Style Online Profitability (Reconciliation Summary)
                 </h4>
               </div>
               <div className="overflow-x-auto">
@@ -349,7 +645,8 @@ export default function OnlineProfitability() {
                       <th className="p-3 text-right">Platform Fees</th>
                       <th className="p-3 text-right">Actual COGS</th>
                       <th className="p-3 text-right">Net Profit</th>
-                      <th className="p-3 text-center">COGS Status</th>
+                      <th className="p-3 text-center">Revenue Status</th>
+                      <th className="p-3 text-center">Cost Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -364,12 +661,19 @@ export default function OnlineProfitability() {
                           {inr(row.net_profit)}
                         </td>
                         <td className="p-3 text-center">
+                          <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                            Revenue: Confirmed
+                          </span>
+                        </td>
+                        <td className="p-3 text-center">
                           {row.cost_estimated_count > 0 ? (
-                            <Badge variant="yellow" title={`${row.cost_estimated_count} units used fallback estimate`}>
-                              Cost Estimated ({row.cost_estimated_count})
-                            </Badge>
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title={`${row.cost_estimated_count} units used fallback estimate`}>
+                              Cost: Estimated ({row.cost_estimated_count})
+                            </span>
                           ) : (
-                            <Badge variant="green">Exact Snapshot</Badge>
+                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                              Cost: Actual
+                            </span>
                           )}
                         </td>
                       </tr>
