@@ -57,7 +57,7 @@ const FALLBACK_DISPATCH_FIELDS = [
 
 const FALLBACK_SETTLEMENT_FIELDS = [
   "order_ref", "leaf_sku",
-  "gross_amount", "commission", "shipping_fee", "rto_charge", "net_payout",
+  "gross_amount", "commission", "shipping_fee", "rto_charge", "gst_on_fees", "fixed_fee", "fees_total", "net_payout",
   "settlement_date", "payment_id",
 ];
 
@@ -101,10 +101,14 @@ const FIELD_HELP = {
   commission:      "Platform commission fee charged.",
   shipping_fee:    "Logistics / forward shipping fee charged.",
   rto_charge:      "Reverse shipping / RTO fee charged.",
+  gst_on_fees:     "GST / Taxes on platform fees (e.g. 18% GST on marketplace commission/shipping).",
+  fixed_fee:       "Fixed platform charges / pick & pack / tech enablement fees.",
+  fees_total:      "Total platform fees deducted (authoritative/provided or computed).",
   net_payout:      "Bank settlement / net payout amount received.",
   settlement_date: "Settlement payout date.",
   payment_id:      "Bank transfer reference / NEFT ID / UTR.",
 };
+
 
 const emptyConfig = {
   platform: "nykaa",

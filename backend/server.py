@@ -6309,9 +6309,10 @@ MONTHLY_REPORT_CANONICAL_FIELDS = [
 # Canonical SETTLEMENT fields — platform payout & fee reconciliation.
 SETTLEMENT_CANONICAL_FIELDS = [
     "order_ref", "leaf_sku",
-    "gross_amount", "commission", "shipping_fee", "rto_charge", "net_payout",
+    "gross_amount", "commission", "shipping_fee", "rto_charge", "gst_on_fees", "fixed_fee", "fees_total", "net_payout",
     "settlement_date", "payment_id",
 ]
+
 
 # ConfigRole distinguishes ORDER/PICKLIST configs (used by the online-orders
 # importer) from DISPATCH configs (used by the daily "what got packed today"
@@ -8545,24 +8546,42 @@ async def _parse_and_resolve_settlement_row(
     leaf_sku, _ = apply_prefix_replacements(leaf_sku_raw, cfg.get("known_sku_prefix_replacements"))
     leaf_sku = strip_known_prefixes(leaf_sku, cfg.get("known_sku_prefixes_to_strip"))
 
-    gross_col    = col_map.get("gross_amount")
-    comm_col     = col_map.get("commission")
-    ship_col     = col_map.get("shipping_fee")
-    rto_col      = col_map.get("rto_charge")
-    payout_col   = col_map.get("net_payout")
-    date_col     = col_map.get("settlement_date")
-    payid_col    = col_map.get("payment_id")
+    gross_col     = col_map.get("gross_amount")
+    comm_col      = col_map.get("commission")
+    ship_col      = col_map.get("shipping_fee")
+    rto_col       = col_map.get("rto_charge")
+    gst_fee_col   = col_map.get("gst_on_fees") or col_map.get("gst_on_fee") or col_map.get("tax_on_fee") or col_map.get("taxes") or col_map.get("gst") or col_map.get("tds_tcs_gst")
+    fixed_fee_col = col_map.get("fixed_fee") or col_map.get("other_charges") or col_map.get("pick_and_pack_fees") or col_map.get("tech_fee")
+    fees_tot_col  = col_map.get("fees_total") or col_map.get("total_fees") or col_map.get("fee_total")
+    payout_col    = col_map.get("net_payout")
+    date_col      = col_map.get("settlement_date")
+    payid_col     = col_map.get("payment_id")
 
     gross_amount    = _safe_float(raw.get(gross_col) if gross_col else 0.0)
     commission      = _safe_float(raw.get(comm_col) if comm_col else 0.0)
     shipping_fee    = _safe_float(raw.get(ship_col) if ship_col else 0.0)
     rto_charge      = _safe_float(raw.get(rto_col) if rto_col else 0.0)
+    gst_on_fees     = _safe_float(raw.get(gst_fee_col) if gst_fee_col else 0.0)
+    fixed_fee       = _safe_float(raw.get(fixed_fee_col) if fixed_fee_col else 0.0)
     net_payout      = _safe_float(raw.get(payout_col) if payout_col else 0.0)
     settlement_date = str(raw.get(date_col) or "").strip() if date_col else ""
     payment_id      = str(raw.get(payid_col) or "").strip() if payid_col else ""
 
+    # Authoritative fees_total calculation:
+    # If explicitly mapped and present, use it; otherwise compute exact sum of all fee components.
+    if fees_tot_col and raw.get(fees_tot_col) is not None and str(raw.get(fees_tot_col)).strip() != "":
+        fees_total = _safe_float(raw.get(fees_tot_col))
+    else:
+        fees_sum = commission + shipping_fee + rto_charge + gst_on_fees + fixed_fee
+        if fees_sum > 0:
+            fees_total = round(fees_sum, 2)
+        elif gross_amount and net_payout:
+            fees_total = round(gross_amount - net_payout, 2)
+        else:
+            fees_total = 0.0
+
     if not net_payout and gross_amount:
-        net_payout = round(gross_amount - commission - shipping_fee - rto_charge, 2)
+        net_payout = round(gross_amount - fees_total, 2)
 
     matched_doc = None
     if order_ref:
@@ -8602,6 +8621,9 @@ async def _parse_and_resolve_settlement_row(
         "commission":         round(commission, 2),
         "shipping_fee":       round(shipping_fee, 2),
         "rto_charge":         round(rto_charge, 2),
+        "gst_on_fees":        round(gst_on_fees, 2),
+        "fixed_fee":          round(fixed_fee, 2),
+        "fees_total":         round(fees_total, 2),
         "net_payout":         round(net_payout, 2),
         "settlement_date":    settlement_date,
         "payment_id":         payment_id,
@@ -8680,6 +8702,9 @@ async def import_settlement_report(
     total_commission = round(sum(c.get("commission", 0) for c in canonical_rows), 2)
     total_shipping   = round(sum(c.get("shipping_fee", 0) for c in canonical_rows), 2)
     total_rto        = round(sum(c.get("rto_charge", 0) for c in canonical_rows), 2)
+    total_gst_fees   = round(sum(c.get("gst_on_fees", 0) for c in canonical_rows), 2)
+    total_fixed_fee  = round(sum(c.get("fixed_fee", 0) for c in canonical_rows), 2)
+    total_fees_total = round(sum(c.get("fees_total", 0) for c in canonical_rows), 2)
     total_net_payout = round(sum(c.get("net_payout", 0) for c in canonical_rows), 2)
     total_invoiced   = round(sum(c.get("invoiced_amount", 0) for c in canonical_rows), 2)
     total_variance   = round(sum(c.get("variance", 0) for c in canonical_rows), 2)
@@ -8692,6 +8717,9 @@ async def import_settlement_report(
         "total_commission":      total_commission,
         "total_shipping_fee":    total_shipping,
         "total_rto_charge":      total_rto,
+        "total_gst_on_fees":     total_gst_fees,
+        "total_fixed_fee":       total_fixed_fee,
+        "total_fees_total":      total_fees_total,
         "total_net_payout":      total_net_payout,
         "total_invoiced_amount": total_invoiced,
         "total_variance":        total_variance,
@@ -8723,6 +8751,9 @@ async def import_settlement_report(
             "commission": canon.get("commission"),
             "shipping_fee": canon.get("shipping_fee"),
             "rto_charge": canon.get("rto_charge"),
+            "gst_on_fees": canon.get("gst_on_fees"),
+            "fixed_fee": canon.get("fixed_fee"),
+            "fees_total": canon.get("fees_total"),
             "net_payout": canon.get("net_payout"),
             "settlement_date": canon.get("settlement_date"),
             "payment_id": canon.get("payment_id"),
@@ -8750,6 +8781,7 @@ async def import_settlement_report(
                     {"$set": {
                         "is_reconciled": True,
                         "reconciled_net_payout": canon.get("net_payout"),
+                        "reconciled_fees_total": canon.get("fees_total"),
                         "settlement_variance": canon.get("variance"),
                         "settlement_id": settle_id,
                         "reconciled_at": now_iso(),
@@ -8823,6 +8855,18 @@ async def get_settlement_summary(
             "commission": {"$sum": {"$ifNull": ["$commission", 0]}},
             "shipping_fee": {"$sum": {"$ifNull": ["$shipping_fee", 0]}},
             "rto_charge": {"$sum": {"$ifNull": ["$rto_charge", 0]}},
+            "gst_on_fees": {"$sum": {"$ifNull": ["$gst_on_fees", 0]}},
+            "fixed_fee": {"$sum": {"$ifNull": ["$fixed_fee", 0]}},
+            "fees_total": {"$sum": {"$ifNull": [
+                "$fees_total",
+                {"$add": [
+                    {"$ifNull": ["$commission", 0]},
+                    {"$ifNull": ["$shipping_fee", 0]},
+                    {"$ifNull": ["$rto_charge", 0]},
+                    {"$ifNull": ["$gst_on_fees", 0]},
+                    {"$ifNull": ["$fixed_fee", 0]}
+                ]}
+            ]}},
             "net_payout": {"$sum": {"$ifNull": ["$net_payout", 0]}},
             "invoiced_amount": {"$sum": {"$ifNull": ["$invoiced_amount", 0]}},
             "variance": {"$sum": {"$ifNull": ["$variance", 0]}},
@@ -8839,12 +8883,16 @@ async def get_settlement_summary(
             "commission": round(d["commission"], 2),
             "shipping_fee": round(d["shipping_fee"], 2),
             "rto_charge": round(d["rto_charge"], 2),
+            "gst_on_fees": round(d.get("gst_on_fees", 0), 2),
+            "fixed_fee": round(d.get("fixed_fee", 0), 2),
+            "fees_total": round(d.get("fees_total", 0), 2),
             "net_payout": round(d["net_payout"], 2),
             "invoiced_amount": round(d["invoiced_amount"], 2),
             "variance": round(d["variance"], 2),
         }
         for d in by_platform_docs
     ]
+
 
     style_pipeline = [
         {"$match": {**q, "matched": True, "matched_style_code": {"$ne": None}}},

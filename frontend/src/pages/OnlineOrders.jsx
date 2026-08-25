@@ -1789,7 +1789,9 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                     </thead>
                     <tbody>
                       {paginatedRows.map((r, i) => {
-                        const fees = (r.commission || 0) + (r.shipping_fee || 0) + (r.rto_charge || 0);
+                        const fees = r.fees_total !== undefined && r.fees_total !== null
+                          ? Number(r.fees_total)
+                          : (r.commission || 0) + (r.shipping_fee || 0) + (r.rto_charge || 0);
                         return (
                           <tr key={i} className={`border-b border-slate-100 ${!r.matched ? "bg-amber-50/40" : "hover:bg-slate-50"}`}>
                             <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
@@ -1928,7 +1930,7 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
                     <th className="p-2 text-left">Platform</th>
                     <th className="p-2 text-right">Rows</th>
                     <th className="p-2 text-right">Gross Amount</th>
-                    <th className="p-2 text-right">Fees (Comm+Ship+RTO)</th>
+                    <th className="p-2 text-right">Total Fees</th>
                     <th className="p-2 text-right">Net Payout</th>
                     <th className="p-2 text-right">Invoiced Amount</th>
                     <th className="p-2 text-right">Variance</th>
@@ -1936,7 +1938,9 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
                 </thead>
                 <tbody>
                   {summary.by_platform.map((p) => {
-                    const fees = (p.commission || 0) + (p.shipping_fee || 0) + (p.rto_charge || 0);
+                    const fees = p.fees_total !== undefined && p.fees_total !== null
+                      ? Number(p.fees_total)
+                      : (p.commission || 0) + (p.shipping_fee || 0) + (p.rto_charge || 0);
                     return (
                       <tr key={p.platform} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="p-2 font-bold capitalize">{p.platform}</td>
@@ -1956,6 +1960,7 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
             </div>
           </div>
         )}
+
 
         {summary?.by_style?.length > 0 && (
           <div className="space-y-2 pt-2">
