@@ -4464,13 +4464,80 @@ async def release_stock(request: Request, payload: StockRelease):
 
 # ---------- STYLES ----------
 
+@api.get("/styles/summary")
+async def list_styles_summary(
+    request: Request,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    include_deleted: bool = False,
+):
+    """Lightweight summary list of styles: code, name, category, status, image_thumbnail_url, cost_summary.
+    Excludes the heavy nested BOM and labor breakdowns for high-performance list views.
+    """
+    await get_current_user(request)
+    query: dict = {}
+    if not include_deleted:
+        query["$or"] = [
+            {"active": {"$ne": False}},
+            {"deleted_at": {"$exists": False}},
+        ]
+    if status:
+        query["status"] = status
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"code": search_regex},
+            {"name": search_regex},
+            {"description": search_regex}
+        ]
+    docs = await db.styles.find(query).sort("created_at", -1).to_list(2000)
+    pipeline_ids = {
+        d["style_id"]
+        for d in await db.style_lifecycle.find({}, {"style_id": 1}).to_list(20000)
+    }
+    out = []
+    for d in docs:
+        d = stringify(d)
+        costing_full = await compute_style_costing_async(d, db)
+        cost_summary = {
+            "materials_cost": costing_full.get("materials_cost", 0.0),
+            "labor_cost": costing_full.get("labor_cost", 0.0),
+            "total_cost": costing_full.get("total_cost", 0.0),
+            "selling_price": costing_full.get("selling_price", 0.0),
+            "suggested_target_price": costing_full.get("suggested_target_price", 0.0),
+            "is_assigned": costing_full.get("is_assigned", False),
+        }
+        out.append({
+            "id": d.get("id"),
+            "code": d.get("code"),
+            "name": d.get("name"),
+            "category": d.get("category", "Footwear"),
+            "status": d.get("status", "active"),
+            "image_thumbnail_url": d.get("image_thumbnail_url") or d.get("image_url") or "",
+            "image_url": d.get("image_url") or "",
+            "image_display_url": d.get("image_display_url") or "",
+            "description": d.get("description", ""),
+            "gst_pct": d.get("gst_pct", 5),
+            "margin_pct": d.get("margin_pct", 25),
+            "insole_mould_name": d.get("insole_mould_name", ""),
+            "sole_mould_name": d.get("sole_mould_name", ""),
+            "in_online_pipeline": d.get("id") in pipeline_ids,
+            "cost_summary": cost_summary,
+            "costing": cost_summary,
+        })
+    return out
+
+
 @api.get("/styles")
 async def list_styles(
     request: Request,
     status: Optional[str] = None,
     search: Optional[str] = None,
     include_deleted: bool  = False,   # set ?include_deleted=true to see soft-deleted styles
+    full: bool = True,
 ):
+    if not full:
+        return await list_styles_summary(request, status=status, search=search, include_deleted=include_deleted)
     await get_current_user(request)
     query: dict = {}
     # ── Exclude soft-deleted styles unless explicitly requested ───────────────
@@ -4505,6 +4572,7 @@ async def list_styles(
         d["in_online_pipeline"] = d["id"] in pipeline_ids
         out.append(d)
     return out
+
 
 @api.get("/styles/bulk/template")
 async def get_styles_template():
@@ -15908,13 +15976,51 @@ async def list_inventory(request: Request):
 
 
 @api.get("/inventory/movements")
-async def list_movements(request: Request, material_id: Optional[str] = None, limit: int = 200):
+async def list_movements(
+    request: Request,
+    material_id: Optional[str] = None,
+    limit: int = 200,
+    skip: int = 0,
+    page: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    type: Optional[str] = None,
+):
     await get_current_user(request)
-    q = {}
+    q: dict = {}
     if material_id:
         q["material_id"] = material_id
-    docs = await db.inventory_movements.find(q).sort("created_at", -1).to_list(limit)
+    if type:
+        q["type"] = type
+
+    if start_date or end_date:
+        conds = []
+        if start_date:
+            conds.append({
+                "$or": [
+                    {"created_at": {"$gte": start_date[:10]}},
+                    {"date": {"$gte": start_date[:10]}},
+                ]
+            })
+        if end_date:
+            end_val = end_date[:10] + "T23:59:59.999999Z" if "T" not in end_date else end_date
+            conds.append({
+                "$or": [
+                    {"created_at": {"$lte": end_val}},
+                    {"date": {"$lte": end_date[:10]}},
+                ]
+            })
+        if len(conds) == 1:
+            q.update(conds[0])
+        elif len(conds) > 1:
+            q["$and"] = conds
+
+    if page and page > 0:
+        skip = (page - 1) * limit
+
+    docs = await db.inventory_movements.find(q).sort("created_at", -1).skip(skip).to_list(limit)
     return [stringify(d) for d in docs]
+
 
 
 @api.post("/inventory/movements")
@@ -16775,10 +16881,18 @@ async def delete_defect(did: str, request: Request):
     return {"ok": True}
 
 
-# ---------- DASHBOARD ----------
-@api.get("/dashboard/stats")
-async def dashboard_stats(request: Request):
-    await get_current_user(request)
+# In-memory dashboard stats cache
+_dashboard_stats_cache = {"data": None, "expires_at": 0.0}
+DASHBOARD_STATS_CACHE_TTL = 300  # 5 minutes
+
+
+def invalidate_dashboard_stats_cache():
+    """Invalidate in-memory dashboard stats cache."""
+    _dashboard_stats_cache["data"] = None
+    _dashboard_stats_cache["expires_at"] = 0.0
+
+
+async def _compute_dashboard_stats_live() -> dict:
     total_pos = await db.pos.count_documents({})
     pending_pos = await db.pos.count_documents({"status": "pending"})
     
@@ -16788,11 +16902,11 @@ async def dashboard_stats(request: Request):
     b2b_jobs = [j for j in jobs if j.get("source_type") != "online_channel"]
     online_jobs = [j for j in jobs if j.get("source_type") == "online_channel"]
     
-    b2b_wip = sum(j["quantity"] for j in b2b_jobs if j["stage"] != "dispatched")
-    b2b_dispatched = sum(j["quantity"] for j in b2b_jobs if j["stage"] == "dispatched")
+    b2b_wip = sum(j.get("quantity", 0) for j in b2b_jobs if j.get("stage") != "dispatched")
+    b2b_dispatched = sum(j.get("quantity", 0) for j in b2b_jobs if j.get("stage") == "dispatched")
     
-    online_wip = sum(j["quantity"] for j in online_jobs if j["stage"] != "dispatched")
-    online_dispatched = sum(j["quantity"] for j in online_jobs if j["stage"] == "dispatched")
+    online_wip = sum(j.get("quantity", 0) for j in online_jobs if j.get("stage") != "dispatched")
+    online_dispatched = sum(j.get("quantity", 0) for j in online_jobs if j.get("stage") == "dispatched")
     
     pairs_in_wip = b2b_wip + online_wip
     dispatched = b2b_dispatched + online_dispatched
@@ -16803,11 +16917,22 @@ async def dashboard_stats(request: Request):
     online_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
     
     for j in jobs:
-        stage_counts[j["stage"]] = stage_counts.get(j["stage"], 0) + j["quantity"]
-        if j.get("source_type") == "online_channel":
-            online_stage_counts[j["stage"]] = online_stage_counts.get(j["stage"], 0) + j["quantity"]
+        st = j.get("stage")
+        qty = j.get("quantity", 0)
+        if st in stage_counts:
+            stage_counts[st] += qty
         else:
-            b2b_stage_counts[j["stage"]] = b2b_stage_counts.get(j["stage"], 0) + j["quantity"]
+            stage_counts[st] = stage_counts.get(st, 0) + qty
+        if j.get("source_type") == "online_channel":
+            if st in online_stage_counts:
+                online_stage_counts[st] += qty
+            else:
+                online_stage_counts[st] = online_stage_counts.get(st, 0) + qty
+        else:
+            if st in b2b_stage_counts:
+                b2b_stage_counts[st] += qty
+            else:
+                b2b_stage_counts[st] = b2b_stage_counts.get(st, 0) + qty
             
     # Revenue split
     b2b_revenue = 0.0
@@ -16847,9 +16972,56 @@ async def dashboard_stats(request: Request):
             "stage_counts": online_stage_counts,
             "recent_orders": recent_online,
             "total_orders": len(online_jobs),
-            "total_qty": sum(j["quantity"] for j in online_jobs),
+            "total_qty": sum(j.get("quantity", 0) for j in online_jobs),
         }
     }
+
+
+# ---------- DASHBOARD ----------
+@api.get("/dashboard/stats")
+async def dashboard_stats(request: Request, force_refresh: bool = False):
+    await get_current_user(request)
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    # 1. Check in-memory cache
+    if not force_refresh and _dashboard_stats_cache["data"] is not None and now_ts < _dashboard_stats_cache["expires_at"]:
+        return _dashboard_stats_cache["data"]
+
+    # 2. Check db.stats_cache collection
+    if not force_refresh:
+        cached_doc = await db.stats_cache.find_one({"_id": "dashboard_stats"})
+        if cached_doc and cached_doc.get("data"):
+            updated_ts = cached_doc.get("updated_at_ts", 0.0)
+            if now_ts - updated_ts < DASHBOARD_STATS_CACHE_TTL:
+                stats = cached_doc["data"]
+                _dashboard_stats_cache["data"] = stats
+                _dashboard_stats_cache["expires_at"] = updated_ts + DASHBOARD_STATS_CACHE_TTL
+                return stats
+
+    # 3. Live computation fallback
+    stats = await _compute_dashboard_stats_live()
+    _dashboard_stats_cache["data"] = stats
+    _dashboard_stats_cache["expires_at"] = now_ts + DASHBOARD_STATS_CACHE_TTL
+
+    # Persist to db.stats_cache
+    try:
+        await db.stats_cache.update_one(
+            {"_id": "dashboard_stats"},
+            {
+                "$set": {
+                    "data": stats,
+                    "updated_at": now_iso(),
+                    "updated_at_ts": now_ts,
+                    "ttl_seconds": DASHBOARD_STATS_CACHE_TTL,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        log.warning(f"Failed to update db.stats_cache: {e}")
+
+    return stats
+
 
 
 # ---------- SEED DEMO DATA (admin only) ----------

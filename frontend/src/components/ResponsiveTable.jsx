@@ -1,8 +1,13 @@
+import { useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+
 /**
  * ResponsiveTable — single source of truth for tabular data across the ERP.
+ * Integrated with @tanstack/react-virtual for high-performance DOM virtualization
+ * supporting 10,000+ rows seamlessly.
  *
- * Desktop (md+):  standard <table> with thead/tbody, full row styling.
- * Mobile (<md):   stacked card-per-row layout:
+ * Desktop (md+):  standard <table> with thead/tbody, full row styling, virtualized windowing.
+ * Mobile (<md):   stacked card-per-row layout, virtualized windowing:
  *   • columns with `primary: true`   → large card header (title + subtitle)
  *   • all other columns              → label : value grid
  *   • columns with `action: true`    → full-width tappable button footer
@@ -17,7 +22,9 @@
  * onRowClick   {Function} (row, e) → makes the whole card/row clickable.
  * emptyMessage {string}   Message shown when rows.length === 0.
  * loading      {bool}     Show skeleton shimmer instead of rows.
- * stickyHeader {bool}     Adds sticky top-0 to thead (desktop only). Default false.
+ * stickyHeader {bool}     Adds sticky top-0 to thead (desktop only). Default true.
+ * maxHeight    {string}   Scroll container max-height. Default "75vh".
+ * virtualize   {bool}     Enable windowing/virtualization. Default true.
  * className    {string}   Extra class on the root wrapper.
  * testId       {string}   data-testid on the root wrapper.
  *
@@ -44,7 +51,9 @@ export default function ResponsiveTable({
   onRowClick,
   emptyMessage = "No data.",
   loading = false,
-  stickyHeader = false,
+  stickyHeader = true,
+  maxHeight = "75vh",
+  virtualize = true,
   className = "",
   testId,
 }) {
@@ -56,6 +65,35 @@ export default function ResponsiveTable({
 
   const getCellValue = (col, row) =>
     col.render ? col.render(row) : (row[col.key] ?? "—");
+
+  // Virtualizer refs
+  const desktopParentRef = useRef(null);
+  const mobileParentRef  = useRef(null);
+
+  const isVirtualized = virtualize && rows.length > 0;
+
+  // Desktop table row virtualizer
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => desktopParentRef.current,
+    estimateSize: () => 48,
+    overscan: 15,
+    getItemKey: (i) => (rows[i] ? rowKey(rows[i], i) : i),
+    enabled: isVirtualized,
+  });
+
+  // Mobile card virtualizer
+  const mobileVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => mobileParentRef.current,
+    estimateSize: () => 140,
+    overscan: 10,
+    getItemKey: (i) => (rows[i] ? rowKey(rows[i], i) : i),
+    enabled: isVirtualized,
+  });
+
+
+
 
   // ── Skeleton rows ──────────────────────────────────────────────────────────
   if (loading) {
@@ -115,18 +153,51 @@ export default function ResponsiveTable({
     );
   }
 
+  // Desktop virtual slice & spacers
+  const rawVirtualRows = isVirtualized ? rowVirtualizer.getVirtualItems() : null;
+  const virtualRows =
+    rawVirtualRows && rawVirtualRows.length > 0
+      ? rawVirtualRows
+      : (isVirtualized ? rows.slice(0, 50).map((_, i) => ({ index: i, start: i * 48, end: (i + 1) * 48 })) : null);
+
+  const totalDesktopSize = isVirtualized ? rowVirtualizer.getTotalSize() : 0;
+  const paddingTop = virtualRows && virtualRows.length > 0 ? virtualRows[0].start : 0;
+  const paddingBottom =
+    virtualRows && virtualRows.length > 0
+      ? Math.max(0, totalDesktopSize - virtualRows[virtualRows.length - 1].end)
+      : 0;
+
+  // Mobile virtual slice & spacers
+  const rawMobileCards = isVirtualized ? mobileVirtualizer.getVirtualItems() : null;
+  const virtualMobileCards =
+    rawMobileCards && rawMobileCards.length > 0
+      ? rawMobileCards
+      : (isVirtualized ? rows.slice(0, 30).map((_, i) => ({ index: i, start: i * 140, end: (i + 1) * 140 })) : null);
+
+  const totalMobileSize = isVirtualized ? mobileVirtualizer.getTotalSize() : 0;
+  const mobilePaddingTop = virtualMobileCards && virtualMobileCards.length > 0 ? virtualMobileCards[0].start : 0;
+  const mobilePaddingBottom =
+    virtualMobileCards && virtualMobileCards.length > 0
+      ? Math.max(0, totalMobileSize - virtualMobileCards[virtualMobileCards.length - 1].end)
+      : 0;
+
+
   return (
     <div className={`${className}`} data-testid={testId}>
 
       {/* ── DESKTOP TABLE ──────────────────────────────────────────────────── */}
-      <div className="hidden md:block overflow-x-auto">
+      <div
+        ref={desktopParentRef}
+        className="hidden md:block overflow-auto"
+        style={{ maxHeight }}
+      >
         <table className="w-full text-sm">
-          <thead className={`bg-slate-50 border-b-2 border-slate-200 text-left ${stickyHeader ? "sticky top-0 z-10" : ""}`}>
+          <thead className={`bg-slate-50 border-b-2 border-slate-200 text-left ${stickyHeader ? "sticky top-0 z-10 shadow-sm" : ""}`}>
             <tr>
               {visibleCols.map((c) => (
                 <th
                   key={c.key}
-                  className={`px-4 py-3 text-[10px] uppercase tracking-wider font-bold text-slate-500 whitespace-nowrap ${c.headerClass || ""}`}
+                  className={`px-4 py-3 text-[10px] uppercase tracking-wider font-bold text-slate-500 whitespace-nowrap bg-slate-50 ${c.headerClass || ""}`}
                 >
                   {c.header}
                 </th>
@@ -134,7 +205,15 @@ export default function ResponsiveTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {rows.map((row, i) => {
+            {paddingTop > 0 && (
+              <tr>
+                <td style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} colSpan={visibleCols.length} />
+              </tr>
+            )}
+            {(virtualRows ? virtualRows : rows.map((_, i) => ({ index: i }))).map((vRow) => {
+              const i = vRow.index;
+              const row = rows[i];
+              if (!row) return null;
               const key = rowKey(row, i);
               const extraClass = rowClassName(row);
               const extraStyle = rowStyle(row);
@@ -142,6 +221,7 @@ export default function ResponsiveTable({
               return (
                 <tr
                   key={key}
+                  data-index={i}
                   className={`transition-colors hover:bg-slate-50 ${extraClass} ${clickable ? "cursor-pointer" : ""}`}
                   style={extraStyle}
                   onClick={clickable ? (e) => onRowClick(row, e) : undefined}
@@ -159,13 +239,28 @@ export default function ResponsiveTable({
                 </tr>
               );
             })}
+            {paddingBottom > 0 && (
+              <tr>
+                <td style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} colSpan={visibleCols.length} />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
 
       {/* ── MOBILE CARDS ───────────────────────────────────────────────────── */}
-      <div className="md:hidden divide-y divide-slate-100">
-        {rows.map((row, i) => {
+      <div
+        ref={mobileParentRef}
+        className="md:hidden overflow-y-auto divide-y divide-slate-100"
+        style={{ maxHeight }}
+      >
+        {mobilePaddingTop > 0 && (
+          <div style={{ height: `${mobilePaddingTop}px` }} />
+        )}
+        {(virtualMobileCards ? virtualMobileCards : rows.map((_, i) => ({ index: i }))).map((vCard) => {
+          const i = vCard.index;
+          const row = rows[i];
+          if (!row) return null;
           const key        = rowKey(row, i);
           const extraClass = rowClassName(row);
           const extraStyle = rowStyle(row);
@@ -177,11 +272,13 @@ export default function ResponsiveTable({
           return (
             <div
               key={key}
+              data-index={i}
               className={`bg-white ${extraClass} ${clickable ? "cursor-pointer active:bg-slate-50" : ""}`}
               style={extraStyle}
               onClick={clickable ? (e) => onRowClick(row, e) : undefined}
               data-testid={`card-${key}`}
             >
+
               {/* Card header — primary fields */}
               {(titleCol || subtitleCol) && (
                 <div className="px-4 pt-4 pb-2">
@@ -236,7 +333,11 @@ export default function ResponsiveTable({
             </div>
           );
         })}
+        {mobilePaddingBottom > 0 && (
+          <div style={{ height: `${mobilePaddingBottom}px` }} />
+        )}
       </div>
     </div>
   );
 }
+

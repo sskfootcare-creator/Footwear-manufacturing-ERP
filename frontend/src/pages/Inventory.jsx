@@ -54,11 +54,61 @@ export default function Inventory() {
   const openType = (type, material = null) => setOpen({ type, material });
 
   const openHistory = async (row) => {
+    const limit = 50;
     const { data } = await http.get(
-      `/inventory/movements?material_id=${row.material_id}`,
+      `/inventory/movements?material_id=${row.material_id}&page=1&limit=${limit}`,
     );
-    setHistory({ ...row, movements: data });
+    setHistory({
+      ...row,
+      movements: data,
+      page: 1,
+      limit,
+      hasMore: data.length === limit,
+      loadingMore: false,
+      startDate: "",
+      endDate: "",
+    });
   };
+
+  const fetchHistoryFiltered = async (row, start, end) => {
+    const limit = 50;
+    let url = `/inventory/movements?material_id=${row.material_id}&page=1&limit=${limit}`;
+    if (start) url += `&start_date=${start}`;
+    if (end) url += `&end_date=${end}`;
+    const { data } = await http.get(url);
+    setHistory((prev) => ({
+      ...prev,
+      movements: data,
+      page: 1,
+      hasMore: data.length === limit,
+      startDate: start,
+      endDate: end,
+      loadingMore: false,
+    }));
+  };
+
+  const loadMoreHistory = async () => {
+    if (!history || history.loadingMore || !history.hasMore) return;
+    const nextPage = (history.page || 1) + 1;
+    const limit = history.limit || 50;
+    setHistory((prev) => ({ ...prev, loadingMore: true }));
+    try {
+      let url = `/inventory/movements?material_id=${history.material_id}&page=${nextPage}&limit=${limit}`;
+      if (history.startDate) url += `&start_date=${history.startDate}`;
+      if (history.endDate) url += `&end_date=${history.endDate}`;
+      const { data } = await http.get(url);
+      setHistory((prev) => ({
+        ...prev,
+        movements: [...prev.movements, ...data],
+        page: nextPage,
+        hasMore: data.length === limit,
+        loadingMore: false,
+      }));
+    } catch (e) {
+      setHistory((prev) => ({ ...prev, loadingMore: false }));
+    }
+  };
+
 
   const filtered = items.filter((m) => {
     if (filterCat && m.category !== filterCat) return false;
@@ -361,6 +411,37 @@ export default function Inventory() {
               <div className="text-xs text-slate-600">{history.name}</div>
             </div>
           </div>
+          <div className="bg-slate-50 p-2.5 rounded border border-slate-200 flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex items-center gap-1">
+              <span className="font-bold text-slate-600 uppercase text-[10px] tracking-wider">From:</span>
+              <input
+                type="date"
+                value={history.startDate || ""}
+                onChange={(e) => fetchHistoryFiltered(history, e.target.value, history.endDate)}
+                className="border border-slate-300 rounded px-2 py-1 text-xs font-mono bg-white"
+                data-testid="history-start-date"
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="font-bold text-slate-600 uppercase text-[10px] tracking-wider">To:</span>
+              <input
+                type="date"
+                value={history.endDate || ""}
+                onChange={(e) => fetchHistoryFiltered(history, history.startDate, e.target.value)}
+                className="border border-slate-300 rounded px-2 py-1 text-xs font-mono bg-white"
+                data-testid="history-end-date"
+              />
+            </div>
+            {(history.startDate || history.endDate) && (
+              <button
+                onClick={() => fetchHistoryFiltered(history, "", "")}
+                className="text-xs text-blue-600 underline font-semibold ml-auto"
+                data-testid="history-clear-dates"
+              >
+                Reset Dates
+              </button>
+            )}
+          </div>
           <div className="overflow-x-auto">
             <table
               className="w-full text-xs"
@@ -383,7 +464,7 @@ export default function Inventory() {
                       colSpan="6"
                       className="px-3 py-8 text-center text-slate-400"
                     >
-                      No movements yet.
+                      No movements found.
                     </td>
                   </tr>
                 ) : (
@@ -413,8 +494,21 @@ export default function Inventory() {
               </tbody>
             </table>
           </div>
+          {history.hasMore && (
+            <div className="pt-2 text-center">
+              <button
+                onClick={loadMoreHistory}
+                disabled={history.loadingMore}
+                data-testid="history-load-more-btn"
+                className="w-full py-2 bg-slate-100 hover:bg-slate-200 border-2 border-slate-300 text-xs font-bold text-slate-800 uppercase tracking-wider transition-colors disabled:opacity-50"
+              >
+                {history.loadingMore ? "Loading..." : "Load More Movements"}
+              </button>
+            </div>
+          )}
         </Drawer>
       )}
+
     </div>
   );
 }

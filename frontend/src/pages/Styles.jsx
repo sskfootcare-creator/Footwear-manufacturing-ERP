@@ -336,7 +336,7 @@ export default function Styles() {
     if (search) queryParams.append("search", search);
     const qs = queryParams.toString() ? `?${queryParams.toString()}` : "";
     const [s, m] = await Promise.all([
-      http.get(`/styles${qs}`),
+      http.get(`/styles/summary${qs}`),
       http.get("/materials"),
     ]);
     setStyles(s.data);
@@ -347,26 +347,7 @@ export default function Styles() {
     if (editCode && s.data.length > 0) {
       const styleToEdit = s.data.find((x) => x.code === editCode);
       if (styleToEdit) {
-        setEditId(styleToEdit.id);
-        setForm({
-          code: styleToEdit.code,
-          name: styleToEdit.name,
-          category: styleToEdit.category,
-          image_url: styleToEdit.image_url || "",
-          image_display_url: styleToEdit.image_display_url || "",
-          image_thumbnail_url: styleToEdit.image_thumbnail_url || "",
-          description: styleToEdit.description || "",
-          base_size: styleToEdit.base_size || "7",
-          insole_mould_name: styleToEdit.insole_mould_name || "",
-          sole_mould_name: styleToEdit.sole_mould_name || "",
-          bom: styleToEdit.bom || [],
-          labor: styleToEdit.labor || [],          overhead_pct: styleToEdit.overhead_pct,
-          packing_cost: styleToEdit.packing_cost,
-          margin_pct: styleToEdit.margin_pct,
-          gst_pct: styleToEdit.gst_pct,
-          default_pairs_per_carton: styleToEdit.default_pairs_per_carton || {},
-        });
-        setOpen(true);
+        startEdit(styleToEdit);
         // Clear the query parameter so it doesn't reopen on refresh
         window.history.replaceState(
           {},
@@ -383,7 +364,7 @@ export default function Styles() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, searchQuery]);
- 
+
   const startNew = () => {
     setEditId(null);
     setIsGstOverridden(false);
@@ -395,40 +376,47 @@ export default function Styles() {
     setCatalogueCodes(null);
     setOpen(true);
   };
-  const startEdit = (s) => {
+  const startEdit = async (s) => {
     setEditId(s.id);
-    const initialSell = s.costing?.suggested_target_price || s.costing?.selling_price || s.costing?.sell || 0;
-    const suggested = suggestGstPct(initialSell);
-    const isOverride = s.gst_pct != null && Number(s.gst_pct) !== suggested;
-    setIsGstOverridden(isOverride);
-    setForm({
-      code: s.code,
-      name: s.name,
-      category: s.category,
-      image_url: s.image_url || "",
-      image_display_url: s.image_display_url || "",
-      image_thumbnail_url: s.image_thumbnail_url || "",
-      description: s.description || "",
-      base_size: s.base_size || "7",
-      insole_mould_name: s.insole_mould_name || "",
-      sole_mould_name: s.sole_mould_name || "",
-      bom: s.bom || [],
-      labor: s.labor || [],
-      overhead_pct: s.overhead_pct,
-      packing_cost: s.packing_cost,
-      margin_pct: s.margin_pct,
-      gst_pct: s.gst_pct,
-      default_pairs_per_carton: s.default_pairs_per_carton || {},
-    });
     setFormError("");
     setStyleMappings([]);
     setAddingMapping(false);
     setEditingMappingId(null);
     setCatalogueCodes(null);
     setOpen(true);
-    loadStyleMappings(s.id);
-    loadCatalogueCodes(s.id);
+
+    try {
+      const { data: fullStyle } = await http.get(`/styles/${s.id}`);
+      const initialSell = fullStyle.costing?.suggested_target_price || fullStyle.costing?.selling_price || fullStyle.costing?.sell || 0;
+      const suggested = suggestGstPct(initialSell);
+      const isOverride = fullStyle.gst_pct != null && Number(fullStyle.gst_pct) !== suggested;
+      setIsGstOverridden(isOverride);
+      setForm({
+        code: fullStyle.code,
+        name: fullStyle.name,
+        category: fullStyle.category,
+        image_url: fullStyle.image_url || "",
+        image_display_url: fullStyle.image_display_url || "",
+        image_thumbnail_url: fullStyle.image_thumbnail_url || "",
+        description: fullStyle.description || "",
+        base_size: fullStyle.base_size || "7",
+        insole_mould_name: fullStyle.insole_mould_name || "",
+        sole_mould_name: fullStyle.sole_mould_name || "",
+        bom: fullStyle.bom || [],
+        labor: fullStyle.labor || [],
+        overhead_pct: fullStyle.overhead_pct,
+        packing_cost: fullStyle.packing_cost,
+        margin_pct: fullStyle.margin_pct,
+        gst_pct: fullStyle.gst_pct,
+        default_pairs_per_carton: fullStyle.default_pairs_per_carton || {},
+      });
+      loadStyleMappings(fullStyle.id);
+      loadCatalogueCodes(fullStyle.id);
+    } catch (e) {
+      console.error("Failed to load full style details", e);
+    }
   };
+
   const save = async () => {
     setFormError("");
     try {

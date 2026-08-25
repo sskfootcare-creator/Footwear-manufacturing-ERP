@@ -282,6 +282,22 @@ export default function Production() {
     return m;
   }, [styles]);
 
+  const stageDataByStageKey = useMemo(() => {
+    const map = {};
+    for (const s of STAGES) {
+      const stageJobs = jobs.filter((j) => j.stage === s.key);
+      const groups = groupJobsByColor(stageJobs);
+      const totalQty = stageJobs.reduce((sum, j) => sum + (j.quantity || 0), 0);
+      map[s.key] = { stageJobs, groups, totalQty };
+    }
+    return map;
+  }, [jobs]);
+
+  const archivedGroupsCount = useMemo(() => {
+    return groupJobsByColor(archivedJobs).length;
+  }, [archivedJobs]);
+
+
   const printCard = async (group, variant = "dual") => {
     try {
       const res = await http.post(`/production/card.pdf?variant=${variant}`,
@@ -578,15 +594,16 @@ export default function Production() {
     e.dataTransfer.dropEffect = "copy";
     setDropZone(stageKey);
   };
-  const onDropStage = (stageKey, stageJobs) => (e) => {
+  const onDropStage = (stageKey) => (e) => {
     e.preventDefault();
     const role = STAGE_TO_ROLE[stageKey];
-    if (!role || !draggingWorker || !stageJobs.length) { setDropZone(null); return; }
+    const stageInfo = stageDataByStageKey[stageKey] || { stageJobs: [], groups: [] };
+    if (!role || !draggingWorker || !stageInfo.stageJobs.length) { setDropZone(null); return; }
     setBulkConfirm({
       worker: draggingWorker, role, stageKey,
-      job_ids: stageJobs.map(j => j.id),
+      job_ids: stageInfo.stageJobs.map(j => j.id),
       stage_label: STAGES.find(s => s.key === stageKey)?.label || stageKey,
-      card_count: groupJobsByColor(stageJobs).length,
+      card_count: stageInfo.groups.length,
       rate: draggingWorker.rate_per_pair,
     });
     setDropZone(null);
@@ -627,8 +644,8 @@ export default function Production() {
             <button onClick={() => setViewArchive(v => !v)} data-testid="toggle-archive"
               className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 flex items-center gap-1 ${viewArchive ? "bg-[#0F172A] text-white border-[#0F172A]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
               <Archive className="w-3.5 h-3.5 inline" />
-              <span className="hidden sm:inline">Archive ({groupJobsByColor(archivedJobs).length})</span>
-              <span className="inline sm:hidden">({groupJobsByColor(archivedJobs).length})</span>
+              <span className="hidden sm:inline">Archive ({archivedGroupsCount})</span>
+              <span className="inline sm:hidden">({archivedGroupsCount})</span>
             </button>
             {procSelectedCount > 0 && (
               <>
@@ -698,9 +715,7 @@ export default function Production() {
         <div className="overflow-x-auto pb-4">
           <div className="flex gap-4 min-w-max">
             {STAGES.map((s) => {
-              const stageJobs = jobs.filter((j) => j.stage === s.key);
-              const groups = groupJobsByColor(stageJobs);
-              const totalQty = stageJobs.reduce((sum, j) => sum + j.quantity, 0);
+              const { stageJobs, groups, totalQty } = stageDataByStageKey[s.key] || { stageJobs: [], groups: [], totalQty: 0 };
               const isProc = s.key === "procurement";
               const isDisp = s.key === "dispatched";
               return (
@@ -710,7 +725,7 @@ export default function Production() {
                     style={{ borderTopColor: s.color }}
                     onDragOver={STAGE_TO_ROLE[s.key] ? onDragOverStage(s.key) : undefined}
                     onDragLeave={() => setDropZone(null)}
-                    onDrop={STAGE_TO_ROLE[s.key] ? onDropStage(s.key, stageJobs) : undefined}
+                    onDrop={STAGE_TO_ROLE[s.key] ? onDropStage(s.key) : undefined}
                     data-testid={`column-header-${s.key}`}
                   >
                     <div className="flex items-baseline justify-between">
@@ -725,6 +740,7 @@ export default function Production() {
                       </div>
                     )}
                   </div>
+
                   <div className="space-y-3">
                     {groups.length === 0 && (
                       <div className="border-2 border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">Empty</div>
@@ -1461,8 +1477,9 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
   const [expandedClusters, setExpandedClusters] = useState({});
   const toggleExpand = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
 
-  const groups = groupJobsByColor(jobs);
+  const groups = useMemo(() => groupJobsByColor(jobs), [jobs]);
   const clusters = useMemo(() => clusterArchivedGroups(groups, dispatchRecordByJobId, invoices), [groups, dispatchRecordByJobId, invoices]);
+
 
   const downloadInvoiceFile = async (invoiceId, invoiceNo) => {
     try {
