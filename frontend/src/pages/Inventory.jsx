@@ -122,7 +122,8 @@ export default function Inventory() {
 
   // KPIs
   const totalValue = filtered.reduce((s, r) => s + r.value, 0);
-  const lowStock = filtered.filter((r) => r.balance <= 0).length;
+  const outOfStock = filtered.filter((r) => r.balance <= 0).length;
+  const lowStock = filtered.filter((r) => r.balance > 0 && r.balance <= (r.reorder_level || 0)).length;
   const categories = Array.from(
     new Set(items.map((i) => i.category).filter(Boolean)),
   );
@@ -201,7 +202,7 @@ export default function Inventory() {
           </Card>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <KpiTile label="Materials" value={items.length} accent="#0F172A" />
           <KpiTile
             label="Stock Value"
@@ -209,11 +210,17 @@ export default function Inventory() {
             accent="#C27842"
           />
           <KpiTile
-            label="Out of Stock"
+            label="Low Stock"
             value={lowStock}
-            accent={lowStock > 0 ? "#DC2626" : "#16A34A"}
+            accent={lowStock > 0 ? "#F59E0B" : "#16A34A"}
+          />
+          <KpiTile
+            label="Out of Stock"
+            value={outOfStock}
+            accent={outOfStock > 0 ? "#DC2626" : "#16A34A"}
           />
         </div>
+
 
         <div className="flex flex-wrap gap-3 items-end">
           <div className="w-full sm:flex-1 sm:max-w-md">
@@ -539,7 +546,8 @@ function MovementDrawer({ type, material, materials, onClose, onSaved }) {
   const [form, setForm] = useState({
     material_id: material?.material_id || material?.id || "",
     quantity: 0,
-    rate: material?.last_purchase_rate || material?.current_rate || 0,
+    rate: material?.last_purchase_rate ?? material?.current_rate ?? 0,
+
     party: "",
     notes: "",
     date: new Date().toISOString().slice(0, 10),

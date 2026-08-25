@@ -5,20 +5,15 @@ export const getBackendUrl = () => {
   if (process.env.REACT_APP_BACKEND_URL && process.env.REACT_APP_BACKEND_URL.trim() !== "") {
     return process.env.REACT_APP_BACKEND_URL.trim();
   }
-  // 2. Browser environment dynamic resolution
-  if (typeof window !== "undefined" && window.location) {
-    const { hostname, port, protocol, origin } = window.location;
-    // Local dev server running on port 3000 (React dev server) -> target backend on port 8000
-    if (port === "3000") {
-      return `${protocol}//${hostname}:8000`;
-    }
-    // Live server / staging / cloud preview / production deployment -> target same origin
-    return origin;
+  // 2. In browser environments, default to current origin
+  if (typeof window !== "undefined" && window.location && window.location.origin) {
+    return window.location.origin;
   }
   return "http://localhost:8000";
 };
 
 export const API = `${getBackendUrl()}/api`;
+
 
 // withCredentials is set to true to send and receive HttpOnly session & auth cookies
 // consistently across frontend requests, aligned with backend allow_credentials=True.

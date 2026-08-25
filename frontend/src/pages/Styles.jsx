@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { http, inr, num } from "../lib/api";
+import { http, inr, num, API } from "../lib/api";
 import {
+
   PageHeader,
   Card,
   BtnPrimary,
@@ -1932,10 +1933,11 @@ export default function Styles() {
                 </div>
               </div>
               <a
-                href={`${process.env.REACT_APP_BACKEND_URL || ""}/api/styles/bulk/template`}
+                href={`${API}/styles/bulk/template`}
                 className="px-3 py-2 border-2 border-[#C27842] text-[#C27842] hover:bg-[#C27842] hover:text-white transition-colors text-xs font-bold uppercase tracking-wider bg-white shrink-0 inline-flex items-center gap-1.5 rounded"
                 download
               >
+
                 <Download className="w-4 h-4" />
                 Download Template
               </a>

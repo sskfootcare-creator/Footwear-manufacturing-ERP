@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { http, inr } from "../lib/api";
+import { http, inr, API } from "../lib/api";
 import {
+
   PageHeader,
   Card,
   Badge,
@@ -395,13 +396,14 @@ export default function Invoices() {
                           <Eye className="w-4 h-4" />
                         </button>
                         <a
-                          href={`${process.env.REACT_APP_BACKEND_URL}/api/invoices/${r.id}/file`}
+                          href={`${API}/invoices/${r.id}/file`}
                           target="_blank"
                           rel="noreferrer"
                           className="text-slate-600 hover:text-[#C27842] p-1.5 inline-block"
                           title="Download PDF"
                           data-testid={`inv-download-${r.invoice_no}`}
                         >
+
                           <FileDown className="w-4 h-4" />
                         </a>
                         {r.status !== "paid" && (

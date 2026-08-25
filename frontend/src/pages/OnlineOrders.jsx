@@ -9,7 +9,8 @@ import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
   ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, DollarSign,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const CHANNEL_COLORS = {
@@ -1216,7 +1217,7 @@ function FunnelViz({ stats, breakdown }) {
   const pending = stats.pending ?? 0;
   const netSold = stats.net_sold ?? 0;
   const neverTouched = stats.never_touched_inventory ?? 0;
-  const barW = (n) => (total > 0 ? Math.max(4, Math.round((n / total) * 100)) : 0);
+  const barW = (n) => (total > 0 ? Math.max(4, Math.round((Math.abs(n) / total) * 100)) : 0);
 
   const stages = [
     { label: "Total rows", count: total, color: "bg-slate-700", text: "text-white" },
@@ -1236,9 +1237,10 @@ function FunnelViz({ stats, breakdown }) {
             {s.label}
           </div>
           <div className={`h-6 flex items-center px-2 font-mono text-xs font-bold ${s.color} ${s.text}`}
-            style={{ width: `${Math.min(100, Math.abs(barW(s.count)))}%`, minWidth: 40 }}>
+            style={{ width: `${Math.min(100, barW(s.count))}%`, minWidth: 40 }}>
             {s.count >= 0 ? s.count : `${s.count}`}
           </div>
+
           {s.sub && Object.values(s.sub).some((v) => v > 0) && (
             <div className="text-[10px] text-slate-500 font-mono ml-2 whitespace-nowrap">
               (rto: {s.sub.rto}, cust: {s.sub.customer_return}, cxl-post-pack: {s.sub.cancelled_after_pack})
@@ -1325,10 +1327,12 @@ export function SettlementImportDrawer({ onClose, onDone }) {
       setPreview(r.data);
     } catch (e) {
       setError(e.response?.data?.detail || e.message);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } finally {
       setLoading(false);
     }
   };
+
 
   const handleCommit = async () => {
     if (!file) return;
@@ -1716,7 +1720,20 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
 
 // ── Main page ─────────────────────────────────────────────
 export default function OnlineOrders() {
-  const [tab, setTab] = useState("orders"); // "orders" | "reconciliation" | "settlement"
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") || "orders"; // "orders" | "reconciliation" | "settlement"
+  const setTab = useCallback((nextTab) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      if (nextTab === "orders") {
+        p.delete("tab");
+      } else {
+        p.set("tab", nextTab);
+      }
+      return p;
+    });
+  }, [setSearchParams]);
+
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);

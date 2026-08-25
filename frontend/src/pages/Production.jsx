@@ -970,7 +970,8 @@ function ColorGroupCard(props) {
         <div className="bg-red-600 text-white px-3 py-1 flex items-center justify-between text-[10px] uppercase tracking-wider font-bold" data-testid={`overdue-${group.key}`}>
           <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> OVERDUE</span>
           <span className="font-mono">
-            {group.overdueHours >= 24 ? `${(group.overdueHours / 24).toFixed(1)} d late` : `${group.overdueHours.toFixed(1)} h late`}
+            {group.overdueHours >= 10 ? `${(group.overdueHours / 10).toFixed(1)} d late` : `${group.overdueHours.toFixed(1)} h late`}
+
           </span>
         </div>
       )}

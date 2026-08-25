@@ -174,8 +174,9 @@ export default function Dashboard() {
                       <td className="px-4 py-2 font-mono">{j.style_code}</td>
                       <td className="px-4 py-2 text-right font-mono">{j.quantity} pairs</td>
                       <td className="px-4 py-2 text-right font-mono font-bold text-red-700">
-                        {j.overdue_hours >= 24 ? `${(j.overdue_hours / 24).toFixed(1)} d` : `${j.overdue_hours.toFixed(1)} h`}
+                        {j.overdue_hours >= 10 ? `${(j.overdue_hours / 10).toFixed(1)} d` : `${j.overdue_hours.toFixed(1)} h`}
                       </td>
+
                     </tr>
                   ))}
                 </tbody>

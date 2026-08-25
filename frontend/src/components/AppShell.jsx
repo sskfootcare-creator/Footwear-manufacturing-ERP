@@ -137,19 +137,43 @@ const WORKSPACE_LABELS = {
 
 /* ─────────────────────────────────────────────────────────────────────────────
    HELPERS
+/* ─────────────────────────────────────────────────────────────────────────────
+   WORKSPACE STATE HOOK
    ───────────────────────────────────────────────────────────────────────────── */
-function useWorkspace() {
-  const [workspace, setWorkspace] = useState(
-    () => localStorage.getItem("workspace") || "management"
-  );
+const VALID_WORKSPACES = ["b2b", "online", "management"];
+const DEFAULT_WORKSPACE = "management";
+
+function sanitizeWorkspace(val) {
+  return VALID_WORKSPACES.includes(val) ? val : DEFAULT_WORKSPACE;
+}
+
+export function useWorkspace() {
+  const [workspace, setWorkspace] = useState(() => {
+    const raw = localStorage.getItem("workspace");
+    const sanitized = sanitizeWorkspace(raw);
+    if (raw && raw !== sanitized) {
+      localStorage.setItem("workspace", sanitized);
+    }
+    return sanitized;
+  });
+
   useEffect(() => {
-    const handler = () =>
-      setWorkspace(localStorage.getItem("workspace") || "management");
+    const handler = () => {
+      const raw = localStorage.getItem("workspace");
+      const sanitized = sanitizeWorkspace(raw);
+      if (raw && raw !== sanitized) {
+        localStorage.setItem("workspace", sanitized);
+      }
+      setWorkspace(sanitized);
+    };
     window.addEventListener("workspaceChanged", handler);
     return () => window.removeEventListener("workspaceChanged", handler);
   }, []);
+
   return [workspace, setWorkspace];
 }
+
+
 
 function visibleGroups(workspace, userRole) {
   return NAV_GROUPS.map((g) => {
@@ -375,6 +399,8 @@ function MoreDrawer({ open, onClose, workspace, user }) {
    ───────────────────────────────────────────────────────────────────────────── */
 function UserMenuPopover({ user, workspace, onSwitch, onLogout, open, onToggle }) {
   const ref = useRef(null);
+  const navigate = useNavigate();
+
 
   useEffect(() => {
     if (!open) return;
@@ -580,9 +606,25 @@ function NotificationBell({ userRole }) {
 
   useEffect(() => {
     fetchNotifs();
-    const iv = setInterval(fetchNotifs, NOTIF_POLL_MS);
-    return () => clearInterval(iv);
+    let iv = setInterval(fetchNotifs, NOTIF_POLL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        fetchNotifs();
+        clearInterval(iv);
+        iv = setInterval(fetchNotifs, NOTIF_POLL_MS);
+      } else {
+        clearInterval(iv);
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [fetchNotifs]);
+
 
   // Close panel on outside click
   useEffect(() => {
@@ -820,8 +862,9 @@ export default function AppShell() {
         className="flex-1 min-w-0 lg:pl-64 mobile-main-content"
         data-testid="main-content"
       >
-        <Outlet />
+        <Outlet key={workspace} context={{ workspace }} />
       </main>
+
 
       {/* ── MOBILE: MORE DRAWER ────────────────────────────────────── */}
       <MoreDrawer
