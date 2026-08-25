@@ -20,15 +20,13 @@ export const getBackendUrl = () => {
 
 export const API = `${getBackendUrl()}/api`;
 
-// NOTE: withCredentials is intentionally OFF. The Emergent ingress adds
-// `Access-Control-Allow-Origin: *` to every response, and browsers reject any
-// credentialed (`withCredentials: true`) response that has a wildcard origin —
-// axios then sees no `response` object at all and every API call silently
-// fails with "Network Error". We use Bearer tokens (localStorage) exclusively.
+// withCredentials is set to true to send and receive HttpOnly session & auth cookies
+// consistently across frontend requests, aligned with backend allow_credentials=True.
 export const http = axios.create({
   baseURL: API,
-  withCredentials: false,
+  withCredentials: true,
 });
+
 
 http.interceptors.request.use(
   (config) => {

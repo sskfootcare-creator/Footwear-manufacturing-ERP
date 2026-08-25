@@ -80,15 +80,18 @@ if _frontend_url_env:
 if _cors_origins_env:
     _raw_origins.extend([o.strip() for o in _cors_origins_env.split(",") if o.strip()])
 
+_cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or None
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(set(_raw_origins)),
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app|https://.*\.onrender\.com|http://localhost:\d+|https://localhost:\d+"),
+    allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
 api = APIRouter(prefix="/api")
 
 # ---------- Object Storage / Local Uploads ----------
@@ -122,14 +125,15 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     if ext not in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
         raise HTTPException(400, "Invalid image format")
 
-    # ── Read once, enforce size cap BEFORE decoding to keep memory bounded
+    # ── Read up to cap + 1 byte to enforce bounded memory allocation
     MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB — server-side limit
-    content = await file.read()
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             413,
-            f"Image too large ({len(content) // (1024*1024)} MB). Max allowed is 8 MB."
+            "Image too large. Max allowed is 8 MB."
         )
+
 
     # ── Verify it's really an image (spoofed extension → PIL will raise)
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -330,11 +334,83 @@ def normalize_image_url(raw: str) -> str:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("ssk")
 
-# ---------- Login rate limiting (in-memory, per-IP) ----------
-# Stores timestamps of failed login attempts keyed by IP string.
+# ---------- Login rate limiting (Redis-backed with in-memory fallback) ----------
+# Stores timestamps of failed login attempts keyed by IP string or identifier.
 _login_failures: dict = defaultdict(list)
 LOGIN_MAX_ATTEMPTS = 5       # max failures before lockout
 LOGIN_WINDOW_SECONDS = 900   # 15-minute sliding window
+
+redis_client = None
+REDIS_URL = os.environ.get("REDIS_URL")
+if REDIS_URL:
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        log.info(f"Connected to Redis for distributed rate limiting: {REDIS_URL}")
+    except Exception as e:
+        log.warning(f"Failed to initialize Redis client: {e}")
+
+
+async def check_rate_limit(key: str, max_attempts: int = LOGIN_MAX_ATTEMPTS, window_seconds: int = LOGIN_WINDOW_SECONDS) -> None:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    window_start = now_ts - window_seconds
+
+    # 1. Try Redis
+    if redis_client is not None:
+        try:
+            rkey = f"login_failures:{key}"
+            await redis_client.zremrangebyscore(rkey, "-inf", window_start)
+            count = await redis_client.zcard(rkey)
+            if count >= max_attempts:
+                oldest = await redis_client.zrange(rkey, 0, 0, withscores=True)
+                oldest_ts = oldest[0][1] if oldest else window_start
+                retry_after = int(window_seconds - (now_ts - oldest_ts))
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many failed login attempts. Try again in {max(1, retry_after // 60)} minutes.",
+                    headers={"Retry-After": str(max(retry_after, 1))},
+                )
+            return
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.warning(f"Redis rate check error, falling back to memory: {e}")
+
+    # 2. In-memory fallback
+    _login_failures[key] = [t for t in _login_failures[key] if t > window_start]
+    if len(_login_failures[key]) >= max_attempts:
+        retry_after = int(window_seconds - (now_ts - _login_failures[key][0]))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {max(1, retry_after // 60)} minutes.",
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )
+
+
+async def record_login_failure(key: str, window_seconds: int = LOGIN_WINDOW_SECONDS) -> int:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if redis_client is not None:
+        try:
+            rkey = f"login_failures:{key}"
+            await redis_client.zadd(rkey, {str(now_ts): now_ts})
+            await redis_client.expire(rkey, window_seconds + 60)
+            return await redis_client.zcard(rkey)
+        except Exception as e:
+            log.warning(f"Redis record failure error, falling back to memory: {e}")
+
+    _login_failures[key].append(now_ts)
+    return len(_login_failures[key])
+
+
+async def clear_login_failures(key: str) -> None:
+    if redis_client is not None:
+        try:
+            rkey = f"login_failures:{key}"
+            await redis_client.delete(rkey)
+        except Exception as e:
+            log.warning(f"Redis clear failure error: {e}")
+    _login_failures.pop(key, None)
+
 
 # ---------- Keep Awake Job ----------
 async def keep_awake_job():
@@ -612,35 +688,23 @@ def _overdue_hours(deadline_iso: str | None) -> float:
 async def login(payload: LoginInput, request: Request, response: Response):
     # --- Rate limiting: reject IPs that have too many recent failures ---
     client_ip = request.headers.get("x-test-rate-limit-client-ip") or (request.client.host if request.client else "unknown")
-    now_ts = datetime.now(timezone.utc).timestamp()
-    window_start = now_ts - LOGIN_WINDOW_SECONDS
-    # Prune old entries
-    _login_failures[client_ip] = [
-        t for t in _login_failures[client_ip] if t > window_start
-    ]
-    if len(_login_failures[client_ip]) >= LOGIN_MAX_ATTEMPTS:
-        retry_after = int(LOGIN_WINDOW_SECONDS - (now_ts - _login_failures[client_ip][0]))
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many failed login attempts. Try again in {retry_after // 60} minutes.",
-            headers={"Retry-After": str(max(retry_after, 1))},
-        )
+    await check_rate_limit(client_ip)
 
     email = payload.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not user.get("active", True) or not verify_password(payload.password, user["password_hash"]):
-        # Record the failure for rate limiting
-        _login_failures[client_ip].append(now_ts)
+        attempt_count = await record_login_failure(client_ip)
         log.warning("Failed login attempt for email=%s from ip=%s (attempt %d/%d)",
-                    email, client_ip, len(_login_failures[client_ip]), LOGIN_MAX_ATTEMPTS)
+                    email, client_ip, attempt_count, LOGIN_MAX_ATTEMPTS)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     # Success — clear failure counter for this IP
-    _login_failures.pop(client_ip, None)
+    await clear_login_failures(client_ip)
     uid = str(user["_id"])
     access = create_access_token(uid, email, user["role"])
     refresh = create_refresh_token(uid)
     set_auth_cookies(response, access, refresh)
+
     return {
         "id": uid, "email": email, "name": user["name"], "role": user["role"],
         "access_token": access, "refresh_token": refresh
@@ -15107,28 +15171,18 @@ async def worker_login(payload: WorkerLoginIn, request: Request, response: Respo
         or (request.client.host if request.client else "unknown")
     )
     limiter_key = f"wpin:{client_ip}"
-    now_ts = datetime.now(timezone.utc).timestamp()
-    window_start = now_ts - LOGIN_WINDOW_SECONDS
-    _login_failures[limiter_key] = [
-        t for t in _login_failures[limiter_key] if t > window_start
-    ]
-    if len(_login_failures[limiter_key]) >= LOGIN_MAX_ATTEMPTS:
-        retry_after = int(LOGIN_WINDOW_SECONDS - (now_ts - _login_failures[limiter_key][0]))
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many failed login attempts. Try again in {retry_after // 60} minutes.",
-            headers={"Retry-After": str(max(retry_after, 1))},
-        )
+    await check_rate_limit(limiter_key)
 
     phone = (payload.phone or "").strip()
     worker = await db.workers.find_one({"phone": phone, "active": {"$ne": False}})
     pin_hash = worker.get("pin_hash", "") if worker else ""
 
     if not worker or not pin_hash or not verify_password(payload.pin, pin_hash):
-        _login_failures[limiter_key].append(now_ts)
+        await record_login_failure(limiter_key)
         raise HTTPException(status_code=401, detail="Invalid phone or PIN")
 
-    _login_failures.pop(limiter_key, None)
+    await clear_login_failures(limiter_key)
+
     wid = str(worker["_id"])
     access = create_access_token(wid, phone, "worker", worker_id=wid)
     set_auth_cookies(response, access)
