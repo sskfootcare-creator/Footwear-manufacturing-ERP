@@ -677,8 +677,10 @@ async def refresh_token_route(request: Request, response: Response):
             raise HTTPException(status_code=401, detail="User not found or inactive")
         
         new_access = create_access_token(str(user["_id"]), user["email"], user["role"])
-        set_auth_cookies(response, new_access)
-        return {"ok": True, "access_token": new_access}
+        new_refresh = create_refresh_token(str(user["_id"]))
+        set_auth_cookies(response, new_access, new_refresh)
+        return {"ok": True, "access_token": new_access, "refresh_token": new_refresh}
+
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Expired refresh token")
     except jwt.InvalidTokenError:
@@ -1051,9 +1053,15 @@ async def update_material(mid: str, payload: MaterialIn, request: Request):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     payload.code = code
     update = payload.model_dump()
+    update.pop("balance", None)
+    if update.get("weighted_avg_rate") is None:
+        update.pop("weighted_avg_rate", None)
+    if update.get("last_purchase_rate") is None:
+        update.pop("last_purchase_rate", None)
     update["updated_at"] = now_iso()
     try:
         await db.materials.update_one({"_id": oid(mid)}, {"$set": update})
+
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     updated_doc = stringify(await db.materials.find_one({"_id": oid(mid)}))
@@ -10505,9 +10513,149 @@ async def update_po(pid: str, payload: POIn, request: Request):
 @api.delete("/pos/{pid}")
 async def delete_po(pid: str, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    po = await db.pos.find_one({"_id": oid(pid)})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+    po_num = po.get("po_number", "N/A")
+
+    # 1. Query all production jobs under this PO
+    jobs = await db.production_jobs.find({
+        "$or": [
+            {"po_id": pid},
+            {"po_id": oid(pid)} if ObjectId.is_valid(pid) else {"po_id": pid},
+            {"po_number": po_num},
+        ]
+    }).to_list(10000)
+
+    job_id_strs = [str(j["_id"]) for j in jobs]
+    job_oids = [j["_id"] for j in jobs]
+
+    # 2. Query all inventory movements associated with these jobs or PO
+    mov_query = {
+        "$or": [
+            {"job_id": {"$in": job_id_strs}},
+            {"job_id": {"$in": job_oids}},
+            {"po_id": pid},
+        ]
+    }
+    existing_movements = await db.inventory_movements.find(mov_query).to_list(10000)
+
+    # 3. Post compensating reversal movements
+    reversal_movements = []
+    materials_to_update = set()
+
+    for m in existing_movements:
+        if m.get("is_reversal"):
+            continue
+        mtype = m.get("type")
+        qty = float(m.get("quantity", 0) or 0)
+        mid = m.get("material_id")
+        if not mid or (qty <= 0 and mtype != "adjustment"):
+            continue
+
+        materials_to_update.add(mid)
+
+        if mtype == "out":
+            rev_type = "in"
+            rev_qty = qty
+        elif mtype == "in":
+            rev_type = "out"
+            rev_qty = qty
+        else:  # adjustment
+            rev_type = "adjustment"
+            rev_qty = -qty
+
+        reversal_movements.append({
+            "material_id": mid,
+            "material_code": m.get("material_code", ""),
+            "material_name": m.get("material_name", ""),
+            "unit": m.get("unit", ""),
+            "type": rev_type,
+            "quantity": rev_qty,
+            "rate": m.get("rate"),
+            "party": f"Reversal (PO {po_num})",
+            "job_id": m.get("job_id"),
+            "po_id": pid,
+            "notes": f"Compensating reversal of {mtype} movement ({str(m.get('_id', ''))}) due to deletion of PO {po_num}",
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "by": u["email"],
+            "created_at": now_iso(),
+            "is_reversal": True,
+            "reversal_of": str(m.get("_id", "")),
+        })
+
+    if reversal_movements:
+        await db.inventory_movements.insert_many(reversal_movements)
+
+        # Update material balances & weighted average rates
+        for mid in materials_to_update:
+            try:
+                summary = await _compute_material_inventory_summary(mid)
+                mat_doc = await db.materials.find_one({"_id": oid(mid)})
+                fallback_rate = (mat_doc.get("rate") or 0.0) if mat_doc else 0.0
+                await db.materials.update_one(
+                    {"_id": oid(mid)},
+                    {"$set": {
+                        "balance": round(summary["balance"], 2),
+                        "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+                        "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else fallback_rate,
+                        "updated_at": now_iso(),
+                    }}
+                )
+            except Exception as e:
+                log.error(f"Error updating material {mid} during PO deletion reversal: {e}")
+
+    # 4. Check component stock movements and rollback reservations/issues
+    if job_id_strs:
+        comp_movs = await db.component_stock_movements.find({
+            "$or": [
+                {"reference_id": {"$in": job_id_strs}},
+                {"reference_id": pid},
+            ]
+        }).to_list(10000)
+
+        for cm in comp_movs:
+            if cm.get("is_reversal"):
+                continue
+            cmtype = cm.get("movement_type")
+            cqty = int(cm.get("quantity", 0) or 0)
+            cid = cm.get("component_id")
+            if not cid or cqty <= 0:
+                continue
+
+            comp = await db.component_master.find_one({"_id": oid(cid) if isinstance(cid, str) else cid})
+            if comp:
+                if cmtype == "production_reserve":
+                    await db.component_master.update_one(
+                        {"_id": comp["_id"]},
+                        {"$inc": {"reserved_stock": -cqty}, "$set": {"updated_at": now_iso()}}
+                    )
+                elif cmtype == "production_issue":
+                    await db.component_master.update_one(
+                        {"_id": comp["_id"]},
+                        {"$inc": {"current_stock": cqty}, "$set": {"updated_at": now_iso()}}
+                    )
+
+    # 5. Log audit activity
+    rev_count = len(reversal_movements)
+    await log_activity(
+        "DELETE",
+        "po",
+        f"Deleted PO {po_num} (ID: {pid}): deleted {len(jobs)} production jobs, posted {rev_count} compensating inventory reversal movements to restore stock",
+        u["email"],
+    )
+
+    # 6. Delete production jobs and PO
+    await db.production_jobs.delete_many({
+        "$or": [
+            {"po_id": pid},
+            {"po_id": oid(pid)} if ObjectId.is_valid(pid) else {"po_id": pid},
+            {"po_number": po_num},
+        ]
+    })
     await db.pos.delete_one({"_id": oid(pid)})
-    await db.production_jobs.delete_many({"po_id": pid})
-    return {"ok": True}
+    return {"ok": True, "reversed_movements_count": rev_count}
+
 
 @api.post("/pos/extract", dependencies=[Depends(upload_rate_limiter)])
 async def extract_po(file: UploadFile = File(...), force_ai: bool = False, request: Request = None):
@@ -10675,7 +10823,7 @@ def _due_iso(invoice_date_str: str, credit_days: int) -> str:
 
 
 def _compute_invoice_totals(po: dict, line_items: list[dict]) -> dict:
-    """Subtotal + CGST/SGST/IGST + grand_total from line items, using PO rates."""
+    """Subtotal + CGST/SGST/IGST + grand_total + net_amount from line items, using PO rates."""
     subtotal = sum(float(li.get("amount") or 0) for li in line_items)
     qty = sum(int(li.get("quantity") or 0) for li in line_items)
     cgst_rate = float(po.get("cgst_rate") or 0)
@@ -10691,6 +10839,8 @@ def _compute_invoice_totals(po: dict, line_items: list[dict]) -> dict:
         "cgst_amount": cgst_amt, "sgst_amount": sgst_amt, "igst_amount": igst_amt,
         "cgst_rate": cgst_rate, "sgst_rate": sgst_rate, "igst_rate": igst_rate,
         "grand_total": grand,
+        "net_amount": grand,
+        "grn_adjustment": 0.0,
     }
 
 
@@ -10721,6 +10871,9 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
         grn_no = inv.get("grn_no")
 
     grand = float(inv.get("grand_total") or 0)
+    if grn_adj == 0.0 and inv.get("grn_adjustment"):
+        grn_adj = float(inv.get("grn_adjustment") or 0.0)
+
     net_after_grn = max(0.0, round(grand - grn_adj, 2))
     outstanding = max(0.0, round(net_after_grn - paid, 2))
     inv["received_amount"] = round(paid, 2)
@@ -10730,6 +10883,7 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
     inv["grn_date"] = grn_date
     inv["grn_no"] = grn_no
     inv["grn_recorded"] = bool(grn_date)
+
 
     credit_days = int(inv.get("payment_terms_days") or 45)
     if grn_date:
@@ -11609,11 +11763,31 @@ async def create_grn(payload: GRNIn, request: Request):
     grn_no = await next_grn_no()
     lines = []
     total_disp = total_recv = total_acc = total_rej = 0
-    for li in payload.line_items:
+    for idx, li in enumerate(payload.line_items, 1):
         disp = int(li.dispatched_qty or 0)
         recv = int(li.received_qty if li.received_qty is not None else disp)
         rej = int(li.rejected_qty or 0)
+
+        # Validation: received_qty cannot exceed dispatched_qty
+        if recv > disp:
+            line_desc = f"{li.style_code} ({li.color}/{li.size})" if (li.style_code or li.color or li.size) else f"Line #{idx}"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Received quantity ({recv}) cannot exceed dispatched quantity ({disp}) for {line_desc}."
+            )
+
+        # Validation: rejected_qty cannot exceed received_qty
+        if rej > recv:
+            line_desc = f"{li.style_code} ({li.color}/{li.size})" if (li.style_code or li.color or li.size) else f"Line #{idx}"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rejected quantity ({rej}) cannot exceed received quantity ({recv}) for {line_desc}."
+            )
+
         acc = int(li.accepted_qty if li.accepted_qty is not None else (recv - rej))
+        # Ensure accepted_qty is accurately bounded
+        acc = max(0, min(recv - rej, disp))
+
         lines.append({
             "style_code": li.style_code, "description": li.description,
             "color": li.color, "size": li.size,
@@ -11622,6 +11796,7 @@ async def create_grn(payload: GRNIn, request: Request):
             "rejection_reason": li.rejection_reason,
         })
         total_disp += disp; total_recv += recv; total_acc += acc; total_rej += rej
+
     doc = {
         "grn_no": grn_no, "grn_date": payload.grn_date,
         "received_date": payload.received_date or payload.grn_date,
@@ -11638,7 +11813,13 @@ async def create_grn(payload: GRNIn, request: Request):
     res = await db.grns.insert_one(doc)
     doc["_id"] = res.inserted_id
 
-    # Update invoice with grn_date and calculated due_date (45 days from GRN date)
+    # Recompute GRN adjustment and net_amount on invoice doc at write-time!
+    grn_map = await _aggregate_grn_adjustments([str(inv["_id"])])
+    grn_entry = grn_map.get(str(inv["_id"]), {})
+    grn_adj = round(float(grn_entry.get("adjustment", 0)), 2)
+    grand = float(inv.get("grand_total") or 0)
+    net_amount = max(0.0, round(grand - grn_adj, 2))
+
     credit_days = int(inv.get("payment_terms_days") or 45)
     due_date = _due_iso(payload.grn_date, credit_days)
     await db.invoices.update_one(
@@ -11648,7 +11829,10 @@ async def create_grn(payload: GRNIn, request: Request):
                 "grn_date": payload.grn_date,
                 "grn_no": grn_no,
                 "grn_recorded": True,
+                "grn_adjustment": grn_adj,
+                "net_amount": net_amount,
                 "due_date": due_date,
+                "updated_at": now_iso(),
             }
         }
     )
@@ -11688,11 +11872,17 @@ async def delete_grn(gid: str, request: Request):
     if not r.deleted_count:
         raise HTTPException(404, "GRN not found")
 
-    # Recalculate remaining GRNs for this invoice if any
+    # Recalculate remaining GRNs and net_amount for this invoice if any
     if invoice_id:
         remaining_grn = await db.grns.find_one({"invoice_id": invoice_id}, sort=[("grn_date", -1)])
         inv = await db.invoices.find_one({"_id": oid(invoice_id)})
         if inv:
+            grn_map = await _aggregate_grn_adjustments([str(inv["_id"])])
+            grn_entry = grn_map.get(str(inv["_id"]), {})
+            grn_adj = round(float(grn_entry.get("adjustment", 0)), 2)
+            grand = float(inv.get("grand_total") or 0)
+            net_amount = max(0.0, round(grand - grn_adj, 2))
+
             if remaining_grn:
                 credit_days = int(inv.get("payment_terms_days") or 45)
                 due_date = _due_iso(remaining_grn["grn_date"], credit_days)
@@ -11703,7 +11893,10 @@ async def delete_grn(gid: str, request: Request):
                             "grn_date": remaining_grn["grn_date"],
                             "grn_no": remaining_grn.get("grn_no"),
                             "grn_recorded": True,
+                            "grn_adjustment": grn_adj,
+                            "net_amount": net_amount,
                             "due_date": due_date,
+                            "updated_at": now_iso(),
                         }
                     }
                 )
@@ -11715,11 +11908,15 @@ async def delete_grn(gid: str, request: Request):
                             "grn_date": None,
                             "grn_no": None,
                             "grn_recorded": False,
+                            "grn_adjustment": 0.0,
+                            "net_amount": grand,
                             "due_date": None,
+                            "updated_at": now_iso(),
                         }
                     }
                 )
     return {"ok": True}
+
 
 
 # ---------- PAYMENTS ----------
@@ -11768,8 +11965,10 @@ async def create_payment(payload: PaymentIn, request: Request):
     allocations: dict[str, float] = {}
     for d in invoices:
         iid = str(d["_id"])
-        net = max(0.0, float(d.get("grand_total") or 0) - existing_grn.get(iid, 0))
+        grn_adj = float(existing_grn.get(iid, {}).get("adjustment", 0) if isinstance(existing_grn.get(iid), dict) else (existing_grn.get(iid) or 0))
+        net = float(d.get("net_amount") if d.get("net_amount") is not None else max(0.0, float(d.get("grand_total") or 0) - grn_adj))
         outstanding = max(0.0, net - existing_paid.get(iid, 0))
+
         if outstanding <= 0:
             continue
         take = round(min(outstanding, remaining), 2)
@@ -12327,7 +12526,23 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             }}
         )
         await db.inventory_movements.insert_many(movements)
+        for m in movements:
+            try:
+                mid = m.get("material_id")
+                if mid:
+                    summary = await _compute_material_inventory_summary(mid)
+                    await db.materials.update_one(
+                        {"_id": oid(mid)},
+                        {"$set": {
+                            "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+                            "last_purchase_rate": round(summary["last_rate"], 2),
+                            "updated_at": now_iso(),
+                        }}
+                    )
+            except Exception:
+                pass
         total_receive_amount = sum(round(float(m["quantity"]) * float(m["rate"]), 2) for m in movements)
+
         receive_doc = {
             "vendor_id": str(po.get("vendor_id")),
             "vendor_po_id": str(po["_id"]),
@@ -12514,8 +12729,9 @@ async def _build_client_ledger(cid_or_name: str) -> dict:
         "days_60_plus": 0.0,
     }
 
-    tot_invoiced = sum(float(r.get("net_amount") or r.get("grand_total") or 0) for r in decorated)
+    tot_invoiced = sum(float(r.get("net_amount") or 0) for r in decorated)
     tot_received = sum(float(r.get("received_amount") or 0) for r in decorated)
+
 
     for r in decorated:
         outstanding = float(r.get("outstanding") or 0)
@@ -15551,36 +15767,121 @@ async def bulk_assign(payload: BulkAssign, request: Request):
     return {"affected": affected, "role": payload.role, "worker_id": payload.worker_id, "worker_name": worker_name, "rate_per_pair": rate}
 
 
-# ---------- INVENTORY ----------
+# ---------- INVENTORY (Weighted-Average Cost Valuation) ----------
+def _calculate_material_weighted_avg(mat: Optional[dict], movements: list) -> dict:
+    """Calculate stock balance, last purchase rate/date, weighted-average cost rate, and stock valuation
+    using chronological moving weighted average.
+
+    Formula on incoming stock (type == 'in' or positive adjustment):
+        weighted_avg_rate = (existing_value + new_qty * new_rate) / (existing_qty + new_qty)
+    """
+    sorted_movs = sorted(
+        movements,
+        key=lambda m: (m.get("date") or "", m.get("created_at") or "", str(m.get("_id", "")))
+    )
+
+    base_rate = float(mat.get("rate") or 0.0) if mat else 0.0
+    stock_in = 0.0
+    stock_out = 0.0
+    adjustments = 0.0
+    last_rate = 0.0
+    last_date = ""
+    current_stock = 0.0
+    current_avg_rate = base_rate
+    has_explicit_rate = False
+
+    for m in sorted_movs:
+        mtype = m.get("type")
+        qty = float(m.get("quantity", 0) or 0.0)
+        m_rate = m.get("rate")
+        has_rate = m_rate is not None and m_rate != ""
+        rate_val = float(m_rate) if has_rate else None
+
+        if mtype == "in":
+            stock_in += qty
+            if rate_val is not None:
+                last_rate = rate_val
+                has_explicit_rate = True
+            last_date = m.get("date") or m.get("created_at", "")
+
+            effective_in_rate = rate_val if rate_val is not None else current_avg_rate
+            if current_stock <= 0:
+                current_stock = current_stock + qty
+                current_avg_rate = effective_in_rate
+            else:
+                existing_val = current_stock * current_avg_rate
+                new_val = qty * effective_in_rate
+                new_qty = current_stock + qty
+                current_avg_rate = (existing_val + new_val) / new_qty if new_qty > 0 else effective_in_rate
+                current_stock = new_qty
+
+        elif mtype == "out":
+            stock_out += qty
+            current_stock -= qty
+
+        else:  # adjustment
+            adjustments += qty
+            if qty > 0:
+                adj_rate = rate_val if rate_val is not None else current_avg_rate
+                if current_stock <= 0:
+                    current_stock = current_stock + qty
+                    if rate_val is not None:
+                        current_avg_rate = adj_rate
+                        has_explicit_rate = True
+                else:
+                    existing_val = current_stock * current_avg_rate
+                    new_val = qty * adj_rate
+                    new_qty = current_stock + qty
+                    current_avg_rate = (existing_val + new_val) / new_qty if new_qty > 0 else adj_rate
+                    current_stock = new_qty
+            else:
+                current_stock += qty
+
+    balance = stock_in - stock_out + adjustments
+    final_avg_rate = current_avg_rate if (has_explicit_rate or current_avg_rate > 0) else base_rate
+    final_val = round(balance * final_avg_rate, 2)
+
+    return {
+        "stock_in": stock_in,
+        "stock_out": stock_out,
+        "adjustments": adjustments,
+        "balance": balance,
+        "last_rate": last_rate if last_rate > 0 else base_rate,
+        "last_date": last_date,
+        "weighted_avg_rate": final_avg_rate,
+        "value": final_val,
+    }
+
+
+async def _compute_material_inventory_summary(material_id: str, mat_doc: Optional[dict] = None) -> dict:
+    """Helper to compute inventory summary for a single material."""
+    if mat_doc is None:
+        try:
+            mat_doc = await db.materials.find_one({"_id": oid(material_id)})
+        except Exception:
+            mat_doc = None
+    movements = await db.inventory_movements.find({"material_id": material_id}).to_list(10000)
+    return _calculate_material_weighted_avg(mat_doc or {}, movements)
+
+
 @api.get("/inventory")
 async def list_inventory(request: Request):
-    """List all materials with computed stock balance."""
+    """List all materials with computed stock balance and weighted-average valuation."""
     await get_current_user(request)
     materials = await db.materials.find({}).to_list(2000)
     movements = await db.inventory_movements.find({}).to_list(20000)
 
     # aggregate per material
-    bal = {}
-    last_in = {}
+    mov_by_mat = defaultdict(list)
     for m in movements:
         mid = m.get("material_id")
-        if mid not in bal:
-            bal[mid] = {"in": 0, "out": 0, "adj": 0, "last_rate": 0, "last_date": ""}
-        if m["type"] == "in":
-            bal[mid]["in"] += m.get("quantity", 0)
-            bal[mid]["last_rate"] = m.get("rate") or bal[mid]["last_rate"]
-            bal[mid]["last_date"] = m.get("date") or m.get("created_at", "")
-            last_in[mid] = m
-        elif m["type"] == "out":
-            bal[mid]["out"] += m.get("quantity", 0)
-        else:
-            bal[mid]["adj"] += m.get("quantity", 0)
+        if mid:
+            mov_by_mat[mid].append(m)
 
     out = []
     for mat in materials:
         mat_id = str(mat["_id"])
-        b = bal.get(mat_id, {"in": 0, "out": 0, "adj": 0, "last_rate": 0, "last_date": ""})
-        stock = b["in"] - b["out"] + b["adj"]
+        summary = _calculate_material_weighted_avg(mat, mov_by_mat.get(mat_id, []))
         out.append({
             "material_id": mat_id,
             "code": mat.get("code"),
@@ -15589,19 +15890,21 @@ async def list_inventory(request: Request):
             "color": mat.get("color", ""),
             "unit": mat.get("unit"),
             "current_rate": mat.get("rate"),
-            "last_purchase_rate": b["last_rate"],
-            "last_purchase_date": b["last_date"],
-            "stock_in": round(b["in"], 2),
-            "stock_out": round(b["out"], 2),
-            "adjustments": round(b["adj"], 2),
-            "balance": round(stock, 2),
-            "value": round(stock * (b["last_rate"] or mat.get("rate", 0)), 2),
+            "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else mat.get("rate", 0),
+            "last_purchase_date": summary["last_date"],
+            "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+            "stock_in": round(summary["stock_in"], 2),
+            "stock_out": round(summary["stock_out"], 2),
+            "adjustments": round(summary["adjustments"], 2),
+            "balance": round(summary["balance"], 2),
+            "value": summary["value"],
             "image_url": mat.get("image_url", ""),
             "image_display_url": mat.get("image_display_url", ""),
             "image_thumbnail_url": mat.get("image_thumbnail_url", ""),
         })
     out.sort(key=lambda r: (r["category"] or "", r["name"] or ""))
     return out
+
 
 
 @api.get("/inventory/movements")
@@ -15625,21 +15928,42 @@ async def create_movement(payload: InventoryMovement, request: Request):
     if not mat:
         raise HTTPException(404, "Material not found")
         
-    # Block deductions that exceed current stock balance
+    # Determine deduction or addition quantity
     deduction_qty = 0.0
     if payload.type == "out":
         deduction_qty = payload.quantity
     elif payload.type == "adjustment" and payload.quantity < 0:
         deduction_qty = -payload.quantity
-        
+
+    add_qty = 0.0
+    if payload.type == "in":
+        add_qty = payload.quantity
+    elif payload.type == "adjustment" and payload.quantity > 0:
+        add_qty = payload.quantity
+
+    # Ensure material balance field is initialized if missing
+    if mat.get("balance") is None:
+        init_bal = await _get_material_balance(payload.material_id)
+        await db.materials.update_one(
+            {"_id": mat["_id"], "balance": {"$exists": False}},
+            {"$set": {"balance": init_bal}}
+        )
+        mat["balance"] = init_bal
+
+    # Atomic deduction guard: decrement balance only if balance >= deduction_qty
     if deduction_qty > 0:
-        current_bal = await _get_material_balance(payload.material_id)
-        if current_bal - deduction_qty < 0:
+        res = await db.materials.update_one(
+            {"_id": mat["_id"], "balance": {"$gte": deduction_qty}},
+            {"$inc": {"balance": -deduction_qty}, "$set": {"updated_at": now_iso()}}
+        )
+        if res.matched_count == 0:
+            fresh_mat = await db.materials.find_one({"_id": mat["_id"]})
+            cur_bal = fresh_mat.get("balance", 0.0) if fresh_mat else 0.0
             raise HTTPException(
                 status_code=400,
-                detail=f"Deduction of {deduction_qty} {mat.get('unit', '')} exceeds current stock balance ({current_bal} {mat.get('unit', '')})."
+                detail=f"Deduction of {deduction_qty} {mat.get('unit', '')} exceeds current stock balance ({round(cur_bal, 2)} {mat.get('unit', '')})."
             )
-            
+
     doc = payload.model_dump()
     doc["material_code"] = mat.get("code")
     doc["material_name"] = mat.get("name")
@@ -15648,17 +15972,66 @@ async def create_movement(payload: InventoryMovement, request: Request):
     doc["by"] = u["email"]
     if not doc.get("date"):
         doc["date"] = datetime.now(timezone.utc).date().isoformat()
-    res = await db.inventory_movements.insert_one(doc)
+
+    try:
+        res = await db.inventory_movements.insert_one(doc)
+    except Exception as e:
+        # Rollback deduction on failure
+        if deduction_qty > 0:
+            await db.materials.update_one({"_id": mat["_id"]}, {"$inc": {"balance": deduction_qty}})
+        raise e
+
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
+
+    # For additions, atomically increment balance
+    if add_qty > 0:
+        await db.materials.update_one(
+            {"_id": mat["_id"]},
+            {"$inc": {"balance": add_qty}, "$set": {"updated_at": now_iso()}}
+        )
+
+    # Recompute and update weighted_avg_rate, last_purchase_rate, and sync balance
+    try:
+        summary = await _compute_material_inventory_summary(payload.material_id, mat)
+        await db.materials.update_one(
+            {"_id": mat["_id"]},
+            {"$set": {
+                "balance": round(summary["balance"], 2),
+                "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+                "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else (mat.get("rate") or 0.0),
+                "updated_at": now_iso(),
+            }}
+        )
+    except Exception:
+        pass
+
     return doc
+
 
 
 @api.delete("/inventory/movements/{mid}")
 async def delete_movement(mid: str, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager")(u)
+    mov = await db.inventory_movements.find_one({"_id": oid(mid)})
     await db.inventory_movements.delete_one({"_id": oid(mid)})
+    if mov and mov.get("material_id"):
+        try:
+            summary = await _compute_material_inventory_summary(mov["material_id"])
+            mat_doc = await db.materials.find_one({"_id": oid(mov["material_id"])})
+            fallback_rate = (mat_doc.get("rate") or 0.0) if mat_doc else 0.0
+            await db.materials.update_one(
+                {"_id": oid(mov["material_id"])},
+                {"$set": {
+                    "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+                    "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else fallback_rate,
+                    "updated_at": now_iso(),
+                }}
+            )
+        except Exception:
+            pass
     return {"ok": True}
+
 
 
 @api.post("/inventory/shortage")

@@ -21,6 +21,9 @@ class MaterialIn(BaseModel):
     component_category: Optional[str] = None
     default_yield_per_unit: Optional[float] = None
     color:               Optional[str] = ""
+    weighted_avg_rate:   Optional[float] = None
+    last_purchase_rate:  Optional[float] = None
+    balance:             Optional[float] = 0.0
 
 
 class BomItem(BaseModel):

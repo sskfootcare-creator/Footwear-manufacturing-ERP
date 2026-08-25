@@ -281,8 +281,17 @@ export default function Inventory() {
                         {r.balance}
                       </td>
                       <td className="px-3 py-2 text-right font-mono">
-                        {inr(r.value)}
+                        <div>{inr(r.value)}</div>
+                        {r.weighted_avg_rate > 0 && (
+                          <div
+                            className="text-[10px] text-slate-400 font-normal"
+                            title="Weighted-Average Cost Rate"
+                          >
+                            @ {inr(r.weighted_avg_rate)}/unit
+                          </div>
+                        )}
                       </td>
+
                       <td className="px-3 py-2 text-right">
                         <button
                           onClick={() => openType("in", r)}

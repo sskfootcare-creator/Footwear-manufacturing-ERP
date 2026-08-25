@@ -321,8 +321,9 @@ export default function Invoices() {
                         {r.po_number || (r.po_numbers || []).join(", ")}
                       </td>
                       <td className="px-4 py-2 text-right font-mono">
-                        {inr(r.net_amount || r.grand_total || 0)}
+                        {inr(r.net_amount || 0)}
                       </td>
+
                       <td className="px-4 py-2 text-right font-mono text-[#16A34A]">
                         {inr(r.received_amount || 0)}
                       </td>
@@ -861,6 +862,29 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
     });
 
   const submit = async () => {
+    // Immediate frontend validation
+    for (let i = 0; i < form.lines.length; i++) {
+      const l = form.lines[i];
+      const disp = Number(l.dispatched_qty || 0);
+      const recv = Number(l.received_qty || 0);
+      const rej = Number(l.rejected_qty || 0);
+      const desc = l.style_code
+        ? `${l.style_code} (${l.color}/${l.size})`
+        : `Line #${i + 1}`;
+      if (recv > disp) {
+        alert(
+          `Received quantity (${recv}) cannot exceed dispatched quantity (${disp}) for ${desc}.`,
+        );
+        return;
+      }
+      if (rej > recv) {
+        alert(
+          `Rejected quantity (${rej}) cannot exceed received quantity (${recv}) for ${desc}.`,
+        );
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       await http.post("/grns", {
@@ -1007,59 +1031,89 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
               </tr>
             </thead>
             <tbody>
-              {form.lines.map((l, i) => (
-                <tr
-                  key={i}
-                  className="border-t border-slate-100"
-                  data-testid={`grn-line-${i}`}
-                >
-                  <td className="px-2 py-1.5 font-mono">{l.style_code}</td>
-                  <td className="px-2 py-1.5">{l.color}</td>
-                  <td className="px-2 py-1.5 font-mono">{l.size}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">
-                    {l.dispatched_qty}
-                  </td>
-                  <td className="px-2 py-1">
-                    <input
-                      type="number"
-                      min="0"
-                      value={l.received_qty}
-                      onChange={(e) =>
-                        updLine(i, "received_qty", e.target.value)
-                      }
-                      data-testid={`grn-recv-${i}`}
-                      className="w-20 border border-slate-300 px-2 py-1 font-mono text-right focus:border-[#7C3AED] outline-none"
-                    />
-                  </td>
-                  <td className="px-2 py-1">
-                    <input
-                      type="number"
-                      min="0"
-                      value={l.rejected_qty}
-                      onChange={(e) =>
-                        updLine(i, "rejected_qty", e.target.value)
-                      }
-                      data-testid={`grn-rej-${i}`}
-                      className="w-20 border border-slate-300 px-2 py-1 font-mono text-right focus:border-[#7C3AED] outline-none"
-                    />
-                  </td>
-                  <td className="px-2 py-1.5 text-right font-mono font-bold text-[#16A34A]">
-                    {l.accepted_qty}
-                  </td>
-                  <td className="px-2 py-1">
-                    <input
-                      value={l.rejection_reason}
-                      onChange={(e) =>
-                        updLine(i, "rejection_reason", e.target.value)
-                      }
-                      data-testid={`grn-reason-${i}`}
-                      placeholder={l.rejected_qty > 0 ? "Reason required" : ""}
-                      className="w-full border border-slate-300 px-2 py-1 text-xs focus:border-[#7C3AED] outline-none"
-                    />
-                  </td>
-                </tr>
-              ))}
+              {form.lines.map((l, i) => {
+                const isOverDispatched =
+                  Number(l.received_qty || 0) > Number(l.dispatched_qty || 0);
+                const isOverReceived =
+                  Number(l.rejected_qty || 0) > Number(l.received_qty || 0);
+
+                return (
+                  <tr
+                    key={i}
+                    className={`border-t border-slate-100 ${
+                      isOverDispatched || isOverReceived ? "bg-red-50/50" : ""
+                    }`}
+                    data-testid={`grn-line-${i}`}
+                  >
+                    <td className="px-2 py-1.5 font-mono">{l.style_code}</td>
+                    <td className="px-2 py-1.5">{l.color}</td>
+                    <td className="px-2 py-1.5 font-mono">{l.size}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {l.dispatched_qty}
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        min="0"
+                        max={l.dispatched_qty}
+                        value={l.received_qty}
+                        onChange={(e) =>
+                          updLine(i, "received_qty", e.target.value)
+                        }
+                        data-testid={`grn-recv-${i}`}
+                        className={`w-20 border px-2 py-1 font-mono text-right outline-none ${
+                          isOverDispatched
+                            ? "border-red-500 bg-red-50 text-red-700 font-bold"
+                            : "border-slate-300 focus:border-[#7C3AED]"
+                        }`}
+                        title={
+                          isOverDispatched
+                            ? `Cannot exceed dispatched qty (${l.dispatched_qty})`
+                            : ""
+                        }
+                      />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        min="0"
+                        max={l.received_qty}
+                        value={l.rejected_qty}
+                        onChange={(e) =>
+                          updLine(i, "rejected_qty", e.target.value)
+                        }
+                        data-testid={`grn-rej-${i}`}
+                        className={`w-20 border px-2 py-1 font-mono text-right outline-none ${
+                          isOverReceived
+                            ? "border-red-500 bg-red-50 text-red-700 font-bold"
+                            : "border-slate-300 focus:border-[#7C3AED]"
+                        }`}
+                        title={
+                          isOverReceived
+                            ? `Cannot exceed received qty (${l.received_qty})`
+                            : ""
+                        }
+                      />
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono font-bold text-[#16A34A]">
+                      {l.accepted_qty}
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        value={l.rejection_reason}
+                        onChange={(e) =>
+                          updLine(i, "rejection_reason", e.target.value)
+                        }
+                        data-testid={`grn-reason-${i}`}
+                        placeholder={l.rejected_qty > 0 ? "Reason required" : ""}
+                        className="w-full border border-slate-300 px-2 py-1 text-xs focus:border-[#7C3AED] outline-none"
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
+
             <tfoot className="bg-slate-900 text-white">
               <tr>
                 <td

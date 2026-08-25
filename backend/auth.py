@@ -90,12 +90,15 @@ def create_access_token(
 
 
 def create_refresh_token(user_id: str) -> str:
+    import uuid
     payload = {
         "sub": user_id,
+        "jti": str(uuid.uuid4()),
         "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_DAYS),
         "type": "refresh",
     }
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
 
 
 def set_auth_cookies(response, access_token: str, refresh_token: str = None):

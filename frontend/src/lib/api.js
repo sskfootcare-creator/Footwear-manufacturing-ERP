@@ -77,7 +77,11 @@ http.interceptors.response.use(
         if (data.access_token) {
           localStorage.setItem("token", data.access_token);
         }
+        if (data.refresh_token) {
+          localStorage.setItem("refresh_token", data.refresh_token);
+        }
         return http(originalRequest);
+
       } catch (refreshError) {
         localStorage.removeItem("token");
         localStorage.removeItem("refresh_token");
