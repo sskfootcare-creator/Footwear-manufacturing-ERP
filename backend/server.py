@@ -7164,7 +7164,10 @@ async def import_online_orders_configured(
     committed = {"orders_created": 0, "items_created": 0, "exceptions_queued": 0, "orders_skipped_duplicate": 0, "items_skipped_duplicate": 0}
     import_batch_id = None
     if not dry_run:
+        if stats.get("matched", 0) == 0:
+            raise HTTPException(400, "Nothing to commit — no rows matched.")
         import_batch_id = f"IMP_{platform_lc}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+
         # Group rows by order_id (or by picklist_batch_id for picklist-mode)
         orders_by_key: Dict[str, dict] = {}
         exceptions: List[dict] = []
@@ -7600,7 +7603,10 @@ async def import_dispatch_configured(
     }
 
     if not dry_run:
+        if stats.get("matched", 0) == 0:
+            raise HTTPException(400, "Nothing to commit — no rows matched.")
         exceptions: List[Dict[str, Any]] = []
+
         for canon in canonical_rows:
             src_row = canon.get("source_row_index")
             order_release_id = canon.get("order_release_id")
@@ -7836,11 +7842,90 @@ def _has_val(v: Any) -> bool:
     return True
 
 
-def _classify_monthly_row(canon: dict) -> dict:
-    """Apply the EXACT classification logic from the spec.
+async def _check_internal_dispatch_record(canon: dict, platform: str) -> bool:
+    """Check if internal system records (online_order_items, fg_stock_movements,
+
+    or online_orders) show this unit was actually dispatched/packed.
+    """
+    order_release_id = canon.get("order_release_id")
+    order_id = canon.get("order_id")
+    leaf_sku = canon.get("leaf_sku") or canon.get("leaf_sku_raw")
+    platform_lc = (platform or "").strip().lower()
+
+    # 1. Query online_order_items for dispatch activity
+    item_or_conditions = []
+    if order_release_id:
+        item_or_conditions.append({"order_release_id": order_release_id})
+    if order_id:
+        if leaf_sku:
+            item_or_conditions.append({
+                "order_id": order_id,
+                "$or": [{"leaf_sku": leaf_sku}, {"leaf_sku_raw": leaf_sku}]
+            })
+        else:
+            item_or_conditions.append({"order_id": order_id})
+
+    if item_or_conditions:
+        item = await db.online_order_items.find_one({
+            "platform": platform_lc,
+            "$or": item_or_conditions,
+            "$and": [
+                {
+                    "$or": [
+                        {"stage": "dispatched"},
+                        {"dispatched_at": {"$ne": None}},
+                        {"was_packed": True},
+                        {"packed_on": {"$ne": None}},
+                    ]
+                }
+            ]
+        })
+        if item:
+            return True
+
+    # 2. Query fg_stock_movements with movement_type="dispatched"
+    ref_ids = [ref for ref in (order_release_id, order_id) if ref]
+    if ref_ids:
+        mov = await db.fg_stock_movements.find_one({
+            "movement_type": "dispatched",
+            "reference_id": {"$in": ref_ids},
+        })
+        if mov:
+            return True
+
+    # 3. Query online_orders for dispatch/packed status
+    if ref_ids:
+        order_conditions = []
+        if order_release_id:
+            order_conditions.append({"order_release_id": order_release_id})
+        if order_id:
+            order_conditions.append({"order_id": order_id})
+
+        ord_doc = await db.online_orders.find_one({
+            "platform": platform_lc,
+            "$or": order_conditions,
+            "$and": [
+                {
+                    "$or": [
+                        {"packed_on": {"$ne": None}},
+                        {"stage": "dispatched"},
+                        {"order_status": {"$in": ["dispatched", "delivered", "packed", "SH", "delivered_to_customer"]}},
+                    ]
+                }
+            ]
+        })
+        if ord_doc and (ord_doc.get("packed_on") or ord_doc.get("stage") == "dispatched"):
+            return True
+
+    return False
+
+
+async def _classify_monthly_row(canon: dict, platform: str = "") -> dict:
+    """Apply the classification logic with dispatch verification against system records.
 
     Returns the same canon dict with was_packed, was_returned_to_stock,
-    is_pending, is_net_sold, never_touched_inventory, return_reason set.
+    is_pending, is_net_sold, never_touched_inventory, has_dispatch_discrepancy,
+    discrepancy_reason, return_reason set.
     """
     status = (canon.get("order_status") or "").strip().upper()
 
@@ -7852,12 +7937,30 @@ def _classify_monthly_row(canon: dict) -> dict:
     was_returned_to_stock = has_rto or has_return or cancelled_post_pack
     is_pending    = status in ("SH", "PK")
     is_net_sold   = was_packed and not was_returned_to_stock and not is_pending
-    never_touched = not was_packed
 
-    # Which reversal reason applies? RTO wins over customer_return wins
-    # over cancelled_after_pack (RTO is the most severe from an inventory
-    # accounting standpoint — the unit was shipped, never delivered, and
-    # returned to warehouse without customer touching it).
+    has_dispatch_discrepancy = False
+    discrepancy_reason = None
+    never_touched = False
+
+    if not was_packed:
+        has_internal_dispatch = await _check_internal_dispatch_record(canon, platform)
+        if has_internal_dispatch:
+            # Internal records show it was dispatched, but monthly report lacks packed_on date
+            never_touched = False
+            has_dispatch_discrepancy = True
+            discrepancy_reason = "Monthly report lacks packed_on date, but internal system records show unit was dispatched."
+            if "flags" not in canon:
+                canon["flags"] = []
+            canon["flags"].append("dispatch_discrepancy")
+            disc_text = "Discrepancy: source file lacks packed_on, but internal records confirm dispatch"
+            existing_reason = canon.get("exception_reason")
+            canon["exception_reason"] = f"{existing_reason} [{disc_text}]" if existing_reason else disc_text
+        else:
+            never_touched = True
+    else:
+        never_touched = False
+
+    # Which reversal reason applies?
     if was_returned_to_stock:
         if   has_rto:              reason = "rto"
         elif has_return:           reason = "customer_return"
@@ -7866,12 +7969,14 @@ def _classify_monthly_row(canon: dict) -> dict:
     else:
         reason = None
 
-    canon["was_packed"]              = was_packed
-    canon["was_returned_to_stock"]   = was_returned_to_stock
-    canon["is_pending"]              = is_pending
-    canon["is_net_sold"]             = is_net_sold
-    canon["never_touched_inventory"] = never_touched
-    canon["return_reason"]           = reason
+    canon["was_packed"]                = was_packed
+    canon["was_returned_to_stock"]     = was_returned_to_stock
+    canon["is_pending"]                = is_pending
+    canon["is_net_sold"]               = is_net_sold
+    canon["never_touched_inventory"]   = never_touched
+    canon["has_dispatch_discrepancy"]  = has_dispatch_discrepancy
+    canon["discrepancy_reason"]        = discrepancy_reason
+    canon["return_reason"]             = reason
     return canon
 
 
@@ -7886,7 +7991,7 @@ async def _parse_and_resolve_monthly_row(
     Reuses the identical normalisation pipeline as order-import and
     dispatch-import (strip_excel_apostrophe → apply_prefix_replacements
     → strip_known_prefixes → split_leaf_sku → resolve_style). Then
-    applies the classification logic above.
+    applies the classification logic with dispatch verification.
     """
     column_map: Dict[str, Optional[str]] = cfg.get("column_map") or {}
     prefixes     = cfg.get("known_sku_prefixes_to_strip") or []
@@ -7931,10 +8036,7 @@ async def _parse_and_resolve_monthly_row(
     canon["discount"]             = _num("discount")
     canon["seller_price"]         = _num("seller_price")
 
-    # ── Classify (does NOT depend on leaf_sku resolution) ──
-    _classify_monthly_row(canon)
-
-    # ── Then normalise leaf_sku (same as everywhere) ──
+    # ── Normalise leaf_sku ──
     leaf_raw = str(_v("leaf_sku") or "").strip()
     canon["leaf_sku_raw"] = leaf_raw
     if not leaf_raw:
@@ -7943,6 +8045,7 @@ async def _parse_and_resolve_monthly_row(
         canon["leaf_sku_replaced_prefix"] = None
         canon["leaf_sku_stripped_prefix"] = None
         canon["exception_reason"] = "leaf_sku column is empty"
+        await _classify_monthly_row(canon, platform)
         return canon
 
     leaf = strip_excel_apostrophe(leaf_raw)
@@ -7959,6 +8062,7 @@ async def _parse_and_resolve_monthly_row(
 
     if not group_id or not size_tok:
         canon["exception_reason"] = f"could not split leaf_sku '{leaf_stripped}' into group+size"
+        await _classify_monthly_row(canon, platform)
         return canon
 
     resolved = {"matched": False, "match_via": None}
@@ -7992,7 +8096,11 @@ async def _parse_and_resolve_monthly_row(
     })
     if not canon["matched"]:
         canon["exception_reason"] = resolved.get("unmapped_reason") or resolved.get("reason") or "no style match in sku_map"
+
+    # ── Classify row (cross-references internal records if packed_on is missing) ──
+    await _classify_monthly_row(canon, platform)
     return canon
+
 
 
 def _return_ref_id(platform: str, order_release_id: Optional[str],
@@ -8153,6 +8261,7 @@ async def import_monthly_report(
         "total_rows":              len(canonical_rows),
         "packed":                  _count(lambda c: c.get("was_packed")),
         "never_touched_inventory": _count(lambda c: c.get("never_touched_inventory")),
+        "discrepancies":           _count(lambda c: c.get("has_dispatch_discrepancy")),
         "returned_to_stock":       _count(lambda c: c.get("was_returned_to_stock")),
         "pending":                 _count(lambda c: c.get("is_pending")),
         "net_sold":                _count(lambda c: c.get("is_net_sold")),
@@ -8273,6 +8382,8 @@ async def import_monthly_report(
                 "is_pending":             canon.get("is_pending"),
                 "is_net_sold":            canon.get("is_net_sold"),
                 "never_touched_inventory":canon.get("never_touched_inventory"),
+                "has_dispatch_discrepancy":canon.get("has_dispatch_discrepancy"),
+                "discrepancy_reason":     canon.get("discrepancy_reason"),
                 "return_reason":          canon.get("return_reason"),
                 "order_status":           canon.get("order_status"),
                 # ── date columns from monthly file ──
@@ -8300,6 +8411,27 @@ async def import_monthly_report(
                 item_set["created_at"]      = now_iso()
                 await db.online_order_items.insert_one(item_set)
             committed["items_upserted"] += 1
+
+            if canon.get("has_dispatch_discrepancy"):
+                exceptions.append({
+                    "import_batch_id":  import_batch_id,
+                    "platform":         platform_lc,
+                    "kind":             "monthly_report_dispatch_discrepancy",
+                    "source_row_index": src_row,
+                    "order_id":         order_id,
+                    "order_release_id": order_release_id,
+                    "style_id":         style_id,
+                    "style_code":       style_code,
+                    "color":            color,
+                    "size":             size,
+                    "leaf_sku":         canon.get("leaf_sku"),
+                    "reason":           canon.get("discrepancy_reason") or "Dispatch discrepancy",
+                    "flags":            canon.get("flags"),
+                    "raw_row":          canon.get("raw_row"),
+                    "created_at":       now_iso(),
+                    "resolved":         False,
+                })
+
 
             # ── If this row is was_returned_to_stock, post return movements ──
             if canon.get("was_returned_to_stock"):
@@ -8574,7 +8706,11 @@ async def import_settlement_report(
             "rows": canonical_rows,
         }
 
+    if stats.get("matched_count", 0) == 0:
+        raise HTTPException(400, "Nothing to commit — no rows matched.")
+
     import_batch_id = f"settle_{now_iso().replace(':', '-').replace('.', '-')}_{uuid.uuid4().hex[:6]}"
+
     for idx, canon in enumerate(canonical_rows):
         settle_id = f"settle:{platform_lc}:{canon.get('order_ref') or 'noref'}:{canon.get('leaf_sku') or 'nosku'}:{idx}"
         settle_doc = {
@@ -10551,6 +10687,63 @@ async def validate_po_styles_endpoint(payload: POIn, request: Request):
     return {"ok": True, "line_count": len(payload.line_items)}
 
 
+async def _sync_po_sku_mappings(client_name: str, line_items: list, user_email: str):
+    """Automatically persist or update SKU mappings for PO line items where external_sku is provided.
+    Runs ONLY after the PO document is successfully written/updated to ensure no orphaned mappings on failure.
+    """
+    client_name = (client_name or "").strip()
+    if not client_name or not line_items:
+        return
+
+    all_styles = await db.styles.find({}, {"code": 1, "_id": 1}).to_list(10000)
+    styles_by_code = {s["code"].strip().upper(): s for s in all_styles}
+
+    for li in line_items:
+        ext_sku = (li.get("external_sku") if isinstance(li, dict) else getattr(li, "external_sku", "")) or ""
+        ext_sku = ext_sku.strip()
+        style_code = (li.get("style_code") if isinstance(li, dict) else getattr(li, "style_code", "")) or ""
+        style_code = style_code.strip()
+        if not ext_sku or not style_code:
+            continue
+        if ext_sku.upper() == style_code.upper():
+            continue  # Same code, no cross-reference mapping needed
+
+        style = styles_by_code.get(style_code.upper())
+        if not style:
+            continue
+
+        existing = await db.sku_map.find_one({
+            "source_type": "b2b_client",
+            "source_name_key": _norm_marketplace(client_name),
+            "external_sku_key": _norm_key(ext_sku),
+        })
+        if not existing:
+            desc = (li.get("description") if isinstance(li, dict) else getattr(li, "description", "")) or ""
+            mapping_doc = {
+                "style_id": str(style["_id"]),
+                "style_code": style["code"],
+                "source_type": "b2b_client",
+                "source_name": client_name,
+                "external_sku": ext_sku,
+                "external_style_name": desc,
+                "source_name_key": _norm_marketplace(client_name),
+                "external_sku_key": _norm_key(ext_sku),
+                "color_map": {},
+                "size_map": {},
+                "image_url": "",
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "created_by": user_email,
+            }
+            try:
+                res = await db.sku_map.insert_one(mapping_doc)
+                mapping_doc["id"] = str(res.inserted_id)
+                await log_activity("CREATE", "sku_map", f"Auto-mapped {ext_sku} ({client_name}) → {style['code']} from PO", user_email)
+                await _update_unmatched_jobs_for_sku_mapping(res.inserted_id, mapping_doc)
+            except DuplicateKeyError:
+                pass
+
+
 @api.post("/pos")
 async def create_po(payload: POIn, request: Request):
     u = await get_current_user(request); require_roles("admin", "manager", "sales")(u)
@@ -10627,6 +10820,9 @@ async def create_po(payload: POIn, request: Request):
         })
     if jobs:
         await db.production_jobs.insert_many(jobs)
+
+    # Sync SKU mappings safely only after successful PO creation
+    await _sync_po_sku_mappings(doc.get("client_name"), doc.get("line_items", []), u.get("email", "system"))
     return doc
 
 @api.patch("/pos/{pid}")
@@ -10640,7 +10836,10 @@ async def update_po(pid: str, payload: POIn, request: Request):
     update = payload.model_dump()
     update["updated_at"] = now_iso()
     await db.pos.update_one({"_id": oid(pid)}, {"$set": update})
+    # Sync SKU mappings safely only after successful PO update
+    await _sync_po_sku_mappings(update.get("client_name"), update.get("line_items", []), u.get("email", "system"))
     return stringify(await db.pos.find_one({"_id": oid(pid)}))
+
 
 @api.delete("/pos/{pid}")
 async def delete_po(pid: str, request: Request):
@@ -19723,7 +19922,8 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
 
 
 @api.post("/online-reconciliation/import-monthly-report")
-async def import_monthly_report(request: Request, file: UploadFile = File(...)):
+async def import_monthly_reconciliation_report(request: Request, file: UploadFile = File(...)):
+
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
     content = await file.read()

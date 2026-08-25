@@ -296,9 +296,11 @@ function ImportDrawer({ onClose, onDone }) {
                   : <div className="text-sm text-slate-500">Click to choose .csv / .xlsx</div>}
               </div>
               <input ref={fileRef} type="file"
+                data-testid="import-order-file-input"
                 accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 className="hidden"
                 onChange={(e) => setFile(e.target.files[0] || null)} />
+
               {selectedCfg?.is_picklist && file && (
                 <div className="text-[11px] text-purple-700 mt-1">
                   Picklist mode: filename stem <span className="font-mono font-bold">{file.name.replace(/\.[^.]+$/, "")}</span> will be stored as <span className="font-mono">picklist_batch_id</span>.
@@ -378,6 +380,22 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
   const stats = preview.stats || {};
   const isPicklist = !!preview.is_picklist;
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+  const [filterMode, setFilterMode] = useState("all"); // "all" | "unmatched" | "matched"
+
+  const filteredRows = useMemo(() => {
+    if (filterMode === "unmatched") return rows.filter((r) => !r.matched);
+    if (filterMode === "matched") return rows.filter((r) => !!r.matched);
+    return rows;
+  }, [rows, filterMode]);
+
+  const effectivePageSize = pageSize === 0 ? filteredRows.length || 1 : pageSize;
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / effectivePageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIdx = (currentPage - 1) * effectivePageSize;
+  const paginatedRows = pageSize === 0 ? filteredRows : filteredRows.slice(startIdx, startIdx + effectivePageSize);
+
   return (
     <div className="space-y-4">
       {/* Header meta */}
@@ -413,10 +431,88 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
         </div>
       )}
 
+      {/* Filter and pagination bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border-2 border-slate-200 p-2.5 rounded text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] mr-1">Filter:</span>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("all"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"}`}
+            data-testid="preview-filter-all"
+          >
+            All ({rows.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("unmatched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "unmatched" ? "bg-red-600 text-white" : "bg-white text-red-700 border border-red-200 hover:bg-red-50"}`}
+            data-testid="preview-filter-unmatched"
+          >
+            Exceptions ({stats.unmatched ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("matched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "matched" ? "bg-emerald-600 text-white" : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"}`}
+            data-testid="preview-filter-matched"
+          >
+            Matched ({stats.matched ?? 0})
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px]">Rows/page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
+              data-testid="preview-page-size"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+              <option value={500}>500</option>
+              <option value={0}>{`All (${filteredRows.length})`}</option>
+
+            </select>
+          </div>
+
+          <div className="text-slate-600 font-mono text-[11px]">
+            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+              data-testid="preview-prev-page"
+            >
+              ‹
+            </button>
+            <span className="px-1.5 font-mono font-bold text-slate-700">
+              {currentPage}/{totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+              data-testid="preview-next-page"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Row preview table */}
       <div className="border-2 border-slate-200 rounded overflow-hidden">
-        <div className="max-h-[420px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs">
+        <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
+          <table className="w-full text-xs" data-testid="preview-rows-table">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
                 <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
@@ -430,7 +526,7 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 300).map((r, i) => {
+              {paginatedRows.map((r, i) => {
                 const isOrderRow = !!r.order_id;
                 const isPicklistRow = !isOrderRow;
                 const matched = !!r.matched;
@@ -480,17 +576,10 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                   </tr>
                 );
               })}
-              {rows.length > 300 && (
-                <tr>
-                  <td colSpan={8} className="p-3 text-center text-xs text-slate-500 italic">
-                    Showing first 300 of {rows.length} rows. All rows will be committed.
-                  </td>
-                </tr>
-              )}
-              {rows.length === 0 && (
+              {paginatedRows.length === 0 && (
                 <tr>
                   <td colSpan={8} className="p-6 text-center text-sm text-slate-400 italic">
-                    No rows parsed — check header row + column map.
+                    {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
                   </td>
                 </tr>
               )}
@@ -520,6 +609,7 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
     </div>
   );
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // Dispatch Import Drawer — daily "what got packed today" (Phase H)
@@ -759,6 +849,22 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
   const rows = preview.rows || [];
   const stats = preview.stats || {};
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+  const [filterMode, setFilterMode] = useState("all"); // "all" | "unmatched" | "matched"
+
+  const filteredRows = useMemo(() => {
+    if (filterMode === "unmatched") return rows.filter((r) => !r.matched);
+    if (filterMode === "matched") return rows.filter((r) => !!r.matched);
+    return rows;
+  }, [rows, filterMode]);
+
+  const effectivePageSize = pageSize === 0 ? filteredRows.length || 1 : pageSize;
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / effectivePageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIdx = (currentPage - 1) * effectivePageSize;
+  const paginatedRows = pageSize === 0 ? filteredRows : filteredRows.slice(startIdx, startIdx + effectivePageSize);
+
   return (
     <div className="space-y-4">
       <div className="bg-slate-50 border-2 border-slate-200 px-4 py-3 text-xs text-slate-800 font-mono space-y-1">
@@ -775,8 +881,80 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
         <MiniStat label="distinct releases" value={stats.distinct_order_releases ?? 0} accent="#2563EB" />
       </div>
 
+      {/* Filter and pagination bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border-2 border-slate-200 p-2.5 rounded text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] mr-1">Filter:</span>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("all"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"}`}
+          >
+            All ({rows.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("unmatched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "unmatched" ? "bg-red-600 text-white" : "bg-white text-red-700 border border-red-200 hover:bg-red-50"}`}
+          >
+            Exceptions ({stats.unmatched ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("matched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "matched" ? "bg-emerald-600 text-white" : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"}`}
+          >
+            Matched ({stats.matched ?? 0})
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px]">Rows/page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+              <option value={500}>500</option>
+              <option value={0}>{`All (${filteredRows.length})`}</option>
+
+            </select>
+          </div>
+
+          <div className="text-slate-600 font-mono text-[11px]">
+            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+            >
+              ‹
+            </button>
+            <span className="px-1.5 font-mono font-bold text-slate-700">
+              {currentPage}/{totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="border-2 border-slate-200 rounded overflow-hidden">
-        <div className="max-h-[420px] overflow-y-auto overflow-x-auto">
+        <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
@@ -793,7 +971,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 300).map((r, i) => {
+              {paginatedRows.map((r, i) => {
                 const matched = !!r.matched;
                 return (
                   <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
@@ -838,17 +1016,10 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
                   </tr>
                 );
               })}
-              {rows.length > 300 && (
-                <tr>
-                  <td colSpan={10} className="p-3 text-center text-xs text-slate-500 italic">
-                    Showing first 300 of {rows.length} rows. All rows will be committed.
-                  </td>
-                </tr>
-              )}
-              {rows.length === 0 && (
+              {paginatedRows.length === 0 && (
                 <tr>
                   <td colSpan={10} className="p-6 text-center text-sm text-slate-400 italic">
-                    No rows parsed — check header row + column map.
+                    {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
                   </td>
                 </tr>
               )}
@@ -878,6 +1049,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
     </div>
   );
 }
+
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1087,6 +1259,23 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
   const stats = preview.stats || {};
   const breakdown = stats.reason_breakdown || {};
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+  const [filterMode, setFilterMode] = useState("all"); // "all" | "discrepancies" | "unmatched" | "matched"
+
+  const filteredRows = useMemo(() => {
+    if (filterMode === "discrepancies") return rows.filter((r) => !!r.has_dispatch_discrepancy);
+    if (filterMode === "unmatched") return rows.filter((r) => !r.matched);
+    if (filterMode === "matched") return rows.filter((r) => !!r.matched);
+    return rows;
+  }, [rows, filterMode]);
+
+  const effectivePageSize = pageSize === 0 ? filteredRows.length || 1 : pageSize;
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / effectivePageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIdx = (currentPage - 1) * effectivePageSize;
+  const paginatedRows = pageSize === 0 ? filteredRows : filteredRows.slice(startIdx, startIdx + effectivePageSize);
+
   return (
     <div className="space-y-4">
       <div className="bg-slate-50 border-2 border-slate-200 px-4 py-3 text-xs text-slate-800 font-mono space-y-1">
@@ -1097,18 +1286,99 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
       {/* ── Funnel: Packed → minus Returned/Pending → Net Sold ── */}
       <FunnelViz stats={stats} breakdown={breakdown} />
 
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
         <MiniStat label="total rows" value={stats.total_rows ?? 0} accent="#0F172A" />
         <MiniStat label="matched sku" value={stats.matched ?? 0} accent="#16A34A" />
         <MiniStat label="unmatched sku" value={stats.unmatched ?? 0} accent="#DC2626" />
         <MiniStat label="never touched inv" value={stats.never_touched_inventory ?? 0} accent="#64748B" />
+        <MiniStat label="discrepancies" value={stats.discrepancies ?? 0} accent="#F97316" />
         <MiniStat label="pending in transit" value={stats.pending ?? 0} accent="#EAB308" />
         <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
       </div>
 
+      {/* Filter and pagination bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border-2 border-slate-200 p-2.5 rounded text-xs">
+        <div className="flex items-center gap-1.5">
+          <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] mr-1">Filter:</span>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("all"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"}`}
+          >
+            All ({rows.length})
+          </button>
+          {stats.discrepancies > 0 && (
+            <button
+              type="button"
+              onClick={() => { setFilterMode("discrepancies"); setPage(1); }}
+              className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "discrepancies" ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-300 hover:bg-amber-50"}`}
+            >
+              Discrepancies ({stats.discrepancies})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { setFilterMode("unmatched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "unmatched" ? "bg-red-600 text-white" : "bg-white text-red-700 border border-red-200 hover:bg-red-50"}`}
+          >
+            Unmatched ({stats.unmatched ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => { setFilterMode("matched"); setPage(1); }}
+            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "matched" ? "bg-emerald-600 text-white" : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"}`}
+          >
+            Matched ({stats.matched ?? 0})
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px]">Rows/page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+              <option value={500}>500</option>
+              <option value={0}>{`All (${filteredRows.length})`}</option>
+            </select>
+          </div>
+
+          <div className="text-slate-600 font-mono text-[11px]">
+            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+            >
+              ‹
+            </button>
+            <span className="px-1.5 font-mono font-bold text-slate-700">
+              {currentPage}/{totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Rows table — status columns instead of dispatch fields */}
       <div className="border-2 border-slate-200 rounded overflow-hidden">
-        <div className="max-h-[400px] overflow-y-auto overflow-x-auto">
+        <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
@@ -1123,8 +1393,8 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 300).map((r, i) => (
-                <tr key={i} className={`border-b border-neutral-100 ${!r.matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
+              {paginatedRows.map((r, i) => (
+                <tr key={i} className={`border-b border-neutral-100 ${r.has_dispatch_discrepancy ? "bg-amber-50/50" : !r.matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
                   <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
                   <td className="p-2 font-mono text-[11px]">
                     <div>{r.order_id || "—"}</div>
@@ -1152,17 +1422,10 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
                   </td>
                 </tr>
               ))}
-              {rows.length > 300 && (
-                <tr>
-                  <td colSpan={8} className="p-3 text-center text-xs text-slate-500 italic">
-                    Showing first 300 of {rows.length} rows. All rows will be committed.
-                  </td>
-                </tr>
-              )}
-              {rows.length === 0 && (
+              {paginatedRows.length === 0 && (
                 <tr>
                   <td colSpan={8} className="p-6 text-center text-sm text-slate-400 italic">
-                    No rows parsed — check header row + column map.
+                    {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
                   </td>
                 </tr>
               )}
@@ -1194,6 +1457,14 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
 }
 
 function ClassificationBadges({ r }) {
+  if (r.has_dispatch_discrepancy) {
+    return (
+      <div className="text-amber-800 text-[10px] leading-tight">
+        <Badge color="orange">dispatch discrepancy</Badge>
+        <div className="mt-1 max-w-[200px] text-amber-700 font-semibold">{r.discrepancy_reason || "Internal dispatch record found"}</div>
+      </div>
+    );
+  }
   if (!r.matched) {
     return (
       <div className="text-red-700 text-[10px] leading-tight">
@@ -1208,6 +1479,7 @@ function ClassificationBadges({ r }) {
   if (r.never_touched_inventory) return <Badge color="slate">never packed</Badge>;
   return <Badge color="slate">—</Badge>;
 }
+
 
 // A compact funnel: total → packed → minus reversals → net sold.
 function FunnelViz({ stats, breakdown }) {
@@ -1311,6 +1583,8 @@ export function SettlementImportDrawer({ onClose, onDone }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [committed, setCommitted] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
 
   const fileInputRef = useRef(null);
 
@@ -1318,6 +1592,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
     if (!file) { setError("Please select a settlement CSV/Excel file"); return; }
     setError("");
     setLoading(true);
+    setPage(1);
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -1352,6 +1627,13 @@ export function SettlementImportDrawer({ onClose, onDone }) {
       setLoading(false);
     }
   };
+
+  const previewRows = preview?.rows || [];
+  const effectivePageSize = pageSize === 0 ? previewRows.length || 1 : pageSize;
+  const totalPages = Math.max(1, Math.ceil(previewRows.length / effectivePageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIdx = (currentPage - 1) * effectivePageSize;
+  const paginatedRows = pageSize === 0 ? previewRows : previewRows.slice(startIdx, startIdx + effectivePageSize);
 
   return (
     <Drawer onClose={onClose} title="Import Settlement Payout CSV" width="max-w-4xl">
@@ -1411,28 +1693,30 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                   type="file"
                   ref={fileInputRef}
                   accept=".csv,.xlsx,.xls"
-                  onChange={(e) => setFile(e.target.files[0])}
-                  className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-slate-900 file:text-white hover:file:bg-slate-800"
+                  onChange={(e) => setFile(e.target.files[0] || null)}
+                  className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#0F172A] file:text-white hover:file:bg-slate-700"
                 />
               </div>
             </div>
 
             <div className="flex justify-end gap-2">
-              <BtnSecondary onClick={handlePreview} disabled={loading || !file}>
-                {loading && !preview ? "Processing..." : "Preview Matching & Variance"}
-              </BtnSecondary>
+              <BtnPrimary onClick={handlePreview} disabled={loading || !file}>
+                {loading ? "Parsing..." : "Preview Settlement Rows"}
+              </BtnPrimary>
             </div>
 
             {preview && (
-              <div className="space-y-4 border-t pt-4">
+              <div className="space-y-4 pt-4 border-t border-slate-200">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="bg-slate-50 p-3 border border-slate-200 rounded">
-                    <div className="text-[10px] text-slate-500 font-bold uppercase">Matched Rows</div>
-                    <div className="text-xl font-bold font-mono text-emerald-700">{preview.stats.matched_count} / {preview.stats.total_rows}</div>
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Total Rows</div>
+                    <div className="text-xl font-bold font-mono text-slate-900">{preview.stats.total_rows}</div>
                   </div>
                   <div className="bg-slate-50 p-3 border border-slate-200 rounded">
-                    <div className="text-[10px] text-slate-500 font-bold uppercase">Unmatched Rows</div>
-                    <div className="text-xl font-bold font-mono text-amber-700">{preview.stats.unmatched_count}</div>
+                    <div className="text-[10px] text-slate-500 font-bold uppercase">Matched / Unmatched</div>
+                    <div className="text-xl font-bold font-mono text-emerald-700">
+                      {preview.stats.matched_count} <span className="text-xs text-amber-600">/ {preview.stats.unmatched_count}</span>
+                    </div>
                   </div>
                   <div className="bg-slate-50 p-3 border border-slate-200 rounded">
                     <div className="text-[10px] text-slate-500 font-bold uppercase">Net Payout</div>
@@ -1441,6 +1725,50 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                   <div className="bg-slate-50 p-3 border border-slate-200 rounded">
                     <div className="text-[10px] text-slate-500 font-bold uppercase">Variance</div>
                     <div className="text-xl font-bold font-mono text-rose-700">₹{preview.stats.total_variance?.toLocaleString()}</div>
+                  </div>
+                </div>
+
+                {/* Pagination header */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-200 p-2.5 rounded text-xs">
+                  <div className="text-slate-600 font-mono text-[11px]">
+                    {previewRows.length === 0 ? "0 rows" : `Showing rows ${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, previewRows.length)} of ${previewRows.length}`}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-500 text-[11px]">Rows/page:</span>
+                      <select
+                        value={pageSize}
+                        onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+                        className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
+                      >
+                        <option value={50}>50</option>
+                        <option value={100}>100</option>
+                        <option value={250}>250</option>
+                        <option value={0}>{`All (${previewRows.length})`}</option>
+
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={currentPage <= 1}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+                      >
+                        ‹
+                      </button>
+                      <span className="px-1.5 font-mono font-bold text-slate-700">
+                        {currentPage}/{totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={currentPage >= totalPages}
+                        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                        className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
+                      >
+                        ›
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -1460,7 +1788,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {preview.rows?.slice(0, 150).map((r, i) => {
+                      {paginatedRows.map((r, i) => {
                         const fees = (r.commission || 0) + (r.shipping_fee || 0) + (r.rto_charge || 0);
                         return (
                           <tr key={i} className={`border-b border-slate-100 ${!r.matched ? "bg-amber-50/40" : "hover:bg-slate-50"}`}>
@@ -1487,7 +1815,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                 <div className="flex justify-end gap-2 pt-2 border-t">
                   <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
                   <BtnPrimary onClick={handleCommit} disabled={loading}>
-                    {loading ? "Committing..." : "Commit Settlement Payout"}
+                    {loading ? "Committing..." : `Commit Settlement Payout (${previewRows.length} rows)`}
                   </BtnPrimary>
                 </div>
               </div>

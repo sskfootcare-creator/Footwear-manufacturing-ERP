@@ -32,6 +32,7 @@ import { API } from "../lib/api";
 const emptyLine = {
   style_code: "",       // Internal SSK style code (SSK_XXXXX). MUST be filled before save.
   external_sku: "",     // Client's / marketplace's raw code from PO (preserved for sku_map)
+  resolution_warning: "", // Warning message if auto-resolution failed
   description: "",
   color: "",
   size: "",
@@ -40,6 +41,7 @@ const emptyLine = {
   unit_price: 0,
   amount: 0,
 };
+
 const emptyPO = {
   po_number: "",
   po_date: "",
@@ -151,6 +153,7 @@ export default function POs() {
         rawLines.map(async (li) => {
           const ext = String(li.style_code || li.item_code || "").trim();
           let mappedStyle = "";
+          let resolutionWarning = "";
           // If the external code is itself already an SSK code, use it directly.
           if (ext && validCodes.has(ext.toUpperCase())) {
             mappedStyle = ext;
@@ -165,12 +168,13 @@ export default function POs() {
                 mappedStyle = r.data.style_code;
               }
             } catch {
-              /* resolver best-effort; leave unmapped */
+              resolutionWarning = "Could not auto-resolve SKU mapping — check manually";
             }
           }
           return {
             style_code: mappedStyle,
             external_sku: ext,
+            resolution_warning: resolutionWarning,
             description: li.description || "",
             color: li.color || "",
             size: String(li.size || ""),
@@ -183,6 +187,7 @@ export default function POs() {
             ),
           };
         }),
+
       );
 
       setForm({
@@ -277,43 +282,6 @@ export default function POs() {
     }
 
     try {
-      // Persist new sku_map entries for lines where external_sku differs from mapped style.
-      // Best-effort — swallow 409 (already mapped) and only surface hard failures.
-      if (form.client_name) {
-        await Promise.all(
-          form.line_items
-            .filter(
-              (li) =>
-                li.external_sku &&
-                li.external_sku.trim().toUpperCase() !==
-                li.style_code.trim().toUpperCase(),
-            )
-            .map(async (li) => {
-              const style = styles.find(
-                (s) =>
-                  s.code.trim().toUpperCase() ===
-                  li.style_code.trim().toUpperCase(),
-              );
-              if (!style) return;
-              try {
-                await http.post("/sku-map", {
-                  style_id: style.id,
-                  source_type: "b2b_client",
-                  source_name: form.client_name,
-                  external_sku: li.external_sku,
-                  external_style_name: li.description || "",
-                  color_map: {},
-                  size_map: {},
-                });
-              } catch (e) {
-                if (e.response?.status !== 409) {
-                  console.warn("sku_map upsert failed:", e);
-                }
-              }
-            }),
-        );
-      }
-
       const body = {
         ...form,
         line_items: form.line_items.map((li) => ({
@@ -322,6 +290,7 @@ export default function POs() {
           unit_price: Number(li.unit_price),
           amount: Number(li.amount),
         })),
+
         cgst_rate: Number(form.cgst_rate),
         sgst_rate: Number(form.sgst_rate),
         igst_rate: Number(form.igst_rate),
@@ -709,10 +678,14 @@ export default function POs() {
                             testId={`po-line-${i}-style-select`}
                           />
                           {!isStyleValid && (
-                            <div className="text-[9px] text-red-600 font-bold mt-0.5">
-                              Mapping required
+                            <div
+                              className="text-[9px] text-red-600 font-bold mt-0.5"
+                              data-testid={`po-line-${i}-resolution-warning`}
+                            >
+                              {li.resolution_warning || "Mapping required"}
                             </div>
                           )}
+
                           {isNewMapping && (
                             <div
                               className="text-[9px] text-blue-700 font-bold mt-0.5"
