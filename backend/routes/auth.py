@@ -52,7 +52,7 @@ from models.auth import (
 
 log = logging.getLogger(__name__)
 
-auth_router = APIRouter()
+auth_router = APIRouter(prefix="/api", tags=["Authentication & Users"])
 
 # ---------------------------------------------------------------------------
 # Rate-limit state (in-memory fallback; Redis if REDIS_URL is set)
