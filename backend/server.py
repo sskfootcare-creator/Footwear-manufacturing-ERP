@@ -322,7 +322,8 @@ if _frontend_url_env:
 if _cors_origins_env:
     _raw_origins.extend([o.strip() for o in _cors_origins_env.split(",") if o.strip()])
 
-_cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or None
+_default_cors_regex = r"^https:\/\/(?:[a-zA-Z0-9_-]+\.)*(?:ssk-footcare-manufacturing-erp|footwear-manufacturing(?:-[a-zA-Z0-9_-]+)?-ssk-footcare)\.vercel\.app$"
+_cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or _default_cors_regex
 
 app.add_middleware(
     CORSMiddleware,
