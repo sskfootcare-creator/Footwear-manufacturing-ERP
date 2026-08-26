@@ -5,6 +5,7 @@ import time
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import HTTPException, Response
 import server
+import routes.auth as auth_routes
 from server import (
     oid,
     login,
@@ -39,6 +40,7 @@ def fresh_db(monkeypatch):
 async def test_in_memory_rate_limiting_lockout_and_clear(fresh_db, monkeypatch):
     """Verify single-instance rate limiting works correctly with 5-attempt limit and clear-on-success."""
     monkeypatch.setattr(server, "redis_client", None)
+    monkeypatch.setattr(auth_routes, "redis_client", None)
     server._login_failures.clear()
 
     test_ip = "10.0.0.1"
@@ -130,6 +132,7 @@ async def test_distributed_multi_instance_rate_limiting(fresh_db, monkeypatch):
     """Simulate two backend instances (Instance A and Instance B) sharing the same Redis store."""
     shared_redis = MockRedisStore()
     monkeypatch.setattr(server, "redis_client", shared_redis)
+    monkeypatch.setattr(auth_routes, "redis_client", shared_redis)
 
     test_ip = "10.0.0.99"
     req = DummyRequest(client_ip=test_ip)

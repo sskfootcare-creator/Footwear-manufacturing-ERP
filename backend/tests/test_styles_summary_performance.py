@@ -3,6 +3,7 @@ import pytest
 import os
 import json
 import time
+from unittest.mock import MagicMock, AsyncMock
 from motor.motor_asyncio import AsyncIOMotorClient
 import server
 from server import (
@@ -20,18 +21,80 @@ class DummyRequest:
     cookies = {}
 
 
+class MockCursor:
+    def __init__(self, items):
+        self.items = items
+
+    def sort(self, *args, **kwargs):
+        return self
+
+    async def to_list(self, limit=10000):
+        return self.items[:limit]
+
+
+class MockPerformanceDB:
+    def __init__(self, styles, jobs=None, lifecycle=None):
+        self._styles = styles
+        self._jobs = jobs or []
+        self._lifecycle = lifecycle or []
+
+        self.styles = MagicMock()
+        self.styles.find = MagicMock(side_effect=self._find_styles)
+        self.styles.find_one = AsyncMock(side_effect=self._find_one_style)
+        self.styles.insert_many = AsyncMock(side_effect=self._insert_many_styles)
+        self.styles.delete_many = AsyncMock(return_value=MagicMock(deleted_count=len(styles)))
+
+        self.production_jobs = MagicMock()
+        self.production_jobs.find = MagicMock(side_effect=self._find_jobs)
+
+        self.style_lifecycle = MagicMock()
+        self.style_lifecycle.find = MagicMock(side_effect=lambda q, proj=None: MockCursor(self._lifecycle))
+
+    def _find_styles(self, query=None):
+        if not query:
+            return MockCursor(self._styles)
+        res = []
+        for s in self._styles:
+            if "code" in query and "$regex" in query["code"]:
+                rx = query["code"]["$regex"]
+                if rx.startswith("^") and s.get("code", "").startswith(rx[1:]):
+                    res.append(s)
+                elif rx in s.get("code", ""):
+                    res.append(s)
+            elif "$or" in query:
+                res.append(s)
+            else:
+                res.append(s)
+        return MockCursor(res)
+
+    async def _find_one_style(self, query):
+        for s in self._styles:
+            if "_id" in query and str(s.get("_id")) == str(query["_id"]):
+                return dict(s)
+            if "code" in query and s.get("code") == query["code"]:
+                return dict(s)
+        return None
+
+    async def _insert_many_styles(self, docs):
+        self._styles.extend(docs)
+        res = MagicMock()
+        res.inserted_ids = [d.get("_id", f"id_{i}") for i, d in enumerate(docs)]
+        return res
+
+    def _find_jobs(self, query):
+        return MockCursor(self._jobs)
+
+
 @pytest.fixture(autouse=True)
-def fresh_db(monkeypatch):
-    c = AsyncIOMotorClient(os.environ["MONGO_URL"])
-    d = c[os.environ["DB_NAME"]]
-    monkeypatch.setattr(server, "client", c)
-    monkeypatch.setattr(server, "db", d)
-    yield d
-    c.close()
+def setup_db(monkeypatch):
+    # Initialize with mock DB for offline / high-speed CI benchmarking
+    mock_db = MockPerformanceDB([])
+    monkeypatch.setattr(server, "db", mock_db)
+    yield mock_db
 
 
 @pytest.mark.anyio
-async def test_styles_summary_payload_reduction_and_full_edit(fresh_db, monkeypatch):
+async def test_styles_summary_payload_reduction_and_full_edit(setup_db, monkeypatch):
     """Verify: measure response size/time for /styles/summary vs the old full /styles call
     against a dataset with 100+ styles — confirm meaningful reduction. Confirm the
     edit drawer still loads full BOM correctly when opened via get_style.
@@ -71,6 +134,8 @@ async def test_styles_summary_payload_reduction_and_full_edit(fresh_db, monkeypa
             {"name": "Packing", "rate": 10.0},
         ]
         test_styles.append({
+            "_id": f"507f1f77bcf86cd799439{i:03d}",
+            "id": f"507f1f77bcf86cd799439{i:03d}",
             "code": f"{prefix}{i:03d}",
             "name": f"Performance Test Footwear Style #{i}",
             "category": "Sneakers" if i % 2 == 0 else "Formal",
