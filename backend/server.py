@@ -1218,10 +1218,8 @@ def compute_style_costing(style: dict) -> dict:
     }
 
 
-async def compute_style_costing_async(style: dict, db) -> dict:
-    """Computes style costing, automatically incorporating real worker assignment rates
-    if production jobs exist for this style.
-    """
+def compute_style_costing_from_jobs(style: dict, jobs: list) -> dict:
+    """Computes style costing given a list of pre-fetched production jobs."""
     c = compute_style_costing(style)
     c["planned_labor_cost"] = c["labor_cost"]
     c["labor_source"] = "estimated"
@@ -1229,22 +1227,6 @@ async def compute_style_costing_async(style: dict, db) -> dict:
     c["assigned_roles"] = []
 
     try:
-        style_id = str(style.get("_id", style.get("id", "")))
-        style_code = style.get("code", "")
-
-        if not style_id and not style_code:
-            return c
-
-        query_conditions = []
-        if style_id:
-            query_conditions.append({"style_id": style_id})
-        if style_code:
-            query_conditions.append({"style_code": style_code})
-
-        jobs = await db.production_jobs.find(
-            {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
-        ).to_list(500)
-
         assigned_roles_map = {}
         job_rates = []
 
@@ -1304,6 +1286,31 @@ async def compute_style_costing_async(style: dict, db) -> dict:
         pass
 
     return c
+
+
+async def compute_style_costing_async(style: dict, db) -> dict:
+    """Computes style costing, automatically incorporating real worker assignment rates
+    if production jobs exist for this style.
+    """
+    try:
+        style_id = str(style.get("_id", style.get("id", "")))
+        style_code = style.get("code", "")
+
+        if not style_id and not style_code:
+            return compute_style_costing_from_jobs(style, [])
+
+        query_conditions = []
+        if style_id:
+            query_conditions.append({"style_id": style_id})
+        if style_code:
+            query_conditions.append({"style_code": style_code})
+
+        fetched_jobs = await db.production_jobs.find(
+            {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
+        ).to_list(500)
+        return compute_style_costing_from_jobs(style, fetched_jobs)
+    except Exception:
+        return compute_style_costing_from_jobs(style, [])
 
 
 
@@ -4559,10 +4566,50 @@ async def list_styles_summary(
         d["style_id"]
         for d in await db.style_lifecycle.find({}, {"style_id": 1}).to_list(20000)
     }
+
+    # ── Batch-fetch production jobs for all styles in a single query ──────────
+    style_ids = [str(d.get("_id") or d.get("id")) for d in docs if (d.get("_id") or d.get("id"))]
+    style_codes = [d.get("code") for d in docs if d.get("code")]
+
+    jobs_by_style_id = defaultdict(list)
+    jobs_by_style_code = defaultdict(list)
+
+    if style_ids or style_codes:
+        job_or = []
+        if style_ids:
+            job_or.append({"style_id": {"$in": style_ids}})
+        if style_codes:
+            job_or.append({"style_code": {"$in": style_codes}})
+        job_query = {"$or": job_or} if len(job_or) > 1 else job_or[0]
+        all_jobs = await db.production_jobs.find(job_query).to_list(50000)
+        for job in all_jobs:
+            jid = job.get("style_id")
+            if jid:
+                jobs_by_style_id[str(jid)].append(job)
+            jcode = job.get("style_code")
+            if jcode:
+                jobs_by_style_code[jcode].append(job)
+
     out = []
     for d in docs:
         d = stringify(d)
-        costing_full = await compute_style_costing_async(d, db)
+        sid = str(d.get("id") or d.get("_id") or "")
+        scode = d.get("code", "")
+
+        matched_jobs = []
+        seen_job_ids = set()
+        for job in jobs_by_style_id.get(sid, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+        for job in jobs_by_style_code.get(scode, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+
+        costing_full = compute_style_costing_from_jobs(d, matched_jobs)
         cost_summary = {
             "materials_cost": costing_full.get("materials_cost", 0.0),
             "labor_cost": costing_full.get("labor_cost", 0.0),
@@ -4629,10 +4676,50 @@ async def list_styles(
         d["style_id"]
         for d in await db.style_lifecycle.find({}, {"style_id": 1}).to_list(20000)
     }
+
+    # ── Batch-fetch production jobs for all styles in a single query ──────────
+    style_ids = [str(d.get("_id") or d.get("id")) for d in docs if (d.get("_id") or d.get("id"))]
+    style_codes = [d.get("code") for d in docs if d.get("code")]
+
+    jobs_by_style_id = defaultdict(list)
+    jobs_by_style_code = defaultdict(list)
+
+    if style_ids or style_codes:
+        job_or = []
+        if style_ids:
+            job_or.append({"style_id": {"$in": style_ids}})
+        if style_codes:
+            job_or.append({"style_code": {"$in": style_codes}})
+        job_query = {"$or": job_or} if len(job_or) > 1 else job_or[0]
+        all_jobs = await db.production_jobs.find(job_query).to_list(50000)
+        for job in all_jobs:
+            jid = job.get("style_id")
+            if jid:
+                jobs_by_style_id[str(jid)].append(job)
+            jcode = job.get("style_code")
+            if jcode:
+                jobs_by_style_code[jcode].append(job)
+
     out = []
     for d in docs:
         d = stringify(d)
-        d["costing"] = await compute_style_costing_async(d, db)
+        sid = str(d.get("id") or d.get("_id") or "")
+        scode = d.get("code", "")
+
+        matched_jobs = []
+        seen_job_ids = set()
+        for job in jobs_by_style_id.get(sid, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+        for job in jobs_by_style_code.get(scode, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+
+        d["costing"] = compute_style_costing_from_jobs(d, matched_jobs)
         d["in_online_pipeline"] = d["id"] in pipeline_ids
         out.append(d)
     return out
