@@ -78,7 +78,11 @@ class GenericMockCollection:
                     if pattern.lower() not in str(doc.get(k, "")).lower():
                         return False
             else:
-                if doc.get(k) != v:
+                doc_val = doc.get(k)
+                if isinstance(doc_val, list) and not isinstance(v, list):
+                    if v not in doc_val and str(v) not in [str(x) for x in doc_val]:
+                        return False
+                elif doc_val != v:
                     return False
         return True
 
@@ -204,6 +208,7 @@ class MockPosDB:
         self.advances = GenericMockCollection()
         self.settings = GenericMockCollection()
         self.counters = GenericMockCollection()
+        self.dispatch_records = GenericMockCollection()
 
 
 @pytest.fixture
@@ -336,6 +341,56 @@ def test_delete_po_with_reversal_movements(client, mock_pos_env, monkeypatch):
     assert len(mock_pos_env.production_jobs.store) == 0
 
 
+def test_delete_po_rejected_when_dispatch_record_exists(client, mock_pos_env):
+    # Setup PO, Job, and Dispatch Record
+    po_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({"_id": ObjectId(po_id), "po_number": "PO-DISPATCHED-01", "client_name": "Test Client"}))
+    job_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({"_id": ObjectId(job_id), "po_id": po_id, "po_number": "PO-DISPATCHED-01", "quantity": 50}))
+    dr_id = str(ObjectId())
+    asyncio.run(mock_pos_env.dispatch_records.insert_one({
+        "_id": ObjectId(dr_id),
+        "po_id": po_id,
+        "po_ids": [po_id],
+        "job_ids": [job_id],
+        "invoice_no": "INV-2026-999",
+    }))
+
+    # Attempt delete
+    del_resp = client.delete(f"/api/pos/{po_id}")
+    assert del_resp.status_code == 409
+    assert "Cannot delete PO — it has dispatch/invoice history" in del_resp.json()["detail"]
+
+    # Verify PO, jobs, and dispatch records are all untouched
+    assert po_id in mock_pos_env.pos.store
+    assert job_id in mock_pos_env.production_jobs.store
+    assert dr_id in mock_pos_env.dispatch_records.store
+
+
+def test_delete_po_rejected_when_invoice_exists(client, mock_pos_env):
+    # Setup PO, Job, and Invoice
+    po_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({"_id": ObjectId(po_id), "po_number": "PO-INVOICED-01", "client_name": "Test Client"}))
+    job_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({"_id": ObjectId(job_id), "po_id": po_id, "po_number": "PO-INVOICED-01", "quantity": 50}))
+    inv_id = str(ObjectId())
+    asyncio.run(mock_pos_env.invoices.insert_one({
+        "_id": ObjectId(inv_id),
+        "po_id": po_id,
+        "invoice_no": "INV-2026-888",
+    }))
+
+    # Attempt delete
+    del_resp = client.delete(f"/api/pos/{po_id}")
+    assert del_resp.status_code == 409
+    assert "Cannot delete PO — it has dispatch/invoice history" in del_resp.json()["detail"]
+
+    # Verify PO, jobs, and invoices are all untouched
+    assert po_id in mock_pos_env.pos.store
+    assert job_id in mock_pos_env.production_jobs.store
+    assert inv_id in mock_pos_env.invoices.store
+
+
 # -------------------- GRN & PAYMENT TESTS --------------------
 
 def test_grn_workflow(client, mock_pos_env, monkeypatch):
@@ -463,3 +518,187 @@ def test_production_job_procurement_gating(client, mock_pos_env, monkeypatch):
     lasting_ok = client.patch(f"/api/production/jobs/{job_id}", json={"stage": "lasting"})
     assert lasting_ok.status_code == 200
     assert lasting_ok.json()["stage"] == "lasting"
+
+
+# -------------------- PO COMPLETION STATUS & FILTERING TESTS --------------------
+
+def test_po_completed_status_when_all_jobs_dispatched_and_invoiced(client, mock_pos_env):
+    po_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({
+        "_id": ObjectId(po_id),
+        "po_number": "PO-COMP-101",
+        "client_name": "Full Client",
+        "total_quantity": 100,
+        "grand_total": 50000.0,
+    }))
+
+    # 2 jobs, both dispatched/archived
+    j1_id = str(ObjectId())
+    j2_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j1_id),
+        "po_id": po_id,
+        "po_number": "PO-COMP-101",
+        "stage": "dispatched",
+        "archived": True,
+        "invoice_generated_at": "2026-03-01T10:00:00Z",
+    }))
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j2_id),
+        "po_id": po_id,
+        "po_number": "PO-COMP-101",
+        "stage": "dispatched",
+        "archived": True,
+        "invoice_generated_at": "2026-03-01T10:00:00Z",
+    }))
+
+    # 1 invoice
+    inv_id = str(ObjectId())
+    asyncio.run(mock_pos_env.invoices.insert_one({
+        "_id": ObjectId(inv_id),
+        "po_id": po_id,
+        "po_number": "PO-COMP-101",
+        "invoice_no": "INV-2026-COMP",
+    }))
+
+    # Query single PO
+    get_resp = client.get(f"/api/pos/{po_id}")
+    assert get_resp.status_code == 200
+    po_data = get_resp.json()
+    assert po_data["is_completed"] is True
+    assert po_data["status"] == "completed"
+
+    # Query list
+    list_resp = client.get("/api/pos")
+    assert list_resp.status_code == 200
+    all_pos = list_resp.json()
+    matched = [p for p in all_pos if p["id"] == po_id]
+    assert len(matched) == 1
+    assert matched[0]["is_completed"] is True
+    assert matched[0]["status"] == "completed"
+
+
+def test_po_active_status_when_partially_dispatched(client, mock_pos_env):
+    po_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({
+        "_id": ObjectId(po_id),
+        "po_number": "PO-PART-202",
+        "client_name": "Partial Client",
+        "total_quantity": 100,
+        "grand_total": 50000.0,
+    }))
+
+    # 2 jobs: 1 dispatched, 1 still in stitching
+    j1_id = str(ObjectId())
+    j2_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j1_id),
+        "po_id": po_id,
+        "po_number": "PO-PART-202",
+        "stage": "dispatched",
+        "archived": True,
+        "invoice_generated_at": "2026-03-01T10:00:00Z",
+    }))
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j2_id),
+        "po_id": po_id,
+        "po_number": "PO-PART-202",
+        "stage": "stitching",
+        "archived": False,
+    }))
+
+    # Invoice exists for the partial shipment
+    inv_id = str(ObjectId())
+    asyncio.run(mock_pos_env.invoices.insert_one({
+        "_id": ObjectId(inv_id),
+        "po_id": po_id,
+        "po_number": "PO-PART-202",
+        "invoice_no": "INV-2026-PART",
+    }))
+
+    get_resp = client.get(f"/api/pos/{po_id}")
+    assert get_resp.status_code == 200
+    po_data = get_resp.json()
+    assert po_data["is_completed"] is False
+    assert po_data["status"] != "completed"
+
+
+def test_po_active_status_when_all_jobs_dispatched_without_invoice(client, mock_pos_env):
+    po_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({
+        "_id": ObjectId(po_id),
+        "po_number": "PO-NOINV-303",
+        "client_name": "No Invoice Client",
+        "total_quantity": 50,
+        "grand_total": 25000.0,
+    }))
+
+    # Job is dispatched but no invoice or dispatch record exists
+    j1_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j1_id),
+        "po_id": po_id,
+        "po_number": "PO-NOINV-303",
+        "stage": "dispatched",
+        "archived": True,
+    }))
+
+    get_resp = client.get(f"/api/pos/{po_id}")
+    assert get_resp.status_code == 200
+    po_data = get_resp.json()
+    assert po_data["is_completed"] is False
+    assert po_data["status"] != "completed"
+
+
+def test_list_pos_status_filter_query(client, mock_pos_env):
+    # PO 1: Completed (job dispatched + invoice)
+    po1_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({
+        "_id": ObjectId(po1_id),
+        "po_number": "PO-FILT-COMP",
+        "client_name": "Client A",
+    }))
+    j1_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j1_id),
+        "po_id": po1_id,
+        "po_number": "PO-FILT-COMP",
+        "stage": "dispatched",
+        "archived": True,
+        "invoice_generated_at": "2026-03-01T10:00:00Z",
+    }))
+    inv1_id = str(ObjectId())
+    asyncio.run(mock_pos_env.invoices.insert_one({
+        "_id": ObjectId(inv1_id),
+        "po_id": po1_id,
+        "po_number": "PO-FILT-COMP",
+    }))
+
+    # PO 2: Active (job in assembly, no invoice)
+    po2_id = str(ObjectId())
+    asyncio.run(mock_pos_env.pos.insert_one({
+        "_id": ObjectId(po2_id),
+        "po_number": "PO-FILT-ACT",
+        "client_name": "Client B",
+    }))
+    j2_id = str(ObjectId())
+    asyncio.run(mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(j2_id),
+        "po_id": po2_id,
+        "po_number": "PO-FILT-ACT",
+        "stage": "assembly",
+    }))
+
+    # Filter ?status=active
+    active_resp = client.get("/api/pos?status=active")
+    assert active_resp.status_code == 200
+    active_ids = [p["id"] for p in active_resp.json()]
+    assert po2_id in active_ids
+    assert po1_id not in active_ids
+
+    # Filter ?status=completed
+    comp_resp = client.get("/api/pos?status=completed")
+    assert comp_resp.status_code == 200
+    comp_ids = [p["id"] for p in comp_resp.json()]
+    assert po1_id in comp_ids
+    assert po2_id not in comp_ids

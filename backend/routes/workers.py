@@ -537,11 +537,27 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
 
         total_marked += q_val
 
+        worker_rate = current_asgn.get("rate_per_pair")
+        if worker_rate is None:
+            w_doc = await db.workers.find_one({"_id": oid(caller_wid)})
+            worker_rate = float(w_doc.get("rate_per_pair", 0) or 0) if w_doc else 0.0
+        else:
+            worker_rate = float(worker_rate or 0)
+
+        completed_by = {
+            "worker_id": str(caller_wid),
+            "worker_name": current_asgn.get("worker_name") or u.get("name", ""),
+            "rate_per_pair": worker_rate,
+            "at": now,
+        }
+
         rfp = {
             "role": worker_role,
             "worker_id": caller_wid,
             "worker_name": u.get("name", ""),
+            "rate_per_pair": worker_rate,
             "completed_qty": q_val,
+            "completed_by": completed_by,
             "at": now,
             "notes": payload.notes or "",
         }
@@ -549,12 +565,14 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
         update_dict = {
             "ready_for_pickup": rfp,
             "completed_qty": q_val,
+            "completed_by": completed_by,
             "updated_at": now,
             f"components.{current_stage}_done": True,
             f"components.{current_stage}_completed_qty": q_val,
             f"assignments.{current_stage}.status": "completed",
             f"assignments.{current_stage}.completed_qty": q_val,
             f"assignments.{current_stage}.completed_at": now,
+            f"assignments.{current_stage}.completed_by": completed_by,
         }
 
         await db.production_jobs.update_one(
@@ -568,6 +586,7 @@ async def ready_for_pickup(job_id: str, payload: ReadyForPickupIn, request: Requ
                         "worker_id": caller_wid,
                         "by": u.get("name", ""),
                         "completed_qty": q_val,
+                        "completed_by": completed_by,
                         "notes": payload.notes or "",
                         "at": now,
                     }

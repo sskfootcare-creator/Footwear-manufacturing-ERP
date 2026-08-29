@@ -72,6 +72,7 @@ export default function POs() {
   const [view, setView] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [formError, setFormError] = useState("");
+  const [statusFilter, setStatusFilter] = useState("active"); // "active" | "completed"
 
   const [selectedPoForInvoices, setSelectedPoForInvoices] = useState(null);
   const [poInvoicesList, setPoInvoicesList] = useState([]);
@@ -113,6 +114,19 @@ export default function POs() {
   useEffect(() => {
     load();
   }, []);
+
+  const activePos = useMemo(() => {
+    return pos.filter((p) => !p.is_completed && p.status !== "completed");
+  }, [pos]);
+
+  const completedPos = useMemo(() => {
+    return pos.filter((p) => p.is_completed || p.status === "completed");
+  }, [pos]);
+
+  const displayedPos = useMemo(() => {
+    if (statusFilter === "completed") return completedPos;
+    return activePos;
+  }, [statusFilter, activePos, completedPos]);
 
   const validStyleCodes = useMemo(() => {
     return new Set(styles.map((s) => s.code.trim().toUpperCase()));
@@ -387,12 +401,59 @@ export default function POs() {
           </div>
         </div>
 
+        {/* Tabs Bar: Active vs Completed */}
+        <div className="flex items-center justify-between border-b border-slate-200">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setStatusFilter("active")}
+              data-testid="tab-active-pos"
+              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px ${
+                statusFilter === "active"
+                  ? "border-[#1E3A8A] text-[#1E3A8A]"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Active
+              <span
+                className={`px-2 py-0.5 text-[10px] rounded-full font-mono font-bold ${
+                  statusFilter === "active"
+                    ? "bg-[#1E3A8A] text-white"
+                    : "bg-slate-100 text-slate-600"
+                }`}
+              >
+                {activePos.length}
+              </span>
+            </button>
+            <button
+              onClick={() => setStatusFilter("completed")}
+              data-testid="tab-completed-pos"
+              className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px ${
+                statusFilter === "completed"
+                  ? "border-[#16A34A] text-[#16A34A]"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Completed
+              <span
+                className={`px-2 py-0.5 text-[10px] rounded-full font-mono font-bold ${
+                  statusFilter === "completed"
+                    ? "bg-[#16A34A] text-white"
+                    : "bg-slate-100 text-slate-600"
+                }`}
+              >
+                {completedPos.length}
+              </span>
+            </button>
+          </div>
+        </div>
+
         <Card className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm" data-testid="pos-table">
               <thead className="bg-slate-50 border-b-2 border-slate-200">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                   <th className="px-4 py-3 font-bold sticky left-0 z-10 bg-slate-50">PO #</th>
+                  <th className="px-4 py-3 font-bold">Status</th>
                   <th className="px-4 py-3 font-bold">Date</th>
                   <th className="px-4 py-3 font-bold">Client</th>
                   <th className="px-4 py-3 font-bold text-right">Lines</th>
@@ -405,24 +466,36 @@ export default function POs() {
                 </tr>
               </thead>
               <tbody>
-                {pos.length === 0 ? (
+                {displayedPos.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="8"
+                      colSpan="9"
                       className="px-6 py-10 text-center text-slate-400"
                     >
-                      No POs yet. Click "Upload PO (AI)" to import your first
-                      one.
+                      {statusFilter === "completed"
+                        ? "No completed POs yet. POs with all jobs dispatched and invoiced will appear here."
+                        : "No active POs. Click \"New PO\" or \"Upload PO (AI)\" to import one."}
                     </td>
                   </tr>
                 ) : (
-                  pos.map((p) => (
+                  displayedPos.map((p) => (
                     <tr
                       key={p.id}
                       className="border-b border-slate-100 hover:bg-slate-50"
                     >
                       <td className="px-4 py-3 font-mono font-bold sticky left-0 z-10 bg-white">
                         {p.po_number}
+                      </td>
+                      <td className="px-4 py-3">
+                        {p.is_completed || p.status === "completed" ? (
+                          <Badge tone="success" className="text-[10px] uppercase font-bold tracking-wider">
+                            Completed
+                          </Badge>
+                        ) : (
+                          <Badge tone="amber" className="text-[10px] uppercase font-bold tracking-wider">
+                            Active
+                          </Badge>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-xs">{p.po_date}</td>
                       <td className="px-4 py-3">{p.client_name}</td>
@@ -859,6 +932,22 @@ export default function POs() {
               <Field label="PO Date" value={view.po_date} />
               <Field label="Delivery" value={view.delivery_date} />
               <Field label="Payment Terms" value={view.payment_terms} />
+              <div>
+                <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 mb-1">
+                  Status
+                </div>
+                <div>
+                  {view.is_completed || view.status === "completed" ? (
+                    <Badge tone="success" className="text-[10px] uppercase font-bold tracking-wider">
+                      Completed
+                    </Badge>
+                  ) : (
+                    <Badge tone="amber" className="text-[10px] uppercase font-bold tracking-wider">
+                      Active
+                    </Badge>
+                  )}
+                </div>
+              </div>
             </div>
             <div>
               <Field label="Billing" value={view.billing_address} />

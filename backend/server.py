@@ -184,6 +184,7 @@ from routes.pos import (
     pos_router,
     validate_po_styles,
     _attach_po_profitability,
+    _attach_po_status,
     _sync_po_sku_mappings,
     _flag_jobs,
     _archive_if_complete,

@@ -244,6 +244,130 @@ async def _attach_po_profitability(po_docs: list, db=None):
                 item["profitability"] = await compute_po_profitability(item, style_doc, db)
 
 
+async def _attach_po_status(po_docs: list, db=None):
+    """Compute and attach derived completion status for purchase orders.
+    A PO is completed when ALL its production_jobs are archived/dispatched AND it has at least one invoice/dispatch on file.
+    """
+    db = db if db is not None else get_db()
+    if not po_docs:
+        return
+
+    pid_strs = []
+    pid_oids = []
+    po_nums = []
+    for d in po_docs:
+        raw_id = d.get("_id") or d.get("id")
+        if raw_id:
+            s_id = str(raw_id)
+            pid_strs.append(s_id)
+            if ObjectId.is_valid(s_id):
+                try:
+                    pid_oids.append(oid(s_id))
+                except Exception:
+                    pass
+        num = d.get("po_number")
+        if num:
+            po_nums.append(str(num))
+
+    job_query_or = []
+    if pid_strs:
+        job_query_or.append({"po_id": {"$in": pid_strs}})
+    if pid_oids:
+        job_query_or.append({"po_id": {"$in": pid_oids}})
+    if po_nums:
+        job_query_or.append({"po_number": {"$in": po_nums}})
+
+    jobs = []
+    if job_query_or and hasattr(db, "production_jobs"):
+        try:
+            jobs = await db.production_jobs.find(
+                {"$or": job_query_or} if len(job_query_or) > 1 else job_query_or[0],
+                {"po_id": 1, "po_number": 1, "archived": 1, "stage": 1, "invoice_generated_at": 1, "status": 1}
+            ).to_list(10000)
+        except Exception as e:
+            log.warning(f"Error querying production_jobs in _attach_po_status: {e}")
+
+    inv_query_or = []
+    if pid_strs:
+        inv_query_or.append({"po_id": {"$in": pid_strs}})
+        inv_query_or.append({"po_ids": {"$in": pid_strs}})
+    if po_nums:
+        inv_query_or.append({"po_number": {"$in": po_nums}})
+        inv_query_or.append({"po_numbers": {"$in": po_nums}})
+
+    invoices = []
+    if inv_query_or and hasattr(db, "invoices"):
+        try:
+            invoices = await db.invoices.find(
+                {"$or": inv_query_or} if len(inv_query_or) > 1 else inv_query_or[0],
+                {"po_id": 1, "po_ids": 1, "po_number": 1, "po_numbers": 1}
+            ).to_list(10000)
+        except Exception as e:
+            log.warning(f"Error querying invoices in _attach_po_status: {e}")
+
+    dr_query_or = []
+    if pid_strs:
+        dr_query_or.append({"po_id": {"$in": pid_strs}})
+        dr_query_or.append({"po_ids": {"$in": pid_strs}})
+    if po_nums:
+        dr_query_or.append({"po_number": {"$in": po_nums}})
+        dr_query_or.append({"po_numbers": {"$in": po_nums}})
+
+    dispatch_records = []
+    if dr_query_or and hasattr(db, "dispatch_records"):
+        try:
+            dispatch_records = await db.dispatch_records.find(
+                {"$or": dr_query_or} if len(dr_query_or) > 1 else dr_query_or[0],
+                {"po_id": 1, "po_ids": 1, "po_number": 1, "po_numbers": 1}
+            ).to_list(10000)
+        except Exception as e:
+            log.warning(f"Error querying dispatch_records in _attach_po_status: {e}")
+
+    def _is_job_finished(j: dict) -> bool:
+        return bool(
+            j.get("archived") is True
+            or j.get("stage") in ("dispatched", "completed")
+            or j.get("status") in ("dispatched", "completed")
+            or j.get("invoice_generated_at")
+        )
+
+    for d in po_docs:
+        d_id = str(d.get("_id") or d.get("id") or "")
+        d_num = str(d.get("po_number") or "")
+
+        po_jobs = [
+            j for j in jobs
+            if (d_id and str(j.get("po_id") or "") == d_id)
+            or (d_num and str(j.get("po_number") or "") == d_num)
+        ]
+
+        po_invoices = [
+            inv for inv in invoices
+            if (d_id and str(inv.get("po_id") or "") == d_id)
+            or (d_id and isinstance(inv.get("po_ids"), list) and d_id in [str(x) for x in inv["po_ids"]])
+            or (d_num and (str(inv.get("po_number") or "") == d_num or (isinstance(inv.get("po_numbers"), list) and d_num in inv["po_numbers"])))
+        ]
+
+        po_dispatches = [
+            dr for dr in dispatch_records
+            if (d_id and str(dr.get("po_id") or "") == d_id)
+            or (d_id and isinstance(dr.get("po_ids"), list) and d_id in [str(x) for x in dr["po_ids"]])
+            or (d_num and (str(dr.get("po_number") or "") == d_num or (isinstance(dr.get("po_numbers"), list) and d_num in dr["po_numbers"])))
+        ]
+
+        has_jobs = len(po_jobs) > 0
+        all_jobs_done = has_jobs and all(_is_job_finished(j) for j in po_jobs)
+        has_invoice_or_dispatch = (len(po_invoices) > 0) or (len(po_dispatches) > 0)
+
+        is_completed = bool(all_jobs_done and has_invoice_or_dispatch)
+        d["is_completed"] = is_completed
+        d["computed_status"] = "completed" if is_completed else "active"
+        if is_completed:
+            d["status"] = "completed"
+        elif not d.get("status") or d.get("status") == "completed":
+            d["status"] = "active"
+
+
 async def validate_po_styles(payload: POIn, db=None):
     """Validate and normalise style codes on a PO payload."""
     db = db if db is not None else get_db()
@@ -961,11 +1085,16 @@ async def get_b2b_profitability(
 # ── Purchase Orders Endpoints ────────────────────────────────────────────────
 
 @pos_router.get("/pos")
-async def list_pos(request: Request):
+async def list_pos(request: Request, status: Optional[str] = Query(None)):
     await _get_user(request)
     db = get_db()
     docs = await db.pos.find({}).sort("created_at", -1).to_list(1000)
     await _attach_po_profitability(docs, db)
+    await _attach_po_status(docs, db)
+    if status == "completed":
+        docs = [d for d in docs if d.get("is_completed")]
+    elif status == "active":
+        docs = [d for d in docs if not d.get("is_completed")]
     return [stringify(d) for d in docs]
 
 
@@ -977,6 +1106,7 @@ async def get_po(pid: str, request: Request):
     if not d:
         raise HTTPException(404, "Not found")
     await _attach_po_profitability([d], db)
+    await _attach_po_status([d], db)
     return stringify(d)
 
 
@@ -1095,6 +1225,17 @@ async def delete_po(pid: str, request: Request):
     if not po:
         raise HTTPException(404, "Purchase Order not found")
     po_num = po.get("po_number", "N/A")
+
+    if (
+        await db.dispatch_records.count_documents({"$or": [{"po_id": pid}, {"po_ids": pid}]}) > 0
+        or await db.invoices.count_documents({"$or": [{"po_id": pid}, {"po_ids": pid}]}) > 0
+    ):
+        raise HTTPException(
+            409,
+            "Cannot delete PO — it has dispatch/invoice history. "
+            "Once goods are dispatched and invoiced, the PO "
+            "record must be retained for accounting/compliance.",
+        )
 
     from routes.materials import _compute_material_inventory_summary
 
@@ -1945,6 +2086,25 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         
     if payload.completed_qty is not None:
         update["completed_qty"] = payload.completed_qty
+        curr_stage = payload.stage if payload.stage else job.get("stage")
+        asgn = (job.get("assignments") or {}).get(curr_stage) or {}
+        if asgn.get("worker_id"):
+            w_rate = asgn.get("rate_per_pair")
+            if w_rate is None:
+                w_doc = await db.workers.find_one({"_id": oid(asgn["worker_id"])})
+                w_rate = float(w_doc.get("rate_per_pair", 0) or 0) if w_doc else 0.0
+            else:
+                w_rate = float(w_rate or 0)
+            completed_by = {
+                "worker_id": str(asgn["worker_id"]),
+                "worker_name": asgn.get("worker_name", ""),
+                "rate_per_pair": w_rate,
+                "at": now_iso(),
+            }
+            update["completed_by"] = completed_by
+            update[f"assignments.{curr_stage}.completed_by"] = completed_by
+            update[f"assignments.{curr_stage}.completed_qty"] = payload.completed_qty
+            update[f"assignments.{curr_stage}.completed_at"] = now_iso()
     if payload.rejected_qty is not None:
         update["rejected_qty"] = payload.rejected_qty
     if payload.qc_pass is not None:
@@ -1953,6 +2113,8 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         "stage": payload.stage, "at": now_iso(), "by": u["email"],
         "notes": payload.notes or "",
         "qc_pass": payload.qc_pass, "rejected_qty": payload.rejected_qty,
+        "completed_qty": payload.completed_qty,
+        "completed_by": update.get("completed_by"),
     }
     mongo_update: dict = {"$set": update, "$push": {"history": history_entry}}
     if job.get("stage") != payload.stage:
@@ -1992,16 +2154,24 @@ async def update_job_assignment(jid: str, payload: AssignmentUpdate, request: Re
     if not job:
         raise HTTPException(404, "Not found")
     assignments = job.get("assignments") or {}
+    prev_asgn = assignments.get(payload.role) or {}
     if payload.worker_id:
         worker = await db.workers.find_one({"_id": oid(payload.worker_id)})
         if not worker:
             raise HTTPException(404, "Worker not found")
         rate = payload.rate_per_pair if payload.rate_per_pair is not None else worker.get("rate_per_pair", 0)
-        assignments[payload.role] = {
+        new_asgn = {
             "worker_id": payload.worker_id,
             "worker_name": worker.get("name", ""),
             "rate_per_pair": float(rate or 0),
         }
+        if prev_asgn.get("completed_by"):
+            new_asgn["completed_by"] = prev_asgn["completed_by"]
+        if prev_asgn.get("completed_qty") is not None:
+            new_asgn["completed_qty"] = prev_asgn["completed_qty"]
+        if prev_asgn.get("completed_at"):
+            new_asgn["completed_at"] = prev_asgn["completed_at"]
+        assignments[payload.role] = new_asgn
     else:
         assignments.pop(payload.role, None)
     await db.production_jobs.update_one(
@@ -2030,6 +2200,25 @@ async def update_job_quantity(jid: str, payload: QuantityUpdate, request: Reques
         update["quantity"] = int(payload.quantity)
     if payload.completed_qty is not None:
         update["completed_qty"] = int(payload.completed_qty)
+        curr_stage = job.get("stage")
+        asgn = (job.get("assignments") or {}).get(curr_stage) or {}
+        if asgn.get("worker_id"):
+            w_rate = asgn.get("rate_per_pair")
+            if w_rate is None:
+                w_doc = await db.workers.find_one({"_id": oid(asgn["worker_id"])})
+                w_rate = float(w_doc.get("rate_per_pair", 0) or 0) if w_doc else 0.0
+            else:
+                w_rate = float(w_rate or 0)
+            completed_by = {
+                "worker_id": str(asgn["worker_id"]),
+                "worker_name": asgn.get("worker_name", ""),
+                "rate_per_pair": w_rate,
+                "at": now_iso(),
+            }
+            update["completed_by"] = completed_by
+            update[f"assignments.{curr_stage}.completed_by"] = completed_by
+            update[f"assignments.{curr_stage}.completed_qty"] = int(payload.completed_qty)
+            update[f"assignments.{curr_stage}.completed_at"] = now_iso()
     if payload.rejected_qty is not None:
         update["rejected_qty"] = int(payload.rejected_qty)
     history_entry = {
@@ -2037,6 +2226,7 @@ async def update_job_quantity(jid: str, payload: QuantityUpdate, request: Reques
         "new_quantity": update.get("quantity", old_qty),
         "completed_qty": update.get("completed_qty"),
         "rejected_qty": update.get("rejected_qty"),
+        "completed_by": update.get("completed_by"),
         "reason": payload.reason or "",
         "at": now_iso(), "by": u["email"],
     }
@@ -2073,11 +2263,20 @@ async def bulk_assign(payload: BulkAssign, request: Request):
     affected = 0
     for j in jobs:
         assignments = j.get("assignments") or {}
+        prev_asgn = assignments.get(payload.role) or {}
         if payload.worker_id:
-            assignments[payload.role] = {
-                "worker_id": payload.worker_id, "worker_name": worker_name,
+            new_asgn = {
+                "worker_id": payload.worker_id,
+                "worker_name": worker_name,
                 "rate_per_pair": rate,
             }
+            if prev_asgn.get("completed_by"):
+                new_asgn["completed_by"] = prev_asgn["completed_by"]
+            if prev_asgn.get("completed_qty") is not None:
+                new_asgn["completed_qty"] = prev_asgn["completed_qty"]
+            if prev_asgn.get("completed_at"):
+                new_asgn["completed_at"] = prev_asgn["completed_at"]
+            assignments[payload.role] = new_asgn
         else:
             assignments.pop(payload.role, None)
         await db.production_jobs.update_one(
@@ -2118,7 +2317,13 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
         assigns = j.get("assignments") or {}
         rfp = j.get("ready_for_pickup") or {}
         for role, a in assigns.items():
-            wid = a.get("worker_id")
+            c_by = a.get("completed_by")
+            if not c_by and rfp.get("role") == role and rfp.get("completed_by"):
+                c_by = rfp.get("completed_by")
+            if not c_by and j.get("stage") == role and isinstance(j.get("completed_by"), dict):
+                c_by = j.get("completed_by")
+
+            wid = str(c_by.get("worker_id")) if (c_by and c_by.get("worker_id")) else (str(a.get("worker_id")) if a.get("worker_id") else None)
             if not wid:
                 continue
             w = worker_map.get(wid)
@@ -2139,8 +2344,12 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
             if not role_comp:
                 continue
 
-            rate = float(a.get("rate_per_pair") if a.get("rate_per_pair") is not None
-                         else w.get("rate_per_pair", 0) or 0)
+            if c_by and c_by.get("rate_per_pair") is not None:
+                rate = float(c_by.get("rate_per_pair") or 0)
+            elif a.get("rate_per_pair") is not None:
+                rate = float(a.get("rate_per_pair") or 0)
+            else:
+                rate = float(w.get("rate_per_pair", 0) or 0)
             earn = rate * role_comp
             if wid not in earnings:
                 earnings[wid] = {

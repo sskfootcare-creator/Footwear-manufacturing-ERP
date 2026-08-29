@@ -4,7 +4,7 @@ import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2 } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
@@ -235,6 +235,7 @@ export default function Production() {
   const [savedPackingLists, setSavedPackingLists] = useState([]);
   const [dispatchRecords, setDispatchRecords] = useState([]);
   const [invoices, setInvoices] = useState([]);
+  const [dispatchDetailFor, setDispatchDetailFor] = useState(null);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
@@ -704,6 +705,7 @@ export default function Production() {
             onPrint={printCard}
             onPacking={openPackingForGroup}
             onViewDetails={(g) => setDetailFor(g)}
+            onViewDispatchDetails={(item) => setDispatchDetailFor(item)}
             savedPackingLists={savedPackingLists}
             onReDownloadPacking={reDownloadSavedPacking}
             dispatchRecordByJobId={dispatchRecordByJobId}
@@ -774,6 +776,7 @@ export default function Production() {
                         isSelectDisabled={isSelectionDisabled(g)}
                         dispatchRecordByJobId={dispatchRecordByJobId}
                         onDownloadDispatchFile={downloadDispatchFile}
+                        onOpenDispatchDetails={(group) => setDispatchDetailFor(group)}
                       />
                     ))}
                   </div>
@@ -851,6 +854,17 @@ export default function Production() {
         <DetailModal group={detailFor} onClose={() => setDetailFor(null)} />
       )}
 
+      {dispatchDetailFor && (
+        <DispatchDetailsModal
+          item={dispatchDetailFor}
+          dispatchRecordByJobId={dispatchRecordByJobId}
+          invoices={invoices}
+          styleByCode={styleByCode}
+          onClose={() => setDispatchDetailFor(null)}
+          onDownloadDispatchFile={downloadDispatchFile}
+        />
+      )}
+
       {packingFor && (
         <PackingListDialog
           payload={packingFor}
@@ -919,7 +933,7 @@ function ColorGroupCard(props) {
   const { group, style, stageColor, stageIdx, canEdit, onMove, onToggleComponent,
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isProc, isDispatched, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
-    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled } = props;
+    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails } = props;
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -1130,6 +1144,11 @@ function ColorGroupCard(props) {
           {isProc && (
             <button onClick={onMatReq} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-3 py-1 flex items-center gap-1" data-testid={`mat-req-${group.key}`}>
               <ClipboardList className="w-3 h-3" /> Material Req.
+            </button>
+          )}
+          {isDispatched && (
+            <button onClick={() => onOpenDispatchDetails?.(group)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-3 py-1 flex items-center gap-1 transition-colors" data-testid={`dispatch-details-btn-${group.key}`}>
+              <Truck className="w-3 h-3" /> View Dispatch Details
             </button>
           )}
           {isDispatched && (
@@ -1474,7 +1493,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
 
 /* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [] }) {
+function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [] }) {
   const [expandedClusters, setExpandedClusters] = useState({});
   const toggleExpand = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
 
@@ -1609,11 +1628,19 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                     {/* Collapsed/Primary Action Bar */}
                     <div className="flex gap-1.5 flex-wrap pt-2 border-t border-slate-200 items-center">
                       <button
+                        onClick={() => onViewDispatchDetails?.(cluster)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors"
+                        data-testid={`archive-merged-dispatch-details-${cluster.id}`}
+                      >
+                        <Truck className="w-3 h-3" /> View Dispatch Details
+                      </button>
+
+                      <button
                         onClick={() => toggleExpand(cluster.id)}
                         className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
                         data-testid={`archive-merged-details-btn-${cluster.id}`}
                       >
-                        <Eye className="w-3 h-3" /> {isExpanded ? "Hide Details" : "View Details"}
+                        <Eye className="w-3 h-3" /> {isExpanded ? "Hide Cards" : "View Cards"}
                         {isExpanded ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
                       </button>
 
@@ -1671,6 +1698,9 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                                 <div className="font-mono font-bold text-xs text-[#C27842]">{g.totalQty} prs</div>
                               </div>
                               <div className="flex gap-1 flex-wrap pt-1.5 border-t border-slate-100">
+                                <button onClick={() => onViewDispatchDetails?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-1.5 py-0.5 flex items-center gap-1" data-testid={`archive-merged-drilldown-dispatch-details-${g.key}`}>
+                                  <Truck className="w-2.5 h-2.5" /> Dispatch Details
+                                </button>
                                 <button onClick={() => onViewDetails(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-1.5 py-0.5 flex items-center gap-1">
                                   <Eye className="w-2.5 h-2.5" /> Details Modal
                                 </button>
@@ -1796,8 +1826,11 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, sa
                     <span className="font-mono">{g.sizes.join(" · ")}</span>
                   </div>
                   <div className="flex gap-1 flex-wrap pt-2 border-t border-slate-200">
+                    <button onClick={() => onViewDispatchDetails?.(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors" data-testid={`archive-dispatch-details-${g.key}`}>
+                      <Truck className="w-3 h-3" /> View Dispatch Details
+                    </button>
                     <button onClick={() => onViewDetails(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1" data-testid={`archive-details-${g.key}`}>
-                      <Eye className="w-3 h-3" /> View details
+                      <Eye className="w-3 h-3" /> Production History
                     </button>
                     <button onClick={() => onPrint(g)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1">
                       <Printer className="w-3 h-3" /> Card PDF
@@ -2074,6 +2107,368 @@ function DLPair({ label, value }) {
     <div className="border-b border-dashed border-slate-200 pb-2">
       <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{label}</div>
       <div className="font-mono font-bold">{value || "—"}</div>
+    </div>
+  );
+}
+
+
+/* -------------------- DISPATCH DETAILS MODAL -------------------- */
+function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [], styleByCode = {}, onClose, onDownloadDispatchFile }) {
+  const [loading, setLoading] = useState(true);
+  const [dispatchRecord, setDispatchRecord] = useState(null);
+  const [cartons, setCartons] = useState([]);
+  const [invoiceData, setInvoiceData] = useState(null);
+
+  const groups = useMemo(() => {
+    if (!item) return [];
+    if (item.groups && Array.isArray(item.groups)) return item.groups;
+    return [item];
+  }, [item]);
+
+  const allRows = useMemo(() => groups.flatMap(g => g.rows || []), [groups]);
+  const jobIds = useMemo(() => allRows.map(r => r.id).filter(Boolean), [allRows]);
+
+  const primaryGroup = groups[0] || {};
+  const poNumbers = useMemo(() => {
+    const list = groups.map(g => g.po_number).filter(Boolean);
+    return Array.from(new Set(list));
+  }, [groups]);
+
+  const clientName = primaryGroup.client_name || dispatchRecord?.client_name || "—";
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchDetails = async () => {
+      setLoading(true);
+      try {
+        // 1. Locate dispatch record
+        let drec = null;
+        for (const jid of jobIds) {
+          if (dispatchRecordByJobId[jid]) {
+            drec = dispatchRecordByJobId[jid];
+            break;
+          }
+        }
+        if (!drec && jobIds.length > 0) {
+          try {
+            const drRes = await http.get(`/dispatch-records?job_id=${jobIds[0]}`);
+            if (drRes.data && drRes.data.length > 0) {
+              drec = drRes.data[0];
+            }
+          } catch (e) {
+            console.log("Could not load dispatch-record by job_id", e);
+          }
+        }
+
+        let fullDrec = drec;
+        if (drec?.id) {
+          try {
+            const singleRes = await http.get(`/dispatch-records/${drec.id}`);
+            if (singleRes.data) fullDrec = singleRes.data;
+          } catch {}
+        }
+
+        // 2. Fetch cartons from /packing/cartons or fallback to snapshot
+        let fetchedCartons = [];
+        if (jobIds.length > 0) {
+          try {
+            const cRes = await http.get(`/packing/cartons?job_ids=${jobIds.join(",")}`);
+            if (cRes.data && cRes.data.length > 0) {
+              fetchedCartons = cRes.data;
+            }
+          } catch {}
+        }
+        if (fetchedCartons.length === 0 && fullDrec?.packing_cartons_snapshot) {
+          fetchedCartons = fullDrec.packing_cartons_snapshot;
+        }
+
+        // 3. Match invoice data
+        let inv = null;
+        const invId = fullDrec?.invoice_id || item?.invoice_id;
+        const invNo = fullDrec?.invoice_no || item?.invoice_no;
+        if (invId) {
+          inv = invoices.find(i => String(i.id || i._id) === String(invId));
+          if (!inv) {
+            try {
+              const iRes = await http.get(`/invoices/${invId}`);
+              if (iRes.data) inv = iRes.data;
+            } catch {}
+          }
+        } else if (invNo) {
+          inv = invoices.find(i => i.invoice_no === invNo);
+        }
+
+        if (isMounted) {
+          setDispatchRecord(fullDrec);
+          setCartons(fetchedCartons);
+          setInvoiceData(inv);
+        }
+      } catch (err) {
+        console.error("Error loading dispatch details:", err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchDetails();
+    return () => { isMounted = false; };
+  }, [item, jobIds, dispatchRecordByJobId, invoices]);
+
+  // Size-wise quantity breakdown
+  const sizeBreakdown = useMemo(() => {
+    const list = [];
+    for (const g of groups) {
+      for (const r of g.rows || []) {
+        const qty = r.completed_qty || r.quantity || 0;
+        list.push({
+          style_code: g.style_code,
+          style_name: styleByCode[g.style_code]?.name || g.style_code,
+          color: g.color,
+          size: r.size || "—",
+          qty: qty,
+        });
+      }
+    }
+    return list;
+  }, [groups, styleByCode]);
+
+  const totalDispatchedPairs = useMemo(() => {
+    if (dispatchRecord?.total_qty) return dispatchRecord.total_qty;
+    return sizeBreakdown.reduce((sum, item) => sum + (Number(item.qty) || 0), 0);
+  }, [dispatchRecord, sizeBreakdown]);
+
+  const totalCartonCount = useMemo(() => {
+    if (dispatchRecord?.total_cartons) return dispatchRecord.total_cartons;
+    if (cartons?.length > 0) return cartons.length;
+    return 0;
+  }, [dispatchRecord, cartons]);
+
+  const resolvedInvoiceNo = dispatchRecord?.invoice_no || invoiceData?.invoice_no || item?.invoice_no || "—";
+  const dispatchDate = dispatchRecord?.dispatched_at
+    ? new Date(dispatchRecord.dispatched_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })
+    : (invoiceData?.supply_date || invoiceData?.invoice_date || "—");
+
+  const transportMode = invoiceData?.transport_mode || dispatchRecord?.transport_mode || "—";
+  const vehicleNo = invoiceData?.vehicle_no || dispatchRecord?.vehicle_no || "—";
+  const transporterName = invoiceData?.transporter || dispatchRecord?.transporter || invoiceData?.transporter_name || "—";
+  const driverName = invoiceData?.driver_name || dispatchRecord?.driver_name || "—";
+  const driverPhone = invoiceData?.driver_phone || dispatchRecord?.driver_phone || "—";
+
+  const downloadDoc = async (type, filename, mimeType) => {
+    if (dispatchRecord?.id) {
+      onDownloadDispatchFile(dispatchRecord.id, type, filename, mimeType);
+    } else if (invoiceData?.id && type === "invoice") {
+      try {
+        const res = await http.get(`/invoices/${invoiceData.id}/file`, { responseType: "blob" });
+        triggerDownload(res.data, filename, "application/pdf");
+      } catch (e) {
+        alert("Download failed: " + (e.response?.data?.detail || e.message));
+      }
+    } else if (jobIds.length > 0) {
+      if (type === "carton-labels") {
+        try {
+          const res = await http.get(`/production/jobs/carton-labels?job_ids=${jobIds.join(",")}`, { responseType: "blob" });
+          triggerDownload(res.data, filename, "application/pdf");
+        } catch (e) {
+          alert("Download failed: " + (e.response?.data?.detail || e.message));
+        }
+      } else if (type === "carton-list") {
+        try {
+          const res = await http.get(`/production/jobs/carton-list?job_ids=${jobIds.join(",")}`, { responseType: "blob" });
+          triggerDownload(res.data, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        } catch (e) {
+          alert("Download failed: " + (e.response?.data?.detail || e.message));
+        }
+      }
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 grid place-items-center p-2 sm:p-4 overflow-y-auto" data-testid="dispatch-details-modal">
+      <div className="bg-white w-full max-w-4xl max-h-[92vh] overflow-y-auto border-2 border-slate-200 shadow-2xl flex flex-col my-auto">
+        {/* Header */}
+        <div className="bg-[#0F172A] text-white px-6 py-4 flex items-baseline justify-between shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold flex items-center gap-1.5">
+              <Truck className="w-3.5 h-3.5" /> Dispatch Record Details
+            </div>
+            <div className="text-xl font-black mt-0.5">
+              {groups.map(g => `${g.style_code} (${g.color})`).join(" + ")}
+            </div>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/10 p-1 text-slate-300 hover:text-white" data-testid="dispatch-details-close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-6 flex-1 overflow-y-auto">
+          {loading ? (
+            <div className="py-12 flex flex-col items-center justify-center text-slate-400 gap-2">
+              <Loader2 className="w-6 h-6 animate-spin text-[#C27842]" />
+              <div className="text-xs uppercase tracking-wider font-bold">Loading dispatch details…</div>
+            </div>
+          ) : (
+            <>
+              {/* Summary Metadata Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 p-4 border border-slate-200">
+                <DLPair label="PO Number(s)" value={poNumbers.join(", ") || "—"} />
+                <DLPair label="Client" value={clientName} />
+                <DLPair label="Invoice #" value={resolvedInvoiceNo} />
+                <DLPair label="Dispatch Date" value={dispatchDate} />
+                <DLPair label="Transporter" value={transporterName} />
+                <DLPair label="Vehicle No." value={vehicleNo} />
+                <DLPair label="Transport Mode" value={transportMode} />
+                <DLPair label="Driver Info" value={driverName !== "—" ? `${driverName} (${driverPhone})` : "—"} />
+                <DLPair label="Total Dispatched" value={`${totalDispatchedPairs} pairs`} />
+                <DLPair label="Total Cartons" value={totalCartonCount ? `${totalCartonCount} cartons` : "—"} />
+                <DLPair label="Dispatched By" value={dispatchRecord?.dispatched_by || "system"} />
+                <DLPair label="Notes" value={invoiceData?.notes || dispatchRecord?.notes || "—"} />
+              </div>
+
+              {/* Consolidated Generated Documents */}
+              <div className="border border-slate-200 p-4 bg-white space-y-2.5">
+                <div className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <FileDown className="w-4 h-4 text-[#C27842]" /> Generated Dispatch Documents
+                </div>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={() => downloadDoc("invoice", `Invoice-${resolvedInvoiceNo}.pdf`, "application/pdf")}
+                    className="text-xs uppercase tracking-wider font-bold text-slate-800 bg-slate-100 hover:bg-[#0F172A] hover:text-white border border-slate-300 px-3 py-2 flex items-center gap-1.5 transition-colors"
+                    data-testid="dispatch-modal-download-invoice"
+                  >
+                    <FileDown className="w-4 h-4 text-[#C27842]" /> Tax Invoice PDF ({resolvedInvoiceNo})
+                  </button>
+
+                  <button
+                    onClick={() => downloadDoc("packing-list", `PackingList-${resolvedInvoiceNo}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                    className="text-xs uppercase tracking-wider font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-700 hover:text-white border border-emerald-300 px-3 py-2 flex items-center gap-1.5 transition-colors"
+                    data-testid="dispatch-modal-download-packing"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Packing List (XLSX)
+                  </button>
+
+                  <button
+                    onClick={() => downloadDoc("carton-labels", `CartonLabels-${resolvedInvoiceNo}.pdf`, "application/pdf")}
+                    className="text-xs uppercase tracking-wider font-bold text-teal-800 bg-teal-50 hover:bg-teal-700 hover:text-white border border-teal-300 px-3 py-2 flex items-center gap-1.5 transition-colors"
+                    data-testid="dispatch-modal-download-labels"
+                  >
+                    <Package className="w-4 h-4 text-teal-600" /> Carton Labels (PDF)
+                  </button>
+
+                  <button
+                    onClick={() => downloadDoc("carton-list", `CartonList-${resolvedInvoiceNo}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                    className="text-xs uppercase tracking-wider font-bold text-amber-800 bg-amber-50 hover:bg-amber-700 hover:text-white border border-amber-300 px-3 py-2 flex items-center gap-1.5 transition-colors"
+                    data-testid="dispatch-modal-download-cartonlist"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-amber-600" /> Carton List (XLSX)
+                  </button>
+                </div>
+              </div>
+
+              {/* Size-wise Quantity Breakdown */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                    Size-wise Quantity Breakdown
+                  </h3>
+                  <span className="text-[11px] font-mono text-slate-500 font-bold">
+                    Total: <strong className="text-[#C27842]">{totalDispatchedPairs} pairs</strong>
+                  </span>
+                </div>
+                <div className="border border-slate-200 overflow-x-auto">
+                  <table className="w-full text-xs" data-testid="dispatch-size-breakdown-table">
+                    <thead className="bg-slate-100 border-b border-slate-200">
+                      <tr className="text-left font-bold text-slate-700 uppercase text-[10px]">
+                        <th className="px-3 py-2">Style Code</th>
+                        <th className="px-3 py-2">Color</th>
+                        <th className="px-3 py-2 text-center">Size</th>
+                        <th className="px-3 py-2 text-right">Dispatched Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {sizeBreakdown.length === 0 ? (
+                        <tr>
+                          <td colSpan="4" className="px-3 py-4 text-center text-slate-400">No size breakdown available.</td>
+                        </tr>
+                      ) : (
+                        sizeBreakdown.map((row, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50">
+                            <td className="px-3 py-2 font-mono font-bold">{row.style_code}</td>
+                            <td className="px-3 py-2 font-medium">{row.color}</td>
+                            <td className="px-3 py-2 text-center font-mono font-bold text-slate-800">{row.size}</td>
+                            <td className="px-3 py-2 text-right font-mono font-bold text-[#C27842]">{row.qty} prs</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {sizeBreakdown.length > 0 && (
+                      <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold">
+                        <tr>
+                          <td colSpan="3" className="px-3 py-2 text-right uppercase text-[10px] text-slate-600">Total Dispatched Pairs:</td>
+                          <td className="px-3 py-2 text-right font-mono text-sm text-[#C27842]">{totalDispatchedPairs} prs</td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </div>
+
+              {/* Carton Assignments */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                    Carton Assignments (Packed Cartons)
+                  </h3>
+                  <span className="text-[11px] font-mono text-slate-500 font-bold">
+                    {cartons.length} Carton{cartons.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div className="border border-slate-200 overflow-x-auto max-h-72 overflow-y-auto">
+                  <table className="w-full text-xs" data-testid="dispatch-cartons-table">
+                    <thead className="bg-slate-100 border-b border-slate-200 sticky top-0 z-10">
+                      <tr className="text-left font-bold text-slate-700 uppercase text-[10px]">
+                        <th className="px-3 py-2">Box #</th>
+                        <th className="px-3 py-2">Style</th>
+                        <th className="px-3 py-2">Color</th>
+                        <th className="px-3 py-2 text-center">Size</th>
+                        <th className="px-3 py-2 text-right">Quantity</th>
+                        <th className="px-3 py-2 font-mono">Barcode / EAN</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {cartons.length === 0 ? (
+                        <tr>
+                          <td colSpan="6" className="px-4 py-6 text-center text-slate-400 italic">
+                            No carton assignment records found for this dispatch.
+                          </td>
+                        </tr>
+                      ) : (
+                        cartons.map((c, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50">
+                            <td className="px-3 py-2 font-mono font-bold text-slate-900">
+                              Carton #{c.box_number != null ? c.box_number : (idx + 1)}
+                            </td>
+                            <td className="px-3 py-2 font-mono">{c.style_code || primaryGroup.style_code || "—"}</td>
+                            <td className="px-3 py-2">{c.color || primaryGroup.color || "—"}</td>
+                            <td className="px-3 py-2 text-center font-mono font-bold">{c.size || "—"}</td>
+                            <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{c.qty != null ? `${c.qty} prs` : "—"}</td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-slate-500">{c.ean_code || "—"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3.5 flex justify-end shrink-0">
+          <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        </div>
+      </div>
     </div>
   );
 }
