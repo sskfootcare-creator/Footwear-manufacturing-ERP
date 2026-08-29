@@ -993,8 +993,36 @@ async def on_startup():
             await db.pos.create_index("po_number", unique=True)
         except Exception as drop_err:
             log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
-    await db.production_jobs.create_index("po_id")
-    await db.vendors.create_index("name")
+
+    # PO, Job, Invoice, and Dispatch query optimization indexes
+    try:
+        await db.production_jobs.create_index("po_id")
+        await db.production_jobs.create_index("style_id")
+        await db.production_jobs.create_index("style_code")
+        await db.production_jobs.create_index("po_number")
+    except Exception as e:
+        log.warning(f"Could not create production_jobs indexes: {e}")
+
+    try:
+        await db.invoices.create_index("po_id")
+        await db.invoices.create_index("po_ids")
+        await db.invoices.create_index("po_number")
+        await db.invoices.create_index("po_numbers")
+    except Exception as e:
+        log.warning(f"Could not create invoices indexes: {e}")
+
+    try:
+        await db.dispatch_records.create_index("po_id")
+        await db.dispatch_records.create_index("po_ids")
+        await db.dispatch_records.create_index("po_number")
+        await db.dispatch_records.create_index("po_numbers")
+    except Exception as e:
+        log.warning(f"Could not create dispatch_records indexes: {e}")
+
+    try:
+        await db.vendors.create_index("name")
+    except Exception as e:
+        log.warning(f"Could not create vendors index: {e}")
 
     # Worker PIN login: phone index for fast lookup
     try:
