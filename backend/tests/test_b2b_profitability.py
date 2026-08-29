@@ -36,12 +36,24 @@ class _Jobs:
         for j in self._docs:
             if "$or" in query:
                 for cond in query["$or"]:
-                    if "style_id" in cond and j.get("style_id") == cond["style_id"]:
-                        matching.append(j)
-                        break
-                    if "style_code" in cond and j.get("style_code") == cond["style_code"]:
-                        matching.append(j)
-                        break
+                    if "style_id" in cond:
+                        val = cond["style_id"]
+                        if isinstance(val, dict) and "$in" in val:
+                            if str(j.get("style_id")) in [str(x) for x in val["$in"]]:
+                                matching.append(j)
+                                break
+                        elif j.get("style_id") == val or str(j.get("style_id")) == str(val):
+                            matching.append(j)
+                            break
+                    if "style_code" in cond:
+                        val = cond["style_code"]
+                        if isinstance(val, dict) and "$in" in val:
+                            if j.get("style_code") in val["$in"]:
+                                matching.append(j)
+                                break
+                        elif j.get("style_code") == val:
+                            matching.append(j)
+                            break
             elif query.get("style_id") == j.get("style_id") or query.get("style_code") == j.get("style_code"):
                 matching.append(j)
         return _Cursor(matching)

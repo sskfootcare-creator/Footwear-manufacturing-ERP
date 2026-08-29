@@ -203,8 +203,8 @@ async def _compute_online_profitability(
     style_id:  Optional[str] = None,
     db=None,
 ) -> Dict[str, Any]:
+    import server
     if db is None:
-        import server
         db = server.db
     from server import compute_style_costing_async
 
@@ -244,9 +244,55 @@ async def _compute_online_profitability(
     style_cost_map: Dict[str, Dict[str, Any]] = {}
     if style_ids:
         style_docs = await db.styles.find({"_id": {"$in": style_ids}}).to_list(len(style_ids))
+        s_id_strs = [str(s.get("_id") or s.get("id")) for s in style_docs if (s.get("_id") or s.get("id"))]
+        s_code_strs = [s.get("code") for s in style_docs if s.get("code")]
+        jobs_by_style_id = defaultdict(list)
+        jobs_by_style_code = defaultdict(list)
+        pj_col = getattr(db, "production_jobs", None)
+        if pj_col is not None and (s_id_strs or s_code_strs):
+            job_or = []
+            if s_id_strs:
+                job_or.append({"style_id": {"$in": s_id_strs}})
+            if s_code_strs:
+                job_or.append({"style_code": {"$in": s_code_strs}})
+            try:
+                all_jobs = await pj_col.find({"$or": job_or} if len(job_or) > 1 else job_or[0]).to_list(50000)
+                for job in all_jobs:
+                    jid = job.get("style_id")
+                    if jid:
+                        jobs_by_style_id[str(jid)].append(job)
+                    jcode = job.get("style_code")
+                    if jcode:
+                        jobs_by_style_code[jcode].append(job)
+            except Exception:
+                pass
+
+        from routes.styles import compute_style_costing_from_jobs
         for s in style_docs:
             try:
-                c = await compute_style_costing_async(s, db)
+                sid = str(s.get("_id") or s.get("id") or "")
+                scode = s.get("code", "")
+                matched_jobs = []
+                seen_job_ids = set()
+                for job in jobs_by_style_id.get(sid, []):
+                    job_id_key = str(job.get("_id", id(job)))
+                    if job_id_key not in seen_job_ids:
+                        seen_job_ids.add(job_id_key)
+                        matched_jobs.append(job)
+                for job in jobs_by_style_code.get(scode, []):
+                    job_id_key = str(job.get("_id", id(job)))
+                    if job_id_key not in seen_job_ids:
+                        seen_job_ids.add(job_id_key)
+                        matched_jobs.append(job)
+
+                c = compute_style_costing_from_jobs(s, matched_jobs)
+                if not s.get("bom") and not s.get("labor") and hasattr(server, "compute_style_costing_async"):
+                    try:
+                        c_async = await server.compute_style_costing_async(s, db)
+                        if c_async and float(c_async.get("total_cost", 0) or 0) > 0:
+                            c = c_async
+                    except Exception:
+                        pass
                 style_cost_map[str(s["_id"])] = {
                     "style_code":        s.get("code") or s.get("style_code"),
                     "unit_cogs":         c.get("total_cost") or 0,
@@ -261,7 +307,7 @@ async def _compute_online_profitability(
                     "packing_cost":      c.get("packing_cost"),
                 }
             except Exception as e:
-                log.warning(f"compute_style_costing_async failed for style {s.get('_id')}: {e}")
+                log.warning(f"compute_style_costing_from_jobs failed for style {s.get('_id')}: {e}")
                 style_cost_map[str(s["_id"])] = {
                     "style_code":        s.get("code"),
                     "unit_cogs":         0,
@@ -299,6 +345,8 @@ async def _compute_online_profitability(
                 "unit_cogs":         round(unit_cogs, 2),
                 "cogs":              0.0,
                 "fallback_revenue":  0.0,
+                "materials_cost":    cost_info.get("materials_cost", 0.0) if cost_info else 0.0,
+                "labor_cost":        cost_info.get("labor_cost", 0.0) if cost_info else 0.0,
                 "cost_is_estimated": cost_info.get("cost_is_estimated", True) if cost_info else True,
                 "labor_source":      cost_info.get("labor_source", "estimated") if cost_info else "estimated",
                 "is_assigned":       cost_info.get("is_assigned", False) if cost_info else False,
@@ -392,11 +440,14 @@ async def _compute_online_profitability(
             "returned_units":    u_ret,
             "return_rate_pct":   ret_rate,
             "unit_cogs":         row["unit_cogs"],
+            "materials_cost":    row.get("materials_cost"),
+            "labor_cost":        row.get("labor_cost"),
             "cogs":              round(cogs_i, 2),
             "revenue_settled":   round(rev_i, 2),
             "platform_fees":     round(fee_i, 2),
             "profit":            round(profit_i, 2),
             "margin_pct":        margin_i,
+            "is_estimated":      source_i == "fallback",
             "cost_is_estimated": row["cost_is_estimated"],
             "labor_source":      row.get("labor_source", "estimated"),
             "is_assigned":       row.get("is_assigned", False),
@@ -421,6 +472,8 @@ async def _compute_online_profitability(
         "gross_profit":               round(gross_profit, 2),
         "gross_margin_pct":           gross_margin_pct,
         "revenue_source_used":        rev_source_used,
+        "is_estimated":               any(r.get("is_estimated", False) for r in by_style_list) if by_style_list else (not phase_3_here),
+        "cost_is_estimated":          any(r.get("cost_is_estimated", False) for r in by_style_list) if by_style_list else True,
         "phase_3_available":          phase_3_here,
         "by_style":                   by_style_list,
         "notes":                      notes,
@@ -657,11 +710,56 @@ async def online_profitability_trend(
         cogs = 0.0
         if style_ids:
             style_docs = await db.styles.find({"_id": {"$in": style_ids}}).to_list(len(style_ids))
+            s_id_strs = [str(s.get("_id") or s.get("id")) for s in style_docs if (s.get("_id") or s.get("id"))]
+            s_code_strs = [s.get("code") for s in style_docs if s.get("code")]
+            jobs_by_style_id = defaultdict(list)
+            jobs_by_style_code = defaultdict(list)
+            pj_col = getattr(db, "production_jobs", None)
+            if pj_col is not None and (s_id_strs or s_code_strs):
+                job_or = []
+                if s_id_strs:
+                    job_or.append({"style_id": {"$in": s_id_strs}})
+                if s_code_strs:
+                    job_or.append({"style_code": {"$in": s_code_strs}})
+                try:
+                    all_jobs = await pj_col.find({"$or": job_or} if len(job_or) > 1 else job_or[0]).to_list(50000)
+                    for job in all_jobs:
+                        jid = job.get("style_id")
+                        if jid:
+                            jobs_by_style_id[str(jid)].append(job)
+                        jcode = job.get("style_code")
+                        if jcode:
+                            jobs_by_style_code[jcode].append(job)
+                except Exception:
+                    pass
+
+            from routes.styles import compute_style_costing_from_jobs
             unit_cost_map = {}
             for s in style_docs:
                 try:
-                    c_async = await compute_style_costing_async(s, db)
-                    unit_cost_map[str(s["_id"])] = float(c_async.get("total_cost") or 0)
+                    sid = str(s.get("_id") or s.get("id") or "")
+                    scode = s.get("code", "")
+                    matched_jobs = []
+                    seen_job_ids = set()
+                    for job in jobs_by_style_id.get(sid, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    for job in jobs_by_style_code.get(scode, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    c_res = compute_style_costing_from_jobs(s, matched_jobs)
+                    if not s.get("bom") and not s.get("labor") and hasattr(server, "compute_style_costing_async"):
+                        try:
+                            c_async = await server.compute_style_costing_async(s, db)
+                            if c_async and float(c_async.get("total_cost", 0) or 0) > 0:
+                                c_res = c_async
+                        except Exception:
+                            pass
+                    unit_cost_map[str(s["_id"])] = float(c_res.get("total_cost") or 0)
                 except Exception:
                     unit_cost_map[str(s["_id"])] = 0.0
             for r in net_rows:

@@ -6,6 +6,7 @@ import re
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any
+from collections import defaultdict
 from io import BytesIO
 
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
@@ -208,6 +209,33 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
     }
 
 
+def _format_po_line_profitability(po_line: dict, style_obj: dict, costing: dict) -> dict:
+    bom_cost = float(costing.get("materials_cost", 0))
+    overhead = float(costing.get("overhead_cost", 0))
+    packing = float(costing.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
+    labor_cost = float(costing.get("labor_cost", 0))
+    labor_source = costing.get("labor_source", "estimated")
+
+    unit_price = float(po_line.get("unit_price", 0))
+    total_cost = round(bom_cost + labor_cost + packing, 2)
+    profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
+    profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
+
+    return {
+        "style_code": style_obj.get("code", "") or po_line.get("style_code", ""),
+        "unit_price": round(unit_price, 2),
+        "bom_cost": round(bom_cost, 2),
+        "labor_cost": round(labor_cost, 2),
+        "labor_source": labor_source,
+        "is_estimated": labor_source == "estimated",
+        "overhead_cost": round(overhead, 2),
+        "packing_cost": round(packing, 2),
+        "total_cost": total_cost,
+        "profit": profit,
+        "profit_pct": profit_pct,
+    }
+
+
 async def _attach_po_profitability(po_docs: list, db=None):
     db = db if db is not None else get_db()
     codes = set()
@@ -229,11 +257,72 @@ async def _attach_po_profitability(po_docs: list, db=None):
         query_or.append({"_id": {"$in": list(ids)}})
 
     styles_map = {}
+    unique_styles = []
+    seen_style_keys = set()
     if query_or:
         styles = await db.styles.find({"$or": query_or} if len(query_or) > 1 else query_or[0]).to_list(10000)
         for s in styles:
-            styles_map[s.get("code", "")] = s
-            styles_map[str(s["_id"])] = s
+            s_code = s.get("code", "")
+            s_id = str(s.get("_id", ""))
+            if s_code:
+                styles_map[s_code] = s
+            if s_id:
+                styles_map[s_id] = s
+            st_key = s_id or s_code
+            if st_key and st_key not in seen_style_keys:
+                seen_style_keys.add(st_key)
+                unique_styles.append(s)
+
+    # 1. Collect all style_ids and style_codes present across styles_map
+    style_ids = [str(s.get("_id") or s.get("id")) for s in unique_styles if (s.get("_id") or s.get("id"))]
+    style_codes = [s.get("code") for s in unique_styles if s.get("code")]
+
+    jobs_by_style_id = defaultdict(list)
+    jobs_by_style_code = defaultdict(list)
+
+    # 2. Run ONE query: db.production_jobs.find({"$or": [{"style_id": {"$in": [...]}}, {"style_code": {"$in": [...]}}]})
+    if style_ids or style_codes:
+        job_or = []
+        if style_ids:
+            job_or.append({"style_id": {"$in": style_ids}})
+        if style_codes:
+            job_or.append({"style_code": {"$in": style_codes}})
+        job_query = {"$or": job_or} if len(job_or) > 1 else job_or[0]
+        all_jobs = await db.production_jobs.find(job_query).to_list(50000)
+
+        # 3. Group the results into a dict keyed by style_id/style_code in memory
+        for job in all_jobs:
+            jid = job.get("style_id")
+            if jid:
+                jobs_by_style_id[str(jid)].append(job)
+            jcode = job.get("style_code")
+            if jcode:
+                jobs_by_style_code[jcode].append(job)
+
+    # Precompute costing per unique style
+    from routes.styles import compute_style_costing_from_jobs
+    costing_cache = {}
+    for s in unique_styles:
+        sid = str(s.get("_id") or s.get("id") or "")
+        scode = s.get("code", "")
+        matched_jobs = []
+        seen_job_ids = set()
+        for job in jobs_by_style_id.get(sid, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+        for job in jobs_by_style_code.get(scode, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+
+        c = compute_style_costing_from_jobs(s, matched_jobs)
+        if sid:
+            costing_cache[sid] = c
+        if scode:
+            costing_cache[scode] = c
 
     for d in po_docs:
         for item in d.get("line_items", []):
@@ -241,7 +330,49 @@ async def _attach_po_profitability(po_docs: list, db=None):
             sid = str(item.get("style_id") or "")
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
-                item["profitability"] = await compute_po_profitability(item, style_doc, db)
+                costing = costing_cache.get(code) or costing_cache.get(sid)
+                if costing is None:
+                    # In-memory lookup from grouped jobs dict without DB queries
+                    style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
+                    style_code_str = style_doc.get("code", "")
+                    matched_jobs = []
+                    seen_job_ids = set()
+                    for job in jobs_by_style_id.get(style_id_str, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    for job in jobs_by_style_code.get(style_code_str, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
+
+                bom_cost = float(costing.get("materials_cost", 0))
+                overhead = float(costing.get("overhead_cost", 0))
+                packing = float(costing.get("packing_cost", 0) or style_doc.get("packing_cost", 0) or 0)
+                labor_cost = float(costing.get("labor_cost", 0))
+                labor_source = costing.get("labor_source", "estimated")
+
+                unit_price = float(item.get("unit_price", 0))
+                total_cost = round(bom_cost + labor_cost + packing, 2)
+                profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
+                profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
+
+                item["profitability"] = {
+                    "style_code": style_doc.get("code", "") or item.get("style_code", ""),
+                    "unit_price": round(unit_price, 2),
+                    "bom_cost": round(bom_cost, 2),
+                    "labor_cost": round(labor_cost, 2),
+                    "labor_source": labor_source,
+                    "is_estimated": labor_source == "estimated",
+                    "overhead_cost": round(overhead, 2),
+                    "packing_cost": round(packing, 2),
+                    "total_cost": total_cost,
+                    "profit": profit,
+                    "profit_pct": profit_pct,
+                }
 
 
 async def _attach_po_status(po_docs: list, db=None):
@@ -830,11 +961,68 @@ async def get_b2b_profitability(
         query_styles.append({"_id": {"$in": list(sids)}})
 
     styles_map = {}
+    unique_styles = []
+    seen_style_keys = set()
     if query_styles:
         found_styles = await db_inst.styles.find({"$or": query_styles} if len(query_styles) > 1 else query_styles[0]).to_list(10000)
         for s in found_styles:
-            styles_map[s.get("code", "")] = s
-            styles_map[str(s["_id"])] = s
+            s_code = s.get("code", "")
+            s_id = str(s.get("_id", ""))
+            if s_code:
+                styles_map[s_code] = s
+            if s_id:
+                styles_map[s_id] = s
+            st_key = s_id or s_code
+            if st_key and st_key not in seen_style_keys:
+                seen_style_keys.add(st_key)
+                unique_styles.append(s)
+
+    # 1. Batch fetch production jobs for all unique styles
+    style_ids = [str(s.get("_id") or s.get("id")) for s in unique_styles if (s.get("_id") or s.get("id"))]
+    style_codes = [s.get("code") for s in unique_styles if s.get("code")]
+
+    jobs_by_style_id = defaultdict(list)
+    jobs_by_style_code = defaultdict(list)
+
+    if style_ids or style_codes:
+        job_or = []
+        if style_ids:
+            job_or.append({"style_id": {"$in": style_ids}})
+        if style_codes:
+            job_or.append({"style_code": {"$in": style_codes}})
+        job_query = {"$or": job_or} if len(job_or) > 1 else job_or[0]
+        all_jobs = await db_inst.production_jobs.find(job_query).to_list(50000)
+        for job in all_jobs:
+            jid = job.get("style_id")
+            if jid:
+                jobs_by_style_id[str(jid)].append(job)
+            jcode = job.get("style_code")
+            if jcode:
+                jobs_by_style_code[jcode].append(job)
+
+    from routes.styles import compute_style_costing_from_jobs
+    costing_cache = {}
+    for s in unique_styles:
+        sid = str(s.get("_id") or s.get("id") or "")
+        scode = s.get("code", "")
+        matched_jobs = []
+        seen_job_ids = set()
+        for job in jobs_by_style_id.get(sid, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+        for job in jobs_by_style_code.get(scode, []):
+            job_id_key = str(job.get("_id", id(job)))
+            if job_id_key not in seen_job_ids:
+                seen_job_ids.add(job_id_key)
+                matched_jobs.append(job)
+
+        c = compute_style_costing_from_jobs(s, matched_jobs)
+        if sid:
+            costing_cache[sid] = c
+        if scode:
+            costing_cache[scode] = c
 
     processed_lines = []
     by_client_map = {}
@@ -874,7 +1062,48 @@ async def get_b2b_profitability(
 
         qty = int(it.get("quantity") or it.get("qty") or it.get("pairs") or 1)
         if style_doc:
-            prof = await compute_po_profitability(it, style_doc, db_inst)
+            costing = costing_cache.get(code) or costing_cache.get(sid)
+            if costing is None:
+                style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
+                style_code_str = style_doc.get("code", "")
+                matched_jobs = []
+                seen_job_ids = set()
+                for job in jobs_by_style_id.get(style_id_str, []):
+                    job_id_key = str(job.get("_id", id(job)))
+                    if job_id_key not in seen_job_ids:
+                        seen_job_ids.add(job_id_key)
+                        matched_jobs.append(job)
+                for job in jobs_by_style_code.get(style_code_str, []):
+                    job_id_key = str(job.get("_id", id(job)))
+                    if job_id_key not in seen_job_ids:
+                        seen_job_ids.add(job_id_key)
+                        matched_jobs.append(job)
+                costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
+
+            bom_cost = float(costing.get("materials_cost", 0))
+            overhead = float(costing.get("overhead_cost", 0))
+            packing = float(costing.get("packing_cost", 0) or style_doc.get("packing_cost", 0) or 0)
+            labor_cost = float(costing.get("labor_cost", 0))
+            labor_source = costing.get("labor_source", "estimated")
+
+            unit_price = float(it.get("unit_price", 0))
+            total_cost_val = round(bom_cost + labor_cost + packing, 2)
+            profit_val = round(unit_price - total_cost_val, 2) if unit_price > 0 else None
+            profit_pct_val = round(profit_val / unit_price * 100, 1) if (profit_val is not None and unit_price > 0) else None
+
+            prof = {
+                "style_code": style_doc.get("code", "") or it.get("style_code", ""),
+                "unit_price": round(unit_price, 2),
+                "bom_cost": round(bom_cost, 2),
+                "labor_cost": round(labor_cost, 2),
+                "labor_source": labor_source,
+                "is_estimated": labor_source == "estimated",
+                "overhead_cost": round(overhead, 2),
+                "packing_cost": round(packing, 2),
+                "total_cost": total_cost_val,
+                "profit": profit_val,
+                "profit_pct": profit_pct_val,
+            }
         else:
             u_price = float(it.get("unit_price") or it.get("price") or it.get("rate") or 0)
             prof = {

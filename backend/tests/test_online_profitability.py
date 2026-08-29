@@ -50,7 +50,13 @@ class _Collection:
                 for cond in conditions:
                     match = True
                     for k, v in cond.items():
-                        if str(d.get(k, "")) != str(v):
+                        if isinstance(v, dict) and "$in" in v:
+                            doc_val = d.get(k)
+                            in_list = [str(x) for x in v["$in"]]
+                            if str(doc_val) not in in_list and doc_val not in v["$in"]:
+                                match = False
+                                break
+                        elif str(d.get(k, "")) != str(v):
                             match = False
                             break
                     if match and d not in res:

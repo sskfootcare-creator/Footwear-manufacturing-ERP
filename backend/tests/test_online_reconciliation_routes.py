@@ -88,6 +88,9 @@ class MockOnlineReconciliationDB:
         self.audit_logs = MagicMock()
         self.audit_logs.insert_one = AsyncMock(return_value=MagicMock(inserted_id="audit_1"))
 
+        self.production_jobs = MagicMock()
+        self.production_jobs.find = MagicMock(return_value=MockCursor([]))
+
     async def list_collection_names(self):
         return [
             "online_daily_payments",

@@ -15,6 +15,7 @@ from routes.pos import (
     _archive_if_complete,
     _build_client_ledger,
     compute_po_profitability,
+    _attach_po_profitability,
 )
 from models.orders import POIn, POLineItem, ProductionStageUpdate
 from models.vendors import GRNIn, GRNLineItem, PaymentIn, DefectIn
@@ -702,3 +703,329 @@ def test_list_pos_status_filter_query(client, mock_pos_env):
     comp_ids = [p["id"] for p in comp_resp.json()]
     assert po1_id in comp_ids
     assert po2_id not in comp_ids
+
+
+@pytest.mark.anyio
+async def test_attach_po_profitability_batched_jobs(mock_pos_env):
+    """
+    Verify _attach_po_profitability batches job queries across styles
+    and matches unbatched compute_po_profitability calculations.
+    """
+    s1_id = ObjectId()
+    s2_id = ObjectId()
+
+    style1 = {
+        "_id": s1_id,
+        "id": str(s1_id),
+        "code": "STYLE-BATCH-1",
+        "name": "Batch Style 1",
+        "bom": [{"item": "Leather", "quantity": 1, "rate": 200.0}],
+        "materials_cost": 200.0,
+        "overhead_cost": 50.0,
+        "packing_cost": 25.0,
+        "labor_cost": 100.0,
+        "labor": [
+            {"role": "stitching", "rate": 60.0, "rate_per_pair": 60.0},
+            {"role": "lasting", "rate": 40.0, "rate_per_pair": 40.0},
+        ],
+    }
+
+    style2 = {
+        "_id": s2_id,
+        "id": str(s2_id),
+        "code": "STYLE-BATCH-2",
+        "name": "Batch Style 2",
+        "bom": [{"item": "Leather", "quantity": 1, "rate": 300.0}],
+        "materials_cost": 300.0,
+        "overhead_cost": 80.0,
+        "packing_cost": 35.0,
+        "labor_cost": 150.0,
+        "labor": [
+            {"role": "stitching", "rate": 80.0, "rate_per_pair": 80.0},
+            {"role": "lasting", "rate": 70.0, "rate_per_pair": 70.0},
+        ],
+    }
+
+    await mock_pos_env.styles.insert_one(style1)
+    await mock_pos_env.styles.insert_one(style2)
+
+    # Add jobs with real assignment rates for Style 1
+    await mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(),
+        "style_id": str(s1_id),
+        "style_code": "STYLE-BATCH-1",
+        "assignments": {
+            "stitching": {"worker_id": "w1", "rate_per_pair": 65.0},
+            "lasting": {"worker_id": "w2", "rate_per_pair": 45.0},
+        }
+    })
+
+    # Add jobs with real assignment rates for Style 2
+    await mock_pos_env.production_jobs.insert_one({
+        "_id": ObjectId(),
+        "style_id": str(s2_id),
+        "style_code": "STYLE-BATCH-2",
+        "assignments": {
+            "stitching": {"worker_id": "w3", "rate_per_pair": 85.0},
+            "lasting": {"worker_id": "w4", "rate_per_pair": 75.0},
+        }
+    })
+
+    po_docs = [
+        {
+            "_id": ObjectId(),
+            "po_number": "PO-BATCH-01",
+            "line_items": [
+                {"style_id": str(s1_id), "style_code": "STYLE-BATCH-1", "quantity": 100, "unit_price": 500.0},
+                {"style_id": str(s2_id), "style_code": "STYLE-BATCH-2", "quantity": 50, "unit_price": 800.0},
+            ]
+        },
+        {
+            "_id": ObjectId(),
+            "po_number": "PO-BATCH-02",
+            "line_items": [
+                {"style_id": str(s1_id), "style_code": "STYLE-BATCH-1", "quantity": 80, "unit_price": 520.0},
+            ]
+        }
+    ]
+
+    # Run _attach_po_profitability
+    await _attach_po_profitability(po_docs, mock_pos_env)
+
+    # 1. Verify line 1 (PO 1, Style 1)
+    p1 = po_docs[0]["line_items"][0]["profitability"]
+    assert p1 is not None
+    assert p1["labor_cost"] == 110.0  # 65 + 45 actual from jobs
+    assert p1["labor_source"] == "actual"
+    assert p1["is_estimated"] is False
+    assert p1["total_cost"] == 200.0 + 110.0 + 25.0  # 335.0
+    assert p1["profit"] == 500.0 - 335.0  # 165.0
+
+    # 2. Verify line 2 (PO 1, Style 2)
+    p2 = po_docs[0]["line_items"][1]["profitability"]
+    assert p2 is not None
+    assert p2["labor_cost"] == 160.0  # 85 + 75 actual from jobs
+    assert p2["labor_source"] == "actual"
+    assert p2["is_estimated"] is False
+    assert p2["total_cost"] == 300.0 + 160.0 + 35.0  # 495.0
+    assert p2["profit"] == 800.0 - 495.0  # 305.0
+
+    # 3. Verify line 3 (PO 2, Style 1)
+    p3 = po_docs[1]["line_items"][0]["profitability"]
+    assert p3 is not None
+    assert p3["labor_cost"] == 110.0
+    assert p3["labor_source"] == "actual"
+    assert p3["is_estimated"] is False
+    assert p3["profit"] == 520.0 - 335.0  # 185.0
+
+
+@pytest.mark.anyio
+async def test_attach_po_profitability_matches_compute_po_profitability(mock_pos_env):
+    """
+    Verify the inline batched profitability logic in _attach_po_profitability produces
+    the exact same profit and cost outputs as compute_po_profitability given the same underlying data.
+    """
+    style_with_jobs_id = ObjectId()
+    style_with_jobs = {
+        "_id": style_with_jobs_id,
+        "id": str(style_with_jobs_id),
+        "code": "STYLE-MATCH-1",
+        "name": "Match Style 1",
+        "materials_cost": 250.0,
+        "overhead_cost": 40.0,
+        "packing_cost": 20.0,
+        "labor_cost": 90.0,
+        "labor": [
+            {"role": "stitching", "rate_per_pair": 50.0},
+            {"role": "lasting", "rate_per_pair": 40.0},
+        ],
+    }
+
+    style_estimated_id = ObjectId()
+    style_estimated = {
+        "_id": style_estimated_id,
+        "id": str(style_estimated_id),
+        "code": "STYLE-MATCH-2",
+        "name": "Match Style 2 (Estimated)",
+        "materials_cost": 180.0,
+        "overhead_cost": 30.0,
+        "packing_cost": 15.0,
+        "labor_cost": 80.0,
+        "labor": [
+            {"role": "cutting", "rate_per_pair": 30.0},
+            {"role": "stitching", "rate_per_pair": 50.0},
+        ],
+    }
+
+    await mock_pos_env.styles.insert_one(style_with_jobs)
+    await mock_pos_env.styles.insert_one(style_estimated)
+
+    job1 = {
+        "_id": ObjectId(),
+        "style_id": str(style_with_jobs_id),
+        "style_code": "STYLE-MATCH-1",
+        "assignments": {
+            "stitching": {"worker_id": "w1", "rate_per_pair": 55.0},
+            "lasting": {"worker_id": "w2", "rate_per_pair": 45.0},
+        }
+    }
+    await mock_pos_env.production_jobs.insert_one(job1)
+
+    po_docs = [
+        {
+            "_id": ObjectId(),
+            "po_number": "PO-MATCH-01",
+            "line_items": [
+                {"style_id": str(style_with_jobs_id), "style_code": "STYLE-MATCH-1", "quantity": 100, "unit_price": 600.0},
+                {"style_id": str(style_estimated_id), "style_code": "STYLE-MATCH-2", "quantity": 50, "unit_price": 450.0},
+            ]
+        }
+    ]
+
+    # Calculate expected profitability using compute_po_profitability directly
+    expected_prof_1 = await compute_po_profitability(
+        po_docs[0]["line_items"][0], style_with_jobs, mock_pos_env
+    )
+    expected_prof_2 = await compute_po_profitability(
+        po_docs[0]["line_items"][1], style_estimated, mock_pos_env
+    )
+
+    # Run batched _attach_po_profitability
+    await _attach_po_profitability(po_docs, mock_pos_env)
+
+    actual_prof_1 = po_docs[0]["line_items"][0]["profitability"]
+    actual_prof_2 = po_docs[0]["line_items"][1]["profitability"]
+
+    # Verify identical output field-by-field
+    assert actual_prof_1 == expected_prof_1
+    assert actual_prof_2 == expected_prof_2
+
+
+@pytest.mark.anyio
+async def test_attach_po_profitability_single_query_50_pos(mock_pos_env):
+    """
+    Verify with a dataset of 50+ POs (150 line items total):
+    1. Exactly ONE production_jobs query is made across all POs and line items (not 150 queries).
+    2. Exactly ONE styles query is made.
+    3. Profitability figures (profit, profit_pct, labor_source, is_estimated, etc.)
+       are IDENTICAL to unbatched compute_po_profitability.
+    4. Standalone compute_po_profitability continues to work correctly for single PO detail views.
+    """
+    import time
+    from unittest.mock import patch
+
+    # 1. Create 10 styles (5 with production job assignments, 5 without)
+    styles = []
+    styles_dict = {}
+    for i in range(10):
+        s_id = ObjectId()
+        has_assignments = (i % 2 == 0)
+        s_code = f"STYLE-LARGE-{i:02d}"
+        style_doc = {
+            "_id": s_id,
+            "id": str(s_id),
+            "code": s_code,
+            "name": f"Style Large {i}",
+            "bom": [{"item": f"Material {i}", "quantity": 1, "rate": 100.0 + i * 10}],
+            "materials_cost": 100.0 + i * 10,
+            "overhead_pct": 5.0,
+            "packing_cost": 15.0 + i,
+            "labor_cost": 80.0,
+            "labor": [
+                {"role": "stitching", "rate": 45.0, "rate_per_pair": 45.0},
+                {"role": "lasting", "rate": 35.0, "rate_per_pair": 35.0},
+            ],
+        }
+        styles.append(style_doc)
+        styles_dict[s_code] = style_doc
+        styles_dict[str(s_id)] = style_doc
+        await mock_pos_env.styles.insert_one(style_doc)
+
+        if has_assignments:
+            job = {
+                "_id": ObjectId(),
+                "style_id": str(s_id),
+                "style_code": s_code,
+                "assignments": {
+                    "stitching": {"worker_id": f"w_{i}_1", "rate_per_pair": 50.0 + i},
+                    "lasting": {"worker_id": f"w_{i}_2", "rate_per_pair": 40.0 + i},
+                }
+            }
+            await mock_pos_env.production_jobs.insert_one(job)
+
+    # 2. Build 60 POs with 3 line items each (180 total line items)
+    po_docs = []
+    for po_idx in range(60):
+        line_items = []
+        for line_idx in range(3):
+            chosen_style = styles[(po_idx * 3 + line_idx) % len(styles)]
+            line_items.append({
+                "style_id": str(chosen_style["_id"]),
+                "style_code": chosen_style["code"],
+                "quantity": 50 + po_idx,
+                "unit_price": 400.0 + po_idx * 2 + line_idx * 5,
+            })
+        po_docs.append({
+            "_id": ObjectId(),
+            "po_number": f"PO-LARGE-{po_idx:03d}",
+            "line_items": line_items,
+        })
+
+    # 3. Spy on find calls
+    orig_pj_find = mock_pos_env.production_jobs.find
+    orig_styles_find = mock_pos_env.styles.find
+    pj_find_count = 0
+    styles_find_count = 0
+
+    def spied_pj_find(*args, **kwargs):
+        nonlocal pj_find_count
+        pj_find_count += 1
+        return orig_pj_find(*args, **kwargs)
+
+    def spied_styles_find(*args, **kwargs):
+        nonlocal styles_find_count
+        styles_find_count += 1
+        return orig_styles_find(*args, **kwargs)
+
+    mock_pos_env.production_jobs.find = spied_pj_find
+    mock_pos_env.styles.find = spied_styles_find
+
+    try:
+        t0 = time.perf_counter()
+        await _attach_po_profitability(po_docs, mock_pos_env)
+        duration = time.perf_counter() - t0
+
+        # Assert exactly ONE query to production_jobs and ONE query to styles
+        assert pj_find_count == 1, f"Expected exactly 1 production_jobs query, got {pj_find_count}"
+        assert styles_find_count == 1, f"Expected exactly 1 styles query, got {styles_find_count}"
+    finally:
+        mock_pos_env.production_jobs.find = orig_pj_find
+        mock_pos_env.styles.find = orig_styles_find
+
+    # 4. Verify profitability calculations match unbatched compute_po_profitability for all lines
+    for po in po_docs[:10]:  # sample first 10 POs (30 line items)
+        for item in po["line_items"]:
+            style_doc = styles_dict[item["style_code"]]
+            expected = await compute_po_profitability(item, style_doc, mock_pos_env)
+            actual = item["profitability"]
+
+            assert actual["profit"] == expected["profit"]
+            assert actual["profit_pct"] == expected["profit_pct"]
+            assert actual["labor_source"] == expected["labor_source"]
+            assert actual["is_estimated"] == expected["is_estimated"]
+            assert actual["bom_cost"] == expected["bom_cost"]
+            assert actual["labor_cost"] == expected["labor_cost"]
+            assert actual["total_cost"] == expected["total_cost"]
+            assert actual == expected
+
+    # 5. Verify standalone compute_po_profitability for single detail view
+    single_line = {"style_id": str(styles[0]["_id"]), "style_code": styles[0]["code"], "unit_price": 550.0}
+    single_result = await compute_po_profitability(single_line, styles[0], mock_pos_env)
+    assert single_result["style_code"] == styles[0]["code"]
+    assert single_result["unit_price"] == 550.0
+    assert single_result["labor_source"] == "actual"
+    assert single_result["is_estimated"] is False
+    assert single_result["profit"] is not None
+
+
+
