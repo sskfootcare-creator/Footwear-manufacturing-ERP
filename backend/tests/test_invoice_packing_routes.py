@@ -102,6 +102,7 @@ class MockInvoiceDB:
         self.production_jobs = MagicMock()
         self.production_jobs.find = MagicMock(side_effect=self._find_jobs)
         self.production_jobs.find_one = AsyncMock(side_effect=self._find_one_job)
+        self.production_jobs.insert_one = AsyncMock(side_effect=self._insert_job)
         self.production_jobs.update_one = AsyncMock(side_effect=self._update_job)
         self.production_jobs.update_many = AsyncMock(side_effect=self._update_many_jobs)
 
@@ -279,6 +280,12 @@ class MockInvoiceDB:
         if "_id" in q:
             return self.production_jobs_store.get(str(q["_id"]))
         return None
+
+    async def _insert_job(self, doc):
+        oid_val = doc.get("_id") or ObjectId()
+        doc["_id"] = oid_val
+        self.production_jobs_store[str(oid_val)] = doc
+        return MagicMock(inserted_id=oid_val)
 
     async def _update_job(self, match, update):
         oid_str = str(match.get("_id"))
@@ -591,3 +598,256 @@ def test_packing_templates_and_merged_packing_lists(client, mock_invoice_env):
     })
     assert res_val.status_code == 200
     assert res_val.json()["valid"] is True
+
+
+def test_dispatch_create_partial_quantities_model_and_job_schema():
+    from models.orders import ProductionJobDoc
+
+    # 1. DispatchCreate with partial dispatch_quantities
+    dc_partial = DispatchCreate(
+        job_ids=["job_1", "job_2"],
+        po_id="po_123",
+        dispatch_quantities={"job_1": 15, "job_2": 25},
+    )
+    assert dc_partial.dispatch_quantities == {"job_1": 15, "job_2": 25}
+    assert dc_partial.job_ids == ["job_1", "job_2"]
+
+    # 2. DispatchCreate with omitted dispatch_quantities (backward compatible)
+    dc_default = DispatchCreate(
+        job_ids=["job_1"],
+        po_id="po_123",
+    )
+    assert dc_default.dispatch_quantities is None
+
+    # 3. ProductionJobDoc schema with split_from_job_id and split_history
+    job_doc = ProductionJobDoc(
+        style_code="OXFORD",
+        quantity=50,
+        split_from_job_id="job_parent_001",
+        split_history=[{"from_job_id": "job_parent_001", "split_qty": 50, "at": "2026-08-29T12:00:00Z"}]
+    )
+    assert job_doc.split_from_job_id == "job_parent_001"
+    assert len(job_doc.split_history) == 1
+    assert job_doc.split_history[0]["split_qty"] == 50
+
+
+def test_dispatch_partial_quantity_splits_job(client, mock_invoice_env):
+    """
+    Verify: dispatch a partial quantity of a single job (e.g. 60 of 100 pairs) —
+    confirm a new job for 60 pairs is created and dispatched, confirm the original job
+    now shows quantity=40 and remains active/visible in its current stage on the
+    Production board, confirm the original job's assignment/history data is correctly
+    present on both the split-off and remaining portions.
+    """
+    po_id = str(ObjectId())
+    job_id = str(ObjectId())
+    carton_id_1 = str(ObjectId())
+    carton_id_2 = str(ObjectId())
+
+    # PO
+    mock_invoice_env.pos_store[po_id] = {
+        "_id": ObjectId(po_id),
+        "id": po_id,
+        "po_number": "PO-SPLIT-01",
+        "client_name": "Bata Retail",
+        "line_items": [
+            {"style_code": "OXFORD", "color": "Black", "size": "8", "quantity": 100, "unit_price": 600.0}
+        ],
+        "subtotal": 60000.0,
+        "grand_total": 67200.0,
+        "payment_terms": "30 Days Credit",
+    }
+
+    # Original Job (100 pairs, currently at qc_pack, 100 pairs completed)
+    mock_invoice_env.production_jobs_store[job_id] = {
+        "_id": ObjectId(job_id),
+        "id": job_id,
+        "po_id": po_id,
+        "po_number": "PO-SPLIT-01",
+        "client_name": "Bata Retail",
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "quantity": 100,
+        "completed_qty": 100,
+        "stage": "qc_pack",
+        "assignments": {
+            "stitching": {
+                "worker_id": "w_stitching_1",
+                "worker_name": "Ramesh",
+                "rate_per_pair": 15.0,
+                "completed_qty": 100,
+            }
+        },
+        "history": [
+            {"stage": "procurement", "at": "2026-08-01T10:00:00Z", "by": "admin@ssk.com", "notes": "Job created"},
+            {"stage": "qc_pack", "at": "2026-08-10T15:00:00Z", "by": "admin@ssk.com", "notes": "QC passed"},
+        ]
+    }
+
+    # Two packed cartons (60 pairs and 40 pairs)
+    mock_invoice_env.packing_cartons_store[carton_id_1] = {
+        "_id": ObjectId(carton_id_1),
+        "id": carton_id_1,
+        "job_id": job_id,
+        "po_id": po_id,
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "qty": 60,
+        "status": "packed",
+    }
+    mock_invoice_env.packing_cartons_store[carton_id_2] = {
+        "_id": ObjectId(carton_id_2),
+        "id": carton_id_2,
+        "job_id": job_id,
+        "po_id": po_id,
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "qty": 40,
+        "status": "packed",
+    }
+
+    # Dispatch partial quantity: 60 pairs of 100
+    res = client.post("/api/dispatch", json={
+        "po_id": po_id,
+        "job_ids": [job_id],
+        "dispatch_quantities": {job_id: 60},
+        "transport_mode": "Road",
+        "vehicle_no": "KA-01-AB-1234",
+    })
+
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"] == "application/zip"
+
+    # 1. Verify Original Job: quantity reduced to 40, completed_qty adjusted to 40, still in qc_pack
+    orig_job_after = mock_invoice_env.production_jobs_store[job_id]
+    assert orig_job_after["quantity"] == 40
+    assert orig_job_after["completed_qty"] == 40
+    assert orig_job_after["stage"] == "qc_pack"  # Still active on production board!
+    assert orig_job_after["assignments"]["stitching"]["completed_qty"] == 40
+    assert orig_job_after["assignments"]["stitching"]["worker_name"] == "Ramesh"
+    assert len(orig_job_after["split_history"]) == 1
+    assert orig_job_after["split_history"][0]["split_qty"] == 60
+    assert orig_job_after["split_history"][0]["remaining_qty"] == 40
+
+    # 2. Verify Split-Off Job: created with quantity 60, split_from_job_id set, stage dispatched
+    all_jobs = list(mock_invoice_env.production_jobs_store.values())
+    split_job = next((j for j in all_jobs if str(j.get("split_from_job_id")) == job_id), None)
+    assert split_job is not None
+    assert split_job["quantity"] == 60
+    assert split_job["completed_qty"] == 60
+    assert split_job["stage"] == "dispatched"
+    assert split_job["assignments"]["stitching"]["completed_qty"] == 60
+    assert split_job["assignments"]["stitching"]["worker_name"] == "Ramesh"
+    assert split_job["style_code"] == "OXFORD"
+    assert split_job["color"] == "Black"
+    assert split_job["size"] == "8"
+    assert len(split_job["split_history"]) == 1
+    assert split_job["split_history"][0]["event"] == "created_from_split"
+    assert split_job["split_history"][0]["split_qty"] == 60
+
+    # 3. Verify provenance: original history items are present on both jobs
+    assert any(h.get("notes") == "Job created" for h in orig_job_after["history"])
+    assert any(h.get("notes") == "Job created" for h in split_job["history"])
+
+    # 4. Verify Dispatch Record and Invoice reference the split job
+    assert len(mock_invoice_env.invoices_store) == 1
+    inv = list(mock_invoice_env.invoices_store.values())[0]
+    assert str(split_job["_id"]) in inv["job_ids"]
+    assert job_id not in inv["job_ids"]
+    assert inv["total_quantity"] == 60
+
+
+def test_two_phase_partial_and_final_dispatch_lifecycle(client, mock_invoice_env):
+    """
+    Verify complete two-phase lifecycle:
+    1. First dispatch: 60 of 100 pairs split-off and dispatched (inv 1, dr 1)
+    2. Remaining 40 pairs continue in production, packed into cartons, and dispatched in 2nd dispatch (inv 2, dr 2)
+    3. Verify both dispatches exist distinctly with 60 pairs and 40 pairs, total 100 pairs dispatched
+    """
+    po_id = str(ObjectId())
+    job_id = str(ObjectId())
+    carton_1 = str(ObjectId())
+    carton_2 = str(ObjectId())
+
+    # PO
+    mock_invoice_env.pos_store[po_id] = {
+        "_id": ObjectId(po_id),
+        "id": po_id,
+        "po_number": "PO-2PHASE-01",
+        "client_name": "Metro Brands",
+        "line_items": [
+            {"style_code": "DERBY", "color": "Brown", "size": "9", "quantity": 100, "unit_price": 750.0}
+        ],
+        "subtotal": 75000.0,
+        "grand_total": 84000.0,
+    }
+
+    # Original Job (100 pairs)
+    mock_invoice_env.production_jobs_store[job_id] = {
+        "_id": ObjectId(job_id),
+        "id": job_id,
+        "po_id": po_id,
+        "po_number": "PO-2PHASE-01",
+        "client_name": "Metro Brands",
+        "style_code": "DERBY",
+        "color": "Brown",
+        "size": "9",
+        "quantity": 100,
+        "completed_qty": 100,
+        "stage": "qc_pack",
+    }
+
+    # Cartons
+    mock_invoice_env.packing_cartons_store[carton_1] = {
+        "_id": ObjectId(carton_1),
+        "id": carton_1,
+        "job_id": job_id,
+        "po_id": po_id,
+        "style_code": "DERBY",
+        "color": "Brown",
+        "size": "9",
+        "qty": 60,
+        "status": "packed",
+    }
+    mock_invoice_env.packing_cartons_store[carton_2] = {
+        "_id": ObjectId(carton_2),
+        "id": carton_2,
+        "job_id": job_id,
+        "po_id": po_id,
+        "style_code": "DERBY",
+        "color": "Brown",
+        "size": "9",
+        "qty": 40,
+        "status": "packed",
+    }
+
+    # Phase 1: Dispatch 60 pairs
+    res1 = client.post("/api/dispatch", json={
+        "po_id": po_id,
+        "job_ids": [job_id],
+        "dispatch_quantities": {job_id: 60},
+        "transport_mode": "Air Cargo",
+    })
+    assert res1.status_code == 200
+
+    # Phase 2: Dispatch remaining 40 pairs on the original job
+    res2 = client.post("/api/dispatch", json={
+        "po_id": po_id,
+        "job_ids": [job_id],
+        "dispatch_quantities": {job_id: 40},
+        "transport_mode": "Road",
+    })
+    assert res2.status_code == 200
+
+    # Verify 2 distinct invoices and 2 dispatch records created
+    assert len(mock_invoice_env.invoices_store) == 2
+    assert len(mock_invoice_env.dispatch_records_store) == 2
+
+    inv_list = list(mock_invoice_env.invoices_store.values())
+    inv_quantities = sorted([inv["total_quantity"] for inv in inv_list])
+    assert inv_quantities == [40, 60]  # Exactly 40 and 60 pairs
+    assert sum(inv_quantities) == 100  # Exactly 100 pairs total
+

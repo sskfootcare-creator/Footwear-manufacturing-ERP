@@ -72,6 +72,7 @@ function groupJobsByColor(jobs) {
   }
   return Object.values(groups).map(g => ({
     ...g,
+    stage: g.rows[0]?.stage,
     sizes: Array.from(g.sizes).sort(sortSizes),
     totalQty: g.rows.reduce((s, r) => s + (r.quantity || 0), 0),
     components: aggregateComponents(g.rows),
@@ -3246,6 +3247,13 @@ function DispatchDialog({ group, onClose, load }) {
     gross_wt_per_carton: "",
     notes: "",
   });
+  const [dispatchQuantities, setDispatchQuantities] = useState(() => {
+    const init = {};
+    (group.rows || []).forEach(r => {
+      init[r.id] = r.completed_qty != null ? r.completed_qty : (r.quantity || 0);
+    });
+    return init;
+  });
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(null);
   const [err, setErr] = useState(null);
@@ -3267,10 +3275,17 @@ function DispatchDialog({ group, onClose, load }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const totalPairs = group.rows?.reduce((s, r) => s + (r.completed_qty || 0), 0) || 0;
+  const totalPairs = group.rows?.reduce((s, r) => s + (r.quantity || 0), 0) || 0;
   const sizes = group.rows?.map(r => r.size).join(", ") || "";
   const poId = group.po_id || group.rows?.[0]?.po_id || "";
   const jobIds = useMemo(() => group.rows?.map(r => r.id).filter(Boolean) || [], [group.rows]);
+
+  const totalDispatchPairs = useMemo(() => {
+    return (group.rows || []).reduce((acc, r) => {
+      const q = dispatchQuantities[r.id];
+      return acc + (q !== "" && q !== undefined ? Number(q) : (r.completed_qty || r.quantity || 0));
+    }, 0);
+  }, [group.rows, dispatchQuantities]);
 
   const handleDispatch = useCallback(async () => {
     if (!poId) { setErr("Cannot find PO for this group — contact admin."); return; }
@@ -3278,7 +3293,12 @@ function DispatchDialog({ group, onClose, load }) {
     setLoading(true); setErr(null);
     try {
       const payload = {
-        job_ids: jobIds, po_id: poId, ...form,
+        job_ids: jobIds,
+        po_id: poId,
+        dispatch_quantities: Object.fromEntries(
+          Object.entries(dispatchQuantities).map(([k, v]) => [k, v === "" ? 0 : Number(v)])
+        ),
+        ...form,
         net_wt_per_carton: form.net_wt_per_carton ? parseFloat(form.net_wt_per_carton) : null,
         gross_wt_per_carton: form.gross_wt_per_carton ? parseFloat(form.gross_wt_per_carton) : null,
       };
@@ -3305,7 +3325,7 @@ function DispatchDialog({ group, onClose, load }) {
       } catch {}
       setErr(msg);
     } finally { setLoading(false); }
-  }, [form, poId, jobIds, load]);
+  }, [form, poId, jobIds, dispatchQuantities, load]);
 
   const Field = ({ label, children }) => (
     <div className="space-y-1">
@@ -3338,13 +3358,79 @@ function DispatchDialog({ group, onClose, load }) {
           <div className="bg-slate-50 border border-slate-200 p-4 rounded">
             <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Dispatch Summary</div>
             <div className="grid grid-cols-3 gap-3 text-center">
-              <div><div className="text-2xl font-black text-[#0F172A]">{totalPairs}</div><div className="text-[10px] text-slate-400 uppercase">Total Pairs</div></div>
+              <div><div className="text-2xl font-black text-teal-700" data-testid="dispatch-total-pairs">{totalDispatchPairs}</div><div className="text-[10px] text-slate-400 uppercase">Dispatch Pairs</div></div>
               <div><div className="text-2xl font-black text-[#0F172A]">{jobIds.length}</div><div className="text-[10px] text-slate-400 uppercase">Job Lines</div></div>
               <div><div className="text-sm font-bold text-[#0F172A]">{sizes || "—"}</div><div className="text-[10px] text-slate-400 uppercase">Sizes</div></div>
             </div>
             <p className="mt-3 pt-3 border-t border-slate-200 text-[11px] text-slate-500">
               Box numbers assigned 1..N (sorted by size). Invoice uses actual packed qty from carton rows.
             </p>
+          </div>
+
+          {/* Dispatch Quantities & Partial Split Section */}
+          <div className="bg-slate-50 border border-slate-200 p-4 rounded space-y-3" data-testid="dispatch-quantities-section">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-700">
+                Dispatch Quantities per Size / Job Line
+              </div>
+              <span className="text-[11px] font-mono text-slate-500">
+                Total to dispatch: <strong className="text-teal-700">{totalDispatchPairs}</strong> / {totalPairs} pairs
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {(group.rows || []).map((r) => {
+                const fullQty = r.quantity || 0;
+                const completedQty = r.completed_qty != null ? r.completed_qty : fullQty;
+                const currentVal = dispatchQuantities[r.id] !== undefined ? dispatchQuantities[r.id] : completedQty;
+                const nowQty = currentVal === "" ? 0 : Number(currentVal);
+                const remainder = Math.max(0, fullQty - nowQty);
+                const stageObj = STAGES.find(s => s.key === r.stage);
+                const stageLabel = stageObj?.label || r.stage || "Production";
+
+                return (
+                  <div key={r.id} className="bg-white border border-slate-200 p-3 rounded space-y-2">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div>
+                        <span className="font-mono font-bold text-sm text-slate-900 mr-2">Size {r.size || "—"}</span>
+                        <span className="text-xs text-slate-500">Full Job Qty: <strong className="font-mono text-slate-700">{fullQty} prs</strong></span>
+                        {r.completed_qty != null && (
+                          <span className="text-xs text-slate-400 ml-2">({r.completed_qty} completed)</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Dispatch now:</label>
+                        <input
+                          type="number"
+                          min="0"
+                          max={fullQty}
+                          data-testid={`dispatch-qty-input-${r.id}`}
+                          value={currentVal}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setDispatchQuantities(prev => ({
+                              ...prev,
+                              [r.id]: v === "" ? "" : Math.max(0, Math.min(fullQty, parseInt(v, 10) || 0))
+                            }));
+                          }}
+                          className="w-24 border-2 border-slate-300 px-2.5 py-1.5 font-mono text-sm text-right font-bold text-slate-900 focus:border-[#0D9488] outline-none"
+                        />
+                        <span className="text-xs font-mono text-slate-500">prs</span>
+                      </div>
+                    </div>
+
+                    {remainder > 0 && (
+                      <div className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-1 rounded flex items-center gap-1.5" data-testid={`remainder-indicator-${r.id}`}>
+                        <span>⚠️</span>
+                        <span>
+                          <strong>{remainder} pairs</strong> will remain active in <strong>{stageLabel}</strong> stage
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* Shipping fields */}

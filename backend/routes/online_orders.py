@@ -824,6 +824,8 @@ async def import_online_orders(
             "stage": "procurement",
             "stage_entered_at": entered,
             "stage_deadline": deadline,
+            "split_from_job_id": None,
+            "split_history": None,
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"],

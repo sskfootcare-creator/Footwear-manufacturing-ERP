@@ -163,4 +163,157 @@ describe("Production View Dispatch Details Modal", () => {
       expect(screen.queryByTestId("dispatch-details-modal")).not.toBeInTheDocument();
     });
   });
+
+  test("DispatchDialog shows full quantity, allows editing dispatch now, and displays remainder indicator", async () => {
+    const mockActiveJob = {
+      id: "job_active_1",
+      po_id: "po_123",
+      po_number: "PO-DISP-001",
+      client_name: "Relaxo Footwear",
+      style_id: "style_1",
+      style_code: "OXFORD-BLK",
+      color: "Black",
+      size: "8",
+      quantity: 100,
+      completed_qty: 100,
+      stage: "qc_pack",
+      archived: false,
+    };
+
+    http.get.mockImplementation((url) => {
+      if (url.startsWith("/production/jobs")) return Promise.resolve({ data: [mockActiveJob] });
+      if (url.startsWith("/workers")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/styles")) return Promise.resolve({ data: [{ code: "OXFORD-BLK", name: "Oxford Classic Black" }] });
+      if (url.startsWith("/production/archive")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/dispatch-records")) return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: [] });
+    });
+
+    http.post.mockImplementation((url, payload) => {
+      if (url === "/dispatch") {
+        return Promise.resolve({
+          data: new Blob(["fake-zip"]),
+          headers: {
+            "x-invoice-no": "INV-2026-0099",
+            "x-dispatch-record-id": "dr_999",
+          },
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(
+      <MemoryRouter>
+        <Production />
+      </MemoryRouter>
+    );
+
+    // Wait for the card to load on board
+    await waitFor(() => {
+      expect(screen.getByText("OXFORD-BLK")).toBeInTheDocument();
+    });
+
+    // Find the Dispatch button on the card (or trigger dispatch modal)
+    const dispatchBtn = screen.getByTestId("dispatch-btn-PO-DISP-001::OXFORD-BLK::Black");
+    fireEvent.click(dispatchBtn);
+
+    // Verify dialog opened
+    await waitFor(() => {
+      expect(screen.getByTestId("dispatch-quantities-section")).toBeInTheDocument();
+    });
+
+    // Verify default value is 100
+    const qtyInput = screen.getByTestId("dispatch-qty-input-job_active_1");
+    expect(qtyInput).toHaveValue(100);
+    expect(screen.queryByTestId("remainder-indicator-job_active_1")).not.toBeInTheDocument();
+
+    // Edit to 60 pairs
+    fireEvent.change(qtyInput, { target: { value: "60" } });
+    expect(qtyInput).toHaveValue(60);
+
+    // Verify remainder indication is displayed
+    const remainderInd = screen.getByTestId("remainder-indicator-job_active_1");
+    expect(remainderInd).toBeInTheDocument();
+    expect(remainderInd).toHaveTextContent("40 pairs will remain active in QC & Pack stage");
+
+    // Click confirm dispatch
+    const confirmBtn = screen.getByTestId("dispatch-confirm-btn");
+    fireEvent.click(confirmBtn);
+
+    // Verify http.post was called with dispatch_quantities: { job_active_1: 60 }
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith(
+        "/dispatch",
+        expect.objectContaining({
+          job_ids: ["job_active_1"],
+          po_id: "po_123",
+          dispatch_quantities: { job_active_1: 60 },
+        }),
+        expect.anything()
+      );
+    });
+  });
+
+  test("Archive panel clustering cleanly handles split-dispatched jobs into distinct invoice clusters", () => {
+    const { clusterArchivedGroups } = require("../Production");
+
+    const splitJob1 = {
+      id: "job_split_1",
+      po_id: "po_1",
+      po_number: "PO-SPLIT-01",
+      style_code: "DERBY",
+      color: "Tan",
+      size: "8",
+      quantity: 60,
+      stage: "dispatched",
+      split_from_job_id: "job_orig_1",
+    };
+
+    const remainingJob = {
+      id: "job_orig_1",
+      po_id: "po_1",
+      po_number: "PO-SPLIT-01",
+      style_code: "DERBY",
+      color: "Tan",
+      size: "8",
+      quantity: 40,
+      stage: "dispatched",
+    };
+
+    const groups = [
+      {
+        key: "PO-SPLIT-01::DERBY::Tan::batch1",
+        po_number: "PO-SPLIT-01",
+        style_code: "DERBY",
+        color: "Tan",
+        rows: [splitJob1],
+      },
+      {
+        key: "PO-SPLIT-01::DERBY::Tan::batch2",
+        po_number: "PO-SPLIT-01",
+        style_code: "DERBY",
+        color: "Tan",
+        rows: [remainingJob],
+      },
+    ];
+
+    const dispatchRecordByJobId = {
+      job_split_1: { id: "dr_batch1", invoice_id: "inv_batch1", invoice_no: "INV-001" },
+      job_orig_1: { id: "dr_batch2", invoice_id: "inv_batch2", invoice_no: "INV-002" },
+    };
+
+    const invoices = [
+      { id: "inv_batch1", invoice_no: "INV-001", job_ids: ["job_split_1"] },
+      { id: "inv_batch2", invoice_no: "INV-002", job_ids: ["job_orig_1"] },
+    ];
+
+    const clusters = clusterArchivedGroups(groups, dispatchRecordByJobId, invoices);
+
+    // Verify exactly 2 distinct clusters are created with correct invoices and no orphan/duplicate confusion
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0].invoice_no).toBe("INV-001");
+    expect(clusters[0].groups[0].rows[0].id).toBe("job_split_1");
+    expect(clusters[1].invoice_no).toBe("INV-002");
+    expect(clusters[1].groups[0].rows[0].id).toBe("job_orig_1");
+  });
 });

@@ -1188,6 +1188,8 @@ async def create_po(payload: POIn, request: Request):
             "delivery_date": doc.get("delivery_date", ""),
             "stage_entered_at": entered,
             "stage_deadline": deadline,
+            "split_from_job_id": None,
+            "split_history": None,
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"], "notes": "Job created"}],

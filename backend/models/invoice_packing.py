@@ -1,6 +1,6 @@
 """Invoicing & Packing List Pydantic Models."""
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel
 
 
@@ -15,6 +15,10 @@ class InvoiceGenerate(BaseModel):
 class DispatchCreate(BaseModel):
     job_ids: List[str]
     po_id: str
+    dispatch_quantities: Optional[Dict[str, int]] = None
+    # job_id -> quantity to dispatch now. If a job_id is in job_ids but NOT in this
+    # dict, dispatch its full remaining quantity (backward-compatible default —
+    # existing whole-job dispatch behavior unchanged when this field is omitted).
     transport_mode: Optional[str] = ""
     vehicle_no: Optional[str] = ""
     supply_date: Optional[str] = ""

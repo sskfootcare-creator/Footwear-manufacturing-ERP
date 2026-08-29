@@ -775,4 +775,162 @@ async def test_my_payroll_reflects_same_corrected_earnings_as_admin_report(monke
     assert karigarB_payroll["net_payable"] == 0.0
 
 
+@pytest.mark.anyio
+async def test_split_job_full_lifecycle_payroll_and_profitability(monkeypatch):
+    """
+    Verify full scenario:
+    - 100-pair job assigned to Karigar A @ Rs 10/pr
+    - 60 pairs split-dispatched into a new job
+    - Remaining 40 pairs completed through to a second dispatch later
+    - Confirm payroll correctly counts total pairs (100) and earnings (Rs 1000) across both dispatches
+    - Confirm no double-counting or gaps
+    """
+    db = MockDB()
+    wA_id = ObjectId()
+    db.workers.docs.append({
+        "_id": wA_id,
+        "name": "Karigar A",
+        "skill": "stitching",
+        "rate_per_pair": 10.0,
+    })
+
+    po_id = ObjectId()
+    orig_job_id = ObjectId()
+    split_job_id = ObjectId()
+
+    # Split-off job from 1st dispatch (60 pairs, dispatched)
+    db.production_jobs.docs.append({
+        "_id": split_job_id,
+        "po_id": str(po_id),
+        "po_number": "PO-SPLIT-LIFECYCLE",
+        "style_code": "OXFORD",
+        "size": "8",
+        "quantity": 60,
+        "completed_qty": 60,
+        "stage": "dispatched",
+        "split_from_job_id": str(orig_job_id),
+        "updated_at": "2026-08-10T12:00:00Z",
+        "assignments": {
+            "stitching": {
+                "worker_id": str(wA_id),
+                "worker_name": "Karigar A",
+                "rate_per_pair": 10.0,
+                "completed_qty": 60,
+                "completed_by": {
+                    "worker_id": str(wA_id),
+                    "worker_name": "Karigar A",
+                    "rate_per_pair": 10.0,
+                    "at": "2026-08-10T10:00:00Z",
+                }
+            }
+        },
+        "history": [
+            {
+                "event": "quantity_update",
+                "role": "stitching",
+                "completed_qty": 60,
+                "completed_by": {
+                    "worker_id": str(wA_id),
+                    "worker_name": "Karigar A",
+                    "rate_per_pair": 10.0,
+                    "at": "2026-08-10T10:00:00Z",
+                },
+                "at": "2026-08-10T10:00:00Z",
+            },
+            {
+                "event": "created_from_split",
+                "from_job_id": str(orig_job_id),
+                "split_qty": 60,
+                "at": "2026-08-10T12:00:00Z",
+            }
+        ]
+    })
+
+    # Remaining job completed and dispatched in 2nd dispatch (40 pairs, dispatched)
+    db.production_jobs.docs.append({
+        "_id": orig_job_id,
+        "po_id": str(po_id),
+        "po_number": "PO-SPLIT-LIFECYCLE",
+        "style_code": "OXFORD",
+        "size": "8",
+        "quantity": 40,
+        "completed_qty": 40,
+        "stage": "dispatched",
+        "split_history": [
+            {
+                "event": "split",
+                "split_to_job_id": str(split_job_id),
+                "split_qty": 60,
+                "remaining_qty": 40,
+                "at": "2026-08-10T12:00:00Z",
+            }
+        ],
+        "updated_at": "2026-08-20T15:00:00Z",
+        "assignments": {
+            "stitching": {
+                "worker_id": str(wA_id),
+                "worker_name": "Karigar A",
+                "rate_per_pair": 10.0,
+                "completed_qty": 40,
+                "completed_by": {
+                    "worker_id": str(wA_id),
+                    "worker_name": "Karigar A",
+                    "rate_per_pair": 10.0,
+                    "at": "2026-08-20T14:00:00Z",
+                }
+            }
+        },
+        "history": [
+            {
+                "event": "split",
+                "split_qty": 60,
+                "remaining_qty": 40,
+                "at": "2026-08-10T12:00:00Z",
+            },
+            {
+                "event": "quantity_update",
+                "role": "stitching",
+                "completed_qty": 40,
+                "completed_by": {
+                    "worker_id": str(wA_id),
+                    "worker_name": "Karigar A",
+                    "rate_per_pair": 10.0,
+                    "at": "2026-08-20T14:00:00Z",
+                },
+                "at": "2026-08-20T14:00:00Z",
+            }
+        ]
+    })
+
+    monkeypatch.setattr("routes.pos.get_db", lambda: db)
+
+    # 1. Admin report_payroll across full period
+    admin_req = make_request(db, {"email": "admin@ssk.com", "role": "admin", "roles": ["admin"]})
+    admin_payroll = await report_payroll(admin_req, from_date="2026-08-01", to_date="2026-08-31")
+    rows = admin_payroll.get("rows", [])
+    row_A = next((r for r in rows if r["worker_id"] == str(wA_id)), None)
+
+    assert row_A is not None
+    assert row_A["total_pairs"] == 100  # Exactly 60 + 40
+    assert row_A["total_earning"] == 1000.0  # Exactly Rs 600 + Rs 400
+    assert len(row_A["jobs"]) == 1
+    assert row_A["jobs"][0]["pairs"] == 100
+    assert row_A["jobs"][0]["earning"] == 1000.0
+
+    # 2. Worker self-service my_payroll parity
+    worker_req = make_request(db, {
+        "id": str(wA_id),
+        "worker_id": str(wA_id),
+        "name": "Karigar A",
+        "role": "worker",
+    })
+    my_p_res = await my_payroll(worker_req, from_date="2026-08-01", to_date="2026-08-31")
+    my_p = my_p_res.get("payroll", {})
+    assert my_p["worker_id"] == str(wA_id)
+    assert my_p["total_pairs"] == 100
+    assert my_p["total_earning"] == 1000.0
+    assert my_p["net_payable"] == 1000.0
+
+
+
 

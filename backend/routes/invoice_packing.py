@@ -1669,9 +1669,131 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         raise HTTPException(404, "PO not found")
     po = stringify(po_doc)
 
+    # 1.5 Handle partial dispatch / job splitting if dispatch_quantities is provided
+    effective_job_ids = []
+    dispatch_qty_map = payload.dispatch_quantities or {}
+
+    for jid in payload.job_ids:
+        orig_job = await db.production_jobs.find_one({"_id": oid(jid)})
+        if not orig_job:
+            effective_job_ids.append(jid)
+            continue
+
+        orig_qty = int(orig_job.get("quantity", 0))
+        target_qty = int(dispatch_qty_map.get(jid, orig_qty)) if (jid in dispatch_qty_map) else orig_qty
+
+        if 0 < target_qty < orig_qty:
+            # Partial dispatch: split job
+            rem_qty = orig_qty - target_qty
+            orig_comp = orig_job.get("completed_qty", 0) or 0
+            new_comp = min(target_qty, orig_comp)
+            rem_comp = min(rem_qty, max(0, orig_comp - target_qty))
+
+            # Split assignments
+            orig_asgn = orig_job.get("assignments") or {}
+            new_asgn = {}
+            rem_asgn = {}
+            if isinstance(orig_asgn, dict):
+                for role_k, role_v in orig_asgn.items():
+                    if isinstance(role_v, dict):
+                        nv = dict(role_v)
+                        rv = dict(role_v)
+                        r_comp = role_v.get("completed_qty")
+                        if r_comp is not None:
+                            nv["completed_qty"] = min(target_qty, r_comp)
+                            rv["completed_qty"] = min(rem_qty, max(0, r_comp - target_qty))
+                        new_asgn[role_k] = nv
+                        rem_asgn[role_k] = rv
+                    else:
+                        new_asgn[role_k] = role_v
+                        rem_asgn[role_k] = role_v
+
+            new_job_oid = ObjectId()
+            now = now_iso()
+
+            # 1. Create NEW split job (inherits assignments, full history, split lineage)
+            new_job_doc = dict(orig_job)
+            new_job_doc["_id"] = new_job_oid
+            new_job_doc["id"] = str(new_job_oid)
+            new_job_doc["quantity"] = target_qty
+            new_job_doc["completed_qty"] = new_comp
+            new_job_doc["assignments"] = new_asgn
+            new_job_doc["split_from_job_id"] = str(orig_job["_id"])
+            new_job_doc["created_at"] = now
+            new_job_doc["updated_at"] = now
+
+            new_split_hist = list(orig_job.get("split_history") or [])
+            new_split_hist.append({
+                "event": "created_from_split",
+                "from_job_id": str(orig_job["_id"]),
+                "split_qty": target_qty,
+                "at": now,
+                "by": u.get("email", "system"),
+            })
+            new_job_doc["split_history"] = new_split_hist
+
+            new_hist = list(orig_job.get("history") or [])
+            new_hist.append({
+                "event": "created_from_split",
+                "from_job_id": str(orig_job["_id"]),
+                "split_qty": target_qty,
+                "at": now,
+                "by": u.get("email", "system"),
+                "notes": f"Split from job {orig_job['_id']} for partial dispatch of {target_qty} pairs",
+            })
+            new_job_doc["history"] = new_hist
+
+            await db.production_jobs.insert_one(new_job_doc)
+
+            # 2. Update ORIGINAL job (remains active in current stage with reduced quantity)
+            orig_split_hist = list(orig_job.get("split_history") or [])
+            orig_split_hist.append({
+                "event": "split",
+                "split_to_job_id": str(new_job_oid),
+                "split_qty": target_qty,
+                "remaining_qty": rem_qty,
+                "at": now,
+                "by": u.get("email", "system"),
+            })
+            orig_hist = list(orig_job.get("history") or [])
+            orig_hist.append({
+                "event": "split",
+                "at": now,
+                "by": u.get("email", "system"),
+                "notes": f"Partial dispatch split: {target_qty} pairs split to job {new_job_oid}, {rem_qty} pairs remaining",
+            })
+
+            await db.production_jobs.update_one(
+                {"_id": orig_job["_id"]},
+                {"$set": {
+                    "quantity": rem_qty,
+                    "completed_qty": rem_comp,
+                    "assignments": rem_asgn,
+                    "split_history": orig_split_hist,
+                    "history": orig_hist,
+                    "updated_at": now,
+                }}
+            )
+
+            # 3. Reassign corresponding packed cartons to new_job_oid
+            orig_cartons = await db.packing_cartons.find({"job_id": jid, "status": "packed"}).to_list(5000)
+            allocated = 0
+            for c in orig_cartons:
+                c_q = c.get("qty", 0)
+                if allocated + c_q <= target_qty or allocated < target_qty:
+                    await db.packing_cartons.update_one(
+                        {"_id": c["_id"]},
+                        {"$set": {"job_id": str(new_job_oid)}}
+                    )
+                    allocated += c_q
+
+            effective_job_ids.append(str(new_job_oid))
+        else:
+            effective_job_ids.append(jid)
+
     # 2. Load packed cartons
     carton_docs = await db.packing_cartons.find(
-        {"job_id": {"$in": payload.job_ids}, "status": "packed"}
+        {"job_id": {"$in": effective_job_ids}, "status": "packed"}
     ).sort([("size", 1), ("_id", 1)]).to_list(50000)
 
     if not carton_docs:
@@ -1726,7 +1848,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         raise HTTPException(400, "No packed quantities found — carton rows may have 0 qty")
 
     # 5. Invoice PDF
-    existing_inv = await db.invoices.find_one({"job_ids": {"$in": payload.job_ids}})
+    existing_inv = await db.invoices.find_one({"job_ids": {"$in": effective_job_ids}})
     if existing_inv and existing_inv.get("invoice_no"):
         invoice_no = existing_inv["invoice_no"]
         invoice_date = existing_inv.get("invoice_date") or datetime.now().strftime("%d/%m/%Y")
@@ -1790,7 +1912,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "po_number": po.get("po_number"),
         "po_numbers": [po.get("po_number")],
         "client_name": po.get("client_name"),
-        "job_ids": payload.job_ids,
+        "job_ids": effective_job_ids,
         "line_items_snapshot": line_items,
         **totals,
         "transport_mode": payload.transport_mode,
@@ -1837,7 +1959,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "client_name": po.get("client_name"),
         "po_ids": [payload.po_id],
         "po_numbers": [po.get("po_number", "")],
-        "job_ids": payload.job_ids,
+        "job_ids": effective_job_ids,
         "packing_cartons_snapshot": snapshot,
         "total_cartons": total_cartons,
         "total_qty": total_qty,
@@ -1850,7 +1972,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     dispatch_record_id = str(dr_res.inserted_id)
 
     # 11. Advance job stages
-    await _flag_jobs(payload.job_ids, "invoice_generated_at", db=db)
+    await _flag_jobs(effective_job_ids, "invoice_generated_at", db=db)
 
     # 12. ZIP all documents
     date_tag = datetime.now().strftime("%Y%m%d-%H%M")

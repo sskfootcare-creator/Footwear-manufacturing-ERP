@@ -55,3 +55,30 @@ class ProductionStageUpdate(BaseModel):
     qc_pass: Optional[bool] = None
     notes: Optional[str] = ""
     confirm_skip: bool = False
+
+
+class ProductionJobDoc(BaseModel):
+    source_type: Optional[str] = "b2b_client"
+    po_id: Optional[str] = None
+    po_number: Optional[str] = None
+    client_name: Optional[str] = None
+    style_code: str
+    style_id: Optional[str] = None
+    style_match_status: Optional[str] = None
+    mapped_from_sku: Optional[str] = None
+    sku_mapping_id: Optional[str] = None
+    description: Optional[str] = ""
+    color: Optional[str] = ""
+    size: Optional[str] = ""
+    quantity: int
+    completed_qty: Optional[int] = 0
+    rejected_qty: Optional[int] = 0
+    stage: str = "procurement"
+    delivery_date: Optional[str] = ""
+    stage_entered_at: Optional[str] = None
+    stage_deadline: Optional[str] = None
+    split_from_job_id: Optional[str] = None   # set on a job created by a split, points to the original job's id
+    split_history: Optional[List[dict]] = None # optional: track split lineage if a job gets split more than once
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    history: Optional[List[dict]] = None

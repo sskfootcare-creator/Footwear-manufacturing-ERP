@@ -16,7 +16,7 @@ from models.components import (
     ComponentMovementIn, StyleComponentMappingIn, StyleComponentMappingUpdate
 )
 from models.orders import (
-    PRODUCTION_STAGES, POLineItem, POIn, ProductionStageUpdate
+    PRODUCTION_STAGES, POLineItem, POIn, ProductionStageUpdate, ProductionJobDoc
 )
 from models.workers import (
     WorkerIn, AssignmentUpdate, BulkAssign, AdvanceIn,
@@ -74,7 +74,7 @@ __all__ = [
     "ComponentUpdate", "ComponentIn", "ComponentMasterUpdate", "ComponentBulkMatrix",
     "ComponentMovementIn", "StyleComponentMappingIn", "StyleComponentMappingUpdate",
     # Orders
-    "PRODUCTION_STAGES", "POLineItem", "POIn", "ProductionStageUpdate",
+    "PRODUCTION_STAGES", "POLineItem", "POIn", "ProductionStageUpdate", "ProductionJobDoc",
     # Workers
     "WorkerIn", "AssignmentUpdate", "BulkAssign", "AdvanceIn",
     "SetPinIn", "WorkerLoginIn", "ReadyForPickupIn",
