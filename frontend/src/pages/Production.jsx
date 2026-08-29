@@ -1269,6 +1269,27 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
       const bm = (b.skill === matchingSkill || b.skill === "general") ? 0 : 1;
       return am - bm;
     });
+
+  const roleHistory = useMemo(() => {
+    const events = [];
+    const seen = new Set();
+    (group.rows || []).forEach(r => {
+      (r.history || []).forEach(h => {
+        if (!h) return;
+        const isAssignment = (h.event === "assignment_update" || h.event === "bulk_assignment") && h.role === role;
+        const isCompletion = (h.role === role || h.stage === role) && (h.completed_qty != null || h.completed_by != null);
+        if (isAssignment || isCompletion) {
+          const key = `${h.at}_${h.worker_id || h.completed_by?.worker_id}_${h.event || h.stage}_${h.completed_qty}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            events.push(h);
+          }
+        }
+      });
+    });
+    return events.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+  }, [group, role]);
+
   const onPickWorker = (w) => {
     setSelectedWid(w.id);
     if (rate === "" || rate === null || rate === undefined) setRate(w.rate_per_pair);
@@ -1283,7 +1304,20 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 touch-manipulation"><X className="w-5 h-5" /></button>
         </div>
-        <div className="p-5 max-h-[55vh] overflow-y-auto">
+
+        {current?.worker_name && (
+          <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-200 text-xs flex items-center justify-between" data-testid="current-assignee-banner">
+            <div>
+              <span className="text-[10px] uppercase font-bold text-amber-800 tracking-wider">Current Assignee: </span>
+              <span className="font-bold text-slate-900">{current.worker_name}</span>
+            </div>
+            {current.rate_per_pair != null && (
+              <span className="font-mono font-bold text-amber-900">₹{current.rate_per_pair}/pr</span>
+            )}
+          </div>
+        )}
+
+        <div className="p-5 max-h-[40vh] overflow-y-auto">
           {sorted.length === 0 ? (
             <div className="text-center text-sm text-slate-500 py-8">No karigars yet.</div>
           ) : (
@@ -1312,6 +1346,47 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
             </div>
           )}
         </div>
+
+        {roleHistory.length > 0 && (
+          <div className="px-5 py-3 border-t-2 border-slate-200 bg-slate-50" data-testid="assignment-history-section">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-2 flex items-center justify-between">
+              <span>Assignment & Completion History</span>
+              <span className="font-mono text-slate-400 font-normal">({roleHistory.length} events)</span>
+            </div>
+            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+              {roleHistory.map((h, i) => {
+                const wName = h.completed_by?.worker_name || h.worker_name || (h.worker_id ? (workers.find(w => w.id === h.worker_id)?.name || h.worker_id) : "Unassigned");
+                const wRate = h.completed_by?.rate_per_pair ?? h.rate_per_pair;
+                const isCompletion = h.completed_qty != null || h.completed_by != null;
+                return (
+                  <div key={i} className="text-xs p-2 bg-white border border-slate-200 rounded flex items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${isCompletion ? "bg-emerald-100 text-emerald-800" : "bg-blue-100 text-blue-800"}`}>
+                          {isCompletion ? "Completed" : "Assigned"}
+                        </span>
+                        <span className="font-bold text-slate-800">{wName}</span>
+                        {isCompletion && h.completed_qty != null && (
+                          <span className="text-[10px] text-slate-500 font-mono">({h.completed_qty} pairs)</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {h.at ? new Date(h.at).toLocaleString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                        {h.by ? ` · by ${h.by}` : ""}
+                      </div>
+                    </div>
+                    {wRate != null && (
+                      <div className="font-mono font-bold text-slate-700 text-right text-[11px]">
+                        ₹{wRate}/pr
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {selectedWid && (
           <div className="px-5 py-4 border-t-2 border-slate-200 bg-slate-50 space-y-3">
             <div>
@@ -2050,18 +2125,69 @@ function DetailModal({ group, onClose }) {
               <thead className="bg-slate-50">
                 <tr className="text-left">
                   <th className="px-3 py-2 font-bold">Role</th>
-                  <th className="px-3 py-2 font-bold">Karigar</th>
+                  <th className="px-3 py-2 font-bold">Current Karigar</th>
+                  <th className="px-3 py-2 font-bold">Assignment History</th>
                   <th className="px-3 py-2 font-bold text-right">Rate / Pair</th>
                 </tr>
               </thead>
               <tbody>
                 {ASSIGNMENT_ROLES.map(role => {
                   const a = group.assignments?.[role.key];
+                  const roleHist = [];
+                  const seenKeys = new Set();
+                  (group.rows || []).forEach(r => {
+                    (r.history || []).forEach(h => {
+                      if (!h) return;
+                      const isAsgn = (h.event === "assignment_update" || h.event === "bulk_assignment") && h.role === role.key;
+                      const isComp = (h.role === role.key || h.stage === role.key) && (h.completed_qty != null || h.completed_by != null);
+                      if (isAsgn || isComp) {
+                        const k = `${h.at}_${h.worker_id || h.completed_by?.worker_id}_${h.event || h.stage}_${h.completed_qty}`;
+                        if (!seenKeys.has(k)) {
+                          seenKeys.add(k);
+                          roleHist.push(h);
+                        }
+                      }
+                    });
+                  });
+                  roleHist.sort((x, y) => new Date(y.at || 0) - new Date(x.at || 0));
+
                   return (
                     <tr key={role.key} className="border-t border-slate-200">
-                      <td className="px-3 py-2 font-bold uppercase text-[10px] tracking-wider">{role.label}</td>
-                      <td className="px-3 py-2">{a?.worker_name || "—"}</td>
-                      <td className="px-3 py-2 text-right font-mono">{a?.rate_per_pair != null ? `₹${a.rate_per_pair}` : "—"}</td>
+                      <td className="px-3 py-2 font-bold uppercase text-[10px] tracking-wider align-top">{role.label}</td>
+                      <td className="px-3 py-2 align-top">
+                        <span className="font-semibold">{a?.worker_name || "—"}</span>
+                      </td>
+                      <td className="px-3 py-2 align-top" data-testid={`history-${role.key}`}>
+                        {roleHist.length === 0 ? (
+                          <span className="text-slate-400 italic text-[11px]">No assignment history</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {roleHist.map((h, hi) => {
+                              const wName = h.completed_by?.worker_name || h.worker_name || (h.worker_id ? `Worker #${h.worker_id}` : "Unassigned");
+                              const wRate = h.completed_by?.rate_per_pair ?? h.rate_per_pair;
+                              const isComp = h.completed_qty != null || h.completed_by != null;
+                              return (
+                                <div key={hi} className="text-[11px] flex items-center justify-between gap-2 border-b border-slate-100 last:border-0 pb-0.5">
+                                  <div className="flex items-center gap-1">
+                                    <span className={`text-[9px] uppercase px-1 py-0.2 rounded font-bold ${isComp ? "bg-emerald-100 text-emerald-800" : "bg-blue-100 text-blue-800"}`}>
+                                      {isComp ? "Done" : "Asgn"}
+                                    </span>
+                                    <span className="text-slate-700">{wName}</span>
+                                    {wRate != null && <span className="font-mono text-slate-500">(@ ₹{wRate})</span>}
+                                    {isComp && h.completed_qty != null && (
+                                      <span className="font-mono text-emerald-700 font-bold">[{h.completed_qty} prs]</span>
+                                    )}
+                                  </div>
+                                  <span className="font-mono text-[9px] text-slate-400 whitespace-nowrap">
+                                    {h.at ? new Date(h.at).toLocaleDateString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono align-top">{a?.rate_per_pair != null ? `₹${a.rate_per_pair}` : "—"}</td>
                     </tr>
                   );
                 })}

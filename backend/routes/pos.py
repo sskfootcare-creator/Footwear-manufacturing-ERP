@@ -2291,6 +2291,149 @@ async def bulk_assign(payload: BulkAssign, request: Request):
     return {"affected": affected, "role": payload.role, "worker_id": payload.worker_id, "worker_name": worker_name, "rate_per_pair": rate}
 
 
+def extract_role_completions(j: dict, role: str, worker_map: dict) -> list[dict]:
+    """
+    Extracts all completion slices for a specific role on a job `j`.
+    Attributes each slice of completed work to the worker who actually did it at that moment.
+    If multiple completions/reassignments occurred, splits earnings proportionally across historical assignees.
+    Falls back to current assignment attribution for legacy records without completed_by data.
+    """
+    hist = j.get("history") or []
+    role_milestones = []
+    for h in hist:
+        if not isinstance(h, dict):
+            continue
+        h_role = h.get("role") or (h.get("stage") if h.get("stage") not in ("dispatched", "completed", "procurement") else None)
+        if h_role != role:
+            continue
+
+        c_qty = h.get("completed_qty")
+        if c_qty is None or int(c_qty) <= 0:
+            continue
+
+        c_by = h.get("completed_by")
+        if not c_by or not isinstance(c_by, dict) or not c_by.get("worker_id"):
+            if h.get("worker_id"):
+                c_by = {
+                    "worker_id": str(h["worker_id"]),
+                    "worker_name": h.get("worker_name", ""),
+                    "rate_per_pair": h.get("rate_per_pair"),
+                    "at": h.get("at", ""),
+                }
+
+        if c_by and isinstance(c_by, dict) and c_by.get("worker_id"):
+            role_milestones.append({
+                "qty": int(c_qty),
+                "completed_by": c_by,
+                "at": h.get("at") or "",
+            })
+
+    # Sort milestones chronologically
+    role_milestones.sort(key=lambda m: (m["at"], m["qty"]))
+
+    completions = []
+    prev_qty = 0
+    if role_milestones:
+        for m in role_milestones:
+            q = m["qty"]
+            delta = q - prev_qty
+            if delta > 0:
+                c_by = m["completed_by"]
+                wid = str(c_by["worker_id"])
+                if c_by.get("rate_per_pair") is not None:
+                    rate = float(c_by["rate_per_pair"] or 0)
+                else:
+                    rate = float(worker_map.get(wid, {}).get("rate_per_pair", 0) or 0)
+                completions.append({
+                    "worker_id": wid,
+                    "pairs": delta,
+                    "rate": rate,
+                    "at": m["at"],
+                })
+                prev_qty = q
+
+        # Check if total completed_qty recorded on assignments/job exceeds the milestones
+        a = (j.get("assignments") or {}).get(role) or {}
+        rfp = j.get("ready_for_pickup") or {}
+
+        target_qty = prev_qty
+        if a.get("completed_qty") is not None and int(a.get("completed_qty", 0) or 0) > prev_qty:
+            target_qty = int(a["completed_qty"])
+        elif rfp.get("role") == role and int(rfp.get("completed_qty", 0) or 0) > prev_qty:
+            target_qty = int(rfp["completed_qty"])
+        elif j.get("stage") == role and int(j.get("completed_qty", 0) or 0) > prev_qty:
+            target_qty = int(j["completed_qty"])
+        elif j.get("stage") == "dispatched" and int(j.get("quantity", 0) or 0) > prev_qty:
+            target_qty = int(j["quantity"])
+
+        if target_qty > prev_qty:
+            delta = target_qty - prev_qty
+            curr_c_by = a.get("completed_by")
+            if not curr_c_by and rfp.get("role") == role and rfp.get("completed_by"):
+                curr_c_by = rfp.get("completed_by")
+            if not curr_c_by and j.get("stage") == role and isinstance(j.get("completed_by"), dict):
+                curr_c_by = j.get("completed_by")
+
+            wid = str(curr_c_by.get("worker_id")) if (curr_c_by and curr_c_by.get("worker_id")) else (str(a.get("worker_id")) if a.get("worker_id") else None)
+            if wid:
+                if curr_c_by and curr_c_by.get("rate_per_pair") is not None:
+                    rate = float(curr_c_by["rate_per_pair"] or 0)
+                elif a.get("rate_per_pair") is not None:
+                    rate = float(a.get("rate_per_pair") or 0)
+                else:
+                    rate = float(worker_map.get(wid, {}).get("rate_per_pair", 0) or 0)
+                at_val = (curr_c_by.get("at") if curr_c_by else (j.get("updated_at") or j.get("created_at") or ""))
+                completions.append({
+                    "worker_id": wid,
+                    "pairs": delta,
+                    "rate": rate,
+                    "at": at_val,
+                })
+        return completions
+
+    # Fallback when no history completion milestones exist (e.g. single snapshot or legacy jobs)
+    a = (j.get("assignments") or {}).get(role) or {}
+    rfp = j.get("ready_for_pickup") or {}
+    c_by = a.get("completed_by")
+    if not c_by and rfp.get("role") == role and rfp.get("completed_by"):
+        c_by = rfp.get("completed_by")
+    if not c_by and j.get("stage") == role and isinstance(j.get("completed_by"), dict):
+        c_by = j.get("completed_by")
+
+    wid = str(c_by.get("worker_id")) if (c_by and c_by.get("worker_id")) else (str(a.get("worker_id")) if a.get("worker_id") else None)
+    if not wid:
+        return []
+
+    role_comp = a.get("completed_qty")
+    if role_comp is None or role_comp == 0:
+        if rfp.get("worker_id") == wid and rfp.get("role") == role:
+            role_comp = rfp.get("completed_qty", 0) or 0
+        elif j.get("stage") == role:
+            role_comp = j.get("completed_qty", 0) or 0
+        elif j.get("stage") == "dispatched":
+            role_comp = j.get("quantity", 0)
+        else:
+            role_comp = j.get("completed_qty", 0) or 0
+
+    if not role_comp or int(role_comp) <= 0:
+        return []
+
+    if c_by and c_by.get("rate_per_pair") is not None:
+        rate = float(c_by.get("rate_per_pair") or 0)
+    elif a.get("rate_per_pair") is not None:
+        rate = float(a.get("rate_per_pair") or 0)
+    else:
+        rate = float(worker_map.get(wid, {}).get("rate_per_pair", 0) or 0)
+
+    at_val = (c_by.get("at") if c_by else (j.get("updated_at") or j.get("created_at") or ""))
+    return [{
+        "worker_id": wid,
+        "pairs": int(role_comp),
+        "rate": rate,
+        "at": at_val,
+    }]
+
+
 # ── Payroll & Wage Slip Endpoints ───────────────────────────────────────────
 
 @pos_router.get("/reports/payroll")
@@ -2314,94 +2457,80 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
     earnings = {}
     raw_jobs_by_worker = {}
     for j in jobs:
-        assigns = j.get("assignments") or {}
-        rfp = j.get("ready_for_pickup") or {}
-        for role, a in assigns.items():
-            c_by = a.get("completed_by")
-            if not c_by and rfp.get("role") == role and rfp.get("completed_by"):
-                c_by = rfp.get("completed_by")
-            if not c_by and j.get("stage") == role and isinstance(j.get("completed_by"), dict):
-                c_by = j.get("completed_by")
+        roles_to_check = set()
+        for r in (j.get("assignments") or {}).keys():
+            roles_to_check.add(r)
+        for h in j.get("history") or []:
+            if h.get("role"):
+                roles_to_check.add(h["role"])
+            if h.get("stage") and h.get("stage") not in ("dispatched", "completed", "procurement"):
+                roles_to_check.add(h["stage"])
+        if j.get("stage") and j.get("stage") not in ("dispatched", "completed", "procurement"):
+            roles_to_check.add(j["stage"])
 
-            wid = str(c_by.get("worker_id")) if (c_by and c_by.get("worker_id")) else (str(a.get("worker_id")) if a.get("worker_id") else None)
-            if not wid:
-                continue
-            w = worker_map.get(wid)
-            if not w:
-                continue
+        for role in roles_to_check:
+            slices = extract_role_completions(j, role, worker_map)
+            for s in slices:
+                wid = s["worker_id"]
+                w = worker_map.get(wid)
+                if not w:
+                    continue
+                role_comp = s["pairs"]
+                rate = s["rate"]
+                earn = rate * role_comp
+                if wid not in earnings:
+                    earnings[wid] = {
+                        "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
+                        "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
+                        "bonus_pct": float(w.get("bonus_pct", 0) or 0),
+                        "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
+                        "total_pairs": 0, "total_earning": 0.0,
+                        "total_bonus": 0.0,
+                        "advances_taken": 0.0, "advances_open": 0.0,
+                        "payments_paid": 0.0,
+                        "net_payable": 0.0,
+                        "by_role": {}, "jobs": [],
+                    }
+                    raw_jobs_by_worker[wid] = []
+                earnings[wid]["total_pairs"] += role_comp
+                earnings[wid]["total_earning"] += earn
+                earnings[wid]["by_role"][role] = earnings[wid]["by_role"].get(role, 0) + role_comp
 
-            role_comp = a.get("completed_qty")
-            if role_comp is None or role_comp == 0:
-                if rfp.get("worker_id") == wid and rfp.get("role") == role:
-                    role_comp = rfp.get("completed_qty", 0) or 0
-                elif j.get("stage") == role:
-                    role_comp = j.get("completed_qty", 0) or 0
-                elif j.get("stage") == "dispatched":
-                    role_comp = j.get("quantity", 0)
-                else:
-                    role_comp = j.get("completed_qty", 0) or 0
+                bonus_amt = 0
+                bp = float(w.get("bonus_pct", 0) or 0)
+                td = float(w.get("target_cycle_days", 0) or 0)
+                if bp > 0 and td > 0:
+                    hist = j.get("history") or []
+                    assign_at = None
+                    done_at = None
+                    for h in hist:
+                        if h.get("event") in ("assignment_update", "bulk_assignment") and h.get("role") == role and h.get("worker_id") == wid:
+                            assign_at = h.get("at")
+                        if h.get("stage") == "dispatched":
+                            done_at = h.get("at")
+                    if not done_at and s.get("at"):
+                        done_at = s.get("at")
+                    if assign_at and done_at:
+                        try:
+                            delta_days = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
+                            if 0 <= delta_days <= td:
+                                bonus_amt = round(earn * bp / 100, 2)
+                                earnings[wid]["total_bonus"] += bonus_amt
+                        except Exception:
+                            pass
 
-            if not role_comp:
-                continue
-
-            if c_by and c_by.get("rate_per_pair") is not None:
-                rate = float(c_by.get("rate_per_pair") or 0)
-            elif a.get("rate_per_pair") is not None:
-                rate = float(a.get("rate_per_pair") or 0)
-            else:
-                rate = float(w.get("rate_per_pair", 0) or 0)
-            earn = rate * role_comp
-            if wid not in earnings:
-                earnings[wid] = {
-                    "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
-                    "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
-                    "bonus_pct": float(w.get("bonus_pct", 0) or 0),
-                    "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
-                    "total_pairs": 0, "total_earning": 0.0,
-                    "total_bonus": 0.0,
-                    "advances_taken": 0.0, "advances_open": 0.0,
-                    "payments_paid": 0.0,
-                    "net_payable": 0.0,
-                    "by_role": {}, "jobs": [],
-                }
-                raw_jobs_by_worker[wid] = []
-            earnings[wid]["total_pairs"] += role_comp
-            earnings[wid]["total_earning"] += earn
-            earnings[wid]["by_role"][role] = earnings[wid]["by_role"].get(role, 0) + role_comp
-
-            bonus_amt = 0
-            bp = float(w.get("bonus_pct", 0) or 0)
-            td = float(w.get("target_cycle_days", 0) or 0)
-            if bp > 0 and td > 0:
-                hist = j.get("history") or []
-                assign_at = None
-                done_at = None
-                for h in hist:
-                    if h.get("event") in ("assignment_update", "bulk_assignment") and h.get("role") == role and h.get("worker_id") == wid:
-                        assign_at = h.get("at")
-                    if h.get("stage") == "dispatched":
-                        done_at = h.get("at")
-                if assign_at and done_at:
-                    try:
-                        delta_days = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
-                        if 0 <= delta_days <= td:
-                            bonus_amt = round(earn * bp / 100, 2)
-                            earnings[wid]["total_bonus"] += bonus_amt
-                    except Exception:
-                        pass
-
-            raw_jobs_by_worker[wid].append({
-                "job_id": str(j["_id"]),
-                "po_number": j.get("po_number"),
-                "style_code": j.get("style_code"),
-                "color": j.get("color"),
-                "size": j.get("size"),
-                "role": role,
-                "pairs": role_comp,
-                "rate": rate,
-                "earning": round(earn, 2),
-                "bonus": bonus_amt,
-            })
+                raw_jobs_by_worker[wid].append({
+                    "job_id": str(j["_id"]),
+                    "po_number": j.get("po_number"),
+                    "style_code": j.get("style_code"),
+                    "color": j.get("color"),
+                    "size": j.get("size"),
+                    "role": role,
+                    "pairs": role_comp,
+                    "rate": rate,
+                    "earning": round(earn, 2),
+                    "bonus": bonus_amt,
+                })
 
     for wid, e in earnings.items():
         raw_list = raw_jobs_by_worker.get(wid, [])

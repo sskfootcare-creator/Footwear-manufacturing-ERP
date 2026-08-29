@@ -57,11 +57,14 @@ def oid(id_str: str) -> ObjectId:
 
 
 async def _get_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
     import server
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
     from auth import get_current_user_factory
-    db = getattr(request.app, "mongodb", None) or server.db
+    db = getattr(request.app, "mongodb", None) or getattr(server, "db", None)
     fn = await get_current_user_factory(db)
     return await fn(request)
 
@@ -640,8 +643,8 @@ async def my_payroll(
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
 
-    import server
-    full = await server.report_payroll(request, from_date=from_date, to_date=to_date)
+    from routes.pos import report_payroll as pos_report_payroll
+    full = await pos_report_payroll(request, from_date=from_date, to_date=to_date)
     rows = full.get("rows", [])
     my_row = next((r for r in rows if r.get("worker_id") == caller_wid), None)
     if not my_row:
@@ -714,52 +717,63 @@ async def worker_ledger(wid: str, request: Request,
         job_q["updated_at"]["$lte"] = to_date + "T23:59:59Z"
     jobs = await db.production_jobs.find(job_q).to_list(5000)
 
+    from routes.pos import extract_role_completions
     entries = []
+    worker_map = {wid: worker}
     for j in jobs:
-        assigns = j.get("assignments") or {}
-        comp = j.get("completed_qty", 0)
-        if not comp and j.get("stage") == "dispatched":
-            comp = j.get("quantity", 0)
-        if not comp:
-            continue
-        for role, a in assigns.items():
-            if a.get("worker_id") != wid:
-                continue
-            rate = float(a.get("rate_per_pair") if a.get("rate_per_pair") is not None
-                         else worker.get("rate_per_pair", 0) or 0)
-            earning = round(rate * comp, 2)
-            entry_date = (j.get("updated_at") or j.get("created_at") or "")[:10]
-            entries.append({
-                "date": entry_date,
-                "txn_type": "earning",
-                "amount": earning,
-                "description": f"{j.get('po_number','')} · {j.get('style_code','')} · {j.get('color','')} · Sz {j.get('size','')} · {role.upper()} ({comp} prs × ₹{rate}/pr)",
-                "ref": j.get("po_number"),
-            })
+        roles_to_check = set()
+        for r in (j.get("assignments") or {}).keys():
+            roles_to_check.add(r)
+        for h in j.get("history") or []:
+            if h.get("role"):
+                roles_to_check.add(h["role"])
+            if h.get("stage") and h.get("stage") not in ("dispatched", "completed", "procurement"):
+                roles_to_check.add(h["stage"])
+        if j.get("stage") and j.get("stage") not in ("dispatched", "completed", "procurement"):
+            roles_to_check.add(j["stage"])
 
-            if bonus_pct > 0 and target_cycle_days > 0:
-                hist = j.get("history") or []
-                assign_at = None
-                done_at = None
-                for h in hist:
-                    if h.get("event") in ("assignment_update", "bulk_assignment") and h.get("role") == role and h.get("worker_id") == wid:
-                        assign_at = h.get("at")
-                    if h.get("stage") == "dispatched":
-                        done_at = h.get("at")
-                if assign_at and done_at:
-                    try:
-                        delta = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
-                        if 0 <= delta <= target_cycle_days:
-                            bonus = round(earning * bonus_pct / 100, 2)
-                            entries.append({
-                                "date": done_at[:10],
-                                "txn_type": "bonus",
-                                "amount": bonus,
-                                "description": f"Productivity bonus ({bonus_pct}%) for completing in {delta:.1f} days (target {target_cycle_days}d) · {j.get('style_code')} {j.get('color')}",
-                                "ref": j.get("po_number"),
-                            })
-                    except Exception:
-                        pass
+        for role in roles_to_check:
+            slices = extract_role_completions(j, role, worker_map)
+            for s in slices:
+                if s["worker_id"] != wid:
+                    continue
+                role_comp = s["pairs"]
+                rate = s["rate"]
+                earning = round(rate * role_comp, 2)
+                entry_date = (s.get("at") or j.get("updated_at") or j.get("created_at") or "")[:10]
+                entries.append({
+                    "date": entry_date,
+                    "txn_type": "earning",
+                    "amount": earning,
+                    "description": f"{j.get('po_number','')} · {j.get('style_code','')} · {j.get('color','')} · Sz {j.get('size','')} · {role.upper()} ({role_comp} prs × ₹{rate}/pr)",
+                    "ref": j.get("po_number"),
+                })
+
+                if bonus_pct > 0 and target_cycle_days > 0:
+                    hist = j.get("history") or []
+                    assign_at = None
+                    done_at = None
+                    for h in hist:
+                        if h.get("event") in ("assignment_update", "bulk_assignment") and h.get("role") == role and h.get("worker_id") == wid:
+                            assign_at = h.get("at")
+                        if h.get("stage") == "dispatched":
+                            done_at = h.get("at")
+                    if not done_at and s.get("at"):
+                        done_at = s.get("at")
+                    if assign_at and done_at:
+                        try:
+                            delta = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
+                            if 0 <= delta <= target_cycle_days:
+                                bonus = round(earning * bonus_pct / 100, 2)
+                                entries.append({
+                                    "date": done_at[:10],
+                                    "txn_type": "bonus",
+                                    "amount": bonus,
+                                    "description": f"Productivity bonus ({bonus_pct}%) for completing in {delta:.1f} days (target {target_cycle_days}d) · {j.get('style_code')} {j.get('color')}",
+                                    "ref": j.get("po_number"),
+                                })
+                        except Exception:
+                            pass
 
     adv_q = {"worker_id": wid}
     if from_date:
