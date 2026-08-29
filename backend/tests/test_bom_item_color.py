@@ -129,6 +129,118 @@ def test_pdf_procurement_swatch_color_rendering():
     assert len(pdf_bytes) > 0
     assert pdf_bytes.startswith(b"%PDF-")
 
+    # 3. Test PDF generation with sole size_breakdown
+    material_lines_with_breakdown = [
+        {"code": "MAT-UPPER-01", "name": "Grain Leather", "category": "upper", "unit": "sqft", "rate": 150.0, "total_qty_required": 120.0, "total_cost": 18000.0, "color": "Royal Sapphire Blue"},
+        {"code": "MAT-SOLE-01", "name": "TPR Sole", "category": "sole", "unit": "pair", "rate": 80.0, "total_qty_required": 273.0, "total_cost": 21840.0, "color": "Black", "size_breakdown": {"6": 90, "7": 95, "8": 88}},
+        {"code": "MAT-ADH-01", "name": "PU Adhesive", "category": "consumable", "unit": "kg", "rate": 250.0, "total_qty_required": 5.0, "total_cost": 1250.0, "color": "Transparent"}
+    ]
+    pdf_bytes_bd = build_material_requirement("PO Batch PO-101", jobs_summary, material_lines_with_breakdown, notes="Test notes")
+    assert isinstance(pdf_bytes_bd, bytes)
+    assert len(pdf_bytes_bd) > 0
+    assert pdf_bytes_bd.startswith(b"%PDF-")
+
+
+@pytest.mark.anyio
+async def test_compute_material_requirement_sole_size_breakdown():
+    """Unit test to verify _compute_material_requirement computes size_breakdown for soles while keeping bulk materials aggregated."""
+    from routes.materials import _compute_material_requirement
+    from bson import ObjectId
+
+    job1_id = ObjectId()
+    job2_id = ObjectId()
+    job3_id = ObjectId()
+    mat_leather_id = ObjectId()
+    mat_sole_id = ObjectId()
+
+    mock_materials = [
+        {"_id": mat_leather_id, "code": "MAT-UPP-1", "name": "Leather", "category": "upper", "unit": "sqft", "rate": 100.0},
+        {"_id": mat_sole_id, "code": "MAT-SOL-1", "name": "Rubber Sole", "category": "sole", "unit": "pair", "rate": 50.0},
+    ]
+
+    mock_styles = [
+        {
+            "_id": ObjectId(),
+            "code": "STY-001",
+            "name": "Classic Derby",
+            "bom": [
+                {
+                    "material_id": str(mat_leather_id),
+                    "material_code": "MAT-UPP-1",
+                    "material_name": "Leather",
+                    "unit": "sqft",
+                    "quantity": 1.5,
+                    "yield_per_unit": 1.0,
+                    "waste_pct": 0.0,
+                    "color": "Brown",
+                    "section": "upper"
+                },
+                {
+                    "material_id": str(mat_sole_id),
+                    "material_code": "MAT-SOL-1",
+                    "material_name": "Rubber Sole",
+                    "unit": "pair",
+                    "quantity": 1.0,
+                    "yield_per_unit": 1.0,
+                    "waste_pct": 0.0,
+                    "color": "Black",
+                    "section": "sole"
+                }
+            ]
+        }
+    ]
+
+    mock_jobs = [
+        {"_id": job1_id, "po_number": "PO-100", "style_code": "STY-001", "color": "Brown", "size": "6", "quantity": 90},
+        {"_id": job2_id, "po_number": "PO-100", "style_code": "STY-001", "color": "Brown", "size": "7", "quantity": 95},
+        {"_id": job3_id, "po_number": "PO-100", "style_code": "STY-001", "color": "Brown", "size": "8", "quantity": 88},
+    ]
+
+    class AsyncMockCursor:
+        def __init__(self, data):
+            self.data = data
+        async def to_list(self, length=None):
+            return self.data
+
+    class MockCollection:
+        def __init__(self, data):
+            self.data = data
+        def find(self, query=None):
+            if not query:
+                return AsyncMockCursor(self.data)
+            if "_id" in query and "$in" in query["_id"]:
+                filtered = [d for d in self.data if d["_id"] in query["_id"]["$in"]]
+                return AsyncMockCursor(filtered)
+            if "code" in query and "$in" in query["code"]:
+                filtered = [d for d in self.data if d["code"] in query["code"]["$in"]]
+                return AsyncMockCursor(filtered)
+            return AsyncMockCursor(self.data)
+
+    class MockDB:
+        def __init__(self):
+            self.production_jobs = MockCollection(mock_jobs)
+            self.styles = MockCollection(mock_styles)
+            self.materials = MockCollection(mock_materials)
+
+    db = MockDB()
+    res = await _compute_material_requirement([str(job1_id), str(job2_id), str(job3_id)], db=db)
+
+    assert "materials" in res
+    assert len(res["materials"]) == 2
+
+    # Find sole and upper
+    sole_line = next(m for m in res["materials"] if m["code"] == "MAT-SOL-1")
+    upper_line = next(m for m in res["materials"] if m["code"] == "MAT-UPP-1")
+
+    # Sole must have size_breakdown matching per-size quantities
+    assert sole_line["size_breakdown"] == {"6": 90, "7": 95, "8": 88}
+    assert sole_line["total_qty_required"] == 273.0
+    assert sum(sole_line["size_breakdown"].values()) == sole_line["total_qty_required"]
+
+    # Non-sole material must NOT have size_breakdown or size splitting
+    assert "size_breakdown" not in upper_line or upper_line.get("size_breakdown") is None
+    assert upper_line["total_qty_required"] == round(1.5 * (90 + 95 + 88), 2)
+
 
 @pytest.fixture(scope="module")
 def client():

@@ -166,10 +166,23 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
             swatch_cell = "—"
             row_heights.append(None)
 
+        mat_name = m.get("name", "")
+        size_bd = m.get("size_breakdown")
+        if cat == "sole" and size_bd:
+            bd_parts = [f"{sz}:{_fmt(qty)}" for sz, qty in size_bd.items()]
+            bd_text = "  ".join(bd_parts)
+            mat_cell = [
+                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica", fontSize=8, leading=9.5, textColor=BLACK)),
+                Paragraph(f"<font color='#C27842'><b>Sizes:</b></font> <font color='#334155'>{bd_text}</font>",
+                          ParagraphStyle("mat_s", fontName="Helvetica", fontSize=7, leading=8.5))
+            ]
+        else:
+            mat_cell = mat_name
+
         mat_rows.append([
             str(i),
             m.get("code", ""),
-            m.get("name", ""),
+            mat_cell,
             m.get("category", ""),
             m.get("unit", ""),
             _fmt(m.get("total_qty_required", 0), 2),

@@ -319,21 +319,39 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             per_pair = (qty / yld) * (1 + waste / 100)
             total_qty = per_pair * pairs
             key = (code or mid, color)
+            cat = (mat_map.get(str(mid), {}).get("category") or mat_info.get("category") or b.get("section") or "other")
+            is_sole = (cat or "").strip().lower() == "sole"
+            job_size = str(j.get("size", "") or "").strip()
+
             if key not in requirements:
-                cat = mat_map.get(str(mid), {}).get("category", b.get("section", "other"))
                 requirements[key] = {
                     "code": code, "name": name, "category": cat, "unit": unit, "color": color,
                     "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
                 }
+                if is_sole:
+                    requirements[key]["size_breakdown"] = {}
             elif not requirements[key]["rate"] and rate > 0:
                 requirements[key]["rate"] = rate
+
             requirements[key]["total_qty_required"] += total_qty
             requirements[key]["total_cost"] += total_qty * rate
+
+            if is_sole:
+                if "size_breakdown" not in requirements[key] or requirements[key]["size_breakdown"] is None:
+                    requirements[key]["size_breakdown"] = {}
+                sz_key = job_size if job_size else "Standard"
+                requirements[key]["size_breakdown"][sz_key] = requirements[key]["size_breakdown"].get(sz_key, 0.0) + total_qty
 
     material_lines = []
     for v in requirements.values():
         v["total_qty_required"] = round(v["total_qty_required"], 2)
         v["total_cost"] = round(v["total_cost"], 2)
+        if "size_breakdown" in v and v["size_breakdown"] is not None:
+            sorted_breakdown = {}
+            for sz in sorted(v["size_breakdown"].keys(), key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999, str(x))):
+                val = round(v["size_breakdown"][sz], 2)
+                sorted_breakdown[sz] = int(val) if val == int(val) else val
+            v["size_breakdown"] = sorted_breakdown
         material_lines.append(v)
     material_lines.sort(key=lambda m: (m["category"], m["code"], m.get("color", "")))
 
