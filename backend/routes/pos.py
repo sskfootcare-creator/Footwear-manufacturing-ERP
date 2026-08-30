@@ -1726,9 +1726,9 @@ async def list_grns(request: Request, invoice_id: Optional[str] = None,
     db = get_db()
     q: dict = {}
     if invoice_id:
-        q["invoice_id"] = invoice_id
+        q["invoice_id"] = str(invoice_id)
     if client:
-        q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
+        q["client_name"] = {"$regex": re.escape(str(client)), "$options": "i"}
     docs = await db.grns.find(q).sort("grn_date", -1).to_list(limit)
     return [stringify(d) for d in docs]
 
@@ -1895,9 +1895,9 @@ async def list_payments(request: Request, invoice_id: Optional[str] = None,
     db = get_db()
     q: dict = {}
     if invoice_id:
-        q["invoice_ids"] = invoice_id
+        q["invoice_ids"] = str(invoice_id)
     if client:
-        q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
+        q["client_name"] = {"$regex": re.escape(str(client)), "$options": "i"}
     docs = await db.payments.find(q).sort("payment_date", -1).to_list(limit)
     return [stringify(d) for d in docs]
 
@@ -2240,7 +2240,7 @@ async def list_jobs(request: Request, include_archived: bool = False, source_typ
         if source_type == "b2b_client":
             q["source_type"] = {"$in": ["b2b_client", None]}
         else:
-            q["source_type"] = source_type
+            q["source_type"] = str(source_type)
     docs = await db.production_jobs.find(q).sort("created_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
 

@@ -1342,14 +1342,15 @@ async def list_marketplace_mappings(
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     q = {}
-    if marketplace: q["marketplace"] = marketplace
-    if active is not None: q["active"] = active
+    if marketplace: q["marketplace"] = str(marketplace)
+    if active is not None: q["active"] = bool(active)
     if search:
+        rx = {"$regex": re.escape(str(search)), "$options": "i"}
         q["$or"] = [
-            {"marketplace_style_code": {"$regex": search, "$options": "i"}},
-            {"marketplace_color_code": {"$regex": search, "$options": "i"}},
-            {"erp_style_code":         {"$regex": search, "$options": "i"}},
-            {"erp_color_code":         {"$regex": search, "$options": "i"}},
+            {"marketplace_style_code": rx},
+            {"marketplace_color_code": rx},
+            {"erp_style_code":         rx},
+            {"erp_color_code":         rx},
         ]
     docs = await db.marketplace_style_color_mapping.find(q).sort("marketplace", 1).to_list(2000)
     return [stringify(d) for d in docs]

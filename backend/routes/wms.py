@@ -589,10 +589,10 @@ async def wms_list_locations(
         try:
             q["rack"] = int(rack)
         except ValueError:
-            q["rack"] = rack.upper()
-    if status: q["status"] = status
-    if zone:   q["zone"] = zone
-    if search: q["location_code"] = {"$regex": search, "$options": "i"}
+            q["rack"] = str(rack).upper()
+    if status: q["status"] = str(status)
+    if zone:   q["zone"] = str(zone)
+    if search: q["location_code"] = {"$regex": re.escape(str(search)), "$options": "i"}
     docs = await db.warehouse_locations.find(q).sort("location_code", 1).to_list(500)
     return [stringify(d) for d in docs]
 
@@ -732,12 +732,12 @@ async def wms_fg_location_inventory(
     q = {}
     if style_id:
         try:
-            q["$or"] = [{"style_id": ObjectId(style_id)}, {"style_id": str(style_id)}]
+            q["$or"] = [{"style_id": ObjectId(str(style_id))}, {"style_id": str(style_id)}]
         except Exception:
             q["style_id"] = str(style_id)
-    if color: q["color"] = color
-    if size:  q["size"] = size
-    if location_code: q["location_code"] = location_code.upper()
+    if color: q["color"] = str(color)
+    if size:  q["size"] = str(size)
+    if location_code: q["location_code"] = str(location_code).upper()
     docs = await db.fg_location_inventory.find(q).sort("location_code", 1).to_list(2000)
     return [stringify(d) for d in docs]
 
@@ -821,10 +821,10 @@ async def list_picklists(
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     q = {}
-    if status:   q["status"] = status
-    if channel:  q["channel"] = channel.lower()
-    if order_id: q["order_id"] = order_id
-    if picker:   q["picker"] = picker
+    if status:   q["status"] = str(status)
+    if channel:  q["channel"] = str(channel).lower()
+    if order_id: q["order_id"] = str(order_id)
+    if picker:   q["picker"] = str(picker)
     docs = await db.picklists.find(q).sort("created_at", -1).to_list(500)
     return [stringify(d) for d in docs]
 

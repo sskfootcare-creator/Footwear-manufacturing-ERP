@@ -305,7 +305,14 @@ async def refresh_token_route(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Missing refresh token")
 
     try:
-        payload = jwt.decode(refresh_token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        from auth import JWT_ISSUER, JWT_AUDIENCE
+        payload = jwt.decode(
+            refresh_token,
+            get_jwt_secret(),
+            algorithms=[JWT_ALGORITHM],
+            issuer=JWT_ISSUER,
+            audience=JWT_AUDIENCE,
+        )
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid token type")
 
@@ -398,17 +405,25 @@ async def reset_password(payload: ResetPasswordInput):
     outstanding tokens for the same user on success."""
     token_hash = _hash_reset_token(payload.token.strip())
     db = _get_db()
-    row = await db.password_resets.find_one({"token_hash": token_hash})
+    now = datetime.now(timezone.utc)
+    # Atomic check-and-fetch directly in lookup query (eliminates race window)
+    row = await db.password_resets.find_one({
+        "token_hash": token_hash,
+        "used_at": None,
+        "expires_at": {"$gt": now},
+    })
     if not row:
+        existing = await db.password_resets.find_one({"token_hash": token_hash})
+        if existing and existing.get("used_at"):
+            raise HTTPException(400, "This reset link has already been used.")
+        if existing and existing.get("expires_at"):
+            exp = existing["expires_at"]
+            if isinstance(exp, datetime):
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp < now:
+                    raise HTTPException(400, "This reset link has expired. Please request a new one.")
         raise HTTPException(400, "Invalid or already-used reset link.")
-    if row.get("used_at"):
-        raise HTTPException(400, "This reset link has already been used.")
-    exp = row.get("expires_at")
-    if isinstance(exp, datetime):
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=timezone.utc)
-        if exp < datetime.now(timezone.utc):
-            raise HTTPException(400, "This reset link has expired. Please request a new one.")
     validate_password(payload.new_password)
 
     user = await db.users.find_one({"_id": _oid(row["user_id"])})

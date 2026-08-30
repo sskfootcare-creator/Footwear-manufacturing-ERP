@@ -50,7 +50,7 @@ class RateLimiter:
 
         # Try to extract and decode JWT token to identify the user
         try:
-            from auth import get_jwt_secret, JWT_ALGORITHM
+            from auth import get_jwt_secret, JWT_ALGORITHM, JWT_ISSUER, JWT_AUDIENCE
             import jwt
             token = request.cookies.get("access_token")
             if not token:
@@ -58,7 +58,13 @@ class RateLimiter:
                 if auth_header.startswith("Bearer "):
                     token = auth_header[7:]
             if token:
-                payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+                payload = jwt.decode(
+                    token,
+                    get_jwt_secret(),
+                    algorithms=[JWT_ALGORITHM],
+                    issuer=JWT_ISSUER,
+                    audience=JWT_AUDIENCE,
+                )
                 email = payload.get("email")
                 if email:
                     log.warning(f"Rate Limiter key jwt_email={email}")

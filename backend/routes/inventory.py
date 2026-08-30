@@ -356,16 +356,16 @@ async def list_fg_inventory(
     query = {}
     if style_id:
         try:
-            query["style_id"] = ObjectId(style_id)
+            query["style_id"] = ObjectId(str(style_id))
         except Exception:
             pass
     if color:
-        query["color"] = color
+        query["color"] = str(color)
     if size:
-        query["size"] = size
+        query["size"] = str(size)
     
     if search:
-        search_regex = {"$regex": search, "$options": "i"}
+        search_regex = {"$regex": re.escape(str(search)), "$options": "i"}
         query["$or"] = [
             {"style_code": search_regex},
             {"color": search_regex},

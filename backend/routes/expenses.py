@@ -1,5 +1,6 @@
 """Expense Master, Recurring Expense Scheduler & Simple P&L Routes."""
 
+import re
 import logging
 import calendar
 from datetime import datetime, timezone
@@ -170,17 +171,17 @@ async def list_expenses(
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     q = {}
-    if category and category.lower() != "all":
-        q["category"] = category
+    if category and str(category).lower() != "all":
+        q["category"] = str(category)
     if from_date or to_date:
         date_q = {}
         if from_date:
-            date_q["$gte"] = from_date
+            date_q["$gte"] = str(from_date)
         if to_date:
-            date_q["$lte"] = to_date
+            date_q["$lte"] = str(to_date)
         q["date"] = date_q
     if search:
-        s_regex = {"$regex": search, "$options": "i"}
+        s_regex = {"$regex": re.escape(str(search)), "$options": "i"}
         q["$or"] = [
             {"payee": s_regex},
             {"category": s_regex},

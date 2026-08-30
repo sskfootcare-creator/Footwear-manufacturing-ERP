@@ -942,9 +942,9 @@ async def list_styles_summary(
             {"deleted_at": {"$exists": False}},
         ]
     if status:
-        query["status"] = status
+        query["status"] = str(status)
     if search:
-        search_regex = {"$regex": search, "$options": "i"}
+        search_regex = {"$regex": re.escape(str(search)), "$options": "i"}
         query["$or"] = [
             {"code": search_regex},
             {"name": search_regex},
@@ -1047,9 +1047,9 @@ async def list_styles(
             {"deleted_at": {"$exists": False}},
         ]
     if status:
-        query["status"] = status
+        query["status"] = str(status)
     if search:
-        search_regex = {"$regex": search, "$options": "i"}
+        search_regex = {"$regex": re.escape(str(search)), "$options": "i"}
         query["$or"] = [
             {"code": search_regex},
             {"name": search_regex},

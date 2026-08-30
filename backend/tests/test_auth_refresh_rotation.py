@@ -12,6 +12,8 @@ from server import (
     create_refresh_token,
     get_jwt_secret,
     JWT_ALGORITHM,
+    JWT_ISSUER,
+    JWT_AUDIENCE,
 )
 
 
@@ -70,8 +72,16 @@ async def test_refresh_token_rotates_on_every_use(fresh_db):
         assert new_refresh_token_1 != initial_refresh_token
 
         # Verify decoded payload has type 'refresh' and sub matching user_id
-        decoded_1 = jwt.decode(new_refresh_token_1, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        decoded_1 = jwt.decode(
+            new_refresh_token_1,
+            get_jwt_secret(),
+            algorithms=[JWT_ALGORITHM],
+            issuer=JWT_ISSUER,
+            audience=JWT_AUDIENCE,
+        )
         assert decoded_1["sub"] == user_id
+        assert decoded_1["iss"] == JWT_ISSUER
+        assert decoded_1["aud"] == JWT_AUDIENCE
         assert decoded_1["type"] == "refresh"
         assert "jti" in decoded_1
 

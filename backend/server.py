@@ -29,7 +29,7 @@ from auth import (
     create_access_token, create_refresh_token, validate_password,
     set_auth_cookies, clear_auth_cookies,
     get_current_user_factory, require_roles, seed_admin,
-    JWT_ALGORITHM, get_jwt_secret, validate_jwt_secret,
+    JWT_ALGORITHM, JWT_ISSUER, JWT_AUDIENCE, get_jwt_secret, validate_jwt_secret,
 )
 from routes.auth import (
     auth_router,

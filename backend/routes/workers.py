@@ -670,7 +670,7 @@ async def list_advances(request: Request, worker_id: Optional[str] = None):
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     q = {}
     if worker_id:
-        q["worker_id"] = worker_id
+        q["worker_id"] = str(worker_id)
     docs = await db.advances.find(q).sort("date", -1).to_list(2000)
     return [stringify(d) for d in docs]
 

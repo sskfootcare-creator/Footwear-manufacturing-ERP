@@ -29,6 +29,8 @@ from bson import ObjectId
 log = logging.getLogger(__name__)
 
 JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "ssk-footcare-erp"
+JWT_AUDIENCE = "ssk-footcare-erp-api"
 ACCESS_TOKEN_HOURS = 12
 REFRESH_TOKEN_DAYS = 7
 
@@ -151,6 +153,8 @@ def create_access_token(
         "sub": user_id,
         "email": email,
         "role": role,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
         "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_HOURS),
         "type": "access",
     }
@@ -164,6 +168,8 @@ def create_refresh_token(user_id: str) -> str:
     payload = {
         "sub": user_id,
         "jti": str(uuid.uuid4()),
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
         "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_DAYS),
         "type": "refresh",
     }
@@ -212,7 +218,13 @@ async def get_current_user_factory(db):
         if not token:
             raise HTTPException(status_code=401, detail="Not authenticated")
         try:
-            payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(
+                token,
+                get_jwt_secret(),
+                algorithms=[JWT_ALGORITHM],
+                issuer=JWT_ISSUER,
+                audience=JWT_AUDIENCE,
+            )
             if payload.get("type") != "access":
                 raise HTTPException(status_code=401, detail="Invalid token type")
 
