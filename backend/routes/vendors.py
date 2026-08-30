@@ -339,7 +339,6 @@ async def get_all_vendors_ageing(request: Request, include_inactive: bool = Fals
         "vendors": records
     }
 
-
 @vendors_router.get("/vendors/{vid}/ledger")
 async def get_vendor_ledger(vid: str, request: Request):
     await _get_user(request)
