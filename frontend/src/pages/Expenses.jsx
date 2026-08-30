@@ -64,6 +64,7 @@ export default function Expenses() {
   const [expenses, setExpenses] = useState([]);
   const [dueQueue, setDueQueue] = useState([]);
   const [recurringTemplates, setRecurringTemplates] = useState([]);
+  const [bankAccounts, setBankAccounts] = useState([]);
   const [pnl, setPnl] = useState({
     revenue: 0,
     invoices_revenue: 0,
@@ -100,6 +101,7 @@ export default function Expenses() {
     date: TODAY,
     notes: "",
     receipt: null,
+    bank_account_id: "",
   });
 
   // Recurring template modal
@@ -113,6 +115,7 @@ export default function Expenses() {
     start_date: TODAY,
     due_day: "1",
     end_date: "",
+    bank_account_id: "",
     active: true,
     notes: "",
   });
@@ -126,6 +129,7 @@ export default function Expenses() {
     payee: "",
     notes: "",
     receipt: null,
+    bank_account_id: "",
     is_recurring: false,
   });
 
@@ -138,17 +142,19 @@ export default function Expenses() {
       if (toDate) params.to_date = toDate;
       if (search) params.search = search;
 
-      const [expRes, pnlRes, dueRes, recRes] = await Promise.all([
+      const [expRes, pnlRes, dueRes, recRes, bankRes] = await Promise.all([
         http.get("/expenses", { params }),
         http.get("/reports/pnl", { params: { from_date: fromDate, to_date: toDate } }),
         http.get("/expenses/due-queue"),
         http.get("/expenses/recurring"),
+        http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
       ]);
 
       setExpenses(expRes.data || []);
       if (pnlRes.data) setPnl(pnlRes.data);
       setDueQueue(dueRes.data || []);
       setRecurringTemplates(recRes.data || []);
+      setBankAccounts(Array.isArray(bankRes?.data) ? bankRes.data : bankRes?.data?.items || []);
     } catch (err) {
       console.error("Failed to load expenses data:", err);
     } finally {
@@ -171,6 +177,7 @@ export default function Expenses() {
       payee: "",
       notes: "",
       receipt: null,
+      bank_account_id: "",
       is_recurring: false,
     });
     setModalOpen(true);
@@ -187,6 +194,7 @@ export default function Expenses() {
       payee: item.payee || "",
       notes: item.notes || "",
       receipt: item.receipt || null,
+      bank_account_id: item.bank_account_id || "",
       is_recurring: !!item.is_recurring,
     });
     setModalOpen(true);
@@ -211,6 +219,7 @@ export default function Expenses() {
       payee: form.payee.trim(),
       notes: form.notes ? form.notes.trim() : "",
       receipt: form.receipt,
+      bank_account_id: form.bank_account_id || null,
       is_recurring: form.is_recurring,
       status: "confirmed",
     };
@@ -240,6 +249,7 @@ export default function Expenses() {
       date: item.date || TODAY,
       notes: item.notes || "",
       receipt: item.receipt || null,
+      bank_account_id: item.bank_account_id || "",
     });
   };
 
@@ -254,6 +264,7 @@ export default function Expenses() {
         date: confirmForm.date,
         notes: confirmForm.notes,
         receipt: confirmForm.receipt,
+        bank_account_id: confirmForm.bank_account_id || null,
       });
       setConfirmModalItem(null);
       loadData();
@@ -275,6 +286,7 @@ export default function Expenses() {
       start_date: TODAY,
       due_day: "1",
       end_date: "",
+      bank_account_id: "",
       active: true,
       notes: "",
     });
@@ -295,6 +307,7 @@ export default function Expenses() {
       start_date: recurringForm.start_date,
       due_day: parseInt(recurringForm.due_day, 10),
       end_date: recurringForm.end_date || null,
+      bank_account_id: recurringForm.bank_account_id || null,
       active: recurringForm.active,
       notes: recurringForm.notes || "",
     };
@@ -1000,6 +1013,25 @@ export default function Expenses() {
               </div>
 
               <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                  Bank Account (Optional)
+                </label>
+                <select
+                  value={confirmForm.bank_account_id || ""}
+                  onChange={(e) => setConfirmForm({ ...confirmForm, bank_account_id: e.target.value })}
+                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                  data-testid="confirm-form-bank-account"
+                >
+                  <option value="">-- No Bank Account / Unassigned --</option>
+                  {bankAccounts.map((acc) => (
+                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Invoice Ref</label>
                 <textarea
                   rows={2}
@@ -1147,6 +1179,25 @@ export default function Expenses() {
               </div>
 
               <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                  Bank Account (Optional)
+                </label>
+                <select
+                  value={recurringForm.bank_account_id || ""}
+                  onChange={(e) => setRecurringForm({ ...recurringForm, bank_account_id: e.target.value })}
+                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                  data-testid="rec-form-bank-account"
+                >
+                  <option value="">-- No Bank Account / Unassigned --</option>
+                  {bankAccounts.map((acc) => (
+                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes</label>
                 <textarea
                   rows={2}
@@ -1252,6 +1303,25 @@ export default function Expenses() {
                   required
                   data-testid="expense-form-payee"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                  Bank Account (Optional)
+                </label>
+                <select
+                  value={form.bank_account_id || ""}
+                  onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
+                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                  data-testid="expense-form-bank-account"
+                >
+                  <option value="">-- No Bank Account / Unassigned --</option>
+                  {bankAccounts.map((acc) => (
+                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div>

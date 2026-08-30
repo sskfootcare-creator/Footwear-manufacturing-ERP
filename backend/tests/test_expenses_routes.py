@@ -151,18 +151,21 @@ def test_expense_crud(client, mock_expenses_env):
         "date": "2026-08-01",
         "payee": "Factory Landlord",
         "notes": "Factory Unit 1 Rent August",
+        "bank_account_id": "bank_acc_123",
         "status": "confirmed"
     })
     assert res.status_code == 200
     exp = res.json()
     assert exp["category"] == "Rent & Utilities"
     assert exp["amount"] == 45000.0
+    assert exp["bank_account_id"] == "bank_acc_123"
     eid = exp["id"]
 
     # 2. Get expense
     res = client.get(f"/api/expenses/{eid}")
     assert res.status_code == 200
     assert res.json()["payee"] == "Factory Landlord"
+    assert res.json()["bank_account_id"] == "bank_acc_123"
 
     # 3. List expenses
     res = client.get("/api/expenses")
@@ -182,6 +185,42 @@ def test_expense_crud(client, mock_expenses_env):
     assert res.json()["ok"] is True
 
 
+def test_expense_with_bank_account(client, mock_expenses_env):
+    payload = {
+        "category": "Raw Materials",
+        "amount": 12500.0,
+        "date": "2026-08-15",
+        "payee": "Leather Supplier Co",
+        "notes": "Direct bank payment for sole materials",
+        "bank_account_id": "bank_acc_xyz_789",
+        "status": "confirmed"
+    }
+    # 1. Create expense with bank_account_id and verify it is returned on create
+    res = client.post("/api/expenses", json=payload)
+    assert res.status_code == 200
+    created = res.json()
+    assert created.get("bank_account_id") == "bank_acc_xyz_789"
+    assert "id" in created
+    eid = created["id"]
+
+    # 2. Verify getting expense by ID returns the bank_account_id correctly
+    get_res = client.get(f"/api/expenses/{eid}")
+    assert get_res.status_code == 200
+    fetched = get_res.json()
+    assert fetched.get("id") == eid
+    assert fetched.get("bank_account_id") == "bank_acc_xyz_789"
+    assert fetched.get("payee") == "Leather Supplier Co"
+    assert fetched.get("amount") == 12500.0
+
+    # 3. Verify getting expenses list includes the expense with bank_account_id
+    list_res = client.get("/api/expenses")
+    assert list_res.status_code == 200
+    all_expenses = list_res.json()
+    matched = next((item for item in all_expenses if item.get("id") == eid), None)
+    assert matched is not None
+    assert matched.get("bank_account_id") == "bank_acc_xyz_789"
+
+
 def test_recurring_expenses_flow(client, mock_expenses_env):
     # 1. Create recurring expense template
     res = client.post("/api/expenses/recurring", json={
@@ -191,12 +230,14 @@ def test_recurring_expenses_flow(client, mock_expenses_env):
         "frequency": "monthly",
         "start_date": "2026-01-01",
         "due_day": 5,
+        "bank_account_id": "bank_acc_recurring_99",
         "active": True,
         "notes": "High speed fiber"
     })
     assert res.status_code == 201
     rec = res.json()
     assert rec["category"] == "Office & Administrative"
+    assert rec.get("bank_account_id") == "bank_acc_recurring_99"
     rid = rec["id"]
 
     # 2. List recurring templates
@@ -208,6 +249,7 @@ def test_recurring_expenses_flow(client, mock_expenses_env):
     res = client.get(f"/api/expenses/recurring/{rid}")
     assert res.status_code == 200
     assert res.json()["amount"] == 2500.0
+    assert res.json().get("bank_account_id") == "bank_acc_recurring_99"
 
     # 4. Trigger recurring check
     res = client.post("/api/expenses/check-recurring")
@@ -220,6 +262,7 @@ def test_recurring_expenses_flow(client, mock_expenses_env):
     queue = res.json()
     assert isinstance(queue, list)
     if queue:
+        assert queue[0].get("bank_account_id") == "bank_acc_recurring_99"
         due_eid = queue[0]["id"]
         # 6. Confirm expense from due queue
         res_conf = client.post(f"/api/expenses/{due_eid}/confirm", json={"amount": 2500.0})
@@ -235,6 +278,42 @@ def test_recurring_expenses_flow(client, mock_expenses_env):
     res = client.delete(f"/api/expenses/recurring/{rid}")
     assert res.status_code == 200
     assert res.json()["ok"] is True
+
+
+def test_recurring_expense_bank_account_inheritance(client, mock_expenses_env):
+    # 1. Create a recurring expense template with a bank_account_id set
+    res = client.post("/api/expenses/recurring", json={
+        "category": "Rent & Utilities",
+        "payee": "Warehouse Property Ltd",
+        "amount": 35000.0,
+        "frequency": "monthly",
+        "start_date": "2026-01-01",
+        "due_day": 1,
+        "bank_account_id": "bank_acc_hdfc_5544",
+        "active": True,
+        "notes": "Warehouse monthly lease"
+    })
+    assert res.status_code == 201
+    rec_tmpl = res.json()
+    assert rec_tmpl.get("bank_account_id") == "bank_acc_hdfc_5544"
+    tmpl_id = rec_tmpl["id"]
+
+    # 2. Trigger the recurring expense check via POST /api/expenses/check-recurring
+    check_res = client.post("/api/expenses/check-recurring")
+    assert check_res.status_code == 200
+
+    # 3. Check the due queue via GET /api/expenses/due-queue
+    queue_res = client.get("/api/expenses/due-queue")
+    assert queue_res.status_code == 200
+    queue = queue_res.json()
+    assert isinstance(queue, list)
+
+    # 4. Verify that the auto-generated expense has inherited the same bank_account_id from the template
+    gen_expense = next((item for item in queue if item.get("recurring_expense_id") == tmpl_id), None)
+    assert gen_expense is not None, "Generated expense not found in due queue"
+    assert gen_expense.get("bank_account_id") == "bank_acc_hdfc_5544"
+    assert gen_expense.get("payee") == "Warehouse Property Ltd"
+    assert gen_expense.get("amount") == 35000.0
 
 
 def test_pnl_report(client, mock_expenses_env):

@@ -944,5 +944,88 @@ async def test_unmatched_erp_candidates_listing(monkeypatch):
     assert "vendor_payment" in types
 
 
+@pytest.mark.anyio
+async def test_auto_reconcile_expense_with_pre_set_bank_account(monkeypatch):
+    """Ensure auto-reconcile on Account A does NOT match an expense pre-assigned to Account B."""
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    account_a_id = str(ObjectId())
+    account_b_id = str(ObjectId())
+
+    acc_a_doc = {
+        "_id": ObjectId(account_a_id),
+        "name": "Account A - UCO Bank",
+        "account_type": "b2b_client",
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_a_doc)
+
+    # Statement line on Account A (debit of 15000.0 on 2026-08-10)
+    line_id = ObjectId()
+    unmatched_lines = [
+        {
+            "_id": line_id,
+            "bank_account_id": account_a_id,
+            "date": "2026-08-10",
+            "credit_amount": 0.0,
+            "debit_amount": 15000.0,
+            "match_status": "unmatched",
+            "narration": "OFFICE EXPENSE PAYMENT",
+        }
+    ]
+
+    mock_cursor = MagicMock()
+    mock_cursor.sort = MagicMock(return_value=mock_cursor)
+    mock_cursor.to_list = AsyncMock(return_value=unmatched_lines)
+    mock_db.bank_statement_lines.find = MagicMock(return_value=mock_cursor)
+
+    # Expense is pre-assigned to Account B
+    expense_doc = {
+        "_id": ObjectId(),
+        "date": "2026-08-10",
+        "amount": 15000.0,
+        "category": "Office & Administrative",
+        "payee": "Stationery Mart",
+        "bank_account_id": account_b_id,
+    }
+
+    # When querying expenses, simulate MongoDB filtering on bank_account_id
+    def mock_expenses_find(query):
+        acc_filter = query.get("bank_account_id", {})
+        allowed_accounts = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        matching = [expense_doc] if expense_doc.get("bank_account_id") in allowed_accounts else []
+        return MagicMock(to_list=AsyncMock(return_value=matching))
+
+    mock_db.expenses.find = MagicMock(side_effect=mock_expenses_find)
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    updated_stmt = {}
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=lambda q, u: updated_stmt.update({str(q["_id"]): u["$set"]}))
+    mock_db.expenses.update_one = AsyncMock()
+
+    req = MagicMock()
+    # Run auto-reconcile on Account A
+    res = await routes.banking.reconcile_bank_account(
+        id=account_a_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        dry_run=False,
+    )
+
+    assert res["ok"] is True
+    assert res["total_unmatched_evaluated"] == 1
+    assert res["auto_matched_count"] == 0
+    assert res["no_match_count"] == 1
+    assert str(line_id) not in updated_stmt
+    mock_db.expenses.update_one.assert_not_called()
+
+
+
 
 

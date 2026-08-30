@@ -129,3 +129,41 @@ def test_recurring_expense_lifecycle_and_pnl(client):
     queue3_ids = [e["id"] for e in r_queue3.json()]
     assert rent_id not in queue3_ids
     assert elec_id not in queue3_ids
+
+
+def test_recurring_expense_bank_account_inheritance(client):
+    unique_suffix = uuid.uuid4().hex[:6].upper()
+    bank_acc_id = f"bank_acc_{unique_suffix}"
+
+    # 1. Create recurring expense template with a bank_account_id set
+    payload = {
+        "category": "Rent",
+        "payee": f"Warehouse {unique_suffix}",
+        "amount": 35000.0,
+        "frequency": "monthly",
+        "start_date": "2026-07-01",
+        "due_day": 1,
+        "bank_account_id": bank_acc_id,
+        "active": True,
+        "notes": "Warehouse monthly lease"
+    }
+    res = client.post("/expenses/recurring", json=payload)
+    assert res.status_code == 201, res.text
+    tmpl = res.json()
+    tmpl_id = tmpl["id"]
+    assert tmpl.get("bank_account_id") == bank_acc_id
+
+    # 2. Trigger recurring check via POST /expenses/check-recurring
+    check_res = client.post("/expenses/check-recurring")
+    assert check_res.status_code == 200, check_res.text
+
+    # 3. Check the due queue via GET /expenses/due-queue
+    queue_res = client.get("/expenses/due-queue")
+    assert queue_res.status_code == 200, queue_res.text
+    queue = queue_res.json()
+
+    # 4. Verify auto-generated expense has inherited bank_account_id
+    gen_expense = next((item for item in queue if item.get("recurring_expense_id") == tmpl_id), None)
+    assert gen_expense is not None, "Auto-generated expense not found in due queue"
+    assert gen_expense.get("bank_account_id") == bank_acc_id
+
