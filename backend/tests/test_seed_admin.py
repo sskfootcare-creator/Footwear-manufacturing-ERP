@@ -40,6 +40,7 @@ class MockDB:
 def test_seed_admin_production_missing_password_fails():
     """Verify that in production mode, missing ADMIN_PASSWORD causes startup to fail with RuntimeError."""
     os.environ["ENVIRONMENT"] = "production"
+    os.environ["JWT_SECRET"] = "a" * 32
     if "ADMIN_PASSWORD" in os.environ:
         del os.environ["ADMIN_PASSWORD"]
 
@@ -51,6 +52,7 @@ def test_seed_admin_production_missing_password_fails():
 def test_seed_admin_production_seeds_only_env_admin():
     """Verify that in production mode, only env admin is seeded and hardcoded accounts are skipped."""
     os.environ["ENVIRONMENT"] = "production"
+    os.environ["JWT_SECRET"] = "a" * 32
     os.environ["ADMIN_EMAIL"] = "prodadmin@sskfootcare.com"
     os.environ["ADMIN_PASSWORD"] = "ProdSecret123!"
 

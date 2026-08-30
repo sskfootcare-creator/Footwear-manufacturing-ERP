@@ -11,6 +11,20 @@ from fastapi import HTTPException, Request
 log = logging.getLogger("ssk.rate_limiter")
 
 
+def _is_test_mode() -> bool:
+    """Return True if running in a test or dev environment where test headers may override IP/window.
+    In production (ENVIRONMENT='production'), test header overrides are strictly ignored.
+    """
+    env = os.environ.get("ENVIRONMENT", "development").strip().lower()
+    if env == "production":
+        return False
+    return (
+        os.environ.get("TESTING") == "1"
+        or os.environ.get("RATE_LIMIT_DISABLED") == "1"
+        or env in ("test", "testing", "development")
+    )
+
+
 class RateLimiter:
     """In-memory sliding-window rate limiter per user/IP."""
 
@@ -21,11 +35,12 @@ class RateLimiter:
         self._history: dict = defaultdict(list)
 
     def get_client_key(self, request: Request) -> str:
-        # Header override for test isolation
-        test_ip = request.headers.get("x-test-rate-limit-client-ip")
-        if test_ip:
-            log.warning(f"Rate Limiter key test_ip={test_ip}")
-            return f"test:{test_ip}"
+        # Header override for test isolation (gated to non-production environments)
+        if _is_test_mode():
+            test_ip = request.headers.get("x-test-rate-limit-client-ip")
+            if test_ip:
+                log.warning(f"Rate Limiter key test_ip={test_ip}")
+                return f"test:{test_ip}"
         
         # User state (set by auth middleware or get_current_user if available)
         user = getattr(request.state, "user", None)
@@ -57,18 +72,19 @@ class RateLimiter:
         return f"ip:{client_ip}"
 
     def check(self, request: Request):
-        if (os.environ.get("RATE_LIMIT_DISABLED") == "1" or os.environ.get("TESTING") == "1") and not request.headers.get("x-test-rate-limit-client-ip"):
+        if _is_test_mode() and (os.environ.get("RATE_LIMIT_DISABLED") == "1" or os.environ.get("TESTING") == "1") and not request.headers.get("x-test-rate-limit-client-ip"):
             return
         key = self.get_client_key(request)
         now_ts = datetime.now(timezone.utc).timestamp()
         
         window = self.window_seconds
-        test_window = request.headers.get("x-test-rate-limit-window")
-        if test_window:
-            try:
-                window = int(test_window)
-            except ValueError:
-                pass
+        if _is_test_mode():
+            test_window = request.headers.get("x-test-rate-limit-window")
+            if test_window:
+                try:
+                    window = int(test_window)
+                except ValueError:
+                    pass
 
         window_start = now_ts - window
 

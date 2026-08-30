@@ -147,10 +147,9 @@ async def worker_login(payload: WorkerLoginIn, request: Request, response: Respo
     import server
     db = getattr(request.app, "mongodb", None) or server.db
 
-    client_ip = (
-        request.headers.get("x-test-rate-limit-client-ip")
-        or (request.client.host if request.client else "unknown")
-    )
+    from rate_limiter import _is_test_mode
+    test_ip = request.headers.get("x-test-rate-limit-client-ip") if _is_test_mode() else None
+    client_ip = test_ip or (request.client.host if request.client else "unknown")
     limiter_key = f"wpin:{client_ip}"
     if hasattr(server, "check_rate_limit"):
         await server.check_rate_limit(limiter_key)
@@ -643,8 +642,9 @@ async def my_payroll(
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
 
-    from routes.pos import report_payroll as pos_report_payroll
-    full = await pos_report_payroll(request, from_date=from_date, to_date=to_date)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    from routes.pos import compute_payroll
+    full = await compute_payroll(db=db, from_date=from_date, to_date=to_date)
     rows = full.get("rows", [])
     my_row = next((r for r in rows if r.get("worker_id") == caller_wid), None)
     if not my_row:

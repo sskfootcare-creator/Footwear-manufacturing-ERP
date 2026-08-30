@@ -54,8 +54,78 @@ def get_environment() -> str:
     return env
 
 
+_INSECURE_JWT_DEFAULTS = {
+    "supersecretjwtkey12345!",
+    "secret",
+    "changeme",
+    "jwtsecret",
+    "password",
+}
+MIN_JWT_SECRET_LENGTH = 32
+
+
+def validate_jwt_secret() -> str:
+    """Validate JWT_SECRET environment variable based on the current ENVIRONMENT.
+
+    In production:
+    - Raises RuntimeError if JWT_SECRET is unset or empty.
+    - Raises RuntimeError if JWT_SECRET matches any known insecure default.
+    - Raises RuntimeError if len(JWT_SECRET) < 32 characters.
+
+    In non-production (development | test):
+    - Warns if JWT_SECRET is weak or using default, but does not block startup.
+    - Falls back to 'supersecretjwtkey12345!' if unset.
+    """
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    environment = get_environment()
+
+    if environment == "production":
+        if not secret:
+            raise RuntimeError(
+                "FATAL: JWT_SECRET environment variable is not set. "
+                "The server refuses to start in production without an explicit "
+                "cryptographically secure JWT secret. Set JWT_SECRET in your deployment secrets."
+            )
+        if secret in _INSECURE_JWT_DEFAULTS or secret.lower() in _INSECURE_JWT_DEFAULTS:
+            raise RuntimeError(
+                f"FATAL: JWT_SECRET is set to the known insecure default '{secret}'. "
+                "The server refuses to start in production with a default secret. "
+                "Generate a cryptographically random secret with at least 32 characters."
+            )
+        if len(secret) < MIN_JWT_SECRET_LENGTH:
+            raise RuntimeError(
+                f"FATAL: JWT_SECRET length ({len(secret)} characters) is below the minimum required "
+                f"{MIN_JWT_SECRET_LENGTH} characters for production. "
+                "Generate a cryptographically random secret with at least 32 characters."
+            )
+    else:
+        if not secret:
+            secret = "supersecretjwtkey12345!"
+            log.warning(
+                "[auth] JWT_SECRET is not set. Using insecure default 'supersecretjwtkey12345!' "
+                "for development/test mode. Do NOT use this in production."
+            )
+        elif secret in _INSECURE_JWT_DEFAULTS or secret.lower() in _INSECURE_JWT_DEFAULTS:
+            log.warning(
+                f"[auth] JWT_SECRET is set to a known insecure default '{secret}'. "
+                "Acceptable for development/test only."
+            )
+        elif len(secret) < MIN_JWT_SECRET_LENGTH:
+            log.warning(
+                f"[auth] JWT_SECRET is only {len(secret)} characters long "
+                f"(recommended minimum: {MIN_JWT_SECRET_LENGTH})."
+            )
+
+    return secret
+
+
 def get_jwt_secret() -> str:
-    return os.environ["JWT_SECRET"]
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if not secret:
+        if get_environment() != "production":
+            return "supersecretjwtkey12345!"
+        raise RuntimeError("FATAL: JWT_SECRET environment variable is not set.")
+    return secret
 
 
 def hash_password(password: str) -> str:
@@ -233,6 +303,9 @@ async def seed_admin(db) -> None:
     """
     environment = get_environment()
     log.info(f"[seed_admin] ENVIRONMENT={environment}")
+
+    # ── Validate JWT Secret (enforce production strength) ────────────────────
+    validate_jwt_secret()
 
     # ── Validate env-admin config ─────────────────────────────────────────────
     admin_email    = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower().strip()

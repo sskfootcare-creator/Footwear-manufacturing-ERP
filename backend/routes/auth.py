@@ -253,10 +253,9 @@ def _stringify(doc: dict) -> dict:
 @auth_router.post("/auth/login")
 async def login(payload: LoginInput, request: Request, response: Response):
     """Rate-limited login — returns JWT access + refresh tokens in cookies and body."""
-    client_ip = (
-        request.headers.get("x-test-rate-limit-client-ip")
-        or (request.client.host if request.client else "unknown")
-    )
+    from rate_limiter import _is_test_mode
+    test_ip = request.headers.get("x-test-rate-limit-client-ip") if _is_test_mode() else None
+    client_ip = test_ip or (request.client.host if request.client else "unknown")
     await check_rate_limit(client_ip)
 
     db = _get_db()

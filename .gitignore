@@ -73,6 +73,13 @@ agenthub/agents/youtube/db
 *.deb
 *.dylib
 
+# Uploads (local media & attachments)
+uploads/
+/uploads/
+backend/uploads/
+/backend/uploads/
+**/uploads/
+
 # Build caches
 .cache/
 
@@ -551,15 +558,6 @@ mongodb-portable/data/index-3-5411863223930935416.wt
 mongodb-portable/data/diagnostic.data/metrics.2026-07-13T14-48-50Z-00000
 mongodb-portable/data/diagnostic.data/metrics.2026-07-13T15-39-01Z-00000
 mongodb-portable/data/
-backend/uploads/images/09081cdea05b4236940b5bdb46b87a8a/display.jpg
-backend/uploads/images/09081cdea05b4236940b5bdb46b87a8a/original.jpg
-backend/uploads/images/09081cdea05b4236940b5bdb46b87a8a/thumb.jpg
-backend/uploads/images/7e9441511117481cbbd18fd281584065/display.jpg
-backend/uploads/images/7e9441511117481cbbd18fd281584065/original.jpg
-backend/uploads/images/7e9441511117481cbbd18fd281584065/thumb.jpg
-backend/uploads/images/8b75f105cdce445a82d4769a3466305c/display.jpg
-backend/uploads/images/8b75f105cdce445a82d4769a3466305c/original.jpg
-backend/uploads/images/8b75f105cdce445a82d4769a3466305c/thumb.jpg
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/vcruntime140.dll
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/concrt140.dll
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140_1.dll
@@ -567,13 +565,4 @@ mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140_codecvt_ids.dll
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140.dll
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/vcruntime140_1.dll
 mongodb-portable/mongod.log
-mongodb-portable/mongod.log
-uploads/images/53cd793b8a3e49a3af80e7e6eb31d7f4/display.jpg
-uploads/images/53cd793b8a3e49a3af80e7e6eb31d7f4/original.jpg
-uploads/images/53cd793b8a3e49a3af80e7e6eb31d7f4/thumb.jpg
-uploads/images/dce661136ac640f894fc3dc96eabd4aa/thumb.jpg
-uploads/images/dce661136ac640f894fc3dc96eabd4aa/display.jpg
-uploads/images/dce661136ac640f894fc3dc96eabd4aa/original.jpg
-uploads/images/13cc7efffeae4b669f3089d63f046c69/display.jpg
-uploads/images/13cc7efffeae4b669f3089d63f046c69/original.jpg
-uploads/images/13cc7efffeae4b669f3089d63f046c69/thumb.jpg
+

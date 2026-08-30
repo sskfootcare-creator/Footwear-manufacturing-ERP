@@ -846,7 +846,8 @@ async def get_b2b_profitability(
     style_id: Optional[str] = Query(None),
     db_override: Any = None,
 ):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
     db_inst = db_override or getattr(getattr(request, "app", None), "state", None) and getattr(request.app.state, "db", None) or get_db()
 
     today_str = now_iso()[:10]
@@ -1315,7 +1316,8 @@ async def get_b2b_profitability(
 
 @pos_router.get("/pos")
 async def list_pos(request: Request, status: Optional[str] = Query(None)):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
     docs = await db.pos.find({}).sort("created_at", -1).to_list(1000)
     await _attach_po_profitability(docs, db)
@@ -1329,7 +1331,8 @@ async def list_pos(request: Request, status: Optional[str] = Query(None)):
 
 @pos_router.get("/pos/{pid}")
 async def get_po(pid: str, request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
     d = await db.pos.find_one({"_id": oid(pid)})
     if not d:
@@ -1341,7 +1344,8 @@ async def get_po(pid: str, request: Request):
 
 @pos_router.post("/pos/validate-styles")
 async def validate_po_styles_endpoint(payload: POIn, request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
     await validate_po_styles(payload, db=db)
     return {"ok": True, "line_count": len(payload.line_items)}
@@ -1717,7 +1721,8 @@ async def create_grn(payload: GRNIn, request: Request):
 @pos_router.get("/grns")
 async def list_grns(request: Request, invoice_id: Optional[str] = None,
                     client: Optional[str] = None, limit: int = 300):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
     q: dict = {}
     if invoice_id:
@@ -1730,7 +1735,8 @@ async def list_grns(request: Request, invoice_id: Optional[str] = None,
 
 @pos_router.get("/grns/{gid}")
 async def get_grn(gid: str, request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
     doc = await db.grns.find_one({"_id": oid(gid)})
     if not doc:
@@ -1884,7 +1890,8 @@ async def create_payment(payload: PaymentIn, request: Request):
 @pos_router.get("/payments")
 async def list_payments(request: Request, invoice_id: Optional[str] = None,
                         client: Optional[str] = None, limit: int = 500):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
     db = get_db()
     q: dict = {}
     if invoice_id:
@@ -1911,7 +1918,8 @@ async def delete_payment(pid: str, request: Request):
 @pos_router.get("/clients")
 async def list_clients(request: Request):
     """Return unique clients seen on invoices + their aggregate AR snapshot."""
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
     db = get_db()
     from routes.invoice_packing import _aggregate_payments_for_invoices, _aggregate_grn_adjustments, _decorate_invoice
 
@@ -1948,7 +1956,8 @@ async def list_clients(request: Request):
 @pos_router.get("/clients/{cid}/ledger")
 async def client_ledger(cid: str, request: Request):
     """Client ledger and aging breakdown."""
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
     db = get_db()
     return await _build_client_ledger(cid, db=db)
 
@@ -1957,7 +1966,8 @@ async def client_ledger(cid: str, request: Request):
 
 @pos_router.get("/reports/cost-variance")
 async def report_cost_variance(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production", "sales")(u)
     db = get_db()
     import server
 
@@ -2005,7 +2015,8 @@ async def report_cost_variance(request: Request, from_date: Optional[str] = None
 
 @pos_router.get("/reports/stage-cycle-time")
 async def report_stage_cycle_time(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     
     job_query = {}
@@ -2045,7 +2056,8 @@ async def report_stage_cycle_time(request: Request, from_date: Optional[str] = N
 
 @pos_router.get("/reports/defect-rate")
 async def report_defect_rate(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     
     defect_query = {}
@@ -2105,7 +2117,8 @@ async def report_defect_rate(request: Request, from_date: Optional[str] = None, 
 @pos_router.get("/dashboard/overdue")
 async def overdue_jobs(request: Request):
     """Returns active jobs whose stage_deadline has passed (excluding dispatched)."""
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     jobs = await db.production_jobs.find({"stage": {"$ne": "dispatched"}}).to_list(5000)
     out = []
@@ -2128,7 +2141,8 @@ async def overdue_jobs(request: Request):
 
 @pos_router.get("/production/unmatched-styles")
 async def unmatched_styles(request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     jobs = await db.production_jobs.find({
         "archived": {"$ne": True},
@@ -2164,7 +2178,8 @@ async def unmatched_styles(request: Request):
 
 @pos_router.get("/reports/monthly-production")
 async def report_monthly_production(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     
     job_query = {}
@@ -2196,6 +2211,8 @@ async def report_monthly_production(request: Request, from_date: Optional[str] =
 @pos_router.get("/reports/karigar-output")
 async def report_karigar_output(request: Request,
                                 from_date: Optional[str] = None, to_date: Optional[str] = None):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     if not from_date:
         from_date = datetime.now(timezone.utc).strftime("%Y-%m-01")
     if not to_date:
@@ -2213,7 +2230,8 @@ async def report_karigar_output(request: Request,
 
 @pos_router.get("/production/jobs")
 async def list_jobs(request: Request, include_archived: bool = False, source_type: Optional[str] = "b2b_client"):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     q: dict = {}
     if not include_archived:
@@ -2229,7 +2247,8 @@ async def list_jobs(request: Request, include_archived: bool = False, source_typ
 
 @pos_router.get("/production/archive")
 async def list_archive(request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     docs = await db.production_jobs.find({"archived": True}).sort("archived_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
@@ -2667,10 +2686,8 @@ def extract_role_completions(j: dict, role: str, worker_map: dict) -> list[dict]
 
 # ── Payroll & Wage Slip Endpoints ───────────────────────────────────────────
 
-@pos_router.get("/reports/payroll")
-async def report_payroll(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
-    await _get_user(request)
-    db = get_db()
+async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    db = db if db is not None else get_db()
     workers = await db.workers.find({}).to_list(500)
     worker_map = {str(w["_id"]): w for w in workers}
 
@@ -2908,11 +2925,19 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
     }
 
 
+@pos_router.get("/reports/payroll")
+async def report_payroll(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    return await compute_payroll(from_date=from_date, to_date=to_date)
+
+
 @pos_router.get("/reports/payroll.pdf")
 async def report_payroll_pdf(request: Request,
                              from_date: Optional[str] = None,
                              to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
     data = await report_payroll(request, from_date, to_date)
     from pdf_payroll import build_payroll_summary
     pdf_bytes = build_payroll_summary(data)
@@ -2926,7 +2951,8 @@ async def report_payroll_pdf(request: Request,
 async def report_wage_slip_pdf(worker_id: str, request: Request,
                                from_date: Optional[str] = None,
                                to_date: Optional[str] = None):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
     db = get_db()
     data = await report_payroll(request, from_date, to_date)
     row = next((r for r in data["rows"] if r["worker_id"] == worker_id), None)
@@ -2946,7 +2972,8 @@ async def report_wage_slip_pdf(worker_id: str, request: Request,
 
 @pos_router.post("/production/card.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def production_card_pdf(payload: dict, request: Request, variant: str = Query("single")):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     job_ids = payload.get("job_ids", [])
     if not job_ids:
@@ -3004,7 +3031,8 @@ async def production_card_pdf(payload: dict, request: Request, variant: str = Qu
 
 @pos_router.get("/defects")
 async def list_defects(request: Request):
-    await _get_user(request)
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
     db = get_db()
     docs = await db.defects.find({}).sort("created_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
