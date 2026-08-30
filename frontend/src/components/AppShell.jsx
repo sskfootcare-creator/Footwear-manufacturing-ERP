@@ -8,7 +8,7 @@ import {
   Warehouse, IndianRupee, Settings as SettingsIcon, Receipt,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check, Bell, TrendingUp,
+  Check, Bell, TrendingUp, Landmark,
 } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +31,7 @@ const NAV_GROUPS = [
       { to: "/workers",             label: "Workers",              icon: HardHat,         roles: ["admin","manager","production"] },
       { to: "/payroll",             label: "Payroll",              icon: IndianRupee,     roles: ["admin","manager"] },
       { to: "/expenses",            label: "Expenses & P&L",       icon: IndianRupee,     roles: ["admin","manager"] },
+      { to: "/bank-reconciliation", label: "Bank Reconciliation",  icon: Landmark,        roles: ["admin","manager"] },
       { to: "/listing-formats",     label: "Listing Formats",      icon: FileText,        roles: ["admin"] },
       { to: "/order-import-formats",label: "Order Import Formats", icon: FileText,        roles: ["admin"] },
       { to: "/settings",            label: "Settings",             icon: SettingsIcon,    roles: ["admin","manager"] },
@@ -91,6 +92,7 @@ const PAGE_TITLES = {
   "/vendor-pos":           "Vendor POs",
   "/invoices":             "Invoices",
   "/expenses":             "Expenses & P&L",
+  "/bank-reconciliation":  "Bank Reconciliation",
   "/clients":              "Clients",
   "/costing":              "Costing",
   "/b2b-profitability":    "B2B Profitability",

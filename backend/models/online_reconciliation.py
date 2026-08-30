@@ -17,6 +17,7 @@ class DailyPaymentRow(BaseModel):
     order_line_id: Optional[str] = ""
     return_id: Optional[str] = ""
     payment_date: Optional[str] = ""
+    bank_account_id: Optional[str] = None
 
 
 class DailyPaymentImportIn(DailyPaymentRow):
@@ -45,6 +46,7 @@ class SettlementImportIn(BaseModel):
     return_date: Optional[str] = ""
     return_type: Optional[str] = ""
     neft_ref: Optional[str] = ""
+    bank_account_id: Optional[str] = None
 
 
 class NonOrderDeductionRow(BaseModel):
@@ -55,6 +57,7 @@ class NonOrderDeductionRow(BaseModel):
     invoice_ref: Optional[str] = ""
     settlement_date: Optional[str] = ""
     settlement_description: Optional[str] = ""
+    bank_account_id: Optional[str] = None
 
 
 class NonOrderDeductionIn(NonOrderDeductionRow):

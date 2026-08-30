@@ -81,6 +81,7 @@ from routes.plm import plm_router, DEFAULT_PLM_FOLDERS
 from routes.settings import settings_router
 from routes.workers import workers_router
 from routes.vendors import vendors_router
+from routes.banking import banking_router
 from routes.notifications import notifications_router
 from routes.components import (
     components_router,
@@ -962,6 +963,7 @@ app.include_router(wms_router)
 app.include_router(pos_router)
 app.include_router(online_orders_router)
 app.include_router(styles_router)
+app.include_router(banking_router)
 
 
 
@@ -1255,6 +1257,21 @@ async def on_startup():
         )
     except Exception as e:
         log.warning(f"Could not create online_profitability_daily index: {e}")
+
+    try:
+        await db.bank_accounts.create_index("name", unique=True, name="bank_account_name_unique")
+        await db.bank_accounts.create_index("account_type", name="bank_account_type")
+        await db.bank_accounts.create_index("active", name="bank_account_active")
+    except Exception as e:
+        log.warning(f"Could not create bank_accounts indexes: {e}")
+
+    try:
+        await db.bank_statement_lines.create_index("bank_account_id", name="statement_bank_acc")
+        await db.bank_statement_lines.create_index("date", name="statement_date")
+        await db.bank_statement_lines.create_index("match_status", name="statement_match_status")
+        await db.bank_statement_lines.create_index([("bank_account_id", 1), ("date", -1)], name="statement_acc_date")
+    except Exception as e:
+        log.warning(f"Could not create bank_statement_lines indexes: {e}")
 
     # ── One-time URL rewrites for image URLs that predate the current shape.
     # (1) legacy "/uploads/..." → "/api/uploads/..." so K8s ingress routes them

@@ -42,6 +42,7 @@ import KarigarDashboard from "@/pages/KarigarDashboard";
 import StylePLM from "@/pages/StylePLM";
 import PatternManager from "@/pages/PatternManager";
 import ToolingLibrary from "@/pages/ToolingLibrary";
+import BankReconciliation from "@/pages/BankReconciliation";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
@@ -93,6 +94,7 @@ function App() {
             <Route path="reports" element={<Reports />} />
             <Route path="invoices" element={<Invoices />} />
             <Route path="expenses" element={<Expenses />} />
+            <Route path="bank-reconciliation" element={<BankReconciliation />} />
             <Route path="clients" element={<Clients />} />
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />

@@ -59,6 +59,12 @@ from models.online_reconciliation import (
     DailyPaymentRow, DailyPaymentImportIn, SettlementImportIn, NonOrderDeductionRow, NonOrderDeductionIn, MonthlyOrderRow, StyleCostSnapshotIn, ReconciliationRunIn
 )
 from models.notifications import NotificationIn
+from models.banking import (
+    BankAccountIn, BankAccountUpdate, MatchedTo,
+    BankStatementLineIn, BankStatementLineUpdate,
+    StatementImportConfigIn, StatementImportConfigUpdate, STATEMENT_CANONICAL_FIELDS,
+    TransferConfirmIn,
+)
 
 
 __all__ = [
@@ -108,4 +114,8 @@ __all__ = [
     "DailyPaymentRow", "DailyPaymentImportIn", "SettlementImportIn", "NonOrderDeductionRow", "NonOrderDeductionIn", "MonthlyOrderRow", "StyleCostSnapshotIn", "ReconciliationRunIn",
     # Notifications
     "NotificationIn",
+    # Banking & Reconciliation
+    "BankAccountIn", "BankAccountUpdate", "MatchedTo", "BankStatementLineIn", "BankStatementLineUpdate",
+    "StatementImportConfigIn", "StatementImportConfigUpdate", "STATEMENT_CANONICAL_FIELDS",
+    "TransferConfirmIn",
 ]
