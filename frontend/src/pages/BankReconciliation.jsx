@@ -326,11 +326,11 @@ export default function BankReconciliation() {
 
       <div className="p-2 sm:p-4 lg:p-8 space-y-6">
         {/* Account Selector Tabs */}
-        <div className="flex items-center gap-2 overflow-x-auto border-b-2 border-slate-200">
+        <div className="flex items-center gap-2 border-b border-slate-200 overflow-x-auto overflow-y-hidden">
           <button
             onClick={() => setSelectedAccountId("all")}
             data-testid="tab-account-all"
-            className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 ${
+            className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 ${
               selectedAccountId === "all"
                 ? "border-[#1E3A8A] text-[#1E3A8A] bg-slate-50"
                 : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
@@ -343,7 +343,7 @@ export default function BankReconciliation() {
               key={acc.id}
               onClick={() => setSelectedAccountId(acc.id)}
               data-testid={`tab-account-${acc.id}`}
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 whitespace-nowrap ${
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
                 selectedAccountId === acc.id
                   ? "border-[#1E3A8A] text-[#1E3A8A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
@@ -456,11 +456,11 @@ export default function BankReconciliation() {
 
         {/* Main Section Navigation Tabs */}
         <div className="space-y-4">
-          <div className="flex items-center gap-1 border-b-2 border-slate-200 overflow-x-auto pb-0">
+          <div className="flex items-center gap-1 border-b border-slate-200 overflow-x-auto overflow-y-hidden">
             <button
               onClick={() => setActiveTab("unmatched_lines")}
               data-testid="tab-unmatched-lines"
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 whitespace-nowrap ${
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
                 activeTab === "unmatched_lines"
                   ? "border-[#0F172A] text-[#0F172A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
@@ -480,7 +480,7 @@ export default function BankReconciliation() {
             <button
               onClick={() => setActiveTab("transfers")}
               data-testid="tab-transfers"
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 whitespace-nowrap ${
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
                 activeTab === "transfers"
                   ? "border-[#0F172A] text-[#0F172A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
@@ -498,7 +498,7 @@ export default function BankReconciliation() {
             <button
               onClick={() => setActiveTab("erp_expected")}
               data-testid="tab-erp-expected"
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 whitespace-nowrap ${
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
                 activeTab === "erp_expected"
                   ? "border-[#0F172A] text-[#0F172A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
@@ -518,7 +518,7 @@ export default function BankReconciliation() {
             <button
               onClick={() => setActiveTab("ledger")}
               data-testid="tab-ledger"
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-[2px] flex items-center gap-2 whitespace-nowrap ${
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
                 activeTab === "ledger"
                   ? "border-[#0F172A] text-[#0F172A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
