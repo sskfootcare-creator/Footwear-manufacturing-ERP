@@ -465,9 +465,125 @@ def _resolve_column(target: str, actual_headers: List[str]) -> Optional[str]:
     return None
 
 
+def _is_html_content(content: bytes) -> bool:
+    """Check if file content is actually HTML (common with Indian bank .xls exports)."""
+    try:
+        head = content[:2048].decode("utf-8-sig", errors="ignore").strip().lower()
+    except Exception:
+        try:
+            head = content[:2048].decode("latin-1", errors="ignore").strip().lower()
+        except Exception:
+            return False
+    return (
+        head.startswith("<!doctype html") or
+        head.startswith("<html") or
+        head.startswith("<?xml") or
+        "<table" in head[:512] or
+        "<html" in head[:512]
+    )
+
+
+def _parse_html_table(content: bytes) -> List[List[str]]:
+    """
+    Parse an HTML file containing a <table> into a list of rows (list of cell strings).
+    Many Indian bank portals (UCO, SBI, PNB, etc.) export HTML tables with .xls extension.
+    Uses Python's built-in html.parser — no external dependencies needed.
+    """
+    from html.parser import HTMLParser
+
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = content.decode("latin-1")
+        except Exception:
+            raise HTTPException(400, "Unable to decode file content")
+
+    class TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tables: List[List[List[str]]] = []
+            self._current_table: Optional[List[List[str]]] = None
+            self._current_row: Optional[List[str]] = None
+            self._current_cell: Optional[list] = None
+            self._in_cell = False
+            self._colspan = 1
+
+        def handle_starttag(self, tag, attrs):
+            tag_lc = tag.lower()
+            if tag_lc == "table":
+                self._current_table = []
+            elif tag_lc == "tr" and self._current_table is not None:
+                self._current_row = []
+            elif tag_lc in ("td", "th") and self._current_row is not None:
+                self._current_cell = []
+                self._in_cell = True
+                # Handle colspan
+                self._colspan = 1
+                for attr_name, attr_val in attrs:
+                    if attr_name.lower() == "colspan":
+                        try:
+                            self._colspan = int(attr_val)
+                        except (ValueError, TypeError):
+                            self._colspan = 1
+            elif tag_lc == "br" and self._in_cell:
+                self._current_cell.append(" ")
+
+        def handle_endtag(self, tag):
+            tag_lc = tag.lower()
+            if tag_lc in ("td", "th") and self._in_cell:
+                cell_text = "".join(self._current_cell).strip()
+                cell_text = re.sub(r"\s+", " ", cell_text)  # collapse whitespace
+                if self._current_row is not None:
+                    self._current_row.append(cell_text)
+                    # Fill extra cells for colspan > 1
+                    for _ in range(self._colspan - 1):
+                        self._current_row.append("")
+                self._current_cell = None
+                self._in_cell = False
+                self._colspan = 1
+            elif tag_lc == "tr" and self._current_row is not None:
+                if self._current_table is not None:
+                    self._current_table.append(self._current_row)
+                self._current_row = None
+            elif tag_lc == "table" and self._current_table is not None:
+                self.tables.append(self._current_table)
+                self._current_table = None
+
+        def handle_data(self, data):
+            if self._in_cell and self._current_cell is not None:
+                self._current_cell.append(data)
+
+        def handle_entityref(self, name):
+            if self._in_cell and self._current_cell is not None:
+                char_map = {"nbsp": " ", "amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+                self._current_cell.append(char_map.get(name, f"&{name};"))
+
+        def handle_charref(self, name):
+            if self._in_cell and self._current_cell is not None:
+                try:
+                    if name.startswith("x"):
+                        self._current_cell.append(chr(int(name[1:], 16)))
+                    else:
+                        self._current_cell.append(chr(int(name)))
+                except (ValueError, OverflowError):
+                    self._current_cell.append(f"&#{name};")
+
+    parser = TableParser()
+    parser.feed(text)
+
+    if not parser.tables:
+        raise HTTPException(400, "No HTML tables found in the uploaded file")
+
+    # Use the largest table (most rows) — bank statements are usually the biggest table
+    best_table = max(parser.tables, key=len)
+    return best_table
+
+
 def _detect_tabular_file_format(content: bytes, filename: str = "") -> str:
     """
-    Detect whether file is legacy Excel (.xls / OLE2), modern Excel (.xlsx / OOXML zip), or CSV.
+    Detect whether file is legacy Excel (.xls / OLE2), modern Excel (.xlsx / OOXML zip), CSV,
+    or HTML table (common bank portal export disguised as .xls).
     Uses magic bytes inspection first, falling back to file extension or content decoding.
     Raises HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv") if unsupported.
     """
@@ -485,7 +601,11 @@ def _detect_tabular_file_format(content: bytes, filename: str = "") -> str:
     if content.startswith(b"PK\x03\x04") or content.startswith(b"PK\x05\x06") or content.startswith(b"PK\x07\x08"):
         return "xlsx"
 
-    # 2. Filename extension checks
+    # 2. Check for HTML content disguised as .xls (common with Indian bank portals like UCO, SBI, PNB)
+    if _is_html_content(content) and (fname_lc.endswith(".xls") or fname_lc.endswith(".xlsx")):
+        return "html_xls"
+
+    # 3. Filename extension checks
     if fname_lc.endswith(".xls"):
         return "xls"
     if fname_lc.endswith(".xlsx") or fname_lc.endswith(".xlsm") or fname_lc.endswith(".xltx"):
@@ -501,7 +621,11 @@ def _detect_tabular_file_format(content: bytes, filename: str = "") -> str:
             except Exception:
                 raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
 
-    # 3. Plain text / CSV sniffing (no null bytes in initial chunk)
+    # 4. HTML sniffing (no extension match but content is HTML with tables)
+    if _is_html_content(content):
+        return "html_xls"
+
+    # 5. Plain text / CSV sniffing (no null bytes in initial chunk)
     if b"\x00" not in content[:1024]:
         try:
             content.decode("utf-8-sig")
@@ -592,8 +716,18 @@ def _parse_tabular_bytes(
 ) -> Tuple[List[str], List[Dict[str, str]]]:
     fmt = _detect_tabular_file_format(content, filename)
 
-    if fmt == "xls":
-        rows_raw = _parse_xlrd_workbook(content, sheet_locator)
+    if fmt == "html_xls":
+        rows_raw = _parse_html_table(content)
+
+    elif fmt == "xls":
+        try:
+            rows_raw = _parse_xlrd_workbook(content, sheet_locator)
+        except HTTPException:
+            # If xlrd fails, try HTML fallback (some .xls files are actually HTML)
+            if _is_html_content(content):
+                rows_raw = _parse_html_table(content)
+            else:
+                raise
 
     elif fmt == "xlsx":
         try:
@@ -630,6 +764,9 @@ def _parse_tabular_bytes(
                     rows_raw = _parse_xlrd_workbook(content, sheet_locator)
                 except Exception:
                     raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
+            # Try HTML fallback
+            elif _is_html_content(content):
+                rows_raw = _parse_html_table(content)
             else:
                 raise HTTPException(400, f"Failed to parse Excel file: {str(e)}")
 

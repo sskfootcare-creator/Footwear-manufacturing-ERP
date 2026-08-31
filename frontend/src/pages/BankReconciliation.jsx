@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { http, inr } from "../lib/api";
+import { http, inr, formatApiError } from "../lib/api";
 import { PageHeader, Card, Badge, BtnPrimary, BtnSecondary, Input, Select } from "../components/ui-kit";
 import {
   Landmark,
@@ -1095,7 +1095,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
         onSuccess();
       }
     } catch (e) {
-      setError(e.message || "Import failed. Please check the file column layout.");
+      setError(formatApiError(e.response?.data?.detail) || e.response?.data?.detail || e.message || "Import failed. Please check the file column layout.");
     } finally {
       setLoading(false);
     }

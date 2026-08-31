@@ -257,7 +257,7 @@ from models.banking import (
     StatementImportConfigUpdate,
     STATEMENT_CANONICAL_FIELDS,
 )
-from routes.online_orders import _parse_tabular_bytes, _resolve_column, _detect_tabular_file_format, _parse_xlrd_workbook
+from routes.online_orders import _parse_tabular_bytes, _resolve_column, _detect_tabular_file_format, _parse_xlrd_workbook, _is_html_content, _parse_html_table
 
 
 def _extract_statement_metadata(content: bytes, filename: str) -> Dict[str, str]:
@@ -266,8 +266,21 @@ def _extract_statement_metadata(content: bytes, filename: str) -> Dict[str, str]
     """
     fmt = _detect_tabular_file_format(content, filename)
     rows_raw = []
-    if fmt == "xls":
-        rows_raw = _parse_xlrd_workbook(content, SheetLocator(type="first_sheet"))
+    if fmt == "html_xls":
+        try:
+            rows_raw = _parse_html_table(content)
+        except Exception:
+            pass
+    elif fmt == "xls":
+        try:
+            rows_raw = _parse_xlrd_workbook(content, SheetLocator(type="first_sheet"))
+        except Exception:
+            # Try HTML fallback
+            if _is_html_content(content):
+                try:
+                    rows_raw = _parse_html_table(content)
+                except Exception:
+                    pass
     elif fmt == "xlsx":
         try:
             import openpyxl
@@ -277,7 +290,11 @@ def _extract_statement_metadata(content: bytes, filename: str) -> Dict[str, str]
             for r in sheet.iter_rows(values_only=True):
                 rows_raw.append([str(c) if c is not None else "" for c in r])
         except Exception:
-            pass
+            if _is_html_content(content):
+                try:
+                    rows_raw = _parse_html_table(content)
+                except Exception:
+                    pass
     elif fmt == "csv":
         try:
             import csv, io
@@ -498,6 +515,15 @@ async def _handle_statement_import(
 
     cfg = acc.get("statement_format")
     if not cfg or not cfg.get("column_map"):
+        bank_name_lower = (acc.get("bank_name") or acc.get("name") or "").lower()
+        if "uco" in bank_name_lower:
+            cfg = DEFAULT_BANK_FORMAT_TEMPLATES.get("uco")
+        elif "hdfc" in bank_name_lower:
+            cfg = DEFAULT_BANK_FORMAT_TEMPLATES.get("hdfc")
+        else:
+            cfg = DEFAULT_BANK_FORMAT_TEMPLATES.get("uco")
+
+    if not cfg or not cfg.get("column_map"):
         raise HTTPException(
             400,
             f"Bank account '{acc.get('name')}' does not have a saved statement column-map format. "
@@ -514,7 +540,11 @@ async def _handle_statement_import(
     if not content:
         raise HTTPException(400, "Uploaded file is empty")
 
+    detected_fmt = _detect_tabular_file_format(content, file.filename)
+    log.info("Statement import: file=%s, size=%d bytes, detected_format=%s", file.filename, len(content), detected_fmt)
+
     headers, raw_rows = _parse_tabular_bytes(content, file.filename, sheet_loc, header_loc, skip_rows)
+    log.info("Statement import: parsed headers=%s, data_rows=%d", headers, len(raw_rows) if raw_rows else 0)
     if not headers or not raw_rows:
         raise HTTPException(400, "Could not extract tabular header and data rows from file")
 
