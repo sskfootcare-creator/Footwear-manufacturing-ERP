@@ -1790,11 +1790,39 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
   const allocatedAmount = Number(detail?.allocated_amount ?? line?.cash_ledger_info?.allocated_amount ?? 0);
   const remainingBalance = Number(detail?.remaining_balance ?? line?.cash_ledger_info?.remaining_balance ?? (withdrawalAmount - allocatedAmount));
   const wagePayments = detail?.wage_payments || line?.cash_ledger_info?.wage_payments || [];
+  const expenses = detail?.expenses || line?.cash_ledger_info?.expenses || [];
+
+  // Build combined disbursements list if not already computed
+  const disbursements = detail?.disbursements || line?.cash_ledger_info?.disbursements || [
+    ...wagePayments.map((wp) => ({
+      id: wp.id || wp._id,
+      type: "wage_payment",
+      type_label: "Karigar Wage",
+      title: wp.worker_name || `Worker #${String(wp.worker_id).slice(-6)}`,
+      amount: wp.amount,
+      date: wp.date,
+      period_from: wp.period_from,
+      period_to: wp.period_to,
+      notes: wp.notes || "",
+      override_reason: wp.override_reason,
+    })),
+    ...expenses.map((e) => ({
+      id: e.id || e._id,
+      type: "expense",
+      type_label: "Cash Expense",
+      title: e.payee || "Payee",
+      category: e.category || "Expense",
+      amount: e.amount,
+      date: e.date,
+      notes: e.notes || "",
+    })),
+  ].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
   const pctAllocated = withdrawalAmount > 0 ? Math.min(100, Math.round((allocatedAmount / withdrawalAmount) * 100)) : 0;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white border-2 border-slate-900 max-w-2xl w-full shadow-2xl animate-in zoom-in-95 flex flex-col max-h-[90vh]">
+      <div className="bg-white border-2 border-slate-900 max-w-3xl w-full shadow-2xl animate-in zoom-in-95 flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="p-4 border-b-2 border-slate-100 flex items-center justify-between bg-amber-50/50">
           <div className="flex items-center gap-2.5">
@@ -1842,13 +1870,15 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
             <div className="p-3 bg-white border-2 border-emerald-200 bg-emerald-50/20">
               <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">Disbursed to Karigars</div>
               <div className="text-lg font-mono font-bold text-emerald-700 mt-0.5">₹{inr(allocatedAmount)}</div>
-              <div className="text-[10px] text-emerald-600 font-mono mt-0.5">{wagePayments.length} payment(s) recorded</div>
+              <div className="text-[10px] text-emerald-600 font-mono mt-0.5">
+                {wagePayments.length} wage payout(s) • {expenses.length} general expense(s)
+              </div>
             </div>
 
             <div className="p-3 bg-white border-2 border-amber-200 bg-amber-50/20">
               <div className="text-[10px] uppercase font-bold text-amber-900 tracking-wider">Unallocated Cash in Hand</div>
               <div className="text-lg font-mono font-bold text-amber-900 mt-0.5">₹{inr(remainingBalance)}</div>
-              <div className="text-[10px] text-amber-700 font-mono mt-0.5">Available for future wages</div>
+              <div className="text-[10px] text-amber-700 font-mono mt-0.5">Available for future wages & expenses</div>
             </div>
           </div>
 
@@ -1870,49 +1900,67 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <h4 className="font-bold text-xs uppercase tracking-wider text-slate-800">
-                Where did this cash actually go? ({wagePayments.length} Linked Karigar Payouts)
+                Where did this cash actually go? ({disbursements.length} Linked Disbursements)
               </h4>
             </div>
 
             {loading ? (
               <div className="py-8 text-center text-slate-500 font-mono text-xs">
                 <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-slate-400" />
-                Loading linked wage payments...
+                Loading linked disbursements...
               </div>
-            ) : wagePayments.length === 0 ? (
+            ) : disbursements.length === 0 ? (
               <div className="p-6 text-center border-2 border-dashed border-slate-200 bg-slate-50 text-slate-500 space-y-1">
                 <Wallet className="w-8 h-8 mx-auto text-slate-400 opacity-60" />
-                <p className="font-bold text-xs text-slate-700">No wage disbursements recorded yet from this withdrawal.</p>
+                <p className="font-bold text-xs text-slate-700">No wage or expense disbursements recorded yet from this withdrawal.</p>
                 <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
-                  The full amount (₹{inr(withdrawalAmount)}) is currently sitting as unallocated cash in hand. When wage payments are recorded with paid_via="cash" drawing from this withdrawal, they will automatically appear here.
+                  The full amount (₹{inr(withdrawalAmount)}) is currently sitting as unallocated cash in hand. When wage payouts or expenses are recorded with paid_via="cash" drawing from this withdrawal, they will automatically appear here.
                 </p>
               </div>
             ) : (
-              <div className="border-2 border-slate-200 overflow-x-auto max-h-60">
+              <div className="border-2 border-slate-200 overflow-x-auto max-h-64">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-slate-100 sticky top-0 text-[10px] font-bold uppercase tracking-wider text-slate-600 border-b-2 border-slate-200">
                     <tr>
                       <th className="px-3 py-2">Date</th>
-                      <th className="px-3 py-2">Karigar / Worker</th>
+                      <th className="px-3 py-2">Type</th>
+                      <th className="px-3 py-2">Recipient / Payee</th>
                       <th className="px-3 py-2 text-right">Amount Paid</th>
-                      <th className="px-3 py-2">Period Covered</th>
+                      <th className="px-3 py-2">Period / Category</th>
                       <th className="px-3 py-2">Notes & Audit Reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 font-mono">
-                    {wagePayments.map((wp) => (
-                      <tr key={wp.id || wp._id} className="hover:bg-slate-50">
-                        <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{wp.date}</td>
-                        <td className="px-3 py-2 font-bold text-slate-900 font-sans">{wp.worker_name || `Worker #${String(wp.worker_id).slice(-6)}`}</td>
-                        <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">₹{inr(wp.amount)}</td>
+                    {disbursements.map((d) => (
+                      <tr key={d.id || `${d.type}-${d.date}-${d.amount}`} className="hover:bg-slate-50">
+                        <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{d.date}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {d.type === "wage_payment" ? (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              👷 Karigar Wage
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-300">
+                              🧾 Cash Expense
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 font-bold text-slate-900 font-sans">
+                          {d.title}
+                        </td>
+                        <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">₹{inr(d.amount)}</td>
                         <td className="px-3 py-2 text-[11px] text-slate-600 whitespace-nowrap">
-                          {wp.period_from && wp.period_to ? `${wp.period_from} → ${wp.period_to}` : "-"}
+                          {d.type === "wage_payment" ? (
+                            d.period_from && d.period_to ? `${d.period_from} → ${d.period_to}` : "Wage Payout"
+                          ) : (
+                            <span className="font-sans font-medium text-slate-700">{d.category || "General"}</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-slate-600 font-sans max-w-xs">
-                          <div>{wp.notes || "-"}</div>
-                          {wp.override_reason && (
+                          <div>{d.notes || "-"}</div>
+                          {d.override_reason && (
                             <span className="inline-block mt-0.5 text-[9px] bg-red-100 text-red-900 border border-red-200 px-1 py-0.5 rounded font-mono font-bold">
-                              ⚡ Overpayment Override: {wp.override_reason}
+                              ⚡ Overpayment Override: {d.override_reason}
                             </span>
                           )}
                         </td>

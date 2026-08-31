@@ -1783,6 +1783,216 @@ async def test_full_cash_withdrawal_to_wage_payments_audit_trail_flow(monkeypatc
     assert cl_info["wage_payment_count"] == 3
 
 
+def test_expense_paid_via_cash_models_validation():
+    """Verify ExpenseIn and ExpenseUpdate accept paid_via and cash_ledger_id."""
+    e_bank = ExpenseIn(
+        category="Rent & Utilities",
+        amount=25000.0,
+        date="2026-08-01",
+        payee="Landlord",
+        paid_via="bank",
+        bank_account_id="acc_1",
+    )
+    assert e_bank.paid_via == "bank"
+    assert e_bank.bank_account_id == "acc_1"
+    assert e_bank.cash_ledger_id is None
+
+    e_cash = ExpenseIn(
+        category="Office & Administrative",
+        amount=1200.0,
+        date="2026-08-02",
+        payee="Stationery Mart",
+        paid_via="cash",
+        cash_ledger_id="cash_leg_99",
+    )
+    assert e_cash.paid_via == "cash"
+    assert e_cash.cash_ledger_id == "cash_leg_99"
+
+    up = ExpenseUpdate(paid_via="cash", cash_ledger_id="cash_leg_100")
+    assert up.paid_via == "cash"
+    assert up.cash_ledger_id == "cash_leg_100"
+
+
+@pytest.mark.anyio
+async def test_create_cash_expense_success_and_drawdown(monkeypatch):
+    """Verify creating a cash expense decrements cash_ledger remaining_balance."""
+    from routes.expenses import create_expense
+
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 10000.0,
+        "remaining_balance": 10000.0,
+        "date": "2026-08-10",
+        "notes": "ATM Withdrawal",
+    }
+    expenses_store = {}
+
+    mock_db = MagicMock()
+    mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_entry)
+    
+    async def mock_update_cash(q, update):
+        if "$inc" in update and "remaining_balance" in update["$inc"]:
+            cash_entry["remaining_balance"] += update["$inc"]["remaining_balance"]
+        return MagicMock(matched_count=1)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+
+    async def mock_insert_exp(doc):
+        eid = ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=mock_insert_exp)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.expenses._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+
+    payload = ExpenseIn(
+        category="Transport & Logistics",
+        amount=2400.0,
+        date="2026-08-11",
+        payee="Agra Transport Co",
+        notes="Carton shipping freight",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+    )
+
+    res = await create_expense(payload, req)
+    assert res["amount"] == 2400.0
+    assert res["paid_via"] == "cash"
+    assert res["cash_ledger_id"] == str(cash_id)
+    assert res["bank_account_id"] is None
+
+    # Check cash ledger decremented from 10000 to 7600
+    assert cash_entry["remaining_balance"] == 7600.0
+
+
+@pytest.mark.anyio
+async def test_create_cash_expense_overdraft_rejected(monkeypatch):
+    """Verify attempting to pay more cash than available in the pool is rejected."""
+    from routes.expenses import create_expense
+
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 5000.0,
+        "remaining_balance": 1500.0,  # Only 1500 remaining
+        "date": "2026-08-10",
+    }
+
+    mock_db = MagicMock()
+    mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_entry)
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.expenses._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+
+    payload = ExpenseIn(
+        category="Rent & Utilities",
+        amount=3000.0,  # Exceeds 1500
+        date="2026-08-11",
+        payee="Factory Landlord",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await create_expense(payload, req)
+    assert exc.value.status_code == 400
+    assert "Insufficient cash in ledger entry" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_cash_withdrawal_combined_wages_and_expenses_audit_trail(monkeypatch):
+    """Verify cash withdrawal audit trail combines both wage payments and general cash expenses."""
+    cash_ledger_id = ObjectId()
+    cash_doc = {
+        "_id": cash_ledger_id,
+        "bank_account_id": "acc_1",
+        "amount": 20000.0,
+        "remaining_balance": 8000.0,  # 20000 - (7000 wages + 5000 expenses) = 8000
+        "date": "2026-08-01",
+        "notes": "Cash withdrawal for factory floor",
+    }
+
+    wages = [
+        {
+            "_id": ObjectId(),
+            "worker_id": "w_1",
+            "worker_name": "Ramesh Karigar",
+            "amount": 4000.0,
+            "date": "2026-08-05",
+            "paid_via": "cash",
+            "cash_ledger_id": str(cash_ledger_id),
+            "period_from": "2026-08-01",
+            "period_to": "2026-08-15",
+            "notes": "Cutting wages",
+        },
+        {
+            "_id": ObjectId(),
+            "worker_id": "w_2",
+            "worker_name": "Suresh Karigar",
+            "amount": 3000.0,
+            "date": "2026-08-06",
+            "paid_via": "cash",
+            "cash_ledger_id": str(cash_ledger_id),
+            "period_from": "2026-08-01",
+            "period_to": "2026-08-15",
+            "notes": "Lasting wages",
+        },
+    ]
+
+    expenses = [
+        {
+            "_id": ObjectId(),
+            "category": "Raw Materials",
+            "amount": 3500.0,
+            "date": "2026-08-07",
+            "payee": "Local Thread Supplier",
+            "paid_via": "cash",
+            "cash_ledger_id": str(cash_ledger_id),
+            "notes": "Cash buy for urgent thread stock",
+        },
+        {
+            "_id": ObjectId(),
+            "category": "Transport & Logistics",
+            "amount": 1500.0,
+            "date": "2026-08-08",
+            "payee": "Tempo Driver Raju",
+            "paid_via": "cash",
+            "cash_ledger_id": str(cash_ledger_id),
+            "notes": "Delivery freight charge",
+        },
+    ]
+
+    mock_db = MagicMock()
+    mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_doc)
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=wages)))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=expenses)))
+
+    req = MagicMock()
+    monkeypatch.setattr(banking_routes, "_get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+    monkeypatch.setattr(banking_routes, "_get_db", lambda r: mock_db)
+
+    detail = await get_cash_ledger_detail(str(cash_ledger_id), req)
+    assert detail["ok"] is True
+    assert detail["withdrawal_amount"] == 20000.0
+    assert detail["allocated_amount"] == 12000.0  # 7000 + 5000
+    assert detail["remaining_balance"] == 8000.0
+    assert detail["wage_payment_count"] == 2
+    assert detail["expense_count"] == 2
+    assert detail["disbursement_count"] == 4
+
+    disb_types = [d["type"] for d in detail["disbursements"]]
+    assert "wage_payment" in disb_types
+    assert "expense" in disb_types
+
+    disb_titles = [d["title"] for d in detail["disbursements"]]
+    assert "Ramesh Karigar" in disb_titles
+    assert "Local Thread Supplier" in disb_titles
+    assert "Tempo Driver Raju" in disb_titles
+
+
 
 
 

@@ -136,14 +136,44 @@ async def create_expense(payload: ExpenseIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    amount = float(payload.amount)
+    if amount <= 0:
+        raise HTTPException(400, "Expense amount must be greater than 0")
+
+    if payload.paid_via == "cash":
+        if not payload.cash_ledger_id:
+            raise HTTPException(400, "cash_ledger_id is required when paid_via is 'cash'")
+        cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+        if not cash_entry:
+            raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
+        remaining = float(cash_entry.get("remaining_balance") or 0.0)
+        if amount > remaining + 0.001:
+            raise HTTPException(
+                400,
+                f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
+            )
+        # Decrement cash_ledger entry's remaining balance
+        await db.cash_ledger.update_one(
+            {"_id": oid(payload.cash_ledger_id)},
+            {"$inc": {"remaining_balance": -round(amount, 2)}}
+        )
+        bank_account_id = None
+        cash_ledger_id = str(payload.cash_ledger_id)
+    else:
+        bank_account_id = payload.bank_account_id
+        cash_ledger_id = None
+
     doc = {
         "category": payload.category,
-        "amount": float(payload.amount),
+        "amount": amount,
         "date": payload.date,
         "payee": payload.payee,
         "notes": payload.notes or "",
         "receipt": payload.receipt,
-        "bank_account_id": payload.bank_account_id,
+        "paid_via": payload.paid_via,
+        "cash_ledger_id": cash_ledger_id,
+        "bank_account_id": bank_account_id,
         "is_recurring": bool(payload.is_recurring),
         "recurring_expense_id": payload.recurring_expense_id or "",
         "status": payload.status or "confirmed",
@@ -555,6 +585,11 @@ async def delete_expense(eid: str, request: Request):
         raise HTTPException(404, "Expense not found")
     if not doc:
         raise HTTPException(404, "Expense not found")
+    if doc.get("paid_via") == "cash" and doc.get("cash_ledger_id") and hasattr(db, "cash_ledger"):
+        await db.cash_ledger.update_one(
+            {"_id": oid(doc["cash_ledger_id"])},
+            {"$inc": {"remaining_balance": round(float(doc.get("amount") or 0.0), 2)}}
+        )
     await db.expenses.delete_one({"_id": oid(eid)})
     await log_activity_db(
         db,

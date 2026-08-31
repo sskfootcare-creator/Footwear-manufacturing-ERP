@@ -1,6 +1,6 @@
 """Expense models for SSK Footcare ERP."""
 
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -26,6 +26,8 @@ class ExpenseIn(BaseModel):
     notes: Optional[str] = ""
     receipt: Optional[Any] = None
     bank_account_id: Optional[str] = None
+    paid_via: Literal["bank", "cash"] = "bank"
+    cash_ledger_id: Optional[str] = None
     is_recurring: bool = False
     recurring_expense_id: Optional[str] = None
     status: str = "confirmed"  # confirmed, due, overdue
@@ -39,6 +41,8 @@ class ExpenseUpdate(BaseModel):
     notes: Optional[str] = None
     receipt: Optional[Any] = None
     bank_account_id: Optional[str] = None
+    paid_via: Optional[Literal["bank", "cash"]] = None
+    cash_ledger_id: Optional[str] = None
     is_recurring: Optional[bool] = None
     recurring_expense_id: Optional[str] = None
     status: Optional[str] = None

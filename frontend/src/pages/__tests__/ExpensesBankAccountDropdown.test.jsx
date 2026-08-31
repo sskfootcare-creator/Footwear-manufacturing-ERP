@@ -211,4 +211,77 @@ describe("Expenses Bank Account Selection", () => {
       );
     });
   });
+
+  it("allows selecting 'Paid via Cash' and choosing a cash withdrawal entry", async () => {
+    http.get.mockImplementation((url) => {
+      if (url === "/expenses") return Promise.resolve({ data: [] });
+      if (url === "/reports/pnl") return Promise.resolve({ data: {} });
+      if (url === "/expenses/due-queue" || url === "/expenses/recurring") return Promise.resolve({ data: [] });
+      if (url === "/banking/accounts") {
+        return Promise.resolve({
+          data: [{ id: "bank_acc_101", name: "HDFC Primary", active: true }],
+        });
+      }
+      if (url === "/banking/cash-ledger") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: "cash_leg_55",
+                date: "2026-08-15",
+                amount: 10000,
+                remaining_balance: 6500,
+                notes: "ATM Floor Cash",
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    render(<Expenses />);
+
+    const addBtn = await screen.findByTestId("add-expense-btn");
+    fireEvent.click(addBtn);
+
+    // Switch to Paid via Cash
+    const cashToggle = await screen.findByTestId("expense-pay-via-cash");
+    fireEvent.click(cashToggle);
+
+    // Cash ledger dropdown should appear
+    const cashDropdown = await screen.findByTestId("expense-form-cash-ledger");
+    expect(cashDropdown).toBeInTheDocument();
+    expect(screen.getByText(/₹6,500/)).toBeInTheDocument();
+
+    // Fill form and select cash ledger
+    fireEvent.change(screen.getByTestId("expense-form-amount"), {
+      target: { value: "3500" },
+    });
+    fireEvent.change(screen.getByTestId("expense-form-payee"), {
+      target: { value: "Agra Packaging Store" },
+    });
+    fireEvent.change(cashDropdown, {
+      target: { value: "cash_leg_55" },
+    });
+
+    http.post.mockResolvedValueOnce({ data: { id: "exp_cash_1" } });
+
+    const submitBtn = screen.getByTestId("save-expense-btn");
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith(
+        "/expenses",
+        expect.objectContaining({
+          amount: 3500,
+          payee: "Agra Packaging Store",
+          paid_via: "cash",
+          cash_ledger_id: "cash_leg_55",
+          bank_account_id: null,
+        })
+      );
+    });
+  });
 });
+

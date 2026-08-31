@@ -10,9 +10,10 @@ export function PageHeader({ title, subtitle, action, testId }) {
   );
 }
 
-export function BtnPrimary({ children, className = "", ...rest }) {
+export function BtnPrimary({ children, className = "", testId, ...rest }) {
   return (
     <button
+      data-testid={testId}
       className={`bg-[#0F172A] text-white font-bold uppercase tracking-wider text-xs px-5 py-2.5 border-2 border-[#0F172A] shadow-ind hover:shadow-ind-lg hover:-translate-x-0.5 hover:-translate-y-0.5 transition-all active:shadow-none active:translate-x-0.5 active:translate-y-0.5 disabled:opacity-50 ${className}`}
       {...rest}
     >
@@ -21,9 +22,10 @@ export function BtnPrimary({ children, className = "", ...rest }) {
   );
 }
 
-export function BtnSecondary({ children, className = "", ...rest }) {
+export function BtnSecondary({ children, className = "", testId, ...rest }) {
   return (
     <button
+      data-testid={testId}
       className={`bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${className}`}
       {...rest}
     >

@@ -65,6 +65,7 @@ export default function Expenses() {
   const [dueQueue, setDueQueue] = useState([]);
   const [recurringTemplates, setRecurringTemplates] = useState([]);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [cashLedgerEntries, setCashLedgerEntries] = useState([]);
   const [pnl, setPnl] = useState({
     revenue: 0,
     invoices_revenue: 0,
@@ -101,6 +102,8 @@ export default function Expenses() {
     date: TODAY,
     notes: "",
     receipt: null,
+    paid_via: "bank",
+    cash_ledger_id: "",
     bank_account_id: "",
   });
 
@@ -129,6 +132,8 @@ export default function Expenses() {
     payee: "",
     notes: "",
     receipt: null,
+    paid_via: "bank",
+    cash_ledger_id: "",
     bank_account_id: "",
     is_recurring: false,
   });
@@ -142,12 +147,13 @@ export default function Expenses() {
       if (toDate) params.to_date = toDate;
       if (search) params.search = search;
 
-      const [expRes, pnlRes, dueRes, recRes, bankRes] = await Promise.all([
+      const [expRes, pnlRes, dueRes, recRes, bankRes, cashRes] = await Promise.all([
         http.get("/expenses", { params }),
         http.get("/reports/pnl", { params: { from_date: fromDate, to_date: toDate } }),
         http.get("/expenses/due-queue"),
         http.get("/expenses/recurring"),
         http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
+        http.get("/banking/cash-ledger").catch(() => ({ data: [] })),
       ]);
 
       setExpenses(expRes.data || []);
@@ -155,6 +161,8 @@ export default function Expenses() {
       setDueQueue(dueRes.data || []);
       setRecurringTemplates(recRes.data || []);
       setBankAccounts(Array.isArray(bankRes?.data) ? bankRes.data : bankRes?.data?.items || []);
+      const clItems = cashRes?.data?.items || (Array.isArray(cashRes?.data) ? cashRes.data : []);
+      setCashLedgerEntries(clItems);
     } catch (err) {
       console.error("Failed to load expenses data:", err);
     } finally {
@@ -177,6 +185,8 @@ export default function Expenses() {
       payee: "",
       notes: "",
       receipt: null,
+      paid_via: "bank",
+      cash_ledger_id: "",
       bank_account_id: "",
       is_recurring: false,
     });
@@ -194,6 +204,8 @@ export default function Expenses() {
       payee: item.payee || "",
       notes: item.notes || "",
       receipt: item.receipt || null,
+      paid_via: item.paid_via || (item.cash_ledger_id ? "cash" : "bank"),
+      cash_ledger_id: item.cash_ledger_id || "",
       bank_account_id: item.bank_account_id || "",
       is_recurring: !!item.is_recurring,
     });
@@ -204,6 +216,11 @@ export default function Expenses() {
     e.preventDefault();
     if (!form.amount || parseFloat(form.amount) <= 0 || !form.payee.trim()) {
       alert("Please enter a valid amount and payee name.");
+      return;
+    }
+
+    if (form.paid_via === "cash" && !form.cash_ledger_id) {
+      alert("Please select a Cash Withdrawal ledger entry for cash payment.");
       return;
     }
 
@@ -219,7 +236,9 @@ export default function Expenses() {
       payee: form.payee.trim(),
       notes: form.notes ? form.notes.trim() : "",
       receipt: form.receipt,
-      bank_account_id: form.bank_account_id || null,
+      paid_via: form.paid_via || "bank",
+      cash_ledger_id: form.paid_via === "cash" ? form.cash_ledger_id : null,
+      bank_account_id: form.paid_via === "bank" ? (form.bank_account_id || null) : null,
       is_recurring: form.is_recurring,
       status: "confirmed",
     };
@@ -1306,22 +1325,83 @@ export default function Expenses() {
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Bank Account (Optional)
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                  Payment Method *
                 </label>
-                <select
-                  value={form.bank_account_id || ""}
-                  onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  data-testid="expense-form-bank-account"
-                >
-                  <option value="">-- No Bank Account / Unassigned --</option>
-                  {bankAccounts.map((acc) => (
-                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                    </option>
-                  ))}
-                </select>
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, paid_via: "bank", cash_ledger_id: "" })}
+                    className={`px-3 py-2 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
+                      form.paid_via === "bank"
+                        ? "bg-[#0F172A] text-white border-[#0F172A] shadow-sm"
+                        : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                    }`}
+                    data-testid="expense-pay-via-bank"
+                  >
+                    <span>🏦 Bank Account</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, paid_via: "cash", bank_account_id: "" })}
+                    className={`px-3 py-2 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
+                      form.paid_via === "cash"
+                        ? "bg-amber-700 text-white border-amber-700 shadow-sm"
+                        : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                    }`}
+                    data-testid="expense-pay-via-cash"
+                  >
+                    <span>💵 Paid via Cash</span>
+                  </button>
+                </div>
+
+                {form.paid_via === "bank" ? (
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                      Bank Account (Optional)
+                    </label>
+                    <select
+                      value={form.bank_account_id || ""}
+                      onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                      data-testid="expense-form-bank-account"
+                    >
+                      <option value="">-- No Bank Account / Unassigned --</option>
+                      {bankAccounts.map((acc) => (
+                        <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                          {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-amber-900 mb-1">
+                      Cash in Hand Withdrawal Pool *
+                    </label>
+                    <select
+                      value={form.cash_ledger_id || ""}
+                      onChange={(e) => setForm({ ...form, cash_ledger_id: e.target.value })}
+                      className="w-full border-2 border-amber-400 bg-amber-50/40 px-3 py-2 text-xs font-bold text-amber-950 outline-none focus:border-amber-700"
+                      required
+                      data-testid="expense-form-cash-ledger"
+                    >
+                      <option value="">-- Select Cash Withdrawal to Draw From --</option>
+                      {cashLedgerEntries.map((cl) => {
+                        const cid = String(cl.id || cl._id);
+                        const rem = Number(cl.remaining_balance ?? cl.amount ?? 0);
+                        return (
+                          <option key={cid} value={cid}>
+                            {`Withdrawal #${cid.slice(-6)} • ${cl.date || "Date"} • ₹${inr(rem)} remaining${cl.notes ? ` (${cl.notes})` : ""}`}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <p className="text-[10px] text-amber-800 mt-1 font-medium">
+                      Payment will draw down this withdrawal's remaining cash pool.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div>

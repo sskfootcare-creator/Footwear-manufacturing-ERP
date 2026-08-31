@@ -243,22 +243,42 @@ async def list_statement_lines(
             cash_ledger_map = {}
 
     wage_payments_by_cl = {}
-    if cash_ledger_ids and hasattr(db, "wage_payments") and db.wage_payments is not None:
-        try:
-            wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": [str(c) for c in cash_ledger_ids]}})
-            if hasattr(wp_cursor, "to_list"):
-                res = wp_cursor.to_list(1000)
-                if hasattr(res, "__await__"):
-                    wp_docs = await res
-                elif isinstance(res, list):
-                    wp_docs = res
-                else:
-                    wp_docs = []
-                for wp in wp_docs:
-                    clid = str(wp.get("cash_ledger_id"))
-                    wage_payments_by_cl.setdefault(clid, []).append(wp)
-        except Exception:
-            wage_payments_by_cl = {}
+    expenses_by_cl = {}
+    if cash_ledger_ids:
+        cl_str_ids = [str(c) for c in cash_ledger_ids]
+        if hasattr(db, "wage_payments") and db.wage_payments is not None:
+            try:
+                wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": cl_str_ids}})
+                if hasattr(wp_cursor, "to_list"):
+                    res = wp_cursor.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        wp_docs = await res
+                    elif isinstance(res, list):
+                        wp_docs = res
+                    else:
+                        wp_docs = []
+                    for wp in wp_docs:
+                        clid = str(wp.get("cash_ledger_id"))
+                        wage_payments_by_cl.setdefault(clid, []).append(wp)
+            except Exception:
+                wage_payments_by_cl = {}
+
+        if hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                exp_cursor = db.expenses.find({"cash_ledger_id": {"$in": cl_str_ids}})
+                if hasattr(exp_cursor, "to_list"):
+                    res = exp_cursor.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        exp_docs = await res
+                    elif isinstance(res, list):
+                        exp_docs = res
+                    else:
+                        exp_docs = []
+                    for e in exp_docs:
+                        clid = str(e.get("cash_ledger_id"))
+                        expenses_by_cl.setdefault(clid, []).append(e)
+            except Exception:
+                expenses_by_cl = {}
 
     items = []
     for d in docs:
@@ -267,9 +287,41 @@ async def list_statement_lines(
             ref_id = str(d["matched_to"].get("ref_id"))
             cl_doc = cash_ledger_map.get(ref_id, {})
             wps = wage_payments_by_cl.get(ref_id, [])
-            allocated = round(sum(float(wp.get("amount") or 0.0) for wp in wps), 2)
+            exps = expenses_by_cl.get(ref_id, [])
+            allocated_wages = sum(float(wp.get("amount") or 0.0) for wp in wps)
+            allocated_expenses = sum(float(e.get("amount") or 0.0) for e in exps)
+            allocated = round(allocated_wages + allocated_expenses, 2)
             withdrawn = float(cl_doc.get("amount") or d.get("debit_amount") or 0.0)
             rem = float(cl_doc.get("remaining_balance") if cl_doc.get("remaining_balance") is not None else (withdrawn - allocated))
+
+            # Combine all disbursements sorted by date
+            disbursements = []
+            for wp in wps:
+                disbursements.append({
+                    "id": str(wp.get("_id") or wp.get("id")),
+                    "type": "wage_payment",
+                    "type_label": "Karigar Wage",
+                    "title": wp.get("worker_name") or f"Worker #{str(wp.get('worker_id'))[-6:]}",
+                    "amount": float(wp.get("amount") or 0.0),
+                    "date": wp.get("date"),
+                    "period_from": wp.get("period_from"),
+                    "period_to": wp.get("period_to"),
+                    "notes": wp.get("notes") or "",
+                    "override_reason": wp.get("override_reason"),
+                })
+            for e in exps:
+                disbursements.append({
+                    "id": str(e.get("_id") or e.get("id")),
+                    "type": "expense",
+                    "type_label": "Cash Expense",
+                    "title": e.get("payee") or "Payee",
+                    "category": e.get("category") or "Expense",
+                    "amount": float(e.get("amount") or 0.0),
+                    "date": e.get("date"),
+                    "notes": e.get("notes") or "",
+                })
+            disbursements.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+
             sd["cash_ledger_info"] = {
                 "cash_ledger_id": ref_id,
                 "withdrawal_amount": withdrawn,
@@ -277,6 +329,9 @@ async def list_statement_lines(
                 "allocated_amount": allocated,
                 "wage_payment_count": len(wps),
                 "wage_payments": [stringify(wp) for wp in wps],
+                "expense_count": len(exps),
+                "expenses": [stringify(e) for e in exps],
+                "disbursements": disbursements,
             }
         items.append(sd)
 
@@ -1161,37 +1216,91 @@ async def list_cash_ledger(
     total_withdrawn = sum(float(d.get("amount") or 0.0) for d in docs)
     total_remaining_balance = sum(float(d.get("remaining_balance") or 0.0) for d in docs)
 
-    # Populate linked wage payments per cash_ledger entry
+    # Populate linked wage payments and cash expenses per cash_ledger entry
     cash_ids = [str(d["_id"]) for d in docs]
     wage_payments_by_cl = {}
-    if cash_ids and hasattr(db, "wage_payments") and db.wage_payments is not None:
-        try:
-            wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": cash_ids}})
-            if hasattr(wp_cursor, "to_list"):
-                res = wp_cursor.to_list(1000)
-                if hasattr(res, "__await__"):
-                    wp_docs = await res
-                elif isinstance(res, list):
-                    wp_docs = res
-                else:
-                    wp_docs = []
-                for wp in wp_docs:
-                    clid = str(wp.get("cash_ledger_id"))
-                    wage_payments_by_cl.setdefault(clid, []).append(wp)
-        except Exception:
-            wage_payments_by_cl = {}
+    expenses_by_cl = {}
+    if cash_ids:
+        if hasattr(db, "wage_payments") and db.wage_payments is not None:
+            try:
+                wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": cash_ids}})
+                if hasattr(wp_cursor, "to_list"):
+                    res = wp_cursor.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        wp_docs = await res
+                    elif isinstance(res, list):
+                        wp_docs = res
+                    else:
+                        wp_docs = []
+                    for wp in wp_docs:
+                        clid = str(wp.get("cash_ledger_id"))
+                        wage_payments_by_cl.setdefault(clid, []).append(wp)
+            except Exception:
+                wage_payments_by_cl = {}
+
+        if hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                exp_cursor = db.expenses.find({"cash_ledger_id": {"$in": cash_ids}})
+                if hasattr(exp_cursor, "to_list"):
+                    res = exp_cursor.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        exp_docs = await res
+                    elif isinstance(res, list):
+                        exp_docs = res
+                    else:
+                        exp_docs = []
+                    for e in exp_docs:
+                        clid = str(e.get("cash_ledger_id"))
+                        expenses_by_cl.setdefault(clid, []).append(e)
+            except Exception:
+                expenses_by_cl = {}
 
     items = []
     for d in docs:
         sd = stringify(d)
-        wps = wage_payments_by_cl.get(str(d["_id"]), [])
-        allocated = round(sum(float(wp.get("amount") or 0.0) for wp in wps), 2)
+        cid = str(d["_id"])
+        wps = wage_payments_by_cl.get(cid, [])
+        exps = expenses_by_cl.get(cid, [])
+        allocated_wages = sum(float(wp.get("amount") or 0.0) for wp in wps)
+        allocated_expenses = sum(float(e.get("amount") or 0.0) for e in exps)
+        allocated = round(allocated_wages + allocated_expenses, 2)
         withdrawn = float(d.get("amount") or 0.0)
         rem = float(d.get("remaining_balance") if d.get("remaining_balance") is not None else (withdrawn - allocated))
+
+        disbursements = []
+        for wp in wps:
+            disbursements.append({
+                "id": str(wp.get("_id") or wp.get("id")),
+                "type": "wage_payment",
+                "type_label": "Karigar Wage",
+                "title": wp.get("worker_name") or f"Worker #{str(wp.get('worker_id'))[-6:]}",
+                "amount": float(wp.get("amount") or 0.0),
+                "date": wp.get("date"),
+                "period_from": wp.get("period_from"),
+                "period_to": wp.get("period_to"),
+                "notes": wp.get("notes") or "",
+                "override_reason": wp.get("override_reason"),
+            })
+        for e in exps:
+            disbursements.append({
+                "id": str(e.get("_id") or e.get("id")),
+                "type": "expense",
+                "type_label": "Cash Expense",
+                "title": e.get("payee") or "Payee",
+                "category": e.get("category") or "Expense",
+                "amount": float(e.get("amount") or 0.0),
+                "date": e.get("date"),
+                "notes": e.get("notes") or "",
+            })
+        disbursements.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+
         sd["allocated_amount"] = allocated
         sd["remaining_balance"] = round(rem, 2)
         sd["wage_payment_count"] = len(wps)
         sd["wage_payments"] = [stringify(wp) for wp in wps]
+        sd["expense_count"] = len(exps)
+        sd["expenses"] = [stringify(e) for e in exps]
+        sd["disbursements"] = disbursements
         items.append(sd)
 
     return {
@@ -1206,7 +1315,7 @@ async def list_cash_ledger(
 @banking_router.get("/banking/cash-ledger/{cash_ledger_id}")
 @banking_router.get("/bank-accounts/cash-ledger/{cash_ledger_id}")
 async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
-    """Get cash ledger entry details with all linked wage payments funded by this withdrawal."""
+    """Get cash ledger entry details with all linked wage payments and cash expenses funded by this withdrawal."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales", "production")(u)
     db = _get_db(request)
@@ -1228,10 +1337,54 @@ async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
         except Exception:
             wage_payments = []
 
+    expenses = []
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            exp_cursor = db.expenses.find({"cash_ledger_id": str(cash_ledger_id)})
+            if hasattr(exp_cursor, "to_list"):
+                res = exp_cursor.to_list(500)
+                if hasattr(res, "__await__"):
+                    expenses = await res
+                elif isinstance(res, list):
+                    expenses = res
+        except Exception:
+            expenses = []
+
     wage_payments_list = [stringify(wp) for wp in wage_payments]
-    allocated_amount = round(sum(float(wp.get("amount") or 0.0) for wp in wage_payments), 2)
+    expenses_list = [stringify(e) for e in expenses]
+
+    allocated_wages = sum(float(wp.get("amount") or 0.0) for wp in wage_payments)
+    allocated_expenses = sum(float(e.get("amount") or 0.0) for e in expenses)
+    allocated_amount = round(allocated_wages + allocated_expenses, 2)
     withdrawal_amount = float(doc.get("amount") or 0.0)
     remaining_balance = float(doc.get("remaining_balance") if doc.get("remaining_balance") is not None else (withdrawal_amount - allocated_amount))
+
+    disbursements = []
+    for wp in wage_payments:
+        disbursements.append({
+            "id": str(wp.get("_id") or wp.get("id")),
+            "type": "wage_payment",
+            "type_label": "Karigar Wage",
+            "title": wp.get("worker_name") or f"Worker #{str(wp.get('worker_id'))[-6:]}",
+            "amount": float(wp.get("amount") or 0.0),
+            "date": wp.get("date"),
+            "period_from": wp.get("period_from"),
+            "period_to": wp.get("period_to"),
+            "notes": wp.get("notes") or "",
+            "override_reason": wp.get("override_reason"),
+        })
+    for e in expenses:
+        disbursements.append({
+            "id": str(e.get("_id") or e.get("id")),
+            "type": "expense",
+            "type_label": "Cash Expense",
+            "title": e.get("payee") or "Payee",
+            "category": e.get("category") or "Expense",
+            "amount": float(e.get("amount") or 0.0),
+            "date": e.get("date"),
+            "notes": e.get("notes") or "",
+        })
+    disbursements.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
 
     return {
         "ok": True,
@@ -1241,6 +1394,10 @@ async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
         "remaining_balance": round(remaining_balance, 2),
         "wage_payments": wage_payments_list,
         "wage_payment_count": len(wage_payments_list),
+        "expenses": expenses_list,
+        "expense_count": len(expenses_list),
+        "disbursements": disbursements,
+        "disbursement_count": len(disbursements),
     }
 
 
