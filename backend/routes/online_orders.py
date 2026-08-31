@@ -430,6 +430,17 @@ def strip_known_prefixes(leaf_sku: str, prefixes: List[str]) -> str:
     return s
 
 
+COMMON_COLUMN_ALIAS_GROUPS = [
+    {"withdrawl", "withdrawal", "withdrawals", "withdrawalamt", "withdrawalamount", "debit", "debitamount", "dramount", "dr"},
+    {"deposit", "deposits", "depositamt", "depositamount", "credit", "creditamount", "cramount", "cr"},
+    {"trandate", "transactiondate", "txndate", "date", "txdate", "postingdate"},
+    {"valuedate"},
+    {"narration", "description", "particulars", "remarks", "transactionremarks", "transactionparticulars"},
+    {"balance", "closingbalance", "runningbalance", "netbalance"},
+    {"chqno", "chqrefno", "chequeno", "refno", "referenceno", "reference", "utr", "utrno", "chqrefno", "chequereferenceno"},
+]
+
+
 def _resolve_column(target: str, actual_headers: List[str]) -> Optional[str]:
     if not target or not actual_headers:
         return None
@@ -444,7 +455,132 @@ def _resolve_column(target: str, actual_headers: List[str]) -> Optional[str]:
     for h in actual_headers:
         if _norm_token(h) == t_norm:
             return h
+
+    # Check alias groups (e.g. withdrawal <-> withdrawl)
+    for group in COMMON_COLUMN_ALIAS_GROUPS:
+        if t_norm in group:
+            for h in actual_headers:
+                if _norm_token(h) in group:
+                    return h
     return None
+
+
+def _detect_tabular_file_format(content: bytes, filename: str = "") -> str:
+    """
+    Detect whether file is legacy Excel (.xls / OLE2), modern Excel (.xlsx / OOXML zip), or CSV.
+    Uses magic bytes inspection first, falling back to file extension or content decoding.
+    Raises HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv") if unsupported.
+    """
+    if not content:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    fname_lc = (filename or "").strip().lower()
+
+    # 1. Magic bytes check (highest priority)
+    # Legacy OLE2 compound document signature for .xls: D0 CF 11 E0
+    if content.startswith(b"\xd0\xcf\x11\xe0"):
+        return "xls"
+
+    # OOXML / Zip archive signature for .xlsx: PK\x03\x04, PK\x05\x06, PK\x07\x08
+    if content.startswith(b"PK\x03\x04") or content.startswith(b"PK\x05\x06") or content.startswith(b"PK\x07\x08"):
+        return "xlsx"
+
+    # 2. Filename extension checks
+    if fname_lc.endswith(".xls"):
+        return "xls"
+    if fname_lc.endswith(".xlsx") or fname_lc.endswith(".xlsm") or fname_lc.endswith(".xltx"):
+        return "xlsx"
+    if fname_lc.endswith(".csv") or fname_lc.endswith(".tsv") or fname_lc.endswith(".txt"):
+        try:
+            content.decode("utf-8-sig")
+            return "csv"
+        except UnicodeDecodeError:
+            try:
+                content.decode("latin-1")
+                return "csv"
+            except Exception:
+                raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
+
+    # 3. Plain text / CSV sniffing (no null bytes in initial chunk)
+    if b"\x00" not in content[:1024]:
+        try:
+            content.decode("utf-8-sig")
+            return "csv"
+        except UnicodeDecodeError:
+            try:
+                content.decode("latin-1")
+                return "csv"
+            except Exception:
+                pass
+
+    raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
+
+
+def _parse_xlrd_workbook(content: bytes, sheet_locator: SheetLocator) -> List[List[str]]:
+    try:
+        import xlrd
+    except ImportError:
+        raise HTTPException(500, "xlrd is required to parse legacy .xls Excel files")
+    try:
+        wb = xlrd.open_workbook(file_contents=content, formatting_info=True)
+    except Exception:
+        try:
+            wb = xlrd.open_workbook(file_contents=content)
+        except Exception as e:
+            raise HTTPException(400, f"Failed to parse .xls file: {str(e)}")
+
+    sheet = None
+    if sheet_locator.type == "first_sheet":
+        sheet = wb.sheet_by_index(0)
+    elif sheet_locator.type == "fixed_name":
+        if sheet_locator.name not in wb.sheet_names():
+            raise HTTPException(400, f"Sheet '{sheet_locator.name}' not found in workbook")
+        sheet = wb.sheet_by_name(sheet_locator.name)
+    elif sheet_locator.type == "name_contains":
+        sub = (sheet_locator.substring or "").lower()
+        for sname in wb.sheet_names():
+            if sub in sname.lower():
+                sheet = wb.sheet_by_name(sname)
+                break
+        if not sheet:
+            sheet = wb.sheet_by_index(0)
+    else:
+        sheet = wb.sheet_by_index(0)
+
+    rows_raw = []
+    for r in range(sheet.nrows):
+        row = []
+        for c in range(sheet.ncols):
+            ctype = sheet.cell_type(r, c)
+            val = sheet.cell_value(r, c)
+            if ctype == xlrd.XL_CELL_DATE:
+                try:
+                    dt = xlrd.xldate_as_datetime(val, wb.datemode)
+                    row.append(dt.strftime("%Y-%m-%d %H:%M:%S") if (dt.hour or dt.minute or dt.second) else dt.strftime("%Y-%m-%d"))
+                except Exception:
+                    row.append(str(val))
+            elif ctype == xlrd.XL_CELL_NUMBER:
+                if isinstance(val, float) and val.is_integer():
+                    row.append(str(int(val)))
+                else:
+                    row.append(str(val))
+            elif ctype == xlrd.XL_CELL_BOOLEAN:
+                row.append("TRUE" if val else "FALSE")
+            elif ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK, xlrd.XL_CELL_ERROR):
+                row.append("")
+            else:
+                row.append(str(val) if val is not None else "")
+        rows_raw.append(row)
+
+    for (rlo, rhi, clo, chi) in getattr(sheet, "merged_cells", []):
+        top_left_val = rows_raw[rlo][clo] if rlo < len(rows_raw) and clo < len(rows_raw[rlo]) else ""
+        if top_left_val:
+            for r in range(rlo, min(rhi, len(rows_raw))):
+                for c in range(clo, min(chi, len(rows_raw[r]))):
+                    if not rows_raw[r][c]:
+                        rows_raw[r][c] = top_left_val
+
+    return rows_raw
 
 
 def _parse_tabular_bytes(
@@ -454,43 +590,61 @@ def _parse_tabular_bytes(
     header_locator: HeaderLocator,
     skip_rows_after_header: int = 0,
 ) -> Tuple[List[str], List[Dict[str, str]]]:
-    fname_lc = (filename or "").lower()
-    is_excel = fname_lc.endswith(".xlsx") or fname_lc.endswith(".xls")
+    fmt = _detect_tabular_file_format(content, filename)
 
-    if is_excel:
+    if fmt == "xls":
+        rows_raw = _parse_xlrd_workbook(content, sheet_locator)
+
+    elif fmt == "xlsx":
         try:
             import openpyxl
         except ImportError:
             raise HTTPException(500, "openpyxl is required to parse Excel files")
-        wb = openpyxl.load_workbook(BytesIO(content), data_only=True, read_only=True)
-        sheet = None
-        if sheet_locator.type == "first_sheet":
-            sheet = wb.worksheets[0]
-        elif sheet_locator.type == "fixed_name":
-            if sheet_locator.name not in wb.sheetnames:
-                raise HTTPException(400, f"Sheet '{sheet_locator.name}' not found in workbook")
-            sheet = wb[sheet_locator.name]
-        elif sheet_locator.type == "name_contains":
-            sub = (sheet_locator.substring or "").lower()
-            for sname in wb.sheetnames:
-                if sub in sname.lower():
-                    sheet = wb[sname]
-                    break
-            if not sheet:
+        try:
+            wb = openpyxl.load_workbook(BytesIO(content), data_only=True, read_only=True)
+            sheet = None
+            if sheet_locator.type == "first_sheet":
                 sheet = wb.worksheets[0]
-        else:
-            sheet = wb.worksheets[0]
+            elif sheet_locator.type == "fixed_name":
+                if sheet_locator.name not in wb.sheetnames:
+                    raise HTTPException(400, f"Sheet '{sheet_locator.name}' not found in workbook")
+                sheet = wb[sheet_locator.name]
+            elif sheet_locator.type == "name_contains":
+                sub = (sheet_locator.substring or "").lower()
+                for sname in wb.sheetnames:
+                    if sub in sname.lower():
+                        sheet = wb[sname]
+                        break
+                if not sheet:
+                    sheet = wb.worksheets[0]
+            else:
+                sheet = wb.worksheets[0]
 
-        rows_raw = []
-        for r in sheet.iter_rows(values_only=True):
-            rows_raw.append([str(c) if c is not None else "" for c in r])
-    else:
+            rows_raw = []
+            for r in sheet.iter_rows(values_only=True):
+                rows_raw.append([str(c) if c is not None else "" for c in r])
+        except Exception as e:
+            # If openpyxl fails because file was actually legacy .xls (OLE2 format)
+            if "xlrd" in str(e).lower() or content.startswith(b"\xd0\xcf\x11\xe0"):
+                try:
+                    rows_raw = _parse_xlrd_workbook(content, sheet_locator)
+                except Exception:
+                    raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
+            else:
+                raise HTTPException(400, f"Failed to parse Excel file: {str(e)}")
+
+    elif fmt == "csv":
         try:
             text = content.decode("utf-8-sig")
         except UnicodeDecodeError:
-            text = content.decode("latin-1")
+            try:
+                text = content.decode("latin-1")
+            except Exception:
+                raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
         reader = csv.reader(io.StringIO(text))
         rows_raw = list(reader)
+    else:
+        raise HTTPException(400, "Unsupported file format — please upload .xls, .xlsx, or .csv")
 
     if not rows_raw:
         return [], []
@@ -499,17 +653,37 @@ def _parse_tabular_bytes(
     if header_locator.type == "fixed_row":
         header_row_idx = max(0, header_locator.row or 0)
     elif header_locator.type == "scan_for_columns":
-        must_contain = [_norm_token(kw) for kw in (header_locator.must_contain_any or []) if kw]
-        found = False
-        if must_contain:
-            for idx, r in enumerate(rows_raw):
-                row_tokens = [_norm_token(c) for c in r]
-                if any(any(kw in cell for cell in row_tokens) for kw in must_contain):
-                    header_row_idx = idx
-                    found = True
-                    break
-        if not found:
-            header_row_idx = 0
+        raw_kws = header_locator.must_contain_any or []
+        if not raw_kws:
+            raw_kws = [
+                "Tran. Date", "Transaction Date", "Txn Date", "Value Date", "Date",
+                "Withdrawl", "Withdrawal", "Withdrawals", "Withdrawal Amt.", "Debit", "Debit Amount", "Dr Amount",
+                "Deposit", "Deposits", "Deposit Amt.", "Credit", "Credit Amount", "Cr Amount",
+                "Balance", "Closing Balance", "Running Balance",
+                "Narration", "Description", "Particulars", "Remarks",
+                "Chq. No.", "Chq./Ref.No.", "Cheque No", "Ref No", "Reference No"
+            ]
+        must_contain = [_norm_token(kw) for kw in raw_kws if kw]
+        best_idx = 0
+        best_score = 0
+        for idx, r in enumerate(rows_raw):
+            row_tokens = [_norm_token(c) for c in r if c and str(c).strip()]
+            if not row_tokens:
+                continue
+            matched_kws = set()
+            for kw in must_contain:
+                for cell in row_tokens:
+                    if kw == cell or (len(kw) >= 4 and kw in cell):
+                        matched_kws.add(kw)
+                        break
+            score = len(matched_kws)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_score > 0:
+            header_row_idx = best_idx
+        else:
             header_row_idx = 0
 
     if header_row_idx >= len(rows_raw):

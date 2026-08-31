@@ -47,6 +47,9 @@ class BankAccountIn(BaseModel):
     name: str = Field(..., description="Account name e.g. HDFC - Online, UCO Bank - Offline")
     bank_name: str = Field(..., description="Bank name e.g. HDFC, UCO Bank")
     account_number_last4: str = Field(..., min_length=2, max_length=10, description="Last 4 digits of account number")
+    account_number: Optional[str] = Field(None, description="Full bank account number")
+    ifsc: Optional[str] = Field(None, description="Bank branch IFSC code e.g. UCBA0001860")
+    branch: Optional[str] = Field(None, description="Bank branch name")
     account_type: Literal["online_channel", "b2b_client"] = Field("b2b_client", description="online_channel | b2b_client")
     opening_balance: float = Field(0.0, description="Opening balance in INR")
     opening_balance_date: Optional[str] = Field(None, description="Opening balance date (YYYY-MM-DD)")
@@ -58,6 +61,9 @@ class BankAccountUpdate(BaseModel):
     name: Optional[str] = None
     bank_name: Optional[str] = None
     account_number_last4: Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc: Optional[str] = None
+    branch: Optional[str] = None
     account_type: Optional[Literal["online_channel", "b2b_client"]] = None
     opening_balance: Optional[float] = None
     opening_balance_date: Optional[str] = None

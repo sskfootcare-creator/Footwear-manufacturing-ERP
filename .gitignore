@@ -566,3 +566,4 @@ mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/msvcp140.dll
 mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/vcruntime140_1.dll
 mongodb-portable/mongod.log
 
+backend/tests/fixtures/uco_statement_real.xls

@@ -1068,6 +1068,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
+  const [confirmAccountUpdate, setConfirmAccountUpdate] = useState(true);
   const [error, setError] = useState("");
 
   const handlePreviewOrImport = async (dryRun = true) => {
@@ -1076,7 +1077,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
       return;
     }
     if (!file) {
-      setError("Please choose a statement file (.csv or .xlsx).");
+      setError("Please choose a statement file (.xls, .xlsx, or .csv).");
       return;
     }
     setLoading(true);
@@ -1084,7 +1085,8 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const { data } = await http.post(`/banking/accounts/${accId}/statement/import?dry_run=${dryRun}`, formData, {
+      const url = `/banking/accounts/${accId}/statement/import?dry_run=${dryRun}&confirm_account_update=${confirmAccountUpdate}`;
+      const { data } = await http.post(url, formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       if (dryRun) {
@@ -1141,10 +1143,10 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
 
           {/* File Upload Box */}
           <div className="space-y-1">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Statement File (.CSV or .XLSX)</div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Statement File (.XLS, .XLSX, or .CSV)</div>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
+              accept=".xls,.xlsx,.csv"
               onChange={(e) => {
                 setFile(e.target.files[0] || null);
                 setPreview(null);
@@ -1155,14 +1157,38 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
 
           {/* Preview Details */}
           {preview && (
-            <div className="p-3.5 bg-slate-50 border-2 border-slate-200 space-y-2">
+            <div className="p-3.5 bg-slate-50 border-2 border-slate-200 space-y-2.5">
               <div className="flex items-center justify-between text-xs font-bold text-emerald-800">
                 <span>✓ Layout Verified: {preview.parsed_count} transactions parsed</span>
-                <span className="font-mono">Rows: {preview.total_file_rows}</span>
+                <span className="font-mono">Total rows in file: {preview.total_file_rows}</span>
               </div>
+
+              {preview.suggested_account_update && (
+                <div className="p-2.5 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 space-y-1.5">
+                  <div className="font-bold flex items-center gap-1.5">
+                    <span>💡 Bank Details Detected in Header</span>
+                  </div>
+                  <div className="text-[11px] font-mono grid grid-cols-2 gap-1 text-slate-700">
+                    {preview.suggested_account_update.ifsc && <div>IFSC: <strong>{preview.suggested_account_update.ifsc}</strong></div>}
+                    {preview.suggested_account_update.account_number && <div>A/C: <strong>{preview.suggested_account_update.account_number}</strong></div>}
+                    {preview.suggested_account_update.branch && <div className="col-span-2">Branch: <strong>{preview.suggested_account_update.branch}</strong></div>}
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer pt-1 font-semibold text-[11px]">
+                    <input
+                      type="checkbox"
+                      checked={confirmAccountUpdate}
+                      onChange={(e) => setConfirmAccountUpdate(e.target.checked)}
+                      className="rounded text-[#1E3A8A] focus:ring-[#1E3A8A]"
+                    />
+                    <span>Save detected IFSC & Account details to this Bank Account</span>
+                  </label>
+                </div>
+              )}
+
               <div className="text-[11px] text-slate-600 space-y-1 border-t border-slate-200 pt-2">
-                {preview.sample?.slice(0, 2).map((s, idx) => (
-                  <div key={idx} className="flex justify-between border-b border-slate-100 pb-1">
+                <div className="font-bold text-slate-700 text-[10px] uppercase tracking-wider mb-1">Sample Parsed Rows:</div>
+                {preview.sample?.slice(0, 3).map((s, idx) => (
+                  <div key={idx} className="flex justify-between items-center border-b border-slate-100 pb-1">
                     <span className="truncate max-w-[240px] font-medium">{s.narration} ({s.date})</span>
                     <span className="font-mono font-bold text-slate-900">
                       {s.credit_amount > 0 ? `+${inr(s.credit_amount)}` : `-${inr(s.debit_amount)}`}
@@ -1179,7 +1205,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
           <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
           <div className="flex gap-2">
             {!preview ? (
-              <BtnPrimary onClick={() => handlePreviewOrImport(true)} disabled={loading || !file}>
+              <BtnPrimary onClick={() => handlePreviewOrImport(true)} disabled={loading || !file} testId="preview-layout-btn">
                 {loading ? "Parsing..." : "Preview Layout"}
               </BtnPrimary>
             ) : (
@@ -1187,6 +1213,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
                 onClick={() => handlePreviewOrImport(false)}
                 disabled={loading}
                 className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-5 py-2.5 border-2 border-emerald-600 shadow-ind transition-colors"
+                data-testid="confirm-import-btn"
               >
                 {loading ? "Importing..." : "Confirm & Import Rows"}
               </button>

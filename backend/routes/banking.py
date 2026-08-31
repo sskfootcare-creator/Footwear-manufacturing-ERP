@@ -94,13 +94,21 @@ async def create_bank_account(payload: BankAccountIn, request: Request):
     require_roles("admin", "manager")(u)
     db = _get_db(request)
 
+    last4 = payload.account_number_last4.strip() if payload.account_number_last4 else ""
+    if not last4 and payload.account_number:
+        last4 = payload.account_number.strip()[-4:]
+
     doc = {
         "name": payload.name.strip(),
         "bank_name": payload.bank_name.strip(),
-        "account_number_last4": payload.account_number_last4.strip(),
+        "account_number_last4": last4,
+        "account_number": (payload.account_number or "").strip() or None,
+        "ifsc": (payload.ifsc or "").strip().upper() or None,
+        "branch": (payload.branch or "").strip() or None,
         "account_type": payload.account_type,
         "opening_balance": float(payload.opening_balance),
         "opening_balance_date": payload.opening_balance_date,
+        "statement_format": payload.statement_format.dict() if payload.statement_format else None,
         "active": payload.active,
         "created_at": _now_iso(),
         "created_by": u.get("email") or u.get("name", ""),
@@ -249,7 +257,87 @@ from models.banking import (
     StatementImportConfigUpdate,
     STATEMENT_CANONICAL_FIELDS,
 )
-from routes.online_orders import _parse_tabular_bytes, _resolve_column
+from routes.online_orders import _parse_tabular_bytes, _resolve_column, _detect_tabular_file_format, _parse_xlrd_workbook
+
+
+def _extract_statement_metadata(content: bytes, filename: str) -> Dict[str, str]:
+    """
+    Extract account metadata (account_number, ifsc, branch) from statement header rows.
+    """
+    fmt = _detect_tabular_file_format(content, filename)
+    rows_raw = []
+    if fmt == "xls":
+        rows_raw = _parse_xlrd_workbook(content, SheetLocator(type="first_sheet"))
+    elif fmt == "xlsx":
+        try:
+            import openpyxl
+            from io import BytesIO
+            wb = openpyxl.load_workbook(BytesIO(content), data_only=True, read_only=True)
+            sheet = wb.worksheets[0]
+            for r in sheet.iter_rows(values_only=True):
+                rows_raw.append([str(c) if c is not None else "" for c in r])
+        except Exception:
+            pass
+    elif fmt == "csv":
+        try:
+            import csv, io
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                import csv, io
+                text = content.decode("latin-1")
+            except Exception:
+                text = ""
+        if text:
+            reader = csv.reader(io.StringIO(text))
+            rows_raw = list(reader)
+
+    meta: Dict[str, str] = {}
+    for r in rows_raw:
+        row_cells = []
+        for c in r:
+            s = str(c).strip()
+            if s and (not row_cells or s != row_cells[-1]):
+                row_cells.append(s)
+
+        for i, cell in enumerate(row_cells):
+            cell_lc = cell.lower()
+            if not meta.get("account_number"):
+                if re.search(r"^(?:account\s*no\.?|acct\s*no\.?|a/c\s*no\.?|number\s*:?)$", cell_lc) and i + 1 < len(row_cells):
+                    next_val = re.sub(r"[^\d]", "", row_cells[i + 1])
+                    if 9 <= len(next_val) <= 20:
+                        meta["account_number"] = next_val
+                else:
+                    m_acc = re.search(r"(?:account\s*no\.?|acct\s*no\.?|a/c\s*no\.?|number\s*:)\s*(\d{9,20})", cell, re.IGNORECASE)
+                    if m_acc:
+                        meta["account_number"] = m_acc.group(1)
+
+            if not meta.get("ifsc"):
+                if re.search(r"^ifsc\s*(?:code)?\s*:?$", cell_lc) and i + 1 < len(row_cells):
+                    next_val = row_cells[i + 1].strip().upper()
+                    if re.match(r"^[A-Z]{4}0[A-Z0-9]{6}$", next_val):
+                        meta["ifsc"] = next_val
+                else:
+                    m_ifsc = re.search(r"\b([A-Z]{4}0[A-Z0-9]{6})\b", cell)
+                    if m_ifsc:
+                        meta["ifsc"] = m_ifsc.group(1).upper()
+
+            if not meta.get("branch"):
+                if re.search(r"^branch\s*:?$", cell_lc) and i + 1 < len(row_cells):
+                    next_val = row_cells[i + 1].strip()
+                    if next_val and next_val.lower() != "branch":
+                        meta["branch"] = next_val
+                else:
+                    m_br = re.search(r"branch\s*:\s*([A-Za-z0-9\s]+?)(?:\s{2,}|$)", cell, re.IGNORECASE)
+                    if m_br:
+                        val = m_br.group(1).strip()
+                        if val:
+                            meta["branch"] = val
+
+    if meta.get("account_number") and not meta.get("account_number_last4"):
+        meta["account_number_last4"] = meta["account_number"][-4:]
+
+    return meta
 
 
 def _parse_date_to_iso(date_str: str, custom_format: Optional[str] = None) -> str:
@@ -304,6 +392,53 @@ def _parse_amount(val: Any) -> float:
         return 0.0
 
 
+DEFAULT_BANK_FORMAT_TEMPLATES = {
+    "uco": {
+        "sheet_locator": {"type": "first_sheet"},
+        "header_locator": {
+            "type": "scan_for_columns",
+            "must_contain_any": [
+                "Tran. Date", "Transaction Date", "Value Date",
+                "Withdrawl", "Withdrawal", "Deposit", "Balance",
+                "Narration", "Description"
+            ]
+        },
+        "skip_rows_after_header": 0,
+        "column_map": {
+            "date": "Tran. Date",
+            "narration": "Narration",
+            "reference": "Chq. No.",
+            "debit_amount": "Withdrawl",
+            "credit_amount": "Deposit",
+            "balance": "Balance",
+        },
+        "date_format": "%d/%m/%Y",
+        "notes": "Standard UCO Bank Corporate / Retail Netbanking XLS/CSV template (date from Tran. Date)"
+    },
+    "hdfc": {
+        "sheet_locator": {"type": "first_sheet"},
+        "header_locator": {
+            "type": "scan_for_columns",
+            "must_contain_any": [
+                "Date", "Narration", "Chq./Ref.No.",
+                "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"
+            ]
+        },
+        "skip_rows_after_header": 0,
+        "column_map": {
+            "date": "Date",
+            "narration": "Narration",
+            "reference": "Chq./Ref.No.",
+            "debit_amount": "Withdrawal Amt.",
+            "credit_amount": "Deposit Amt.",
+            "balance": "Closing Balance",
+        },
+        "date_format": "%d/%m/%Y",
+        "notes": "Standard HDFC Bank Statement template"
+    }
+}
+
+
 @banking_router.get("/banking/accounts/{id}/statement-format")
 @banking_router.get("/bank-accounts/{id}/statement-format")
 async def get_statement_format(id: str, request: Request):
@@ -320,6 +455,7 @@ async def get_statement_format(id: str, request: Request):
         "bank_name": doc.get("bank_name"),
         "canonical_fields": STATEMENT_CANONICAL_FIELDS,
         "statement_format": doc.get("statement_format"),
+        "default_templates": DEFAULT_BANK_FORMAT_TEMPLATES,
     }
 
 
@@ -349,6 +485,7 @@ async def _handle_statement_import(
     id: str,
     file: UploadFile,
     dry_run: bool,
+    confirm_account_update: bool,
     request: Request,
 ) -> dict:
     u = await _get_user(request)
@@ -426,8 +563,30 @@ async def _handle_statement_import(
     if not statement_lines:
         raise HTTPException(400, "No valid statement transaction rows extracted from the file")
 
+    # Extract metadata from statement header for auto-populate suggestion (requires explicit user confirmation)
+    extracted_meta = _extract_statement_metadata(content, file.filename)
+    suggested_update: Dict[str, str] = {}
+    if extracted_meta.get("account_number") and not acc.get("account_number"):
+        suggested_update["account_number"] = extracted_meta["account_number"]
+    if extracted_meta.get("ifsc") and not acc.get("ifsc"):
+        suggested_update["ifsc"] = extracted_meta["ifsc"]
+    if extracted_meta.get("branch") and not acc.get("branch"):
+        suggested_update["branch"] = extracted_meta["branch"]
+    if extracted_meta.get("account_number_last4") and not acc.get("account_number_last4"):
+        suggested_update["account_number_last4"] = extracted_meta["account_number_last4"]
+
+    applied_account_update = None
+    is_confirmed = isinstance(confirm_account_update, bool) and confirm_account_update
+    if is_confirmed and suggested_update and not dry_run:
+        upd = dict(suggested_update)
+        upd["updated_at"] = _now_iso()
+        upd["updated_by"] = user_email
+        await db.bank_accounts.update_one({"_id": _oid(id)}, {"$set": upd})
+        applied_account_update = suggested_update
+        suggested_update = {}
+
     if dry_run:
-        return {
+        res_dict = {
             "ok": True,
             "dry_run": True,
             "bank_account_id": id,
@@ -436,9 +595,18 @@ async def _handle_statement_import(
             "parsed_count": len(statement_lines),
             "sample": statement_lines[:5],
         }
+        if suggested_update:
+            res_dict["suggested_account_update"] = suggested_update
+            res_dict["requires_account_confirmation"] = True
+            res_dict["account_update_prompt"] = (
+                "Statement header contains bank details: "
+                + ", ".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in suggested_update.items())
+                + ". Confirm update to save these to the bank account."
+            )
+        return res_dict
 
     res = await db.bank_statement_lines.insert_many(statement_lines)
-    return {
+    res_dict = {
         "ok": True,
         "dry_run": False,
         "bank_account_id": id,
@@ -447,6 +615,17 @@ async def _handle_statement_import(
         "inserted_count": len(res.inserted_ids),
         "sample": [stringify(s) for s in statement_lines[:5]],
     }
+    if suggested_update:
+        res_dict["suggested_account_update"] = suggested_update
+        res_dict["requires_account_confirmation"] = True
+        res_dict["account_update_prompt"] = (
+            "Statement header contains bank details: "
+            + ", ".join(f"{k.replace('_', ' ').title()}: {v}" for k, v in suggested_update.items())
+            + ". Confirm update to save these to the bank account."
+        )
+    if applied_account_update:
+        res_dict["applied_account_update"] = applied_account_update
+    return res_dict
 
 
 @banking_router.post("/bank-accounts/{id}/statement/import")
@@ -456,9 +635,10 @@ async def import_bank_statement(
     request: Request,
     file: UploadFile = File(...),
     dry_run: bool = Query(False),
+    confirm_account_update: bool = Query(False),
 ):
-    """Import statement file (CSV/XLSX) using the bank account's saved column-map configuration."""
-    return await _handle_statement_import(id, file, dry_run, request)
+    """Import statement file (CSV/XLS/XLSX) using the bank account's saved column-map configuration."""
+    return await _handle_statement_import(id, file, dry_run, confirm_account_update, request)
 
 
 @banking_router.patch("/banking/statement-lines/{id}/match")

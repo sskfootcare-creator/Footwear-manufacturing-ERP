@@ -474,6 +474,402 @@ async def test_hdfc_statement_import_xlsx(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_uco_statement_import_real_xls(monkeypatch):
+    """Test importing the real legacy UCO Bank .xls file via xlrd reader."""
+    import os
+    from pathlib import Path
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    fixture_path = fixtures_dir / "uco_statement_real.xls"
+    downloads_path = Path(r"C:\Users\Dell\Downloads\OpTransactionHistoryUX531-08-2026 11_06_17 .xls")
+
+    if fixture_path.exists():
+        with open(fixture_path, "rb") as f:
+            uco_xls_content = f.read()
+    elif downloads_path.exists():
+        with open(downloads_path, "rb") as f:
+            uco_xls_content = f.read()
+    else:
+        pytest.skip("Real UCO Bank .xls file not found")
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    uco_acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "UCO Bank - Offline",
+        "bank_name": "UCO Bank",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "scan_for_columns", "must_contain_any": ["Tran. Date", "Narration"]},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Tran. Date",
+                "narration": "Narration",
+                "reference": "Chq. No.",
+                "debit_amount": "Withdrawl",
+                "credit_amount": "Deposit",
+                "balance": "Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=uco_acc_doc)
+
+    inserted_docs = []
+    async def mock_insert_many(docs):
+        inserted_docs.extend(docs)
+        return MagicMock(inserted_ids=[ObjectId() for _ in docs])
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=mock_insert_many)
+
+    from fastapi import UploadFile
+    from io import BytesIO
+    file = UploadFile(filename="OpTransactionHistoryUX531-08-2026 11_06_17 .xls", file=BytesIO(uco_xls_content))
+
+    req = MagicMock()
+    res = await routes.banking.import_bank_statement(acc_id, req, file=file, dry_run=False)
+
+    assert res["ok"] is True
+    assert res["inserted_count"] == 10
+    assert len(inserted_docs) == 10
+
+    # Ensure none of the metadata rows (Account Details, IFSC, Balance Details, etc.) were parsed as transactions
+    narrations = [d["narration"] for d in inserted_docs]
+    assert not any("Account Details" in n or "IFSC" in n or "Balance Details" in n for n in narrations)
+
+    # Detailed assertion of all 10 real transaction rows
+    expected_rows = [
+        {"date": "2026-08-13", "debit": 10000.00, "credit": 0.0, "balance": 25304.00, "narr": "IB-To:18600110093108-TRTRumesh"},
+        {"date": "2026-08-13", "debit": 25000.00, "credit": 0.0, "balance": 304.00, "narr": "IB-To:18600110093108-TRTRJeevrajPU"},
+        {"date": "2026-08-18", "debit": 10.00, "credit": 0.0, "balance": 294.00, "narr": "MPAY/IMPSP/TRTR/623032483866/SBIN/XX131411/IMPS"},
+        {"date": "2026-08-21", "debit": 0.0, "credit": 450000.00, "balance": 450294.00, "narr": "RTGS/HDFCR52026082198849971/SSK FOOTCARE MANUFACTU"},
+        {"date": "2026-08-21", "debit": 206.50, "credit": 0.0, "balance": 450087.50, "narr": "Charges for CARD-ISSUE"},
+        {"date": "2026-08-21", "debit": 450000.00, "credit": 0.0, "balance": 87.50, "narr": "IB-To:18600510000946-TRTRMysteva"},
+        {"date": "2026-08-26", "debit": 0.0, "credit": 550000.00, "balance": 550087.50, "narr": "RTGS/HDFCR52026082650776660/SSK FOOTCARE MANUFACTU"},
+        {"date": "2026-08-26", "debit": 16005.90, "credit": 0.0, "balance": 534081.60, "narr": "MPAY/IMPSP/TRTR/623834195323/ICIC/XX556181/IMPS"},
+        {"date": "2026-08-26", "debit": 221000.00, "credit": 0.0, "balance": 313081.60, "narr": "eRTGS/UCBAR52026082600471738/UMESH CHOTURAM SUWASI"},
+        {"date": "2026-08-26", "debit": 60000.00, "credit": 0.0, "balance": 253081.60, "narr": "IB-To:18600110093108-TRTRPukhrajMaterial"},
+    ]
+
+    for idx, exp in enumerate(expected_rows):
+        doc = inserted_docs[idx]
+        assert doc["date"] == exp["date"], f"Row {idx} date mismatch"
+        assert doc["debit_amount"] == exp["debit"], f"Row {idx} debit mismatch"
+        assert doc["credit_amount"] == exp["credit"], f"Row {idx} credit mismatch"
+        assert doc["running_balance"] == exp["balance"], f"Row {idx} balance mismatch"
+        assert doc["narration"] == exp["narr"], f"Row {idx} narration mismatch"
+        assert doc["match_status"] == "unmatched"
+
+
+
+@pytest.mark.anyio
+async def test_uco_statement_import_misnamed_extension_xls(monkeypatch):
+    """Test importing legacy .xls file even when misnamed with .xlsx extension via magic bytes detection."""
+    from pathlib import Path
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    fixture_path = fixtures_dir / "uco_statement_real.xls"
+    if not fixture_path.exists():
+        pytest.skip("Real UCO Bank .xls file not found")
+
+    with open(fixture_path, "rb") as f:
+        uco_xls_content = f.read()
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    uco_acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "UCO Bank - Offline",
+        "bank_name": "UCO Bank",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "scan_for_columns", "must_contain_any": ["Tran. Date", "Narration"]},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Tran. Date",
+                "narration": "Narration",
+                "reference": "Chq. No.",
+                "debit_amount": "Withdrawl",
+                "credit_amount": "Deposit",
+                "balance": "Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=uco_acc_doc)
+
+    inserted_docs = []
+    async def mock_insert_many(docs):
+        inserted_docs.extend(docs)
+        return MagicMock(inserted_ids=[ObjectId() for _ in docs])
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=mock_insert_many)
+
+    from fastapi import UploadFile
+    from io import BytesIO
+    # Note: misnamed as .xlsx but content has OLE2 d0 cf 11 e0 magic bytes
+    file = UploadFile(filename="statement_misnamed.xlsx", file=BytesIO(uco_xls_content))
+
+    req = MagicMock()
+    res = await routes.banking.import_bank_statement(acc_id, req, file=file, dry_run=False)
+
+    assert res["ok"] is True
+    assert res["inserted_count"] == 10
+    assert len(inserted_docs) == 10
+
+
+@pytest.mark.anyio
+async def test_statement_import_metadata_autofill_and_confirmation(monkeypatch):
+    """Test extracting IFSC/Account No. from statement header and confirming before saving."""
+    from pathlib import Path
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    fixture_path = fixtures_dir / "uco_statement_real.xls"
+    if not fixture_path.exists():
+        pytest.skip("Real UCO Bank .xls file not found")
+
+    with open(fixture_path, "rb") as f:
+        uco_xls_content = f.read()
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    # Account is missing IFSC and full account_number
+    uco_acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "UCO Bank - Offline",
+        "bank_name": "UCO Bank",
+        "account_number_last4": "6054",
+        "account_number": None,
+        "ifsc": None,
+        "branch": None,
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "scan_for_columns"},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Tran. Date",
+                "narration": "Narration",
+                "reference": "Chq. No.",
+                "debit_amount": "Withdrawl",
+                "credit_amount": "Deposit",
+                "balance": "Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=uco_acc_doc)
+    mock_db.bank_accounts.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+    mock_db.bank_statement_lines.insert_many = AsyncMock(return_value=MagicMock(inserted_ids=[ObjectId() for _ in range(10)]))
+
+    from fastapi import UploadFile
+    from io import BytesIO
+
+    # 1. Normal import without confirm_account_update:
+    # Must surface suggestions and require confirmation, but NOT modify bank_account in DB
+    file1 = UploadFile(filename="uco_statement.xls", file=BytesIO(uco_xls_content))
+    req = MagicMock()
+    res1 = await routes.banking.import_bank_statement(acc_id, req, file=file1, dry_run=False, confirm_account_update=False)
+
+    assert res1["ok"] is True
+    assert res1["inserted_count"] == 10
+    assert res1.get("requires_account_confirmation") is True
+    assert res1.get("suggested_account_update") == {
+        "account_number": "18600210006054",
+        "ifsc": "UCBA0001860",
+        "branch": "KOPAR KHAIRANE",
+    }
+    # Confirm bank_accounts.update_one was NOT called (no silent overwrite)
+    mock_db.bank_accounts.update_one.assert_not_called()
+
+    # 2. Import with confirm_account_update=True:
+    # Must update bank_account in DB with the confirmed fields
+    file2 = UploadFile(filename="uco_statement.xls", file=BytesIO(uco_xls_content))
+    res2 = await routes.banking.import_bank_statement(acc_id, req, file=file2, dry_run=False, confirm_account_update=True)
+
+    assert res2["ok"] is True
+    assert res2.get("applied_account_update") == {
+        "account_number": "18600210006054",
+        "ifsc": "UCBA0001860",
+        "branch": "KOPAR KHAIRANE",
+    }
+    mock_db.bank_accounts.update_one.assert_called_once()
+    call_args = mock_db.bank_accounts.update_one.call_args[0]
+    assert call_args[0] == {"_id": ObjectId(acc_id)}
+    set_fields = call_args[1]["$set"]
+    assert set_fields["account_number"] == "18600210006054"
+    assert set_fields["ifsc"] == "UCBA0001860"
+    assert set_fields["branch"] == "KOPAR KHAIRANE"
+
+
+@pytest.mark.anyio
+async def test_statement_import_unsupported_format_error(monkeypatch):
+    """Test that uploading an unsupported format (like PDF or binary) returns a clear 400 error."""
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    uco_acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "UCO Bank - Offline",
+        "bank_name": "UCO Bank",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "fixed_row", "row": 0},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Date",
+                "narration": "Narration",
+            },
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=uco_acc_doc)
+
+    from fastapi import UploadFile, HTTPException
+    from io import BytesIO
+    # Binary PDF-like content
+    fake_pdf = b"%PDF-1.4\x00\x01\x02\x03\xff\xfe\xfd"
+    file = UploadFile(filename="bank_statement.pdf", file=BytesIO(fake_pdf))
+
+    req = MagicMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await routes.banking.import_bank_statement(acc_id, req, file=file, dry_run=False)
+
+    assert exc_info.value.status_code == 400
+    assert "Unsupported file format" in exc_info.value.detail
+
+
+@pytest.mark.anyio
+async def test_uco_statement_preview_and_commit_flow(monkeypatch):
+    """
+    Re-test exact bug report scenario:
+    1. Select UCO account.
+    2. Upload real .xls file.
+    3. Click Preview Layout (dry_run=True) -> Confirm it succeeds and shows accurate transaction preview.
+    4. Confirm & Commit Import (dry_run=False) -> Confirm all 10 bank_statement_lines are inserted matching real file data.
+    """
+    from pathlib import Path
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    fixture_path = fixtures_dir / "uco_statement_real.xls"
+    if not fixture_path.exists():
+        pytest.skip("Real UCO Bank .xls file not found")
+
+    with open(fixture_path, "rb") as f:
+        uco_xls_content = f.read()
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    uco_acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "UCO Bank - Current A/C",
+        "bank_name": "UCO Bank",
+        "account_number_last4": "6054",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {
+                "type": "scan_for_columns",
+                "must_contain_any": ["Tran. Date", "Withdrawl", "Deposit", "Balance", "Narration"]
+            },
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Tran. Date",
+                "narration": "Narration",
+                "reference": "Chq. No.",
+                "debit_amount": "Withdrawl",
+                "credit_amount": "Deposit",
+                "balance": "Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=uco_acc_doc)
+
+    inserted_docs = []
+    async def mock_insert_many(docs):
+        inserted_docs.extend(docs)
+        return MagicMock(inserted_ids=[ObjectId() for _ in docs])
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=mock_insert_many)
+
+    from fastapi import UploadFile
+    from io import BytesIO
+
+    # ── STEP 1: PREVIEW LAYOUT (dry_run=True) ──
+    file_preview = UploadFile(
+        filename="OpTransactionHistoryUX531-08-2026 11_06_17 .xls",
+        file=BytesIO(uco_xls_content)
+    )
+    req = MagicMock()
+    preview_res = await routes.banking.import_bank_statement(
+        acc_id, req, file=file_preview, dry_run=True
+    )
+
+    assert preview_res["ok"] is True
+    assert preview_res["dry_run"] is True
+    assert preview_res["parsed_count"] == 10
+    assert preview_res["total_file_rows"] == 10
+    assert len(preview_res["sample"]) > 0
+    # Confirm DB insert was NOT called during preview
+    mock_db.bank_statement_lines.insert_many.assert_not_called()
+    assert len(inserted_docs) == 0
+
+    # ── STEP 2: CONFIRM & COMMIT IMPORT (dry_run=False) ──
+    file_commit = UploadFile(
+        filename="OpTransactionHistoryUX531-08-2026 11_06_17 .xls",
+        file=BytesIO(uco_xls_content)
+    )
+    commit_res = await routes.banking.import_bank_statement(
+        acc_id, req, file=file_commit, dry_run=False
+    )
+
+    assert commit_res["ok"] is True
+    assert commit_res["dry_run"] is False
+    assert commit_res["inserted_count"] == 10
+    mock_db.bank_statement_lines.insert_many.assert_called_once()
+    assert len(inserted_docs) == 10
+
+    # Confirm created statement lines match exact real file transactions
+    assert inserted_docs[0]["date"] == "2026-08-13"
+    assert inserted_docs[0]["debit_amount"] == 10000.00
+    assert inserted_docs[0]["credit_amount"] == 0.0
+    assert inserted_docs[0]["running_balance"] == 25304.00
+    assert inserted_docs[0]["narration"] == "IB-To:18600110093108-TRTRumesh"
+
+    assert inserted_docs[3]["date"] == "2026-08-21"
+    assert inserted_docs[3]["debit_amount"] == 0.0
+    assert inserted_docs[3]["credit_amount"] == 450000.00
+    assert inserted_docs[3]["running_balance"] == 450294.00
+    assert inserted_docs[3]["narration"] == "RTGS/HDFCR52026082198849971/SSK FOOTCARE MANUFACTU"
+
+    assert inserted_docs[9]["date"] == "2026-08-26"
+    assert inserted_docs[9]["debit_amount"] == 60000.00
+    assert inserted_docs[9]["credit_amount"] == 0.0
+    assert inserted_docs[9]["running_balance"] == 253081.60
+    assert inserted_docs[9]["narration"] == "IB-To:18600110093108-TRTRPukhrajMaterial"
+
+
+@pytest.mark.anyio
 async def test_auto_reconcile_online_account_credits(monkeypatch):
     """Test auto-reconciliation on online account: confident match, ambiguous match, and no match."""
     mock_db = MagicMock()
