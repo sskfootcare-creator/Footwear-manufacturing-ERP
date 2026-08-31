@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from bson import ObjectId
 
@@ -155,12 +155,17 @@ class MockWorkersDB:
         oid_str = str(query.get("_id"))
         if oid_str in self.cash_ledger_store:
             doc = self.cash_ledger_store[oid_str]
+            if "remaining_balance" in query and isinstance(query["remaining_balance"], dict):
+                gte_val = query["remaining_balance"].get("$gte")
+                if gte_val is not None and doc.get("remaining_balance", 0.0) < gte_val:
+                    return MagicMock(matched_count=0, modified_count=0)
             if "$inc" in update:
                 for k, v in update["$inc"].items():
                     doc[k] = round(doc.get(k, 0.0) + v, 2)
             if "$set" in update:
                 doc.update(update["$set"])
-        return MagicMock(matched_count=1)
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
 
     async def _find_one_wage_payment(self, query):
         oid_str = str(query.get("_id"))
@@ -578,4 +583,326 @@ def test_wage_payment_bank_transfer_success(client, mock_workers_env):
     res = client.get(f"/api/workers/{wid}/wage-payments")
     assert res.status_code == 200
     assert len(res.json()) == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_wage_payment_requests_prevent_race_condition(monkeypatch):
+    """Verify two concurrent cash wage-payment requests with balance only for one: exactly one succeeds, one rejected, balance >= 0."""
+    import asyncio
+    from routes.workers import create_wage_payment
+
+    wid = ObjectId()
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 5000.0,
+        "remaining_balance": 5000.0,
+        "date": "2026-08-10",
+        "notes": "Cash pool",
+    }
+    wage_payments_store = {}
+    db_lock = asyncio.Lock()
+
+    mock_db = MagicMock()
+
+    async def mock_update_cash(q, update):
+        async with db_lock:
+            gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+            if cash_entry["remaining_balance"] >= gte_val:
+                inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+                cash_entry["remaining_balance"] += inc_val
+                return MagicMock(modified_count=1)
+            return MagicMock(modified_count=0)
+
+    async def mock_find_one_cash(q):
+        async with db_lock:
+            if str(q.get("_id")) == str(cash_id):
+                return dict(cash_entry)
+            return None
+
+    async def mock_find_one_worker(q):
+        return {"_id": wid, "name": "Ramesh", "skill": "cutting"}
+
+    async def mock_find_one_wp(q):
+        return wage_payments_store.get(str(q.get("_id")))
+
+    async def mock_insert_wp(doc):
+        pid = ObjectId()
+        doc["_id"] = pid
+        wage_payments_store[str(pid)] = doc
+        return MagicMock(inserted_id=pid)
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.workers.find_one = AsyncMock(side_effect=mock_find_one_worker)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=mock_insert_wp)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=mock_find_one_wp)
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.workers._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+    monkeypatch.setattr("routes.pos.compute_payroll", AsyncMock(return_value={"rows": [{"worker_id": str(wid), "net_payable": 10000.0}]}))
+
+    payload1 = WagePaymentIn(
+        worker_id=str(wid),
+        worker_name="Ramesh",
+        amount=4000.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+        date="2026-08-16",
+    )
+    payload2 = WagePaymentIn(
+        worker_id=str(wid),
+        worker_name="Ramesh",
+        amount=4000.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+        date="2026-08-16",
+    )
+
+    results = await asyncio.gather(
+        create_wage_payment(str(wid), payload1, req),
+        create_wage_payment(str(wid), payload2, req),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, dict) and r.get("paid_via") == "cash"]
+    failures = [r for r in results if isinstance(r, HTTPException)]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].status_code == 400
+    assert "Insufficient cash in ledger entry" in failures[0].detail
+
+    assert cash_entry["remaining_balance"] == 1000.0
+    assert len(wage_payments_store) == 1
+
+
+@pytest.mark.anyio
+async def test_concurrent_wage_payment_overpayment_guard_prevents_timing_bypass(monkeypatch):
+    """Verify two concurrent wage-payment requests for same worker/period where combined amount > computed_owed: exactly one succeeds, overpayment guard cannot be bypassed by timing."""
+    import asyncio
+    from routes.workers import create_wage_payment
+
+    wid = ObjectId()
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 20000.0,
+        "remaining_balance": 20000.0,
+        "date": "2026-08-10",
+        "notes": "Ample cash pool",
+    }
+    wage_payments_store = {}
+    db_lock = asyncio.Lock()
+
+    mock_db = MagicMock()
+
+    async def mock_update_cash(q, update):
+        async with db_lock:
+            gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+            if cash_entry["remaining_balance"] >= gte_val:
+                inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+                cash_entry["remaining_balance"] += inc_val
+                return MagicMock(modified_count=1)
+            return MagicMock(modified_count=0)
+
+    async def mock_find_one_cash(q):
+        async with db_lock:
+            if str(q.get("_id")) == str(cash_id):
+                return dict(cash_entry)
+            return None
+
+    async def mock_find_one_worker(q):
+        return {"_id": wid, "name": "Ramesh", "skill": "cutting"}
+
+    async def mock_find_one_wp(q):
+        return wage_payments_store.get(str(q.get("_id")))
+
+    async def mock_insert_wp(doc):
+        # Simulate slight async delay to expose any timing windows
+        await asyncio.sleep(0.01)
+        pid = ObjectId()
+        doc["_id"] = pid
+        wage_payments_store[str(pid)] = doc
+        return MagicMock(inserted_id=pid)
+
+    def mock_find_wage_payments(q):
+        # Query existing payments from store for this worker/period
+        matching = [
+            d for d in wage_payments_store.values()
+            if str(d.get("worker_id")) == str(q.get("worker_id"))
+            and d.get("period_from") == q.get("period_from")
+            and d.get("period_to") == q.get("period_to")
+        ]
+        return MagicMock(to_list=AsyncMock(return_value=matching))
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.workers.find_one = AsyncMock(side_effect=mock_find_one_worker)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=mock_insert_wp)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=mock_find_one_wp)
+    mock_db.wage_payments.find = MagicMock(side_effect=mock_find_wage_payments)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.workers._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+    # Worker is owed 5000.0 for this period
+    monkeypatch.setattr("routes.pos.compute_payroll", AsyncMock(return_value={"rows": [{"worker_id": str(wid), "net_payable": 5000.0}]}))
+
+    # Two concurrent requests for 3500.0 each. Neither exceeds 5000 individually, but combined 7000 > 5000.
+    payload1 = WagePaymentIn(
+        worker_id=str(wid),
+        worker_name="Ramesh",
+        amount=3500.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+        date="2026-08-16",
+        override_reason="",
+    )
+    payload2 = WagePaymentIn(
+        worker_id=str(wid),
+        worker_name="Ramesh",
+        amount=3500.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+        date="2026-08-16",
+        override_reason="",
+    )
+
+    results = await asyncio.gather(
+        create_wage_payment(str(wid), payload1, req),
+        create_wage_payment(str(wid), payload2, req),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, dict) and r.get("amount") == 3500.0]
+    failures = [r for r in results if isinstance(r, HTTPException)]
+
+    # Exactly one request must succeed, and the second must be rejected by overpayment guard
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].status_code == 400
+    assert "exceeds owed amount for period" in failures[0].detail
+
+    # Only 1 wage payment recorded in the database
+    assert len(wage_payments_store) == 1
+    # Cash pool only decremented once: 20000 - 3500 = 16500
+    assert cash_entry["remaining_balance"] == 16500.0
+
+
+@pytest.mark.anyio
+async def test_multi_concurrent_wage_payment_requests_high_contention(monkeypatch):
+    """Verify 5 simultaneous concurrent wage payment requests for 1000 each against computed owed of 2500. Exactly 2 succeed, 3 rejected."""
+    import asyncio
+    from routes.workers import create_wage_payment
+
+    wid = ObjectId()
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 10000.0,
+        "remaining_balance": 10000.0,
+        "date": "2026-08-10",
+    }
+    wage_payments_store = {}
+    db_lock = asyncio.Lock()
+
+    mock_db = MagicMock()
+
+    async def mock_update_cash(q, update):
+        await asyncio.sleep(0.001)
+        async with db_lock:
+            gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+            if cash_entry["remaining_balance"] >= gte_val:
+                inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+                cash_entry["remaining_balance"] = round(cash_entry["remaining_balance"] + inc_val, 2)
+                return MagicMock(modified_count=1)
+            return MagicMock(modified_count=0)
+
+    async def mock_find_one_cash(q):
+        async with db_lock:
+            if str(q.get("_id")) == str(cash_id):
+                return dict(cash_entry)
+            return None
+
+    async def mock_find_one_worker(q):
+        return {"_id": wid, "name": "Ramesh", "skill": "cutting"}
+
+    async def mock_find_one_wp(q):
+        return wage_payments_store.get(str(q.get("_id")))
+
+    async def mock_insert_wp(doc):
+        await asyncio.sleep(0.001)
+        pid = ObjectId()
+        doc["_id"] = pid
+        wage_payments_store[str(pid)] = doc
+        return MagicMock(inserted_id=pid)
+
+    def mock_find_wage_payments(q):
+        matching = [
+            d for d in wage_payments_store.values()
+            if str(d.get("worker_id")) == str(q.get("worker_id"))
+            and d.get("period_from") == q.get("period_from")
+            and d.get("period_to") == q.get("period_to")
+        ]
+        return MagicMock(to_list=AsyncMock(return_value=matching))
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.workers.find_one = AsyncMock(side_effect=mock_find_one_worker)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=mock_insert_wp)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=mock_find_one_wp)
+    mock_db.wage_payments.find = MagicMock(side_effect=mock_find_wage_payments)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.workers._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+    # Worker is owed 2500.0 for this period
+    monkeypatch.setattr("routes.pos.compute_payroll", AsyncMock(return_value={"rows": [{"worker_id": str(wid), "net_payable": 2500.0}]}))
+
+    payloads = [
+        WagePaymentIn(
+            worker_id=str(wid),
+            worker_name="Ramesh",
+            amount=1000.0,
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="cash",
+            cash_ledger_id=str(cash_id),
+            date="2026-08-16",
+            override_reason="",
+        )
+        for _ in range(5)
+    ]
+
+    results = await asyncio.gather(
+        *(create_wage_payment(str(wid), p, req) for p in payloads),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, dict) and r.get("amount") == 1000.0]
+    failures = [r for r in results if isinstance(r, HTTPException)]
+
+    # Exactly 2 succeed (2 * 1000 = 2000 <= 2500), 3 fail (2000 + 1000 = 3000 > 2500)
+    assert len(successes) == 2
+    assert len(failures) == 3
+    for f in failures:
+        assert f.status_code == 400
+        assert "exceeds owed amount for period" in f.detail
+
+    assert len(wage_payments_store) == 2
+    assert cash_entry["remaining_balance"] == 8000.0
+
+
+
 

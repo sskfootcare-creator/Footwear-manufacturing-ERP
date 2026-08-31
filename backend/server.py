@@ -828,7 +828,16 @@ async def _compute_dashboard_stats_live() -> dict:
     
     recent_pos = [stringify(p) for p in pos[-5:][::-1]]
     recent_online = [stringify(j) for j in online_jobs[-5:][::-1]]
-    
+
+    # Cash in hand live balance
+    cash_docs = []
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            cash_docs = await db.cash_ledger.find({}).to_list(2000)
+        except Exception:
+            cash_docs = []
+    total_cash_in_hand = round(sum(float(cd.get("remaining_balance") or 0.0) for cd in cash_docs), 2)
+
     return {
         "total_pos": total_pos,
         "pending_pos": pending_pos,
@@ -838,6 +847,7 @@ async def _compute_dashboard_stats_live() -> dict:
         "revenue": round(b2b_revenue + online_revenue, 2),
         "materials_count": await db.materials.count_documents({}),
         "styles_count": await db.styles.count_documents({}),
+        "total_cash_in_hand": total_cash_in_hand,
         
         # Detailed split for Management View
         "b2b": {

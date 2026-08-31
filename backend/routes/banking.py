@@ -2,16 +2,21 @@
 
 import re
 import logging
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+import io
+from io import BytesIO
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, Response
 
 from models.banking import (
     BankAccountIn,
     BankAccountUpdate,
     BankStatementLineIn,
     BankStatementLineUpdate,
+    PeriodLockIn,
+    PeriodUnlockIn,
 )
 from auth import require_roles
 
@@ -343,7 +348,7 @@ async def list_statement_lines(
 
 @banking_router.post("/banking/statement-lines", status_code=201)
 async def create_statement_lines(lines: List[BankStatementLineIn], request: Request):
-    """Insert one or more bank statement lines."""
+    """Insert one or more bank statement lines with deduplication against existing lines."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = _get_db(request)
@@ -354,18 +359,59 @@ async def create_statement_lines(lines: List[BankStatementLineIn], request: Requ
     now = _now_iso()
     user_email = u.get("email") or u.get("name", "")
 
-    to_insert = []
+    def _line_sig(doc):
+        return (
+            str(doc.get("date") or ""),
+            round(float(doc.get("debit_amount") or 0.0), 2),
+            round(float(doc.get("credit_amount") or 0.0), 2),
+            str(doc.get("narration") or "").strip(),
+        )
+
+    lines_by_acc = defaultdict(list)
     for l in lines:
         row = l.dict()
         row["imported_at"] = row.get("imported_at") or now
         row["imported_by"] = row.get("imported_by") or user_email
-        to_insert.append(row)
+        lines_by_acc[row.get("bank_account_id")].append(row)
 
-    res = await db.bank_statement_lines.insert_many(to_insert)
+    to_insert = []
+    skipped_count = 0
+
+    for acc_id, acc_lines in lines_by_acc.items():
+        dates = [r["date"] for r in acc_lines if r.get("date")]
+        date_q = {"date": {"$gte": min(dates), "$lte": max(dates)}} if dates else {}
+        existing_cursor = db.bank_statement_lines.find({"bank_account_id": acc_id, **date_q})
+        existing_docs = []
+        if hasattr(existing_cursor, "to_list"):
+            res = existing_cursor.to_list(100000)
+            if hasattr(res, "__await__"):
+                existing_docs = await res
+            elif isinstance(res, list):
+                existing_docs = res
+        elif isinstance(existing_cursor, list):
+            existing_docs = existing_cursor
+
+        existing_counts = Counter(_line_sig(d) for d in existing_docs)
+        for row in acc_lines:
+            sig = _line_sig(row)
+            if existing_counts[sig] > 0:
+                existing_counts[sig] -= 1
+                skipped_count += 1
+            else:
+                to_insert.append(row)
+
+    inserted_ids = []
+    if to_insert:
+        res = await db.bank_statement_lines.insert_many(to_insert)
+        inserted_ids = [str(i) for i in res.inserted_ids]
+
+    summary_msg = f"{len(inserted_ids)} new, {skipped_count} skipped as duplicates." if skipped_count > 0 else f"{len(inserted_ids)} new lines inserted."
     return {
         "ok": True,
-        "inserted_count": len(res.inserted_ids),
-        "inserted_ids": [str(i) for i in res.inserted_ids],
+        "inserted_count": len(inserted_ids),
+        "skipped_count": skipped_count,
+        "message": summary_msg,
+        "inserted_ids": inserted_ids,
     }
 
 
@@ -738,6 +784,43 @@ async def _handle_statement_import(
         applied_account_update = suggested_update
         suggested_update = {}
 
+    # Deduplicate against existing lines on the same bank_account_id
+    # matching signature: (date, debit_amount, credit_amount, narration)
+    dates = [l["date"] for l in statement_lines if l.get("date")]
+    date_q = {"date": {"$gte": min(dates), "$lte": max(dates)}} if dates else {}
+
+    existing_query = {"bank_account_id": id, **date_q}
+    existing_cursor = db.bank_statement_lines.find(existing_query)
+    existing_docs = []
+    if hasattr(existing_cursor, "to_list"):
+        res = existing_cursor.to_list(100000)
+        if hasattr(res, "__await__"):
+            existing_docs = await res
+        elif isinstance(res, list):
+            existing_docs = res
+    elif isinstance(existing_cursor, list):
+        existing_docs = existing_cursor
+
+    def _line_sig(doc):
+        return (
+            str(doc.get("date") or ""),
+            round(float(doc.get("debit_amount") or 0.0), 2),
+            round(float(doc.get("credit_amount") or 0.0), 2),
+            str(doc.get("narration") or "").strip(),
+        )
+
+    existing_counts = Counter(_line_sig(d) for d in existing_docs)
+
+    new_lines_to_insert = []
+    skipped_count = 0
+    for l in statement_lines:
+        sig = _line_sig(l)
+        if existing_counts[sig] > 0:
+            existing_counts[sig] -= 1
+            skipped_count += 1
+        else:
+            new_lines_to_insert.append(l)
+
     if dry_run:
         res_dict = {
             "ok": True,
@@ -746,7 +829,10 @@ async def _handle_statement_import(
             "bank_account_name": acc.get("name"),
             "total_file_rows": len(raw_rows),
             "parsed_count": len(statement_lines),
-            "sample": statement_lines[:5],
+            "new_count": len(new_lines_to_insert),
+            "skipped_count": skipped_count,
+            "message": f"Parsed {len(statement_lines)} rows ({len(new_lines_to_insert)} new, {skipped_count} skipped as duplicates)." if skipped_count > 0 else f"Parsed {len(statement_lines)} rows ({len(new_lines_to_insert)} new).",
+            "sample": [stringify(s) for s in (new_lines_to_insert[:5] if new_lines_to_insert else statement_lines[:5])],
         }
         if suggested_update:
             res_dict["suggested_account_update"] = suggested_update
@@ -758,15 +844,28 @@ async def _handle_statement_import(
             )
         return res_dict
 
-    res = await db.bank_statement_lines.insert_many(statement_lines)
+    inserted_ids = []
+    if new_lines_to_insert:
+        res = await db.bank_statement_lines.insert_many(new_lines_to_insert)
+        inserted_ids = [str(i) for i in res.inserted_ids]
+
+    inserted_count = len(inserted_ids)
+    if skipped_count > 0:
+        summary_msg = f"{inserted_count} new, {skipped_count} skipped as duplicates."
+    else:
+        summary_msg = f"{inserted_count} new lines inserted."
+
     res_dict = {
         "ok": True,
         "dry_run": False,
         "bank_account_id": id,
         "bank_account_name": acc.get("name"),
         "total_file_rows": len(raw_rows),
-        "inserted_count": len(res.inserted_ids),
-        "sample": [stringify(s) for s in statement_lines[:5]],
+        "parsed_count": len(statement_lines),
+        "inserted_count": inserted_count,
+        "skipped_count": skipped_count,
+        "message": summary_msg,
+        "sample": [stringify(s) for s in new_lines_to_insert[:5]],
     }
     if suggested_update:
         res_dict["suggested_account_update"] = suggested_update
@@ -794,6 +893,131 @@ async def import_bank_statement(
     return await _handle_statement_import(id, file, dry_run, confirm_account_update, request)
 
 
+async def _check_statement_line_dependents(db, line_doc: dict, target_action: str = "reclassify"):
+    """
+    Check if a statement line has dependent records (e.g. cash_ledger entry with wage payments or expenses).
+    Blocks the reclassification/re-matching if dependent records exist.
+    If an unused cash_ledger entry exists with NO dependents, cleanly removes the unused cash_ledger entry.
+    """
+    if not line_doc:
+        return
+
+    line_id_str = str(line_doc.get("_id") or line_doc.get("id"))
+    matched_to = line_doc.get("matched_to") or {}
+    matched_type = matched_to.get("type") if isinstance(matched_to, dict) else None
+    ref_id = matched_to.get("ref_id") if isinstance(matched_to, dict) else None
+
+    # Check if this line is linked to a cash_ledger entry
+    cash_entry = None
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        if matched_type == "cash_withdrawal" and ref_id:
+            try:
+                cash_entry = await db.cash_ledger.find_one({"_id": _oid(ref_id)})
+            except Exception:
+                cash_entry = None
+        elif matched_type in [None, "cash_withdrawal"]:
+            try:
+                cash_entry = await db.cash_ledger.find_one({"source_statement_line_id": line_id_str})
+            except Exception:
+                cash_entry = None
+
+    if cash_entry:
+        clid = str(cash_entry["_id"])
+        wage_payments_count = 0
+        expenses_count = 0
+
+        if hasattr(db, "wage_payments") and db.wage_payments is not None:
+            try:
+                wp_cursor = db.wage_payments.find({"cash_ledger_id": clid})
+                if hasattr(wp_cursor, "to_list"):
+                    wps = wp_cursor.to_list(1000)
+                    if hasattr(wps, "__await__"):
+                        wps = await wps
+                    wage_payments_count = len(wps) if isinstance(wps, list) else 0
+                elif hasattr(db.wage_payments, "count_documents"):
+                    res = db.wage_payments.count_documents({"cash_ledger_id": clid})
+                    if hasattr(res, "__await__"):
+                        wage_payments_count = await res
+                    else:
+                        wage_payments_count = int(res or 0)
+            except Exception:
+                wage_payments_count = 0
+
+        if hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                exp_cursor = db.expenses.find({"cash_ledger_id": clid})
+                if hasattr(exp_cursor, "to_list"):
+                    exps = exp_cursor.to_list(1000)
+                    if hasattr(exps, "__await__"):
+                        exps = await exps
+                    expenses_count = len(exps) if isinstance(exps, list) else 0
+                elif hasattr(db.expenses, "count_documents"):
+                    res = db.expenses.count_documents({"cash_ledger_id": clid})
+                    if hasattr(res, "__await__"):
+                        expenses_count = await res
+                    else:
+                        expenses_count = int(res or 0)
+            except Exception:
+                expenses_count = 0
+
+        if wage_payments_count > 0 or expenses_count > 0:
+            details = []
+            if wage_payments_count > 0:
+                details.append(f"{wage_payments_count} wage payment(s)")
+            if expenses_count > 0:
+                details.append(f"{expenses_count} cash expense(s)")
+            dep_str = " and ".join(details)
+            raise HTTPException(
+                400,
+                f"Cannot {target_action} statement line '{line_id_str}': it is linked to cash ledger entry '{clid}' "
+                f"which has active dependent records ({dep_str}). "
+                f"Please delete or reassign the dependent wage payments/expenses before re-matching or reclassifying this line.",
+            )
+
+        # If cash ledger entry has 0 dependents, clean it up so no orphaned cash pool remains
+        try:
+            await db.cash_ledger.delete_one({"_id": cash_entry["_id"]})
+        except Exception:
+            pass
+
+
+async def _check_period_locked(db, bank_account_id: Optional[str], line_date: Optional[str], action: str = "modify"):
+    """
+    Checks if a transaction date for a given bank account falls within an active locked reconciliation period.
+    If locked, raises HTTPException(400) blocking the action until an admin unlocks the period.
+    """
+    if not line_date or not hasattr(db, "reconciliation_locks") or db.reconciliation_locks is None:
+        return
+
+    line_date_str = str(line_date).strip()[:10]
+    acc_id_str = str(bank_account_id) if bank_account_id else ""
+
+    q = {
+        "status": "locked",
+        "period_from": {"$lte": line_date_str},
+        "period_to": {"$gte": line_date_str},
+    }
+    if acc_id_str:
+        q["bank_account_id"] = {"$in": [acc_id_str, "all", None, ""]}
+    
+    lock = None
+    try:
+        lock = await db.reconciliation_locks.find_one(q)
+    except Exception:
+        lock = None
+
+    if lock:
+        acc_label = "all bank accounts" if lock.get("bank_account_id") in [None, "all", ""] else f"bank account '{acc_id_str}'"
+        locked_by = lock.get("locked_by") or "Administrator"
+        locked_at = str(lock.get("locked_at") or "")[:10]
+        raise HTTPException(
+            400,
+            f"Cannot {action} transaction on {line_date_str}: Reconciliation period ({lock.get('period_from')} to {lock.get('period_to')}) "
+            f"for {acc_label} is finalized and locked by {locked_by} on {locked_at}. "
+            f"An administrator must explicitly unlock this period before making any changes.",
+        )
+
+
 @banking_router.patch("/banking/statement-lines/{id}/match")
 async def match_statement_line(id: str, payload: BankStatementLineUpdate, request: Request):
     """Update match status or link a statement line to an internal payment/settlement/expense."""
@@ -801,12 +1025,23 @@ async def match_statement_line(id: str, payload: BankStatementLineUpdate, reques
     require_roles("admin", "manager")(u)
     db = _get_db(request)
 
+    doc = await db.bank_statement_lines.find_one({"_id": _oid(id)})
+    if not doc:
+        raise HTTPException(404, "Statement line not found")
+
     updates = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
     if not updates:
-        doc = await db.bank_statement_lines.find_one({"_id": _oid(id)})
-        if not doc:
-            raise HTTPException(404, "Statement line not found")
         return stringify(doc)
+
+    # Check if line date falls in a locked period
+    await _check_period_locked(db, doc.get("bank_account_id"), doc.get("date"), "edit or rematch")
+
+    # Check if re-matching / reclassification touches a line with dependent records
+    if "match_status" in updates or "matched_to" in updates:
+        new_status = updates.get("match_status", doc.get("match_status"))
+        new_matched = updates.get("matched_to", doc.get("matched_to"))
+        if new_status != doc.get("match_status") or new_matched != doc.get("matched_to"):
+            await _check_statement_line_dependents(db, doc, "re-match")
 
     updates["updated_at"] = _now_iso()
     updates["updated_by"] = u.get("email") or u.get("name", "")
@@ -820,9 +1055,6 @@ async def match_statement_line(id: str, payload: BankStatementLineUpdate, reques
 
 
 # ---------------------------------------------------------------------------
-# Auto-Reconciliation Engine
-# ---------------------------------------------------------------------------
-
 def _parse_dt(d_val: Any) -> Optional[datetime]:
     if not d_val:
         return None
@@ -833,11 +1065,83 @@ def _parse_dt(d_val: Any) -> Optional[datetime]:
         return None
 
 
+def _compute_match_confidence(
+    stmt_amount: float,
+    doc_amount: float,
+    stmt_date_str: Optional[str],
+    doc_date_str: Optional[str],
+    narration: Optional[str] = "",
+    doc_name_or_ref: Optional[str] = "",
+) -> Tuple[float, List[str]]:
+    """
+    Computes a match confidence score between 0.0 and 1.0 (0% - 100%) and returns explanation reasons.
+    - Exact amount (diff <= 0.001) + Exact date (0 days diff): 0.95 to 1.0 (95%+ high confidence)
+    - Exact amount + 1 day diff: ~0.85 (85% confidence, pending individual review if threshold is 95%)
+    - Exact amount + 2-3 days diff: ~0.70 to 0.80
+    - Non-zero amount diff (within tolerance) + exact date: ~0.85 - 0.90
+    """
+    amt_diff = abs(round(stmt_amount, 2) - round(doc_amount, 2))
+    reasons = []
+
+    # 1. Amount scoring (up to 50 points)
+    if amt_diff <= 0.001:
+        amt_score = 50.0
+        reasons.append("Exact amount match")
+    elif amt_diff <= 1.0:
+        amt_score = 50.0 - (amt_diff * 15.0)
+        reasons.append(f"Amount difference of ₹{amt_diff:.2f}")
+    else:
+        amt_score = max(20.0, 50.0 - (amt_diff * 5.0))
+        reasons.append(f"Amount difference of ₹{amt_diff:.2f}")
+
+    # 2. Date scoring (up to 40 points)
+    stmt_dt = _parse_dt(stmt_date_str)
+    doc_dt = _parse_dt(doc_date_str)
+    day_diff = abs((stmt_dt - doc_dt).days) if (stmt_dt and doc_dt) else None
+
+    if day_diff == 0:
+        date_score = 40.0
+        reasons.append("Exact date match")
+    elif day_diff == 1:
+        date_score = 30.0
+        reasons.append("1 day date difference")
+    elif day_diff == 2:
+        date_score = 20.0
+        reasons.append("2 days date difference")
+    elif day_diff == 3:
+        date_score = 15.0
+        reasons.append("3 days date difference")
+    else:
+        date_score = 10.0
+        if day_diff is not None:
+            reasons.append(f"{day_diff} days date difference")
+
+    # 3. Text / Narration heuristic (up to 10 points)
+    text_score = 5.0
+    if narration and doc_name_or_ref:
+        narr_tokens = set(re.findall(r'[a-zA-Z0-9]+', str(narration).lower()))
+        ref_tokens = set(re.findall(r'[a-zA-Z0-9]+', str(doc_name_or_ref).lower()))
+        stop_words = {"pvt", "ltd", "payment", "bank", "neft", "rtgs", "upi", "imps", "dr", "cr", "to", "by", "for", "the", "a", "an", "and", "in", "of"}
+        overlap = (narr_tokens & ref_tokens) - stop_words
+        if overlap:
+            text_score = 10.0
+            reasons.append(f"Narration match ({', '.join(list(overlap)[:2])})")
+
+    total_score = amt_score + date_score + text_score
+    confidence = min(1.0, max(0.0, round(total_score / 100.0, 2)))
+
+    if amt_diff <= 0.001 and day_diff == 0:
+        confidence = max(0.95, confidence)
+
+    return confidence, reasons
+
+
 async def _handle_reconcile_account(
     id: str,
     date_window_days: int,
     amount_tolerance: float,
     dry_run: bool,
+    min_confidence: float,
     request: Request,
 ) -> dict:
     u = await _get_user(request)
@@ -850,6 +1154,19 @@ async def _handle_reconcile_account(
 
     account_id_str = str(acc["_id"])
     account_type = acc.get("account_type", "b2b_client")
+
+    raw_conf = min_confidence.default if hasattr(min_confidence, "default") else min_confidence
+    conf_float = float(raw_conf) if raw_conf is not None else 0.95
+    norm_min_confidence = conf_float / 100.0 if conf_float > 1.0 else conf_float
+
+    raw_window = date_window_days.default if hasattr(date_window_days, "default") else date_window_days
+    date_window_days = int(raw_window) if raw_window is not None else 3
+
+    raw_tol = amount_tolerance.default if hasattr(amount_tolerance, "default") else amount_tolerance
+    amount_tolerance = float(raw_tol) if raw_tol is not None else 1.0
+
+    raw_dry = dry_run.default if hasattr(dry_run, "default") else dry_run
+    dry_run = bool(raw_dry) if raw_dry is not None else False
 
     unmatched_lines = await db.bank_statement_lines.find({
         "bank_account_id": account_id_str,
@@ -864,13 +1181,18 @@ async def _handle_reconcile_account(
             "bank_account_name": acc.get("name"),
             "total_unmatched_evaluated": 0,
             "auto_matched_count": 0,
+            "pending_review_count": 0,
             "ambiguous_count": 0,
             "no_match_count": 0,
+            "min_confidence": norm_min_confidence,
+            "min_confidence_percent": int(round(norm_min_confidence * 100)),
             "matched_details": [],
+            "pending_review_details": [],
         }
 
     claimed_ids = set()
     matched_results = []
+    pending_review_results = []
     ambiguous_count = 0
     no_match_count = 0
 
@@ -918,9 +1240,9 @@ async def _handle_reconcile_account(
                     if abs(s_amount - credit) <= amount_tolerance:
                         if stmt_dt and s_dt:
                             if abs((s_dt - stmt_dt).days) <= date_window_days:
-                                candidates.append(("settlement", s))
+                                candidates.append(("settlement", s, s_amount, s.get("settlement_date") or s.get("date") or s.get("created_at"), s.get("channel") or s.get("reference_number") or ""))
                         else:
-                            candidates.append(("settlement", s))
+                            candidates.append(("settlement", s, s_amount, s.get("settlement_date") or s.get("date") or s.get("created_at"), s.get("channel") or s.get("reference_number") or ""))
             else:
                 for p in client_payments_raw:
                     p_id = str(p["_id"])
@@ -931,14 +1253,22 @@ async def _handle_reconcile_account(
                     if abs(p_amount - credit) <= amount_tolerance:
                         if stmt_dt and p_dt:
                             if abs((p_dt - stmt_dt).days) <= date_window_days:
-                                candidates.append(("payment", p))
+                                candidates.append(("payment", p, p_amount, p.get("payment_date") or p.get("created_at"), p.get("customer_name") or p.get("reference") or ""))
                         else:
-                            candidates.append(("payment", p))
+                            candidates.append(("payment", p, p_amount, p.get("payment_date") or p.get("created_at"), p.get("customer_name") or p.get("reference") or ""))
 
             if len(candidates) == 1:
-                target_type, match_doc = candidates[0]
+                target_type, match_doc, cand_amount, cand_date, cand_ref = candidates[0]
                 ref_id = str(match_doc["_id"])
-                claimed_ids.add(ref_id)
+                confidence, reasons = _compute_match_confidence(
+                    credit,
+                    cand_amount,
+                    line.get("date"),
+                    cand_date,
+                    line.get("narration"),
+                    cand_ref,
+                )
+
                 matched_item = {
                     "statement_line_id": str(line_id),
                     "statement_date": line.get("date"),
@@ -947,28 +1277,37 @@ async def _handle_reconcile_account(
                     "side": "credit",
                     "matched_type": target_type,
                     "ref_id": ref_id,
+                    "candidate_title": cand_ref or target_type.replace("_", " ").title(),
+                    "confidence_score": confidence,
+                    "confidence_percent": int(round(confidence * 100)),
+                    "confidence_reasons": reasons,
                 }
-                matched_results.append(matched_item)
 
-                if not dry_run:
-                    await db.bank_statement_lines.update_one(
-                        {"_id": line_id},
-                        {"$set": {
-                            "match_status": "matched",
-                            "matched_to": {"type": target_type, "ref_id": ref_id},
-                            "updated_at": now,
-                        }}
-                    )
-                    if target_type == "settlement":
-                        await db.online_settlements.update_one(
-                            {"_id": match_doc["_id"]},
-                            {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                if confidence >= norm_min_confidence:
+                    claimed_ids.add(ref_id)
+                    matched_results.append(matched_item)
+                    if not dry_run:
+                        await db.bank_statement_lines.update_one(
+                            {"_id": line_id},
+                            {"$set": {
+                                "match_status": "matched",
+                                "matched_to": {"type": target_type, "ref_id": ref_id},
+                                "updated_at": now,
+                            }}
                         )
-                    elif target_type == "payment":
-                        await db.payments.update_one(
-                            {"_id": match_doc["_id"]},
-                            {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
-                        )
+                        if target_type == "settlement":
+                            await db.online_settlements.update_one(
+                                {"_id": match_doc["_id"]},
+                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                            )
+                        elif target_type == "payment":
+                            await db.payments.update_one(
+                                {"_id": match_doc["_id"]},
+                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                            )
+                else:
+                    # Low confidence match left for individual review
+                    pending_review_results.append(matched_item)
             elif len(candidates) > 1:
                 ambiguous_count += 1
             else:
@@ -986,9 +1325,9 @@ async def _handle_reconcile_account(
                 if abs(vp_amount - debit) <= amount_tolerance:
                     if stmt_dt and vp_dt:
                         if abs((vp_dt - stmt_dt).days) <= date_window_days:
-                            candidates.append(("vendor_payment", vp))
+                            candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), vp.get("vendor_name") or vp.get("payee") or ""))
                     else:
-                        candidates.append(("vendor_payment", vp))
+                        candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), vp.get("vendor_name") or vp.get("payee") or ""))
 
             for exp in expenses_raw:
                 exp_id = str(exp["_id"])
@@ -999,14 +1338,22 @@ async def _handle_reconcile_account(
                 if abs(exp_amount - debit) <= amount_tolerance:
                     if stmt_dt and exp_dt:
                         if abs((exp_dt - stmt_dt).days) <= date_window_days:
-                            candidates.append(("expense", exp))
+                            candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), exp.get("payee") or exp.get("category") or ""))
                     else:
-                        candidates.append(("expense", exp))
+                        candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), exp.get("payee") or exp.get("category") or ""))
 
             if len(candidates) == 1:
-                target_type, match_doc = candidates[0]
+                target_type, match_doc, cand_amount, cand_date, cand_ref = candidates[0]
                 ref_id = str(match_doc["_id"])
-                claimed_ids.add(ref_id)
+                confidence, reasons = _compute_match_confidence(
+                    debit,
+                    cand_amount,
+                    line.get("date"),
+                    cand_date,
+                    line.get("narration"),
+                    cand_ref,
+                )
+
                 matched_item = {
                     "statement_line_id": str(line_id),
                     "statement_date": line.get("date"),
@@ -1015,28 +1362,37 @@ async def _handle_reconcile_account(
                     "side": "debit",
                     "matched_type": target_type,
                     "ref_id": ref_id,
+                    "candidate_title": cand_ref or target_type.replace("_", " ").title(),
+                    "confidence_score": confidence,
+                    "confidence_percent": int(round(confidence * 100)),
+                    "confidence_reasons": reasons,
                 }
-                matched_results.append(matched_item)
 
-                if not dry_run:
-                    await db.bank_statement_lines.update_one(
-                        {"_id": line_id},
-                        {"$set": {
-                            "match_status": "matched",
-                            "matched_to": {"type": target_type, "ref_id": ref_id},
-                            "updated_at": now,
-                        }}
-                    )
-                    if target_type == "vendor_payment":
-                        await db.payments.update_one(
-                            {"_id": match_doc["_id"]},
-                            {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                if confidence >= norm_min_confidence:
+                    claimed_ids.add(ref_id)
+                    matched_results.append(matched_item)
+                    if not dry_run:
+                        await db.bank_statement_lines.update_one(
+                            {"_id": line_id},
+                            {"$set": {
+                                "match_status": "matched",
+                                "matched_to": {"type": target_type, "ref_id": ref_id},
+                                "updated_at": now,
+                            }}
                         )
-                    elif target_type == "expense":
-                        await db.expenses.update_one(
-                            {"_id": match_doc["_id"]},
-                            {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
-                        )
+                        if target_type == "vendor_payment":
+                            await db.payments.update_one(
+                                {"_id": match_doc["_id"]},
+                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                            )
+                        elif target_type == "expense":
+                            await db.expenses.update_one(
+                                {"_id": match_doc["_id"]},
+                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                            )
+                else:
+                    # Low confidence match left for individual review
+                    pending_review_results.append(matched_item)
             elif len(candidates) > 1:
                 ambiguous_count += 1
             else:
@@ -1049,25 +1405,37 @@ async def _handle_reconcile_account(
         "bank_account_name": acc.get("name"),
         "total_unmatched_evaluated": len(unmatched_lines),
         "auto_matched_count": len(matched_results),
+        "pending_review_count": len(pending_review_results),
         "ambiguous_count": ambiguous_count,
         "no_match_count": no_match_count,
+        "min_confidence": norm_min_confidence,
+        "min_confidence_percent": int(round(norm_min_confidence * 100)),
         "date_window_days": date_window_days,
         "amount_tolerance": amount_tolerance,
         "matched_details": matched_results,
+        "pending_review_details": pending_review_results,
     }
 
 
 @banking_router.post("/banking/accounts/{id}/reconcile")
 @banking_router.post("/bank-accounts/{id}/reconcile")
+@banking_router.post("/banking/accounts/{id}/bulk-confirm-matches")
+@banking_router.post("/bank-accounts/{id}/bulk-confirm-matches")
 async def reconcile_bank_account(
     id: str,
     request: Request,
     date_window_days: int = Query(3, ge=0, le=30),
     amount_tolerance: float = Query(1.0, ge=0.0, le=100.0),
+    min_confidence: float = Query(0.95, ge=0.0, le=100.0),
     dry_run: bool = Query(False),
 ):
-    """Run auto-reconciliation on unmatched statement lines against ERP records within tolerance & date window."""
-    return await _handle_reconcile_account(id, date_window_days, amount_tolerance, dry_run, request)
+    """
+    Run auto-reconciliation on unmatched statement lines against ERP records.
+    Only auto-confirms matches with confidence >= min_confidence (default 95%+ exact amount & date match).
+    Low confidence matches remain unmatched for individual review.
+    Transfer pairs are NEVER bulk-confirmed and always require explicit individual review.
+    """
+    return await _handle_reconcile_account(id, date_window_days, amount_tolerance, dry_run, min_confidence, request)
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1522,13 @@ async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Req
     amount = float(line.get("debit_amount") or 0.0)
     if amount <= 0:
         raise HTTPException(400, "Cash withdrawal line must have a debit amount > 0")
+
+    # Guard against orphaning dependent records if reclassifying
+    if line.get("match_status") in ["matched", "transfer"]:
+        await _check_statement_line_dependents(db, line, "reclassify as cash withdrawal")
+
+    # Guard against modifying locked period
+    await _check_period_locked(db, line.get("bank_account_id"), line.get("date"), "confirm cash withdrawal")
 
     now = _now_iso()
     user_email = u.get("email") or u.get("name", "")
@@ -1519,6 +1894,14 @@ async def confirm_transfer_pair(payload: TransferConfirmIn, request: Request):
     if float(to_line.get("credit_amount") or 0.0) <= 0:
         raise HTTPException(400, "To-line must be a credit (deposit)")
 
+    # Guard against orphaning dependent records (e.g. wage payments / expenses drawn from cash_withdrawal)
+    await _check_statement_line_dependents(db, from_line, "reclassify as transfer")
+    await _check_statement_line_dependents(db, to_line, "reclassify as transfer")
+
+    # Guard against modifying locked reconciliation period
+    await _check_period_locked(db, from_line.get("bank_account_id"), from_line.get("date"), "transfer")
+    await _check_period_locked(db, to_line.get("bank_account_id"), to_line.get("date"), "transfer")
+
     now = _now_iso()
     user_email = u.get("email") or u.get("name", "")
 
@@ -1831,6 +2214,1050 @@ async def get_unmatched_erp_candidates(
         "total": len(candidates),
         "candidates": candidates[:limit],
     }
+
+
+# ---------------------------------------------------------------------------
+# Period Locking & Finalization (Stage 5)
+# ---------------------------------------------------------------------------
+
+@banking_router.post("/banking/periods/lock")
+@banking_router.post("/bank-accounts/periods/lock")
+async def lock_reconciliation_period(payload: PeriodLockIn, request: Request):
+    """Finalize and lock a reconciliation period against any edits or unmatching."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    if payload.period_from > payload.period_to:
+        raise HTTPException(400, "period_from cannot be after period_to")
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "")
+    acc_id_str = str(payload.bank_account_id) if payload.bank_account_id and payload.bank_account_id != "all" else "all"
+
+    # Check if already locked
+    existing = await db.reconciliation_locks.find_one({
+        "status": "locked",
+        "bank_account_id": acc_id_str,
+        "period_from": payload.period_from,
+        "period_to": payload.period_to,
+    })
+    if existing:
+        return {
+            "ok": True,
+            "message": f"Period {payload.period_from} to {payload.period_to} is already locked.",
+            "lock": stringify(existing),
+        }
+
+    lock_doc = {
+        "bank_account_id": acc_id_str,
+        "period_from": payload.period_from,
+        "period_to": payload.period_to,
+        "status": "locked",
+        "locked_at": now,
+        "locked_by": user_email,
+        "lock_reason": payload.reason or "Monthly reconciliation finalized",
+        "history": [{
+            "action": "locked",
+            "timestamp": now,
+            "user": user_email,
+            "reason": payload.reason or "Monthly reconciliation finalized",
+        }],
+    }
+    res = await db.reconciliation_locks.insert_one(lock_doc)
+    lock_doc["_id"] = res.inserted_id
+
+    log.info(f"Reconciliation period {payload.period_from} to {payload.period_to} locked for account {acc_id_str} by {user_email}")
+
+    return {
+        "ok": True,
+        "message": f"Reconciliation period {payload.period_from} to {payload.period_to} successfully locked.",
+        "lock": stringify(lock_doc),
+    }
+
+
+@banking_router.post("/banking/periods/unlock")
+@banking_router.post("/bank-accounts/periods/unlock")
+async def unlock_reconciliation_period(payload: PeriodUnlockIn, request: Request):
+    """Unlock a previously locked reconciliation period (Admin only, audit logged)."""
+    u = await _get_user(request)
+    require_roles("admin")(u)  # ADMIN ONLY!
+    db = _get_db(request)
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "")
+    acc_id_str = str(payload.bank_account_id) if payload.bank_account_id and payload.bank_account_id != "all" else "all"
+
+    # Find active lock
+    lock = await db.reconciliation_locks.find_one({
+        "status": "locked",
+        "bank_account_id": {"$in": [acc_id_str, "all", None, ""]},
+        "period_from": {"$lte": payload.period_from},
+        "period_to": {"$gte": payload.period_to},
+    })
+    if not lock:
+        lock = await db.reconciliation_locks.find_one({
+            "status": "locked",
+            "period_from": payload.period_from,
+            "period_to": payload.period_to,
+        })
+
+    if not lock:
+        raise HTTPException(404, f"No active lock found for period {payload.period_from} to {payload.period_to}")
+
+    unlock_history_entry = {
+        "action": "unlocked",
+        "timestamp": now,
+        "user": user_email,
+        "reason": payload.reason or "Admin unlocked for adjustment",
+    }
+
+    await db.reconciliation_locks.update_one(
+        {"_id": lock["_id"]},
+        {
+            "$set": {
+                "status": "unlocked",
+                "unlocked_at": now,
+                "unlocked_by": user_email,
+                "unlock_reason": payload.reason or "Admin unlocked for adjustment",
+            },
+            "$push": {"history": unlock_history_entry},
+        }
+    )
+
+    log.info(f"Reconciliation period {payload.period_from} to {payload.period_to} unlocked by admin {user_email}. Reason: {payload.reason}")
+
+    return {
+        "ok": True,
+        "message": f"Reconciliation period {payload.period_from} to {payload.period_to} successfully unlocked.",
+        "unlocked_by": user_email,
+        "unlocked_at": now,
+        "reason": payload.reason,
+    }
+
+
+@banking_router.get("/banking/periods/locks")
+@banking_router.get("/bank-accounts/periods/locks")
+async def list_period_locks(request: Request, bank_account_id: Optional[str] = None):
+    """List active and past reconciliation period locks."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    q: Dict[str, Any] = {}
+    if bank_account_id and bank_account_id != "all":
+        q["bank_account_id"] = {"$in": [str(bank_account_id), "all", None, ""]}
+
+    docs = await db.reconciliation_locks.find(q).sort("period_from", -1).to_list(100)
+    return {
+        "ok": True,
+        "locks": [stringify(d) for d in docs],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Month-End Reconciliation Statement & Accountant Export (Stage 6)
+# ---------------------------------------------------------------------------
+
+def _generate_reconciliation_excel(
+    acc_doc: Optional[dict],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    summary_data: dict,
+    categorized_data: dict,
+    lock_doc: Optional[dict],
+    user_email: str,
+) -> bytes:
+    """
+    Generates a CA-ready, audit-grade Multi-Tab Excel Workbook formatted for Month-End Bank Reconciliation.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    # Define color scheme & typography
+    font_family = "Calibri"
+    title_font = Font(name=font_family, size=15, bold=True, color="1E3A8A")
+    subtitle_font = Font(name=font_family, size=10, italic=True, color="475569")
+    h2_font = Font(name=font_family, size=12, bold=True, color="0F172A")
+    tbl_hdr_font = Font(name=font_family, size=10, bold=True, color="FFFFFF")
+    tbl_hdr_fill = PatternFill("solid", fgColor="1E3A8A")
+    subhdr_fill = PatternFill("solid", fgColor="334155")
+    card_hdr_fill = PatternFill("solid", fgColor="F1F5F9")
+    zebra_fill = PatternFill("solid", fgColor="F8FAFC")
+    total_fill = PatternFill("solid", fgColor="E2E8F0")
+    success_fill = PatternFill("solid", fgColor="DCFCE7")
+    warn_fill = PatternFill("solid", fgColor="FEF3C7")
+
+    bold_font = Font(name=font_family, size=10, bold=True)
+    regular_font = Font(name=font_family, size=10)
+    green_bold = Font(name=font_family, size=10, bold=True, color="166534")
+    red_bold = Font(name=font_family, size=10, bold=True, color="991B1B")
+    amber_bold = Font(name=font_family, size=10, bold=True, color="92400E")
+
+    thin_border_side = Side(style="thin", color="CBD5E1")
+    thick_bottom_side = Side(style="medium", color="1E3A8A")
+    double_bottom_side = Side(style="double", color="1E3A8A")
+
+    cell_border = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
+    total_border = Border(top=thin_border_side, bottom=double_bottom_side, left=thin_border_side, right=thin_border_side)
+
+    CURR_FMT = "#,##0.00"
+
+    def auto_fit_columns(ws, max_widths=None):
+        for col in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                val = str(cell.value or "")
+                if cell.number_format and "0.00" in cell.number_format and isinstance(cell.value, (int, float)):
+                    val = f"{cell.value:,.2f}"
+                max_len = max(max_len, len(val))
+            applied_w = max(max_len + 3, 12)
+            if max_widths and col_letter in max_widths:
+                applied_w = min(applied_w, max_widths[col_letter])
+            ws.column_dimensions[col_letter].width = applied_w
+
+    # =========================================================================
+    # TAB 1: Executive Summary & Reconciliation Certificate
+    # =========================================================================
+    ws1 = wb.active
+    ws1.title = "Executive Summary"
+    ws1.views.sheetView[0].showGridLines = True
+
+    # Title & Metadata
+    ws1["A1"] = "SSK FOOTCARE - BANK RECONCILIATION STATEMENT"
+    ws1["A1"].font = title_font
+    ws1["A2"] = "Official Month-End Financial Audit & Reconciliation Certificate"
+    ws1["A2"].font = subtitle_font
+
+    acc_name = acc_doc.get("name", "All Bank Accounts") if acc_doc else "All Bank Accounts"
+    bank_name = acc_doc.get("bank_name", "Consolidated") if acc_doc else "Consolidated"
+    acc_num = acc_doc.get("account_number") or acc_doc.get("account_number_last4") or "N/A" if acc_doc else "All"
+    ifsc = acc_doc.get("ifsc", "N/A") if acc_doc else "N/A"
+    branch = acc_doc.get("branch", "N/A") if acc_doc else "N/A"
+    period_label = f"{from_date or 'Start'} to {to_date or 'Present'}"
+    is_locked = lock_doc and lock_doc.get("status") == "locked"
+    lock_status_label = f"FINALIZED & LOCKED ({lock_doc.get('locked_at', '')[:10]} by {lock_doc.get('locked_by', 'Admin')})" if is_locked else "OPEN / DRAFT"
+
+    meta_entries = [
+        ("Bank Account:", acc_name, "Reconciliation Period:", period_label),
+        ("Bank & Branch:", f"{bank_name} ({branch})", "Lock / Audit Status:", lock_status_label),
+        ("Account Number / IFSC:", f"{acc_num} / {ifsc}", "Report Generated On:", f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by {user_email}"),
+    ]
+
+    curr_row = 4
+    for left_k, left_v, right_k, right_v in meta_entries:
+        ws1.cell(row=curr_row, column=1, value=left_k).font = bold_font
+        ws1.cell(row=curr_row, column=2, value=left_v).font = regular_font
+        ws1.cell(row=curr_row, column=3, value=right_k).font = bold_font
+        ws1.cell(row=curr_row, column=4, value=right_v).font = bold_font if "Status" in right_k and is_locked else regular_font
+        if "Status" in right_k and is_locked:
+            ws1.cell(row=curr_row, column=4).fill = warn_fill
+        curr_row += 1
+
+    curr_row += 1
+
+    # Balance Reconciliation Table
+    ws1.cell(row=curr_row, column=1, value="1. RECONCILIATION SUMMARY (BALANCE PROOF)").font = h2_font
+    curr_row += 1
+
+    rec_headers = ["Line Item / Balance Component", "Amount (INR)", "Reconciliation Status / Note"]
+    for c_idx, h_text in enumerate(rec_headers, start=1):
+        c = ws1.cell(row=curr_row, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx != 2 else "right")
+    curr_row += 1
+
+    op_bal = summary_data.get("opening_balance", 0.0)
+    matched_inc = summary_data.get("matched_income", 0.0)
+    unmatched_inc = summary_data.get("unmatched_income", 0.0)
+    total_inc = summary_data.get("total_income", 0.0)
+    matched_exp = summary_data.get("matched_expenses", 0.0)
+    unmatched_exp = summary_data.get("unmatched_expenses", 0.0)
+    total_exp = summary_data.get("total_expenses", 0.0)
+    stmt_close_bal = summary_data.get("statement_closing_balance", op_bal + total_inc - total_exp)
+    reconciled_erp_bal = summary_data.get("reconciled_erp_balance", op_bal + matched_inc - matched_exp)
+    variance = round(stmt_close_bal - reconciled_erp_bal, 2)
+
+    rec_rows = [
+        ("Bank Statement Opening Balance", op_bal, "Opening ledger position as of period start", regular_font),
+        ("(+) Matched Inflows / Revenue & Receipts", matched_inc, "Verified and linked against ERP invoices & settlements", regular_font),
+        ("(-) Matched Outflows / Operating Expenses & Payments", matched_exp, "Verified and linked against ERP expenses & vendor payments", regular_font),
+        ("(=) Reconciled ERP Closing Position", reconciled_erp_bal, "Fully accounted & verified ERP cash position", bold_font),
+        ("(+) Unmatched Statement Credits (Pending Inflows)", unmatched_inc, "Receipts on bank statement awaiting ERP booking", regular_font),
+        ("(-) Unmatched Statement Debits (Pending Outflows)", unmatched_exp, "Debits on bank statement awaiting ERP booking", regular_font),
+        ("(=) Bank Statement Closing Balance", stmt_close_bal, "Recorded bank statement closing figure", bold_font),
+        ("Reconciliation Variance (Discrepancy)", variance, "Zero variance indicates 100% reconciled period" if variance == 0 else "Pending items require accountant allocation", bold_font),
+    ]
+
+    for item, amt, note, fnt in rec_rows:
+        c1 = ws1.cell(row=curr_row, column=1, value=item)
+        c2 = ws1.cell(row=curr_row, column=2, value=amt)
+        c3 = ws1.cell(row=curr_row, column=3, value=note)
+
+        c1.font = fnt
+        c2.font = fnt
+        c3.font = regular_font
+
+        c1.border = cell_border
+        c2.border = cell_border
+        c3.border = cell_border
+
+        c2.number_format = CURR_FMT
+        c2.alignment = Alignment(horizontal="right")
+
+        if item.startswith("(=)"):
+            c1.fill = total_fill
+            c2.fill = total_fill
+            c3.fill = total_fill
+        elif "Variance" in item:
+            fill_to_use = success_fill if variance == 0 else warn_fill
+            font_to_use = green_bold if variance == 0 else red_bold
+            c1.fill = fill_to_use
+            c2.fill = fill_to_use
+            c3.fill = fill_to_use
+            c1.font = font_to_use
+            c2.font = font_to_use
+            c3.font = font_to_use
+
+        curr_row += 1
+
+    curr_row += 2
+
+    # Categorized Volume Breakdown Table
+    ws1.cell(row=curr_row, column=1, value="2. TRANSACTION TYPE & CATEGORY AUDIT BREAKDOWN").font = h2_font
+    curr_row += 1
+
+    vol_headers = ["Transaction Category", "Flow Direction", "Transaction Count", "Total Volume (INR)", "Audit Description"]
+    for c_idx, h_text in enumerate(vol_headers, start=1):
+        c = ws1.cell(row=curr_row, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = subhdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx not in [3, 4] else "right")
+    curr_row += 1
+
+    rev_list = categorized_data.get("revenue", [])
+    exp_list = categorized_data.get("expenses", [])
+    vp_list = categorized_data.get("vendor_payments", [])
+    trf_list = categorized_data.get("transfers", [])
+    cash_list = categorized_data.get("cash_withdrawals", [])
+    unmatched_list = categorized_data.get("unmatched", [])
+
+    rev_vol = sum(float(r.get("credit_amount") or 0.0) for r in rev_list)
+    exp_vol = sum(float(r.get("debit_amount") or 0.0) for r in exp_list)
+    vp_vol = sum(float(r.get("debit_amount") or 0.0) for r in vp_list)
+    trf_vol = sum(float(r.get("amount") or 0.0) for r in trf_list)
+    cash_vol = sum(float(r.get("debit_amount") or 0.0) for r in cash_list)
+    unmatched_vol = sum(float(r.get("debit_amount") or 0.0) + float(r.get("credit_amount") or 0.0) for r in unmatched_list)
+
+    breakdown_rows = [
+        ("1. Revenue & Client Receipts", "Credit (Inflow)", len(rev_list), rev_vol, "B2B client invoices & online marketplace payouts"),
+        ("2. Operating Overheads & Expenses", "Debit (Outflow)", len(exp_list), exp_vol, "Factory rent, utilities, consumables, courier, GST"),
+        ("3. Vendor Raw Material Payments", "Debit (Outflow)", len(vp_list), vp_vol, "Leather, sole, upper, insole supplier NEFT/RTGS"),
+        ("4. Cash Withdrawals (Karigar Wages / Petty Cash)", "Debit (Outflow)", len(cash_list), cash_vol, "ATM/Bank cash drawn for karigar wages & cash expenses"),
+        ("5. Inter-Account Transfers", "Internal Transfer", len(trf_list), trf_vol, "Excluded from P&L as neutral internal liquidity moves"),
+        ("6. Unmatched / Pending Transactions", "Debit & Credit", len(unmatched_list), unmatched_vol, "Unclassified statement entries awaiting audit review"),
+    ]
+
+    for cat_title, flow, count, vol, desc in breakdown_rows:
+        c1 = ws1.cell(row=curr_row, column=1, value=cat_title)
+        c2 = ws1.cell(row=curr_row, column=2, value=flow)
+        c3 = ws1.cell(row=curr_row, column=3, value=count)
+        c4 = ws1.cell(row=curr_row, column=4, value=vol)
+        c5 = ws1.cell(row=curr_row, column=5, value=desc)
+
+        for cell in (c1, c2, c3, c4, c5):
+            cell.font = regular_font
+            cell.border = cell_border
+
+        c3.alignment = Alignment(horizontal="right")
+        c4.alignment = Alignment(horizontal="right")
+        c4.number_format = CURR_FMT
+        curr_row += 1
+
+    auto_fit_columns(ws1, {"A": 45, "B": 25, "C": 35, "D": 30, "E": 45})
+
+    # =========================================================================
+    # TAB 2: Revenue & Client Receipts
+    # =========================================================================
+    ws2 = wb.create_sheet("1. Revenue & Receipts")
+    ws2.views.sheetView[0].showGridLines = True
+    ws2["A1"] = "1. REVENUE & CLIENT RECEIPTS (MATCHED CREDITS)"
+    ws2["A1"].font = h2_font
+
+    r_headers = ["Date", "Statement Narration", "Ref / UTR", "Client / Source", "ERP Voucher #", "Statement Credit (INR)", "Reconciled Amount (INR)", "Status"]
+    for c_idx, h_text in enumerate(r_headers, start=1):
+        c = ws2.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx not in [6, 7] else "right")
+
+    r_row = 4
+    for item in rev_list:
+        ws2.cell(row=r_row, column=1, value=item.get("date")).font = regular_font
+        ws2.cell(row=r_row, column=2, value=item.get("narration")).font = regular_font
+        ws2.cell(row=r_row, column=3, value=item.get("reference_no") or "-").font = regular_font
+        ws2.cell(row=r_row, column=4, value=item.get("party_name") or "-").font = bold_font
+        ws2.cell(row=r_row, column=5, value=item.get("erp_voucher") or "-").font = regular_font
+        
+        c6 = ws2.cell(row=r_row, column=6, value=float(item.get("credit_amount") or 0.0))
+        c7 = ws2.cell(row=r_row, column=7, value=float(item.get("reconciled_amount") or item.get("credit_amount") or 0.0))
+        c8 = ws2.cell(row=r_row, column=8, value="MATCHED")
+
+        c6.number_format = CURR_FMT
+        c7.number_format = CURR_FMT
+        c6.alignment = Alignment(horizontal="right")
+        c7.alignment = Alignment(horizontal="right")
+        c8.font = green_bold
+
+        for col_i in range(1, 9):
+            ws2.cell(row=r_row, column=col_i).border = cell_border
+            if r_row % 2 == 0:
+                ws2.cell(row=r_row, column=col_i).fill = zebra_fill
+        r_row += 1
+
+    # Total Row
+    if rev_list:
+        ws2.cell(row=r_row, column=1, value="TOTAL REVENUE & RECEIPTS").font = bold_font
+        ws2.cell(row=r_row, column=6, value=rev_vol).font = bold_font
+        ws2.cell(row=r_row, column=6).number_format = CURR_FMT
+        ws2.cell(row=r_row, column=7, value=rev_vol).font = bold_font
+        ws2.cell(row=r_row, column=7).number_format = CURR_FMT
+        for col_i in range(1, 9):
+            ws2.cell(row=r_row, column=col_i).border = total_border
+            ws2.cell(row=r_row, column=col_i).fill = total_fill
+
+    auto_fit_columns(ws2)
+
+    # =========================================================================
+    # TAB 3: Operating Overheads & Expenses
+    # =========================================================================
+    ws3 = wb.create_sheet("2. Operating Expenses")
+    ws3.views.sheetView[0].showGridLines = True
+    ws3["A1"] = "2. OPERATING OVERHEADS & EXPENSES (MATCHED DEBITS)"
+    ws3["A1"].font = h2_font
+
+    e_headers = ["Date", "Statement Narration", "Ref / UTR", "Payee / Beneficiary", "Expense Category", "Statement Debit (INR)", "Reconciled Amount (INR)", "Status"]
+    for c_idx, h_text in enumerate(e_headers, start=1):
+        c = ws3.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx not in [6, 7] else "right")
+
+    e_row = 4
+    for item in exp_list:
+        ws3.cell(row=e_row, column=1, value=item.get("date")).font = regular_font
+        ws3.cell(row=e_row, column=2, value=item.get("narration")).font = regular_font
+        ws3.cell(row=e_row, column=3, value=item.get("reference_no") or "-").font = regular_font
+        ws3.cell(row=e_row, column=4, value=item.get("party_name") or "-").font = bold_font
+        ws3.cell(row=e_row, column=5, value=item.get("category") or "General").font = regular_font
+        
+        c6 = ws3.cell(row=e_row, column=6, value=float(item.get("debit_amount") or 0.0))
+        c7 = ws3.cell(row=e_row, column=7, value=float(item.get("reconciled_amount") or item.get("debit_amount") or 0.0))
+        c8 = ws3.cell(row=e_row, column=8, value="MATCHED")
+
+        c6.number_format = CURR_FMT
+        c7.number_format = CURR_FMT
+        c6.alignment = Alignment(horizontal="right")
+        c7.alignment = Alignment(horizontal="right")
+        c8.font = green_bold
+
+        for col_i in range(1, 9):
+            ws3.cell(row=e_row, column=col_i).border = cell_border
+            if e_row % 2 == 0:
+                ws3.cell(row=e_row, column=col_i).fill = zebra_fill
+        e_row += 1
+
+    if exp_list:
+        ws3.cell(row=e_row, column=1, value="TOTAL OPERATING EXPENSES").font = bold_font
+        ws3.cell(row=e_row, column=6, value=exp_vol).font = bold_font
+        ws3.cell(row=e_row, column=6).number_format = CURR_FMT
+        ws3.cell(row=e_row, column=7, value=exp_vol).font = bold_font
+        ws3.cell(row=e_row, column=7).number_format = CURR_FMT
+        for col_i in range(1, 9):
+            ws3.cell(row=e_row, column=col_i).border = total_border
+            ws3.cell(row=e_row, column=col_i).fill = total_fill
+
+    auto_fit_columns(ws3)
+
+    # =========================================================================
+    # TAB 4: Vendor Payments
+    # =========================================================================
+    ws4 = wb.create_sheet("3. Vendor Payments")
+    ws4.views.sheetView[0].showGridLines = True
+    ws4["A1"] = "3. VENDOR RAW MATERIAL PAYMENTS (MATCHED DEBITS)"
+    ws4["A1"].font = h2_font
+
+    v_headers = ["Date", "Statement Narration", "Ref / UTR", "Vendor / Supplier", "Payment Voucher #", "Statement Debit (INR)", "Reconciled Amount (INR)", "Status"]
+    for c_idx, h_text in enumerate(v_headers, start=1):
+        c = ws4.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx not in [6, 7] else "right")
+
+    v_row = 4
+    for item in vp_list:
+        ws4.cell(row=v_row, column=1, value=item.get("date")).font = regular_font
+        ws4.cell(row=v_row, column=2, value=item.get("narration")).font = regular_font
+        ws4.cell(row=v_row, column=3, value=item.get("reference_no") or "-").font = regular_font
+        ws4.cell(row=v_row, column=4, value=item.get("party_name") or "-").font = bold_font
+        ws4.cell(row=v_row, column=5, value=item.get("erp_voucher") or "-").font = regular_font
+        
+        c6 = ws4.cell(row=v_row, column=6, value=float(item.get("debit_amount") or 0.0))
+        c7 = ws4.cell(row=v_row, column=7, value=float(item.get("reconciled_amount") or item.get("debit_amount") or 0.0))
+        c8 = ws4.cell(row=v_row, column=8, value="MATCHED")
+
+        c6.number_format = CURR_FMT
+        c7.number_format = CURR_FMT
+        c6.alignment = Alignment(horizontal="right")
+        c7.alignment = Alignment(horizontal="right")
+        c8.font = green_bold
+
+        for col_i in range(1, 9):
+            ws4.cell(row=v_row, column=col_i).border = cell_border
+            if v_row % 2 == 0:
+                ws4.cell(row=v_row, column=col_i).fill = zebra_fill
+        v_row += 1
+
+    if vp_list:
+        ws4.cell(row=v_row, column=1, value="TOTAL VENDOR PAYMENTS").font = bold_font
+        ws4.cell(row=v_row, column=6, value=vp_vol).font = bold_font
+        ws4.cell(row=v_row, column=6).number_format = CURR_FMT
+        ws4.cell(row=v_row, column=7, value=vp_vol).font = bold_font
+        ws4.cell(row=v_row, column=7).number_format = CURR_FMT
+        for col_i in range(1, 9):
+            ws4.cell(row=v_row, column=col_i).border = total_border
+            ws4.cell(row=v_row, column=col_i).fill = total_fill
+
+    auto_fit_columns(ws4)
+
+    # =========================================================================
+    # TAB 5: Cash Withdrawals & Karigar Wages / Expense Funding
+    # =========================================================================
+    ws5 = wb.create_sheet("4. Cash & Karigar Wages")
+    ws5.views.sheetView[0].showGridLines = True
+    ws5["A1"] = "4. CASH WITHDRAWALS & KARIGAR WAGES / CASH DISBURSEMENTS"
+    ws5["A1"].font = h2_font
+
+    c_headers = [
+        "Withdrawal Date",
+        "Statement Narration",
+        "Withdrawn (INR)",
+        "Disbursed to Wages & Expenses (INR)",
+        "Unallocated Cash in Hand (INR)",
+        "Cash Pool Ref",
+        "Disbursement Details (What did this cash fund?)",
+    ]
+    for c_idx, h_text in enumerate(c_headers, start=1):
+        c = ws5.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx not in [3, 4, 5] else "right")
+
+    c_row = 4
+    total_disbursed_all = 0.0
+    total_unalloc_all = 0.0
+
+    for item in cash_list:
+        w_amt = float(item.get("debit_amount") or item.get("amount") or 0.0)
+        alloc_amt = float(item.get("allocated_amount") or 0.0)
+        unalloc_amt = float(item.get("remaining_balance") or (w_amt - alloc_amt))
+        total_disbursed_all += alloc_amt
+        total_unalloc_all += unalloc_amt
+
+        ws5.cell(row=c_row, column=1, value=item.get("date")).font = regular_font
+        ws5.cell(row=c_row, column=2, value=item.get("narration")).font = regular_font
+        
+        c3 = ws5.cell(row=c_row, column=3, value=w_amt)
+        c4 = ws5.cell(row=c_row, column=4, value=alloc_amt)
+        c5 = ws5.cell(row=c_row, column=5, value=unalloc_amt)
+        c6 = ws5.cell(row=c_row, column=6, value=item.get("cash_ledger_id") or "-")
+        c7 = ws5.cell(row=c_row, column=7, value=item.get("disbursements_summary") or "Unallocated Cash in Hand")
+
+        c3.number_format = CURR_FMT
+        c4.number_format = CURR_FMT
+        c5.number_format = CURR_FMT
+        c3.alignment = Alignment(horizontal="right")
+        c4.alignment = Alignment(horizontal="right")
+        c5.alignment = Alignment(horizontal="right")
+
+        c3.font = bold_font
+        c4.font = regular_font
+        c5.font = amber_bold if unalloc_amt > 0 else regular_font
+        c6.font = regular_font
+        c7.font = regular_font
+
+        for col_i in range(1, 8):
+            ws5.cell(row=c_row, column=col_i).border = cell_border
+            if c_row % 2 == 0:
+                ws5.cell(row=c_row, column=col_i).fill = zebra_fill
+        c_row += 1
+
+    if cash_list:
+        ws5.cell(row=c_row, column=1, value="TOTAL CASH WITHDRAWALS").font = bold_font
+        ws5.cell(row=c_row, column=3, value=cash_vol).font = bold_font
+        ws5.cell(row=c_row, column=3).number_format = CURR_FMT
+        ws5.cell(row=c_row, column=4, value=total_disbursed_all).font = bold_font
+        ws5.cell(row=c_row, column=4).number_format = CURR_FMT
+        ws5.cell(row=c_row, column=5, value=total_unalloc_all).font = bold_font
+        ws5.cell(row=c_row, column=5).number_format = CURR_FMT
+        for col_i in range(1, 8):
+            ws5.cell(row=c_row, column=col_i).border = total_border
+            ws5.cell(row=c_row, column=col_i).fill = total_fill
+
+    auto_fit_columns(ws5, {"G": 60})
+
+    # =========================================================================
+    # TAB 6: Inter-Account Transfers
+    # =========================================================================
+    ws6 = wb.create_sheet("5. Inter-Account Transfers")
+    ws6.views.sheetView[0].showGridLines = True
+    ws6["A1"] = "5. INTER-ACCOUNT TRANSFERS (INTERNAL LIQUIDITY MOVES - P&L EXCLUDED)"
+    ws6["A1"].font = h2_font
+
+    t_headers = ["Date", "Sending Account (Debit)", "Receiving Account (Credit)", "Statement Narration", "Amount (INR)", "Confirmed By", "Notes"]
+    for c_idx, h_text in enumerate(t_headers, start=1):
+        c = ws6.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = tbl_hdr_fill
+        c.alignment = Alignment(horizontal="left" if c_idx != 5 else "right")
+
+    t_row = 4
+    for item in trf_list:
+        ws6.cell(row=t_row, column=1, value=item.get("date")).font = regular_font
+        ws6.cell(row=t_row, column=2, value=item.get("from_account_name") or "-").font = bold_font
+        ws6.cell(row=t_row, column=3, value=item.get("to_account_name") or "-").font = bold_font
+        ws6.cell(row=t_row, column=4, value=item.get("narration") or "-").font = regular_font
+        
+        c5 = ws6.cell(row=t_row, column=5, value=float(item.get("amount") or 0.0))
+        c6 = ws6.cell(row=t_row, column=6, value=item.get("confirmed_by") or "-")
+        c7 = ws6.cell(row=t_row, column=7, value=item.get("notes") or "-")
+
+        c5.number_format = CURR_FMT
+        c5.alignment = Alignment(horizontal="right")
+        c5.font = bold_font
+
+        for col_i in range(1, 8):
+            ws6.cell(row=t_row, column=col_i).border = cell_border
+            if t_row % 2 == 0:
+                ws6.cell(row=t_row, column=col_i).fill = zebra_fill
+        t_row += 1
+
+    if trf_list:
+        ws6.cell(row=t_row, column=1, value="TOTAL INTERNAL TRANSFERS").font = bold_font
+        ws6.cell(row=t_row, column=5, value=trf_vol).font = bold_font
+        ws6.cell(row=t_row, column=5).number_format = CURR_FMT
+        for col_i in range(1, 8):
+            ws6.cell(row=t_row, column=col_i).border = total_border
+            ws6.cell(row=t_row, column=col_i).fill = total_fill
+
+    auto_fit_columns(ws6)
+
+    # =========================================================================
+    # TAB 7: Pending & Unmatched Transactions
+    # =========================================================================
+    ws7 = wb.create_sheet("6. Pending & Unmatched")
+    ws7.views.sheetView[0].showGridLines = True
+    ws7["A1"] = "6. PENDING & UNMATCHED STATEMENT ENTRIES (REQUIRING AUDIT ATTENTION)"
+    ws7["A1"].font = h2_font
+
+    u_headers = ["Date", "Bank Account", "Statement Narration", "Reference No", "Debit (INR)", "Credit (INR)", "Status", "Auditor / Accountant Remarks"]
+    for c_idx, h_text in enumerate(u_headers, start=1):
+        c = ws7.cell(row=3, column=c_idx, value=h_text)
+        c.font = tbl_hdr_font
+        c.fill = PatternFill("solid", fgColor="B91C1C" if unmatched_list else "1E3A8A")
+        c.alignment = Alignment(horizontal="left" if c_idx not in [5, 6] else "right")
+
+    u_row = 4
+    for item in unmatched_list:
+        ws7.cell(row=u_row, column=1, value=item.get("date")).font = regular_font
+        ws7.cell(row=u_row, column=2, value=item.get("bank_account_name") or "-").font = bold_font
+        ws7.cell(row=u_row, column=3, value=item.get("narration")).font = regular_font
+        ws7.cell(row=u_row, column=4, value=item.get("reference_no") or "-").font = regular_font
+        
+        c5 = ws7.cell(row=u_row, column=5, value=float(item.get("debit_amount") or 0.0) if float(item.get("debit_amount") or 0.0) > 0 else "")
+        c6 = ws7.cell(row=u_row, column=6, value=float(item.get("credit_amount") or 0.0) if float(item.get("credit_amount") or 0.0) > 0 else "")
+        c7 = ws7.cell(row=u_row, column=7, value=str(item.get("match_status") or "unmatched").upper())
+        c8 = ws7.cell(row=u_row, column=8, value=item.get("remarks") or "-")
+
+        if isinstance(c5.value, (int, float)):
+            c5.number_format = CURR_FMT
+            c5.alignment = Alignment(horizontal="right")
+            c5.font = red_bold
+        if isinstance(c6.value, (int, float)):
+            c6.number_format = CURR_FMT
+            c6.alignment = Alignment(horizontal="right")
+            c6.font = green_bold
+        c7.font = amber_bold
+
+        for col_i in range(1, 9):
+            ws7.cell(row=u_row, column=col_i).border = cell_border
+            if u_row % 2 == 0:
+                ws7.cell(row=u_row, column=col_i).fill = zebra_fill
+        u_row += 1
+
+    if not unmatched_list:
+        ws7.cell(row=4, column=1, value="No pending or unmatched lines found for this period. Reconciliation is 100% complete.").font = green_bold
+
+    auto_fit_columns(ws7)
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+@banking_router.get("/banking/reconciliation/export")
+@banking_router.get("/bank-accounts/reconciliation/export")
+async def export_reconciliation_report(
+    request: Request,
+    bank_account_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    format: str = Query("excel"),
+):
+    """
+    Generate and download an official CA / Accountant-Ready Bank Reconciliation Report (Excel format).
+    Includes statement balance, ERP reconciled balance, variance proof, grouped transactions (Revenue, Expenses, Vendor, Transfers, Cash), and unmatched items.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    acc_id_str = str(bank_account_id) if bank_account_id and bank_account_id != "all" else None
+    acc_doc = None
+    if acc_id_str:
+        acc_doc = await db.bank_accounts.find_one({"_id": _oid(acc_id_str)})
+
+    # Fetch statement lines
+    q: Dict[str, Any] = {}
+    if acc_id_str:
+        q["bank_account_id"] = acc_id_str
+    if from_date or to_date:
+        dq = {}
+        if from_date:
+            dq["$gte"] = str(from_date)
+        if to_date:
+            dq["$lte"] = str(to_date)
+        q["date"] = dq
+
+    docs = await db.bank_statement_lines.find(q).sort("date", 1).to_list(50000)
+
+    # Fetch accounts map
+    accounts = await db.bank_accounts.find({}).to_list(1000)
+    acc_map = {str(a["_id"]): a for a in accounts}
+
+    # Fetch active period lock if any
+    lock_q: Dict[str, Any] = {"status": "locked"}
+    if acc_id_str:
+        lock_q["bank_account_id"] = {"$in": [acc_id_str, "all", None, ""]}
+    if from_date:
+        lock_q["period_to"] = {"$gte": from_date}
+    if to_date:
+        lock_q["period_from"] = {"$lte": to_date}
+
+    lock_doc = await db.reconciliation_locks.find_one(lock_q) if hasattr(db, "reconciliation_locks") and db.reconciliation_locks is not None else None
+
+    # Fetch ERP records to enrich details
+    client_payments_map = {}
+    vendor_payments_map = {}
+    expenses_map = {}
+    settlements_map = {}
+    cash_ledger_map = {}
+
+    if hasattr(db, "payments") and db.payments is not None:
+        try:
+            p_list = await db.payments.find({}).to_list(20000)
+            for p in p_list:
+                pid = str(p["_id"])
+                if p.get("type") == "vendor_payment" or p.get("vendor_id") or p.get("vendor_name"):
+                    vendor_payments_map[pid] = p
+                else:
+                    client_payments_map[pid] = p
+        except Exception:
+            pass
+
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            e_list = await db.expenses.find({}).to_list(20000)
+            for e in e_list:
+                expenses_map[str(e["_id"])] = e
+        except Exception:
+            pass
+
+    if hasattr(db, "online_settlements") and db.online_settlements is not None:
+        try:
+            s_list = await db.online_settlements.find({}).to_list(20000)
+            for s in s_list:
+                settlements_map[str(s["_id"])] = s
+        except Exception:
+            pass
+
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            c_list = await db.cash_ledger.find({}).to_list(5000)
+            for c in c_list:
+                cash_ledger_map[str(c["_id"])] = c
+                if c.get("source_statement_line_id"):
+                    cash_ledger_map[str(c.get("source_statement_line_id"))] = c
+        except Exception:
+            pass
+
+    # Fetch wage payments & cash expenses for cash disbursements
+    wage_payments_by_cash_id = defaultdict(list)
+    cash_expenses_by_cash_id = defaultdict(list)
+
+    if hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_list = await db.wage_payments.find({"paid_via": "cash"}).to_list(20000)
+            for wp in wp_list:
+                clid = str(wp.get("cash_ledger_id") or "")
+                if clid:
+                    wage_payments_by_cash_id[clid].append(wp)
+        except Exception:
+            pass
+
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            ce_list = await db.expenses.find({"paid_via": "cash"}).to_list(20000)
+            for ce in ce_list:
+                clid = str(ce.get("cash_ledger_id") or "")
+                if clid:
+                    cash_expenses_by_cash_id[clid].append(ce)
+        except Exception:
+            pass
+
+    # Build categorized lists
+    rev_items = []
+    exp_items = []
+    vp_items = []
+    trf_items = []
+    cash_items = []
+    unmatched_items = []
+
+    total_income = 0.0
+    matched_income = 0.0
+    unmatched_income = 0.0
+    total_expenses = 0.0
+    matched_expenses = 0.0
+    unmatched_expenses = 0.0
+
+    lines_by_id = {str(d["_id"]): d for d in docs}
+
+    for d in docs:
+        lid = str(d["_id"])
+        status = d.get("match_status", "unmatched")
+        matched_to = d.get("matched_to") or {}
+        m_type = matched_to.get("type") if isinstance(matched_to, dict) else None
+        ref_id = str(matched_to.get("ref_id") or "") if isinstance(matched_to, dict) else ""
+
+        credit = float(d.get("credit_amount") or 0.0)
+        debit = float(d.get("debit_amount") or 0.0)
+        acc_info = acc_map.get(str(d.get("bank_account_id")), {})
+
+        if status == "transfer":
+            peer_line = lines_by_id.get(ref_id)
+            if not peer_line:
+                try:
+                    peer_line = await db.bank_statement_lines.find_one({"_id": _oid(ref_id)})
+                except Exception:
+                    peer_line = None
+            peer_acc = acc_map.get(str(peer_line.get("bank_account_id") if peer_line else ""), {})
+
+            if debit > 0:
+                trf_items.append({
+                    "date": d.get("date"),
+                    "from_account_name": acc_info.get("name", "Current Account"),
+                    "to_account_name": peer_acc.get("name", "Peer Account"),
+                    "narration": d.get("narration"),
+                    "amount": debit,
+                    "confirmed_by": d.get("confirmed_by") or d.get("imported_by") or "-",
+                    "notes": d.get("transfer_notes") or "",
+                })
+            continue
+
+        if status == "ignored":
+            continue
+
+        if credit > 0:
+            total_income += credit
+            if status == "matched":
+                matched_income += credit
+                if m_type == "settlement" and ref_id in settlements_map:
+                    s_doc = settlements_map[ref_id]
+                    rev_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": f"Marketplace Settlement ({s_doc.get('order_release_id', '')})",
+                        "erp_voucher": s_doc.get("order_release_id") or "Settlement",
+                        "credit_amount": credit,
+                        "reconciled_amount": float(s_doc.get("net_payout") or credit),
+                    })
+                elif m_type == "payment" and ref_id in client_payments_map:
+                    p_doc = client_payments_map[ref_id]
+                    rev_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": p_doc.get("client_name") or "Client Payment",
+                        "erp_voucher": p_doc.get("payment_no") or p_doc.get("reference") or "Payment",
+                        "credit_amount": credit,
+                        "reconciled_amount": float(p_doc.get("amount") or credit),
+                    })
+                else:
+                    rev_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": "Direct Client Receipt",
+                        "erp_voucher": ref_id or "Matched",
+                        "credit_amount": credit,
+                        "reconciled_amount": credit,
+                    })
+            else:
+                unmatched_income += credit
+                unmatched_items.append({
+                    "date": d.get("date"),
+                    "bank_account_name": acc_info.get("name", "Account"),
+                    "narration": d.get("narration"),
+                    "reference_no": d.get("reference_no"),
+                    "debit_amount": 0.0,
+                    "credit_amount": credit,
+                    "match_status": status,
+                    "remarks": d.get("remarks"),
+                })
+
+        if debit > 0:
+            total_expenses += debit
+            if status == "matched":
+                matched_expenses += debit
+                if m_type == "cash_withdrawal":
+                    cash_doc = cash_ledger_map.get(ref_id) or cash_ledger_map.get(lid)
+                    clid = str(cash_doc["_id"]) if cash_doc else ref_id
+                    wps = wage_payments_by_cash_id.get(clid, [])
+                    exps = cash_expenses_by_cash_id.get(clid, [])
+                    alloc = sum(float(x.get("amount") or 0.0) for x in wps) + sum(float(x.get("amount") or 0.0) for x in exps)
+                    rem = float(cash_doc.get("remaining_balance") if cash_doc else (debit - alloc))
+
+                    disb_details = []
+                    if wps:
+                        wp_strs = [f"Karigar {wp.get('worker_name', 'Worker')} (₹{float(wp.get('amount') or 0.0):,.2f})" for wp in wps[:5]]
+                        if len(wps) > 5:
+                            wp_strs.append(f"+{len(wps)-5} more karigars")
+                        disb_details.append(f"Wages: {', '.join(wp_strs)}")
+                    if exps:
+                        exp_strs = [f"{e.get('category', 'Expense')} (₹{float(e.get('amount') or 0.0):,.2f})" for e in exps[:5]]
+                        if len(exps) > 5:
+                            exp_strs.append(f"+{len(exps)-5} more expenses")
+                        disb_details.append(f"Expenses: {', '.join(exp_strs)}")
+
+                    disb_summary = "; ".join(disb_details) if disb_details else "Unallocated Cash in Hand"
+
+                    cash_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "debit_amount": debit,
+                        "allocated_amount": round(alloc, 2),
+                        "remaining_balance": round(rem, 2),
+                        "cash_ledger_id": clid,
+                        "disbursements_summary": disb_summary,
+                    })
+                elif m_type in ["vendor_payment", "payment"] and (ref_id in vendor_payments_map or (ref_id in client_payments_map and client_payments_map[ref_id].get("vendor_name"))):
+                    v_doc = vendor_payments_map.get(ref_id) or client_payments_map.get(ref_id, {})
+                    vp_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": v_doc.get("vendor_name") or v_doc.get("client_name") or "Vendor Payment",
+                        "erp_voucher": v_doc.get("payment_no") or v_doc.get("reference") or "Payment",
+                        "debit_amount": debit,
+                        "reconciled_amount": float(v_doc.get("amount") or debit),
+                    })
+                elif m_type == "expense" and ref_id in expenses_map:
+                    e_doc = expenses_map[ref_id]
+                    exp_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": e_doc.get("payee") or "Expense Payee",
+                        "category": e_doc.get("category") or "Direct Expense",
+                        "debit_amount": debit,
+                        "reconciled_amount": float(e_doc.get("amount") or debit),
+                    })
+                else:
+                    exp_items.append({
+                        "date": d.get("date"),
+                        "narration": d.get("narration"),
+                        "reference_no": d.get("reference_no"),
+                        "party_name": "Direct Expense",
+                        "category": "Direct Expense",
+                        "debit_amount": debit,
+                        "reconciled_amount": debit,
+                    })
+            else:
+                unmatched_expenses += debit
+                unmatched_items.append({
+                    "date": d.get("date"),
+                    "bank_account_name": acc_info.get("name", "Account"),
+                    "narration": d.get("narration"),
+                    "reference_no": d.get("reference_no"),
+                    "debit_amount": debit,
+                    "credit_amount": 0.0,
+                    "match_status": status,
+                    "remarks": d.get("remarks"),
+                })
+
+    op_balance = float(acc_doc.get("opening_balance") or 0.0) if acc_doc else sum(float(a.get("opening_balance") or 0.0) for a in accounts)
+    stmt_closing = round(op_balance + total_income - total_expenses, 2)
+    erp_closing = round(op_balance + matched_income - matched_expenses, 2)
+
+    summary_data = {
+        "opening_balance": op_balance,
+        "total_income": round(total_income, 2),
+        "matched_income": round(matched_income, 2),
+        "unmatched_income": round(unmatched_income, 2),
+        "total_expenses": round(total_expenses, 2),
+        "matched_expenses": round(matched_expenses, 2),
+        "unmatched_expenses": round(unmatched_expenses, 2),
+        "statement_closing_balance": stmt_closing,
+        "reconciled_erp_balance": erp_closing,
+    }
+
+    categorized_data = {
+        "revenue": rev_items,
+        "expenses": exp_items,
+        "vendor_payments": vp_items,
+        "transfers": trf_items,
+        "cash_withdrawals": cash_items,
+        "unmatched": unmatched_items,
+    }
+
+    user_email = u.get("email") or u.get("name", "Auditor")
+    excel_bytes = _generate_reconciliation_excel(
+        acc_doc=acc_doc,
+        from_date=from_date,
+        to_date=to_date,
+        summary_data=summary_data,
+        categorized_data=categorized_data,
+        lock_doc=lock_doc,
+        user_email=user_email,
+    )
+
+    acc_slug = acc_doc.get("name", "Consolidated").replace(" ", "_") if acc_doc else "Consolidated"
+    date_slug = f"{from_date or 'Start'}_to_{to_date or 'Present'}"
+    filename = f"Bank_Reconciliation_Statement_{acc_slug}_{date_slug}.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 
 
 

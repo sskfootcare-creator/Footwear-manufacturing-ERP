@@ -22,6 +22,8 @@ import {
   TrendingUp,
   Coins,
   Wallet,
+  Lock,
+  Unlock,
 } from "lucide-react";
 
 const isCashWithdrawalCandidate = (line) => {
@@ -71,9 +73,20 @@ export default function BankReconciliation() {
   const [showManualMatchModal, setShowManualMatchModal] = useState(false);
   const [activeLineForMatch, setActiveLineForMatch] = useState(null);
 
+  // Period Lock state
+  const [showLockModal, setShowLockModal] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
+  const [lockFrom, setLockFrom] = useState(new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10));
+  const [lockTo, setLockTo] = useState(new Date().toISOString().slice(0, 10));
+  const [lockReason, setLockReason] = useState("Monthly reconciliation finalized for GST / Accounting");
+  const [unlockReason, setUnlockReason] = useState("");
+  const [periodLocks, setPeriodLocks] = useState([]);
+  const [selectedLockToUnlock, setSelectedLockToUnlock] = useState(null);
+
   // Auto reconcile state
   const [reconciling, setReconciling] = useState(false);
   const [reconcileResult, setReconcileResult] = useState(null);
+  const [minConfidenceThreshold, setMinConfidenceThreshold] = useState(95);
 
   // Toast / feedback
   const [msg, setMsg] = useState({ text: "", type: "info" });
@@ -123,7 +136,7 @@ export default function BankReconciliation() {
         params.search = statementFilter.search;
       }
       const { data } = await http.get("/banking/statement-lines", { params });
-      setStatementLines(data.items || []);
+      setStatementLines(Array.isArray(data) ? data : data.items || []);
     } catch (e) {
       notify(e.message || "Failed to load statement lines", "error");
     } finally {
@@ -178,6 +191,19 @@ export default function BankReconciliation() {
     }
   }, [selectedAccountId, erpSearch]);
 
+  const fetchPeriodLocks = useCallback(async () => {
+    try {
+      const params = {};
+      if (selectedAccountId && selectedAccountId !== "all") {
+        params.bank_account_id = selectedAccountId;
+      }
+      const { data } = await http.get("/banking/periods/locks", { params });
+      setPeriodLocks(data.locks || []);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [selectedAccountId]);
+
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
@@ -188,23 +214,102 @@ export default function BankReconciliation() {
     fetchSuggestedTransfers();
     fetchSuggestedCashWithdrawals();
     fetchErpCandidates();
-  }, [selectedAccountId, fetchSummary, fetchStatementLines, fetchSuggestedTransfers, fetchSuggestedCashWithdrawals, fetchErpCandidates]);
+    fetchPeriodLocks();
+  }, [selectedAccountId, fetchSummary, fetchStatementLines, fetchSuggestedTransfers, fetchSuggestedCashWithdrawals, fetchErpCandidates, fetchPeriodLocks]);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Action Handlers
   // ─────────────────────────────────────────────────────────────────────────────
 
-  const handleRunAutoReconcile = async () => {
+  const handleLockPeriod = async () => {
+    try {
+      await http.post("/banking/periods/lock", {
+        bank_account_id: selectedAccountId === "all" ? null : selectedAccountId,
+        period_from: lockFrom,
+        period_to: lockTo,
+        reason: lockReason || "Monthly reconciliation finalized for GST / Accounting",
+      });
+      notify(`Reconciliation period ${lockFrom} to ${lockTo} successfully locked!`, "success");
+      setShowLockModal(false);
+      fetchPeriodLocks();
+      fetchSummary();
+    } catch (e) {
+      notify(e.message || "Failed to lock period", "error");
+    }
+  };
+
+  const handleUnlockPeriod = async () => {
+    if (!selectedLockToUnlock) return;
+    try {
+      await http.post("/banking/periods/unlock", {
+        bank_account_id: selectedLockToUnlock.bank_account_id === "all" ? null : selectedLockToUnlock.bank_account_id,
+        period_from: selectedLockToUnlock.period_from,
+        period_to: selectedLockToUnlock.period_to,
+        reason: unlockReason || "Admin unlocked for correction",
+      });
+      notify(`Reconciliation period ${selectedLockToUnlock.period_from} to ${selectedLockToUnlock.period_to} unlocked by admin!`, "success");
+      setShowUnlockModal(false);
+      setSelectedLockToUnlock(null);
+      setUnlockReason("");
+      fetchPeriodLocks();
+      fetchSummary();
+    } catch (e) {
+      notify(e.message || "Failed to unlock period (Admin required)", "error");
+    }
+  };
+
+  const handleExportAccountantReport = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (selectedAccountId && selectedAccountId !== "all") {
+        params.append("bank_account_id", selectedAccountId);
+      }
+      if (statementFilter.fromDate) {
+        params.append("from_date", statementFilter.fromDate);
+      }
+      if (statementFilter.toDate) {
+        params.append("to_date", statementFilter.toDate);
+      }
+      const token = localStorage.getItem("token") || "";
+      const url = `/api/banking/reconciliation/export?${params.toString()}`;
+      
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        throw new Error("Failed to generate export file");
+      }
+      const blob = await res.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      const acc = accounts.find((a) => a.id === selectedAccountId);
+      const accName = acc ? acc.name.replace(/\s+/g, "_") : "Consolidated";
+      a.download = `Bank_Reconciliation_Statement_${accName}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      notify("Reconciliation report exported successfully!", "success");
+    } catch (e) {
+      notify(e.message || "Failed to download export", "error");
+    }
+  };
+
+  const handleRunAutoReconcile = async (threshold = minConfidenceThreshold) => {
     if (selectedAccountId === "all") {
       notify("Please select a specific Bank Account to run auto-reconciliation.", "error");
       return;
     }
     setReconciling(true);
     try {
-      const { data } = await http.post(`/banking/accounts/${selectedAccountId}/reconcile?date_window_days=3&amount_tolerance=1.0`);
+      const { data } = await http.post(
+        `/banking/accounts/${selectedAccountId}/reconcile?date_window_days=3&amount_tolerance=1.0&min_confidence=${threshold}`
+      );
       setReconcileResult(data);
+      const pendingMsg = data.pending_review_count > 0 ? ` (${data.pending_review_count} low-confidence left for review)` : "";
       notify(
-        `Auto-reconciliation complete: ${data.auto_matched_count} matches resolved, ${data.ambiguous_count} ambiguous lines left for review.`,
+        `Bulk auto-reconciliation complete: ${data.auto_matched_count} matches resolved (≥${data.min_confidence_percent}% confidence)${pendingMsg}.`,
         "success"
       );
       fetchSummary();
@@ -379,15 +484,89 @@ export default function BankReconciliation() {
             <BtnSecondary onClick={() => setShowImportModal(true)} className="flex items-center gap-1.5" testId="import-statement-btn">
               <Upload className="w-3.5 h-3.5" /> Import Statement
             </BtnSecondary>
+            <BtnSecondary
+              onClick={handleExportAccountantReport}
+              className="flex items-center gap-1.5 bg-white border-slate-300 text-slate-800 hover:bg-slate-50"
+              testId="export-reconciliation-btn"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" /> Export Report (Excel)
+            </BtnSecondary>
+            <div className="flex items-center border-2 border-slate-300 bg-white">
+              <span className="text-[10px] uppercase font-bold text-slate-500 px-2 border-r border-slate-200">
+                Min Confidence:
+              </span>
+              <select
+                value={minConfidenceThreshold}
+                onChange={(e) => setMinConfidenceThreshold(Number(e.target.value))}
+                className="text-xs font-bold py-1.5 px-2 bg-transparent text-slate-800 focus:outline-none"
+                data-testid="confidence-threshold-select"
+              >
+                <option value={95}>95%+ (Exact Date & Amt)</option>
+                <option value={90}>90%+ (±1 Day)</option>
+                <option value={80}>80%+ (±2-3 Days)</option>
+                <option value={70}>70%+ (Broad Match)</option>
+              </select>
+            </div>
             <BtnPrimary
-              onClick={handleRunAutoReconcile}
+              onClick={() => handleRunAutoReconcile(minConfidenceThreshold)}
               disabled={reconciling || selectedAccountId === "all"}
               className="flex items-center gap-1.5 bg-[#1E3A8A] border-[#1E3A8A] hover:bg-[#172554]"
               testId="auto-reconcile-btn"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${reconciling ? "animate-spin" : ""}`} />
-              {reconciling ? "Reconciling..." : "Auto-Reconcile"}
+              {reconciling ? "Reconciling..." : `Bulk Confirm (≥${minConfidenceThreshold}%)`}
             </BtnPrimary>
+
+            {periodLocks.find(
+              (l) =>
+                l.status === "locked" &&
+                (selectedAccountId === "all" || l.bank_account_id === "all" || l.bank_account_id === selectedAccountId)
+            ) ? (
+              <div className="flex items-center gap-2 bg-amber-50 border-2 border-amber-500 px-3 py-1 text-xs font-bold text-amber-900 shadow-sm">
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>
+                  Period Locked:{" "}
+                  {
+                    periodLocks.find(
+                      (l) =>
+                        l.status === "locked" &&
+                        (selectedAccountId === "all" || l.bank_account_id === "all" || l.bank_account_id === selectedAccountId)
+                    ).period_from
+                  }{" "}
+                  →{" "}
+                  {
+                    periodLocks.find(
+                      (l) =>
+                        l.status === "locked" &&
+                        (selectedAccountId === "all" || l.bank_account_id === "all" || l.bank_account_id === selectedAccountId)
+                    ).period_to
+                  }
+                </span>
+                <button
+                  onClick={() => {
+                    const lk = periodLocks.find(
+                      (l) =>
+                        l.status === "locked" &&
+                        (selectedAccountId === "all" || l.bank_account_id === "all" || l.bank_account_id === selectedAccountId)
+                    );
+                    setSelectedLockToUnlock(lk);
+                    setShowUnlockModal(true);
+                  }}
+                  className="ml-2 px-1.5 py-0.5 bg-amber-200 hover:bg-amber-300 text-amber-950 text-[10px] uppercase font-bold tracking-wider rounded border border-amber-400"
+                  data-testid="unlock-period-btn"
+                >
+                  <Unlock className="w-2.5 h-2.5 inline mr-1" /> Unlock (Admin)
+                </button>
+              </div>
+            ) : (
+              <BtnSecondary
+                onClick={() => setShowLockModal(true)}
+                className="flex items-center gap-1.5 border-slate-400 bg-white hover:bg-slate-50 text-slate-800"
+                testId="lock-period-btn"
+              >
+                <Lock className="w-3.5 h-3.5 text-slate-600" /> Lock Period
+              </BtnSecondary>
+            )}
           </div>
         }
       />
@@ -433,7 +612,7 @@ export default function BankReconciliation() {
         </div>
 
         {/* Reconciliation Balance Overview Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="reconcile-overview-cards">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="reconcile-overview-cards">
           {/* Statement Closing Balance */}
           <Card className="p-5 border-l-4 border-l-slate-700 bg-gradient-to-br from-white to-slate-50/30">
             <div className="flex items-center justify-between mb-2">
@@ -498,6 +677,30 @@ export default function BankReconciliation() {
                   {unmatchedLines.length} unmatched line(s) pending
                 </span>
               )}
+            </div>
+          </Card>
+
+          {/* Total Cash in Hand (Prominent Balance Tile) */}
+          <Card
+            className="p-5 border-l-4 border-l-emerald-600 bg-gradient-to-br from-white to-emerald-50/40 cursor-pointer hover:shadow-md transition-shadow"
+            onClick={() => setActiveTab("cash_in_hand")}
+            data-testid="cash-in-hand-overview-card"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-emerald-800">Total Cash in Hand</span>
+              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 grid place-items-center">
+                <Wallet className="w-4 h-4" />
+              </div>
+            </div>
+            <div
+              className="text-2xl font-black font-mono text-emerald-800"
+              data-testid="total-cash-in-hand-val"
+            >
+              {inr(summary?.summary?.total_cash_in_hand || 0)}
+            </div>
+            <div className="text-xs text-slate-600 font-medium mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+              <span>Drawn: ₹{inr(summary?.summary?.total_cash_withdrawn || 0)}</span>
+              <span className="text-[10px] uppercase font-bold text-emerald-700 hover:underline">View Pools →</span>
             </div>
           </Card>
 
@@ -1170,6 +1373,37 @@ export default function BankReconciliation() {
           }}
         />
       )}
+
+      {/* 6. PERIOD LOCK MODAL */}
+      {showLockModal && (
+        <PeriodLockModal
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          periodFrom={lockFrom}
+          periodTo={lockTo}
+          reason={lockReason}
+          onPeriodFromChange={setLockFrom}
+          onPeriodToChange={setLockTo}
+          onReasonChange={setLockReason}
+          onClose={() => setShowLockModal(false)}
+          onLock={handleLockPeriod}
+        />
+      )}
+
+      {/* 7. PERIOD UNLOCK MODAL (ADMIN ONLY) */}
+      {showUnlockModal && selectedLockToUnlock && (
+        <PeriodUnlockModal
+          lockDoc={selectedLockToUnlock}
+          accounts={accounts}
+          unlockReason={unlockReason}
+          onReasonChange={setUnlockReason}
+          onClose={() => {
+            setShowUnlockModal(false);
+            setSelectedLockToUnlock(null);
+          }}
+          onUnlock={handleUnlockPeriod}
+        />
+      )}
     </div>
   );
 }
@@ -1402,10 +1636,22 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
           {/* Preview Details */}
           {preview && (
             <div className="p-3.5 bg-slate-50 border-2 border-slate-200 space-y-2.5">
-              <div className="flex items-center justify-between text-xs font-bold text-emerald-800">
-                <span>✓ Layout Verified: {preview.parsed_count} transactions parsed</span>
-                <span className="font-mono">Total rows in file: {preview.total_file_rows}</span>
-              </div>
+              {preview.skipped_count > 0 ? (
+                <div className="p-2 bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded space-y-0.5">
+                  <div className="font-bold flex items-center justify-between">
+                    <span>⚠️ {preview.new_count ?? (preview.parsed_count - preview.skipped_count)} new rows to import</span>
+                    <span className="font-mono text-[11px] text-amber-700">{preview.skipped_count} duplicates skipped</span>
+                  </div>
+                  <div className="text-[11px] text-amber-700">
+                    {preview.skipped_count} row(s) already exist in this bank account and will not be duplicated.
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between text-xs font-bold text-emerald-800">
+                  <span>✓ Layout Verified: {preview.parsed_count} transactions parsed (all new)</span>
+                  <span className="font-mono">Total rows in file: {preview.total_file_rows}</span>
+                </div>
+              )}
 
               {preview.suggested_account_update && (
                 <div className="p-2.5 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 space-y-1.5">
@@ -1981,5 +2227,210 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Period Lock Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function PeriodLockModal({
+  accounts,
+  selectedAccountId,
+  periodFrom,
+  periodTo,
+  reason,
+  onPeriodFromChange,
+  onPeriodToChange,
+  onReasonChange,
+  onClose,
+  onLock,
+}) {
+  const acc = accounts.find((a) => a.id === selectedAccountId);
+  const accName = acc ? acc.name : "All Bank Accounts";
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden">
+        {/* Header */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-amber-50">
+          <div className="flex items-center gap-2">
+            <Lock className="w-5 h-5 text-amber-700" />
+            <div>
+              <h3 className="font-bold text-sm text-slate-900">Lock Reconciliation Period</h3>
+              <p className="text-[11px] text-slate-600">Finalize monthly statement & prevent further edits</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-amber-100 text-slate-600 rounded">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-5 space-y-4">
+          <div className="p-3 bg-amber-50/80 border border-amber-200 rounded text-xs text-amber-900 space-y-1">
+            <div className="font-bold flex items-center gap-1">
+              <ShieldCheck className="w-4 h-4 text-amber-600" />
+              Finalization & Protection Guard
+            </div>
+            <p className="text-[11px] leading-relaxed">
+              Locking protects all matched statement lines and cash/ERP links in this date range from accidental unmatching, re-matching, or deletions. Useful once monthly figures are verified for GST filing or accounting.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Target Account</label>
+              <input
+                type="text"
+                disabled
+                value={accName}
+                className="w-full bg-slate-100 border border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-700 rounded"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Period From</label>
+                <input
+                  type="date"
+                  value={periodFrom}
+                  onChange={(e) => onPeriodFromChange(e.target.value)}
+                  className="w-full border-2 border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-800 focus:outline-none focus:border-slate-800"
+                  data-testid="lock-period-from-input"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Period To</label>
+                <input
+                  type="date"
+                  value={periodTo}
+                  onChange={(e) => onPeriodToChange(e.target.value)}
+                  className="w-full border-2 border-slate-300 px-3 py-1.5 text-xs font-bold text-slate-800 focus:outline-none focus:border-slate-800"
+                  data-testid="lock-period-to-input"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Reason / Notes</label>
+              <input
+                type="text"
+                value={reason}
+                onChange={(e) => onReasonChange(e.target.value)}
+                placeholder="e.g. August 2026 Monthly Reconciliation Finalized for GST Filing"
+                className="w-full border-2 border-slate-300 px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-slate-800"
+                data-testid="lock-reason-input"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t-2 border-slate-100 flex items-center justify-end gap-2 bg-slate-50">
+          <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+          <BtnPrimary
+            onClick={onLock}
+            className="flex items-center gap-1.5 bg-amber-700 border-amber-700 hover:bg-amber-800"
+            testId="confirm-lock-period-btn"
+          >
+            <Lock className="w-3.5 h-3.5" /> Confirm Lock Period
+          </BtnPrimary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Period Unlock Modal (Admin Only)
+// ─────────────────────────────────────────────────────────────────────────────
+function PeriodUnlockModal({
+  lockDoc,
+  accounts,
+  unlockReason,
+  onReasonChange,
+  onClose,
+  onUnlock,
+}) {
+  const acc = accounts.find((a) => a.id === lockDoc.bank_account_id);
+  const accName = acc ? acc.name : "All Bank Accounts";
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden">
+        {/* Header */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-red-50">
+          <div className="flex items-center gap-2">
+            <Unlock className="w-5 h-5 text-red-700" />
+            <div>
+              <h3 className="font-bold text-sm text-slate-900">Unlock Reconciliation Period</h3>
+              <p className="text-[11px] text-red-700 font-bold">Admin-Only Logged Action</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-red-100 text-slate-600 rounded">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-5 space-y-4">
+          <div className="p-3 bg-red-50/80 border border-red-200 rounded text-xs text-red-900 space-y-1">
+            <div className="font-bold flex items-center gap-1">
+              <AlertTriangle className="w-4 h-4 text-red-600" />
+              Administrative Unlock Required
+            </div>
+            <p className="text-[11px] leading-relaxed">
+              Unlocking will permit modifications to statement lines between{" "}
+              <strong className="font-mono">{lockDoc.period_from}</strong> and{" "}
+              <strong className="font-mono">{lockDoc.period_to}</strong> for {accName}. This action will be permanently recorded in the audit history.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Locked Period</label>
+              <div className="font-mono text-xs font-bold bg-slate-100 p-2 border border-slate-300 rounded">
+                {lockDoc.period_from} → {lockDoc.period_to} ({accName})
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Original Lock Reason</label>
+              <div className="text-xs text-slate-600 bg-slate-50 p-2 border border-slate-200 rounded italic">
+                {lockDoc.lock_reason || "Reconciliation finalized"}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Reason for Unlocking <span className="text-red-600">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={unlockReason}
+                onChange={(e) => onReasonChange(e.target.value)}
+                placeholder="Explain why this finalized period is being unlocked (e.g. Audit correction for invoice #1024)..."
+                className="w-full border-2 border-slate-300 p-2 text-xs text-slate-800 focus:outline-none focus:border-red-600"
+                data-testid="unlock-reason-input"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t-2 border-slate-100 flex items-center justify-end gap-2 bg-slate-50">
+          <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+          <BtnPrimary
+            onClick={onUnlock}
+            disabled={!unlockReason.trim()}
+            className="flex items-center gap-1.5 bg-red-700 border-red-700 hover:bg-red-800 disabled:opacity-50"
+            testId="confirm-unlock-period-btn"
+          >
+            <Unlock className="w-3.5 h-3.5" /> Unlock Period (Admin)
+          </BtnPrimary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 

@@ -1013,6 +1013,7 @@ async def test_auto_reconcile_online_account_credits(monkeypatch):
         request=req,
         date_window_days=3,
         amount_tolerance=1.0,
+        min_confidence=0.70,
         dry_run=False,
     )
 
@@ -1153,6 +1154,7 @@ async def test_auto_reconcile_b2b_account_credits_and_debits(monkeypatch):
         request=req,
         date_window_days=3,
         amount_tolerance=1.0,
+        min_confidence=0.70,
         dry_run=False,
     )
 
@@ -1815,7 +1817,7 @@ def test_expense_paid_via_cash_models_validation():
 
 @pytest.mark.anyio
 async def test_create_cash_expense_success_and_drawdown(monkeypatch):
-    """Verify creating a cash expense decrements cash_ledger remaining_balance."""
+    """Verify creating a cash expense decrements cash_ledger remaining_balance via atomic conditional update."""
     from routes.expenses import create_expense
 
     cash_id = ObjectId()
@@ -1830,11 +1832,14 @@ async def test_create_cash_expense_success_and_drawdown(monkeypatch):
 
     mock_db = MagicMock()
     mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_entry)
-    
+
     async def mock_update_cash(q, update):
-        if "$inc" in update and "remaining_balance" in update["$inc"]:
-            cash_entry["remaining_balance"] += update["$inc"]["remaining_balance"]
-        return MagicMock(matched_count=1)
+        gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+        if cash_entry["remaining_balance"] >= gte_val:
+            inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+            cash_entry["remaining_balance"] += inc_val
+            return MagicMock(modified_count=1)
+        return MagicMock(modified_count=0)
     mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
 
     async def mock_insert_exp(doc):
@@ -1882,7 +1887,16 @@ async def test_create_cash_expense_overdraft_rejected(monkeypatch):
     }
 
     mock_db = MagicMock()
+    async def mock_update_cash(q, update):
+        gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+        if cash_entry["remaining_balance"] >= gte_val:
+            inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+            cash_entry["remaining_balance"] += inc_val
+            return MagicMock(modified_count=1)
+        return MagicMock(modified_count=0)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
     mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_entry)
+
     req = MagicMock()
     req.app.mongodb = mock_db
     monkeypatch.setattr("routes.expenses._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
@@ -1900,6 +1914,91 @@ async def test_create_cash_expense_overdraft_rejected(monkeypatch):
         await create_expense(payload, req)
     assert exc.value.status_code == 400
     assert "Insufficient cash in ledger entry" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_concurrent_cash_expense_requests_prevent_race_condition(monkeypatch):
+    """Verify two concurrent cash-expense requests with balance only for one: exactly one succeeds, one rejected, balance >= 0."""
+    import asyncio
+    from routes.expenses import create_expense
+
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 5000.0,
+        "remaining_balance": 5000.0,
+        "date": "2026-08-10",
+        "notes": "Cash pool",
+    }
+    expenses_store = {}
+    db_lock = asyncio.Lock()
+
+    mock_db = MagicMock()
+
+    async def mock_update_cash(q, update):
+        # Simulate MongoDB atomic conditional update with a lock
+        async with db_lock:
+            gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+            if cash_entry["remaining_balance"] >= gte_val:
+                inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+                cash_entry["remaining_balance"] += inc_val
+                return MagicMock(modified_count=1)
+            return MagicMock(modified_count=0)
+
+    async def mock_find_one(q):
+        async with db_lock:
+            return dict(cash_entry)
+
+    async def mock_insert_exp(doc):
+        eid = ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=mock_insert_exp)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.expenses._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+
+    # Two concurrent requests for 4000.0 each when pool only has 5000.0
+    payload1 = ExpenseIn(
+        category="Raw Materials",
+        amount=4000.0,
+        date="2026-08-11",
+        payee="Supplier A",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+    )
+    payload2 = ExpenseIn(
+        category="Raw Materials",
+        amount=4000.0,
+        date="2026-08-11",
+        payee="Supplier B",
+        paid_via="cash",
+        cash_ledger_id=str(cash_id),
+    )
+
+    results = await asyncio.gather(
+        create_expense(payload1, req),
+        create_expense(payload2, req),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, dict) and r.get("paid_via") == "cash"]
+    failures = [r for r in results if isinstance(r, HTTPException)]
+
+    # Exactly one must succeed and exactly one must fail
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].status_code == 400
+    assert "Insufficient cash in ledger entry" in failures[0].detail
+
+    # Remaining balance must be 5000 - 4000 = 1000 (never negative)
+    assert cash_entry["remaining_balance"] == 1000.0
+    assert len(expenses_store) == 1
 
 
 @pytest.mark.anyio
@@ -1991,6 +2090,1568 @@ async def test_cash_withdrawal_combined_wages_and_expenses_audit_trail(monkeypat
     assert "Ramesh Karigar" in disb_titles
     assert "Local Thread Supplier" in disb_titles
     assert "Tempo Driver Raju" in disb_titles
+
+
+@pytest.mark.anyio
+async def test_statement_reimport_duplicate_skipping_and_reporting(monkeypatch):
+    """Verify importing a statement, then re-importing the exact same file: 0 new, N skipped as duplicates."""
+    from fastapi import UploadFile
+    from io import BytesIO
+    import routes.banking
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "HDFC Primary Current A/C",
+        "bank_name": "HDFC",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "fixed_row", "row": 0},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Date",
+                "narration": "Narration",
+                "reference": "Chq./Ref.No.",
+                "debit_amount": "Withdrawal Amt.",
+                "credit_amount": "Deposit Amt.",
+                "balance": "Closing Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+
+    db_statement_lines = []
+
+    async def mock_insert_many(docs):
+        inserted_ids = []
+        for d in docs:
+            doc_copy = dict(d)
+            oid_val = ObjectId()
+            doc_copy["_id"] = oid_val
+            db_statement_lines.append(doc_copy)
+            inserted_ids.append(oid_val)
+        return MagicMock(inserted_ids=inserted_ids)
+
+    def mock_find(query):
+        matched = [
+            d for d in db_statement_lines
+            if str(d.get("bank_account_id")) == str(query.get("bank_account_id"))
+        ]
+        if "date" in query and isinstance(query["date"], dict):
+            gte = query["date"].get("$gte")
+            lte = query["date"].get("$lte")
+            if gte:
+                matched = [d for d in matched if d.get("date", "") >= gte]
+            if lte:
+                matched = [d for d in matched if d.get("date", "") <= lte]
+        return MagicMock(to_list=AsyncMock(return_value=matched))
+
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=mock_insert_many)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=mock_find)
+
+    csv_content = (
+        "Date,Narration,Chq./Ref.No.,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        "15/08/2026,ACH CR-MYNTRA DESIGNS-SETTLEMENT,ACH001,,45250.50,145250.50\n"
+        "16/08/2026,UPI-SWIGGY-EXPENSE,UPI999,350.00,,144900.50\n"
+        "17/08/2026,NEFT DR-LEATHER SUPPLIER VENDOR,NEFT777,25000.00,,119900.50\n"
+    ).encode("utf-8")
+
+    req = MagicMock()
+
+    # Pass 1: Initial import -> 3 new rows inserted, 0 skipped
+    file1 = UploadFile(filename="hdfc_aug.csv", file=BytesIO(csv_content))
+    res1 = await routes.banking.import_bank_statement(acc_id, req, file=file1, dry_run=False)
+    assert res1["ok"] is True
+    assert res1["inserted_count"] == 3
+    assert res1["skipped_count"] == 0
+    assert len(db_statement_lines) == 3
+
+    # Pass 2: Re-import exact same file -> 0 new, 3 skipped as duplicates
+    file2 = UploadFile(filename="hdfc_aug.csv", file=BytesIO(csv_content))
+    res2 = await routes.banking.import_bank_statement(acc_id, req, file=file2, dry_run=False)
+    assert res2["ok"] is True
+    assert res2["inserted_count"] == 0
+    assert res2["skipped_count"] == 3
+    assert "0 new, 3 skipped as duplicates" in res2["message"]
+    # Total rows in DB remains exactly 3, not 6
+    assert len(db_statement_lines) == 3
+
+
+@pytest.mark.anyio
+async def test_statement_overlapping_import_partial_skipping(monkeypatch):
+    """Verify importing a statement with partial overlap: overlapping rows skipped, genuinely new rows inserted."""
+    from fastapi import UploadFile
+    from io import BytesIO
+    import routes.banking
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "HDFC Primary Current A/C",
+        "bank_name": "HDFC",
+        "statement_format": {
+            "sheet_locator": {"type": "first_sheet"},
+            "header_locator": {"type": "fixed_row", "row": 0},
+            "skip_rows_after_header": 0,
+            "column_map": {
+                "date": "Date",
+                "narration": "Narration",
+                "reference": "Chq./Ref.No.",
+                "debit_amount": "Withdrawal Amt.",
+                "credit_amount": "Deposit Amt.",
+                "balance": "Closing Balance",
+            },
+            "date_format": "%d/%m/%Y",
+        }
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+
+    db_statement_lines = []
+
+    async def mock_insert_many(docs):
+        inserted_ids = []
+        for d in docs:
+            doc_copy = dict(d)
+            oid_val = ObjectId()
+            doc_copy["_id"] = oid_val
+            db_statement_lines.append(doc_copy)
+            inserted_ids.append(oid_val)
+        return MagicMock(inserted_ids=inserted_ids)
+
+    def mock_find(query):
+        matched = [
+            d for d in db_statement_lines
+            if str(d.get("bank_account_id")) == str(query.get("bank_account_id"))
+        ]
+        if "date" in query and isinstance(query["date"], dict):
+            gte = query["date"].get("$gte")
+            lte = query["date"].get("$lte")
+            if gte:
+                matched = [d for d in matched if d.get("date", "") >= gte]
+            if lte:
+                matched = [d for d in matched if d.get("date", "") <= lte]
+        return MagicMock(to_list=AsyncMock(return_value=matched))
+
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=mock_insert_many)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=mock_find)
+
+    # First export: Aug 15 to Aug 17 (3 rows)
+    csv1 = (
+        "Date,Narration,Chq./Ref.No.,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        "15/08/2026,ACH CR-MYNTRA DESIGNS-SETTLEMENT,ACH001,,45250.50,145250.50\n"
+        "16/08/2026,UPI-SWIGGY-EXPENSE,UPI999,350.00,,144900.50\n"
+        "17/08/2026,NEFT DR-LEATHER SUPPLIER VENDOR,NEFT777,25000.00,,119900.50\n"
+    ).encode("utf-8")
+
+    # Second export: Aug 17 to Aug 19 (1 overlapping row on Aug 17, 2 new rows on Aug 18 and 19)
+    csv2 = (
+        "Date,Narration,Chq./Ref.No.,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        "17/08/2026,NEFT DR-LEATHER SUPPLIER VENDOR,NEFT777,25000.00,,119900.50\n"
+        "18/08/2026,ACH CR-AMAZON PAYOUT,ACH002,,62000.00,181900.50\n"
+        "19/08/2026,CHQ DEP-OFFLINE BUYER,CHQ888,,15000.00,196900.50\n"
+    ).encode("utf-8")
+
+    req = MagicMock()
+
+    # Import 1
+    file1 = UploadFile(filename="export_part1.csv", file=BytesIO(csv1))
+    res1 = await routes.banking.import_bank_statement(acc_id, req, file=file1, dry_run=False)
+    assert res1["inserted_count"] == 3
+    assert res1["skipped_count"] == 0
+
+    # Dry run of Import 2 -> reports 2 new, 1 duplicate
+    file2_preview = UploadFile(filename="export_part2.csv", file=BytesIO(csv2))
+    preview_res = await routes.banking.import_bank_statement(acc_id, req, file=file2_preview, dry_run=True)
+    assert preview_res["new_count"] == 2
+    assert preview_res["skipped_count"] == 1
+    assert "2 new, 1 skipped as duplicates" in preview_res["message"]
+
+    # Import 2 commit -> inserts 2 new, skips 1 duplicate
+    file2_commit = UploadFile(filename="export_part2.csv", file=BytesIO(csv2))
+    res2 = await routes.banking.import_bank_statement(acc_id, req, file=file2_commit, dry_run=False)
+    assert res2["inserted_count"] == 2
+    assert res2["skipped_count"] == 1
+    assert "2 new, 1 skipped as duplicates" in res2["message"]
+
+    # Total distinct rows in DB is 3 + 2 = 5
+    assert len(db_statement_lines) == 5
+
+
+@pytest.mark.anyio
+async def test_reclassify_cash_withdrawal_with_dependents_blocked(monkeypatch):
+    """Verify attempting to reclassify/rematch a cash withdrawal line with dependent wage payments/expenses is blocked with a clear error."""
+    import routes.banking
+    from routes.banking import confirm_transfer_pair, match_statement_line
+    from models.banking import TransferConfirmIn, BankStatementLineUpdate
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    from_line_id = ObjectId()
+    to_line_id = ObjectId()
+    cash_ledger_id = ObjectId()
+
+    # from_line was confirmed as cash_withdrawal
+    from_line_doc = {
+        "_id": from_line_id,
+        "bank_account_id": "acc_1",
+        "date": "2026-08-10",
+        "narration": "ATM CASH WITHDRAWAL",
+        "debit_amount": 10000.0,
+        "credit_amount": 0.0,
+        "match_status": "matched",
+        "matched_to": {"type": "cash_withdrawal", "ref_id": str(cash_ledger_id)},
+    }
+    to_line_doc = {
+        "_id": to_line_id,
+        "bank_account_id": "acc_2",
+        "date": "2026-08-10",
+        "narration": "TRANSFER DEPOSIT",
+        "debit_amount": 0.0,
+        "credit_amount": 10000.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+    cash_ledger_doc = {
+        "_id": cash_ledger_id,
+        "source_statement_line_id": str(from_line_id),
+        "amount": 10000.0,
+        "remaining_balance": 3000.0,
+    }
+    # Has 2 dependent wage payments!
+    dependent_wages = [
+        {"_id": ObjectId(), "cash_ledger_id": str(cash_ledger_id), "amount": 4000.0, "worker_name": "Ramesh"},
+        {"_id": ObjectId(), "cash_ledger_id": str(cash_ledger_id), "amount": 3000.0, "worker_name": "Suresh"},
+    ]
+
+    async def mock_find_one_line(q):
+        qid = str(q.get("_id"))
+        if qid == str(from_line_id):
+            return dict(from_line_doc)
+        if qid == str(to_line_id):
+            return dict(to_line_doc)
+        return None
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=mock_find_one_line)
+    mock_db.cash_ledger.find_one = AsyncMock(return_value=cash_ledger_doc)
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=dependent_wages)))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    req = MagicMock()
+
+    # 1. Attempt to confirm as transfer pair -> must be blocked
+    transfer_payload = TransferConfirmIn(
+        from_line_id=str(from_line_id),
+        to_line_id=str(to_line_id),
+        notes="Reclassifying to transfer",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await confirm_transfer_pair(transfer_payload, req)
+    assert exc_info.value.status_code == 400
+    assert "active dependent records" in exc_info.value.detail
+    assert "2 wage payment(s)" in exc_info.value.detail
+    assert "reclassify as transfer" in exc_info.value.detail
+
+    # 2. Attempt to rematch/unmatch directly -> must also be blocked
+    rematch_payload = BankStatementLineUpdate(
+        match_status="unmatched",
+    )
+    with pytest.raises(HTTPException) as exc_info2:
+        await match_statement_line(str(from_line_id), rematch_payload, req)
+    assert exc_info2.value.status_code == 400
+    assert "active dependent records" in exc_info2.value.detail
+
+
+@pytest.mark.anyio
+async def test_rematch_line_without_dependents_succeeds(monkeypatch):
+    """Verify a statement line with no dependents can be freely reclassified/rematched."""
+    import routes.banking
+    from routes.banking import confirm_transfer_pair, match_statement_line
+    from models.banking import TransferConfirmIn, BankStatementLineUpdate
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    from_line_id = ObjectId()
+    to_line_id = ObjectId()
+    cash_ledger_id = ObjectId()
+
+    # from_line was confirmed as cash_withdrawal, but NO wage payments or expenses were drawn from it
+    from_line_doc = {
+        "_id": from_line_id,
+        "bank_account_id": "acc_1",
+        "date": "2026-08-10",
+        "narration": "ATM CASH WITHDRAWAL",
+        "debit_amount": 5000.0,
+        "credit_amount": 0.0,
+        "match_status": "matched",
+        "matched_to": {"type": "cash_withdrawal", "ref_id": str(cash_ledger_id)},
+    }
+    to_line_doc = {
+        "_id": to_line_id,
+        "bank_account_id": "acc_2",
+        "date": "2026-08-10",
+        "narration": "TRANSFER DEPOSIT",
+        "debit_amount": 0.0,
+        "credit_amount": 5000.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+    cash_ledger_doc = {
+        "_id": cash_ledger_id,
+        "source_statement_line_id": str(from_line_id),
+        "amount": 5000.0,
+        "remaining_balance": 5000.0,
+    }
+
+    async def mock_find_one_line(q):
+        qid = str(q.get("_id"))
+        if qid == str(from_line_id):
+            return dict(from_line_doc)
+        if qid == str(to_line_id):
+            return dict(to_line_doc)
+        return None
+
+    async def mock_find_one_cash(q):
+        if str(q.get("_id")) == str(cash_ledger_id) or str(q.get("source_statement_line_id")) == str(from_line_id):
+            return dict(cash_ledger_doc)
+        return None
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=mock_find_one_line)
+    mock_db.bank_statement_lines.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.cash_ledger.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    req = MagicMock()
+
+    # Confirm transfer pair -> succeeds because 0 dependents exist
+    transfer_payload = TransferConfirmIn(
+        from_line_id=str(from_line_id),
+        to_line_id=str(to_line_id),
+        notes="Reclassified to transfer",
+    )
+    res = await confirm_transfer_pair(transfer_payload, req)
+    assert res["ok"] is True
+    assert "Transfer pair successfully confirmed" in res["message"]
+    # Cleaned up the empty unused cash ledger entry
+    mock_db.cash_ledger.delete_one.assert_called_once_with({"_id": cash_ledger_id})
+
+
+@pytest.mark.anyio
+async def test_multi_concurrent_cash_expense_requests_high_contention(monkeypatch):
+    """Verify N-way simultaneous concurrent cash-expense requests (5 coroutines for 1200 each against 3000 pool). Exactly 2 succeed, 3 rejected, balance is 600."""
+    import asyncio
+    from routes.expenses import create_expense
+
+    cash_id = ObjectId()
+    cash_entry = {
+        "_id": cash_id,
+        "amount": 3000.0,
+        "remaining_balance": 3000.0,
+        "date": "2026-08-10",
+    }
+    expenses_store = {}
+    db_lock = asyncio.Lock()
+
+    mock_db = MagicMock()
+
+    async def mock_update_cash(q, update):
+        # Simulate slight async context switch before lock to maximize interleaving
+        await asyncio.sleep(0.001)
+        async with db_lock:
+            gte_val = q.get("remaining_balance", {}).get("$gte", 0.0)
+            if cash_entry["remaining_balance"] >= gte_val:
+                inc_val = update.get("$inc", {}).get("remaining_balance", 0.0)
+                cash_entry["remaining_balance"] = round(cash_entry["remaining_balance"] + inc_val, 2)
+                return MagicMock(modified_count=1)
+            return MagicMock(modified_count=0)
+
+    async def mock_find_one(q):
+        async with db_lock:
+            return dict(cash_entry)
+
+    async def mock_insert_exp(doc):
+        await asyncio.sleep(0.001)
+        eid = ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=mock_insert_exp)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    monkeypatch.setattr("routes.expenses._get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+
+    # 5 concurrent requests of 1200 each against 3000 pool
+    payloads = [
+        ExpenseIn(
+            category="Raw Materials",
+            amount=1200.0,
+            date="2026-08-11",
+            payee=f"Supplier {i}",
+            paid_via="cash",
+            cash_ledger_id=str(cash_id),
+        )
+        for i in range(5)
+    ]
+
+    results = await asyncio.gather(
+        *(create_expense(p, req) for p in payloads),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, dict) and r.get("paid_via") == "cash"]
+    failures = [r for r in results if isinstance(r, HTTPException)]
+
+    # Exactly 2 succeed (2400 <= 3000), and exactly 3 fail (600 < 1200)
+    assert len(successes) == 2
+    assert len(failures) == 3
+    for f in failures:
+        assert f.status_code == 400
+        assert "Insufficient cash in ledger entry" in f.detail
+
+    assert cash_entry["remaining_balance"] == 600.0
+    assert len(expenses_store) == 2
+
+
+@pytest.mark.anyio
+async def test_bulk_confirm_matches_confidence_threshold_filtering(monkeypatch):
+    """Verify bulk auto-reconcile confirms only matches >= min_confidence and leaves lower confidence matches for individual review."""
+    import routes.banking
+    from routes.banking import reconcile_bank_account
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "HDFC Current",
+        "account_type": "b2b_client",
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+
+    line1_id = ObjectId()
+    line2_id = ObjectId()
+    line3_id = ObjectId()
+
+    # In-memory store of statement lines
+    db_lines = {
+        str(line1_id): {
+            "_id": line1_id,
+            "bank_account_id": acc_id,
+            "date": "2026-08-10",
+            "debit_amount": 5000.0,
+            "credit_amount": 0.0,
+            "narration": "NEFT DR RENT PAYMENT",
+            "match_status": "unmatched",
+        },
+        str(line2_id): {
+            "_id": line2_id,
+            "bank_account_id": acc_id,
+            "date": "2026-08-10",
+            "debit_amount": 3000.0,
+            "credit_amount": 0.0,
+            "narration": "NEFT DR VENDOR XYZ",
+            "match_status": "unmatched",
+        },
+        str(line3_id): {
+            "_id": line3_id,
+            "bank_account_id": acc_id,
+            "date": "2026-08-10",
+            "debit_amount": 1500.0,
+            "credit_amount": 0.0,
+            "narration": "UPI EXPENSE TEA",
+            "match_status": "unmatched",
+        },
+    }
+
+    # ERP records:
+    # 1. Expense 1: Exact date ("2026-08-10") & exact amount (5000.0) -> Confidence >= 95%
+    exp1_id = ObjectId()
+    exp1 = {"_id": exp1_id, "amount": 5000.0, "date": "2026-08-10", "payee": "Landlord Rent", "bank_account_id": None}
+
+    # 2. Vendor payment 2: 2 days offset ("2026-08-12") & slight amount diff (2999.50 vs 3000.0) -> Confidence ≈ 68%
+    vp2_id = ObjectId()
+    vp2 = {"_id": vp2_id, "type": "vendor_payment", "amount": 2999.50, "payment_date": "2026-08-12", "vendor_name": "Leather Corp", "bank_account_id": None}
+
+    # 3. Expense 3: 1 day offset ("2026-08-11") & amount (1500.0) -> Confidence ≈ 85%
+    exp3_id = ObjectId()
+    exp3 = {"_id": exp3_id, "amount": 1500.0, "date": "2026-08-11", "payee": "Tea Pantry", "bank_account_id": None}
+
+    def mock_find_lines(q):
+        unmatched = [d for d in db_lines.values() if d["match_status"] == "unmatched"]
+        return MagicMock(sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=unmatched))))
+
+    async def mock_update_line(q, update):
+        lid = str(q["_id"])
+        if lid in db_lines:
+            db_lines[lid].update(update.get("$set", {}))
+        return MagicMock(matched_count=1)
+
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=mock_find_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=mock_update_line)
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[vp2])))
+    mock_db.payments.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[exp1, exp3])))
+    mock_db.expenses.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+
+    req = MagicMock()
+
+    # Pass 1: Run with default conservative threshold (95%+)
+    res1 = await reconcile_bank_account(
+        acc_id,
+        req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert res1["ok"] is True
+    assert res1["total_unmatched_evaluated"] == 3
+    # Exactly Line 1 (exact date+amount) has confidence >= 95% and is auto-matched
+    assert res1["auto_matched_count"] == 1
+    # Lines 2 and 3 remain for individual review
+    assert res1["pending_review_count"] == 2
+    assert db_lines[str(line1_id)]["match_status"] == "matched"
+    assert db_lines[str(line2_id)]["match_status"] == "unmatched"
+    assert db_lines[str(line3_id)]["match_status"] == "unmatched"
+
+    # Pass 2: Run with 80%+ threshold
+    res2 = await reconcile_bank_account(
+        acc_id,
+        req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.80,
+        dry_run=False,
+    )
+    assert res2["ok"] is True
+    assert res2["total_unmatched_evaluated"] == 2
+    # Line 3 (1-day offset, ~85% confidence) is now auto-matched
+    assert res2["auto_matched_count"] == 1
+    # Line 2 (2-day offset, ~75% confidence) still remains for review
+    assert res2["pending_review_count"] == 1
+    assert db_lines[str(line3_id)]["match_status"] == "matched"
+    assert db_lines[str(line2_id)]["match_status"] == "unmatched"
+
+
+@pytest.mark.anyio
+async def test_period_lock_blocks_edits_and_admin_unlock_allows_edits(monkeypatch):
+    """
+    Verify:
+    1. Lock a reconciliation period (2026-08-01 to 2026-08-31).
+    2. Attempt to edit/unmatch/rematch a line within the period -> blocked with clear 400 error.
+    3. Non-admin unlock attempt is rejected with 403.
+    4. Admin unlock with audit reason succeeds.
+    5. Edits/unmatching within the unlocked period are permitted again.
+    """
+    import routes.banking
+    from routes.banking import (
+        lock_reconciliation_period,
+        unlock_reconciliation_period,
+        match_statement_line,
+        list_period_locks,
+    )
+    from models.banking import PeriodLockIn, PeriodUnlockIn, BankStatementLineUpdate
+
+    mock_db = MagicMock()
+    admin_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+    manager_user = {"role": "manager", "email": "manager@sskfootcare.com", "name": "Manager User"}
+    current_user = [admin_user]
+
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(side_effect=lambda r: current_user[0]))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    line_id = ObjectId()
+    line_doc = {
+        "_id": line_id,
+        "bank_account_id": acc_id,
+        "date": "2026-08-15",
+        "debit_amount": 5000.0,
+        "credit_amount": 0.0,
+        "narration": "OFFICE EXPENSE",
+        "match_status": "matched",
+        "matched_to": {"type": "expense", "ref_id": str(ObjectId())},
+    }
+
+    # In-memory collections
+    locks_store = []
+    lines_store = {str(line_id): dict(line_doc)}
+
+    # Mock reconciliation_locks collection
+    mock_locks_col = MagicMock()
+
+    async def mock_lock_insert(doc):
+        d = dict(doc)
+        d["_id"] = ObjectId()
+        locks_store.append(d)
+        return MagicMock(inserted_id=d["_id"])
+
+    async def mock_lock_find_one(q):
+        for l in locks_store:
+            if l.get("status") != q.get("status", l.get("status")):
+                continue
+            if "period_from" in q and isinstance(q["period_from"], dict) and "$lte" in q["period_from"]:
+                target_date = q["period_from"]["$lte"]
+                if not (l["period_from"] <= target_date <= l["period_to"]):
+                    continue
+            elif "period_from" in q and q["period_from"] != l["period_from"]:
+                continue
+            if "period_to" in q and not isinstance(q["period_to"], dict) and q["period_to"] != l["period_to"]:
+                continue
+            return l
+        return None
+
+    async def mock_lock_update(q, u):
+        lid = q.get("_id")
+        for l in locks_store:
+            if l["_id"] == lid:
+                if "$set" in u:
+                    l.update(u["$set"])
+                if "$push" in u:
+                    for pk, pv in u["$push"].items():
+                        l.setdefault(pk, []).append(pv)
+                return MagicMock(matched_count=1)
+        return MagicMock(matched_count=0)
+
+    def mock_lock_find(q):
+        return MagicMock(sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=locks_store))))
+
+    mock_locks_col.insert_one = AsyncMock(side_effect=mock_lock_insert)
+    mock_locks_col.find_one = AsyncMock(side_effect=mock_lock_find_one)
+    mock_locks_col.update_one = AsyncMock(side_effect=mock_lock_update)
+    mock_locks_col.find = MagicMock(side_effect=mock_lock_find)
+    mock_db.reconciliation_locks = mock_locks_col
+
+    # Mock statement lines collection
+    async def mock_stmt_find_one(q):
+        lid = str(q.get("_id"))
+        return lines_store.get(lid)
+
+    async def mock_stmt_update_one(q, u):
+        lid = str(q.get("_id"))
+        if lid in lines_store:
+            lines_store[lid].update(u.get("$set", {}))
+            return MagicMock(matched_count=1)
+        return MagicMock(matched_count=0)
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=mock_stmt_find_one)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=mock_stmt_update_one)
+    mock_db.cash_ledger = MagicMock(find_one=AsyncMock(return_value=None))
+
+    req = MagicMock()
+
+    # Step 1: Lock the period 2026-08-01 to 2026-08-31
+    lock_res = await lock_reconciliation_period(
+        PeriodLockIn(
+            bank_account_id=acc_id,
+            period_from="2026-08-01",
+            period_to="2026-08-31",
+            reason="August 2026 finalized for GST filing",
+        ),
+        req,
+    )
+    assert lock_res["ok"] is True
+    assert len(locks_store) == 1
+    assert locks_store[0]["status"] == "locked"
+    assert locks_store[0]["locked_by"] == "admin@sskfootcare.com"
+
+    # Step 2: Attempt to unmatch/edit statement line on 2026-08-15 -> MUST be blocked
+    with pytest.raises(HTTPException) as exc_info:
+        await match_statement_line(
+            id=str(line_id),
+            payload=BankStatementLineUpdate(match_status="unmatched"),
+            request=req,
+        )
+    assert exc_info.value.status_code == 400
+    assert "Reconciliation period (2026-08-01 to 2026-08-31)" in exc_info.value.detail
+    assert "is finalized and locked" in exc_info.value.detail
+    assert lines_store[str(line_id)]["match_status"] == "matched"
+
+    # Step 3: Non-admin attempt to unlock -> 403 Forbidden
+    current_user[0] = manager_user
+    with pytest.raises(HTTPException) as exc_info:
+        await unlock_reconciliation_period(
+            PeriodUnlockIn(
+                bank_account_id=acc_id,
+                period_from="2026-08-01",
+                period_to="2026-08-31",
+                reason="Manager adjustment",
+            ),
+            req,
+        )
+    assert exc_info.value.status_code == 403
+
+    # Step 4: Admin unlocks the period with an audit reason
+    current_user[0] = admin_user
+    unlock_res = await unlock_reconciliation_period(
+        PeriodUnlockIn(
+            bank_account_id=acc_id,
+            period_from="2026-08-01",
+            period_to="2026-08-31",
+            reason="Admin audit correction for invoice mismatch",
+        ),
+        req,
+    )
+    assert unlock_res["ok"] is True
+    assert locks_store[0]["status"] == "unlocked"
+    assert locks_store[0]["unlocked_by"] == "admin@sskfootcare.com"
+    assert len(locks_store[0]["history"]) == 2
+
+    # Step 5: Now editing / unmatching the statement line SUCCEEDS
+    edit_res = await match_statement_line(
+        id=str(line_id),
+        payload=BankStatementLineUpdate(match_status="unmatched"),
+        request=req,
+    )
+    assert edit_res["match_status"] == "unmatched"
+    assert lines_store[str(line_id)]["match_status"] == "unmatched"
+
+
+@pytest.mark.anyio
+async def test_export_reconciliation_report_excel_generation_and_content(monkeypatch):
+    """
+    Verify the Month-End Bank Reconciliation Excel Export generates a professional,
+    CA/Accountant-grade workbook with Executive Summary, Balance Proof, Grouped
+    Categories (Revenue, Expenses, Vendor, Transfers, Cash Withdrawals + Karigar Wages),
+    and Pending/Unmatched items.
+    """
+    import io
+    import openpyxl
+    import routes.banking
+    from routes.banking import export_reconciliation_report
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "ca.auditor@sskfootcare.com", "name": "Chief Auditor"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc1_id = ObjectId()
+    acc2_id = ObjectId()
+    acc_doc = {
+        "_id": acc1_id,
+        "name": "HDFC Current Account",
+        "bank_name": "HDFC Bank",
+        "account_number_last4": "5678",
+        "account_number": "50200012345678",
+        "ifsc": "HDFC0001234",
+        "branch": "Agra Civil Lines",
+        "opening_balance": 100000.0,
+    }
+    acc2_doc = {
+        "_id": acc2_id,
+        "name": "UCO Bank - Factory",
+        "bank_name": "UCO Bank",
+        "account_number_last4": "9999",
+        "opening_balance": 25000.0,
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+    mock_db.bank_accounts.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[acc_doc, acc2_doc])))
+
+    # 1. Statement lines with mixed transaction types
+    line_rev_id = ObjectId()
+    line_exp_id = ObjectId()
+    line_vp_id = ObjectId()
+    line_trf_id = ObjectId()
+    line_cash_id = ObjectId()
+    line_unmatched_id = ObjectId()
+
+    client_pay_id = ObjectId()
+    expense_id = ObjectId()
+    vendor_pay_id = ObjectId()
+    cash_ledger_id = ObjectId()
+
+    statement_lines = [
+        # Revenue / Client receipt (Credit ₹75,000)
+        {
+            "_id": line_rev_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-05",
+            "credit_amount": 75000.0,
+            "debit_amount": 0.0,
+            "narration": "NEFT CR - BAXTER RETAIL CLIENT PAYMENT",
+            "reference_no": "UTR12345678",
+            "match_status": "matched",
+            "matched_to": {"type": "payment", "ref_id": str(client_pay_id)},
+        },
+        # Direct Operating Expense (Debit ₹15,000)
+        {
+            "_id": line_exp_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-10",
+            "credit_amount": 0.0,
+            "debit_amount": 15000.0,
+            "narration": "NEFT DR - FACTORY ELECTRICITY UPPCL",
+            "reference_no": "BILL9988",
+            "match_status": "matched",
+            "matched_to": {"type": "expense", "ref_id": str(expense_id)},
+        },
+        # Vendor Raw Material Payment (Debit ₹30,000)
+        {
+            "_id": line_vp_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-14",
+            "credit_amount": 0.0,
+            "debit_amount": 30000.0,
+            "narration": "RTGS DR - AGRA LEATHER SUPPLIERS",
+            "reference_no": "UTR887766",
+            "match_status": "matched",
+            "matched_to": {"type": "vendor_payment", "ref_id": str(vendor_pay_id)},
+        },
+        # Cash Withdrawal for Karigar Wages (Debit ₹20,000)
+        {
+            "_id": line_cash_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-18",
+            "credit_amount": 0.0,
+            "debit_amount": 20000.0,
+            "narration": "ATM CASH WDL - SELF FOR KARIGAR PAYOUTS",
+            "reference_no": "ATM5544",
+            "match_status": "matched",
+            "matched_to": {"type": "cash_withdrawal", "ref_id": str(cash_ledger_id)},
+        },
+        # Inter-Account Transfer to UCO Bank (Debit ₹10,000)
+        {
+            "_id": line_trf_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-22",
+            "credit_amount": 0.0,
+            "debit_amount": 10000.0,
+            "narration": "TRF DR - LIQUIDITY TRANSFER TO UCO FACTORY",
+            "reference_no": "TRF1122",
+            "match_status": "transfer",
+            "matched_to": {"type": "transfer", "ref_id": str(ObjectId())},
+            "transfer_notes": "Treasury liquidity rebalance",
+            "confirmed_by": "admin@sskfootcare.com",
+        },
+        # Unmatched Statement Debit (Debit ₹2,500 pending)
+        {
+            "_id": line_unmatched_id,
+            "bank_account_id": str(acc1_id),
+            "date": "2026-08-25",
+            "credit_amount": 0.0,
+            "debit_amount": 2500.0,
+            "narration": "BANK CHARGES / ANNUAL SMS FEE",
+            "reference_no": "CHG4433",
+            "match_status": "unmatched",
+            "remarks": "Bank fees to be booked under Bank Charges expense",
+        },
+    ]
+
+    mock_db.bank_statement_lines.find = MagicMock(
+        return_value=MagicMock(sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=statement_lines))))
+    )
+    mock_db.bank_statement_lines.find_one = AsyncMock(return_value=None)
+
+    # 2. Linked ERP Records
+    client_pay_doc = {
+        "_id": client_pay_id,
+        "client_name": "Baxter Retail Pvt Ltd",
+        "payment_no": "PAY-2026-088",
+        "amount": 75000.0,
+    }
+    expense_doc = {
+        "_id": expense_id,
+        "payee": "UP Power Corporation",
+        "category": "Rent & Utilities",
+        "amount": 15000.0,
+    }
+    vendor_pay_doc = {
+        "_id": vendor_pay_id,
+        "vendor_name": "Agra Leather Tanneries",
+        "payment_no": "VP-2026-044",
+        "amount": 30000.0,
+    }
+    cash_ledger_doc = {
+        "_id": cash_ledger_id,
+        "source_statement_line_id": str(line_cash_id),
+        "amount": 20000.0,
+        "remaining_balance": 5000.0,
+    }
+    wage_payments = [
+        {"_id": ObjectId(), "cash_ledger_id": str(cash_ledger_id), "worker_name": "Ramesh Kumar", "amount": 8000.0, "paid_via": "cash"},
+        {"_id": ObjectId(), "cash_ledger_id": str(cash_ledger_id), "worker_name": "Suresh Chand", "amount": 7000.0, "paid_via": "cash"},
+    ]
+
+    mock_db.payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[client_pay_doc, vendor_pay_doc])))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[expense_doc])))
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[cash_ledger_doc])))
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=wage_payments)))
+
+    # 3. Active period lock document
+    lock_doc = {
+        "_id": ObjectId(),
+        "status": "locked",
+        "bank_account_id": str(acc1_id),
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-31",
+        "locked_at": "2026-08-31T23:59:59Z",
+        "locked_by": "admin@sskfootcare.com",
+    }
+    mock_db.reconciliation_locks = MagicMock(find_one=AsyncMock(return_value=lock_doc))
+
+    req = MagicMock()
+
+    # Step 1: Call export endpoint
+    response = await export_reconciliation_report(
+        request=req,
+        bank_account_id=str(acc1_id),
+        from_date="2026-08-01",
+        to_date="2026-08-31",
+        format="excel",
+    )
+
+    assert response.status_code == 200
+    assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment; filename=" in response.headers["Content-Disposition"]
+    assert "HDFC_Current_Account" in response.headers["Content-Disposition"]
+
+    # Step 2: Load and verify the Excel workbook with openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(response.body))
+    sheet_names = wb.sheetnames
+
+    # All 7 accountant tabs must exist
+    assert "Executive Summary" in sheet_names
+    assert "1. Revenue & Receipts" in sheet_names
+    assert "2. Operating Expenses" in sheet_names
+    assert "3. Vendor Payments" in sheet_names
+    assert "4. Cash & Karigar Wages" in sheet_names
+    assert "5. Inter-Account Transfers" in sheet_names
+    assert "6. Pending & Unmatched" in sheet_names
+
+    # Inspect Tab 1: Executive Summary
+    ws_summary = wb["Executive Summary"]
+    assert ws_summary["A1"].value == "SSK FOOTCARE - BANK RECONCILIATION STATEMENT"
+    assert "HDFC Current Account" in ws_summary["B4"].value
+    assert "FINALIZED & LOCKED" in ws_summary["D5"].value
+
+    # Check that amounts were correctly totaled on summary sheet
+    summary_cells = [cell.value for row in ws_summary.iter_rows() for cell in row if cell.value is not None]
+    assert any("Bank Statement Opening Balance" in str(v) for v in summary_cells)
+    assert any("Matched Inflows" in str(v) for v in summary_cells)
+    assert any("Matched Outflows" in str(v) for v in summary_cells)
+    assert any("Reconciliation Variance" in str(v) for v in summary_cells)
+
+    # Inspect Tab 2: Revenue
+    ws_rev = wb["1. Revenue & Receipts"]
+    assert ws_rev["D4"].value == "Baxter Retail Pvt Ltd"
+    assert ws_rev["F4"].value == 75000.0
+
+    # Inspect Tab 3: Operating Expenses
+    ws_exp = wb["2. Operating Expenses"]
+    assert ws_exp["D4"].value == "UP Power Corporation"
+    assert ws_exp["E4"].value == "Rent & Utilities"
+    assert ws_exp["F4"].value == 15000.0
+
+    # Inspect Tab 4: Vendor Payments
+    ws_vp = wb["3. Vendor Payments"]
+    assert ws_vp["D4"].value == "Agra Leather Tanneries"
+    assert ws_vp["F4"].value == 30000.0
+
+    # Inspect Tab 5: Cash Withdrawals & Karigar Wages
+    ws_cash = wb["4. Cash & Karigar Wages"]
+    assert ws_cash["C4"].value == 20000.0  # Total withdrawal
+    assert ws_cash["D4"].value == 15000.0  # Disbursed to karigars (8k + 7k)
+    assert ws_cash["E4"].value == 5000.0   # Remaining unallocated cash
+    assert "Ramesh Kumar" in ws_cash["G4"].value
+    assert "Suresh Chand" in ws_cash["G4"].value
+
+    # Inspect Tab 6: Transfers
+    ws_trf = wb["5. Inter-Account Transfers"]
+    assert ws_trf["E4"].value == 10000.0
+
+    # Inspect Tab 7: Pending & Unmatched
+    ws_unmatched = wb["6. Pending & Unmatched"]
+    assert ws_unmatched["C4"].value == "BANK CHARGES / ANNUAL SMS FEE"
+    assert ws_unmatched["E4"].value == 2500.0
+    assert ws_unmatched["H4"].value == "Bank fees to be booked under Bank Charges expense"
+
+
+@pytest.mark.anyio
+async def test_total_cash_in_hand_live_aggregation_across_withdrawals_and_disbursements(monkeypatch):
+    """
+    Verify that Total Cash in Hand accurately sums all remaining_balance values across
+    active cash_ledger pools, updates live when cash is withdrawn, and updates as
+    funds are drawn down for wages/expenses.
+    """
+    import server
+    import routes.banking
+    from routes.banking import get_reconciliation_summary
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(server, "db", mock_db)
+
+    # 1. Initially two cash pools exist (e.g. ₹20,000 withdrawn, ₹15,000 remaining; ₹10,000 withdrawn, ₹10,000 remaining)
+    pool1_id = ObjectId()
+    pool2_id = ObjectId()
+    cash_ledger_docs = [
+        {"_id": pool1_id, "amount": 20000.0, "remaining_balance": 15000.0},
+        {"_id": pool2_id, "amount": 10000.0, "remaining_balance": 10000.0},
+    ]
+
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=cash_ledger_docs)))
+    mock_db.bank_accounts.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.bank_statement_lines.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.jobs.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.production_jobs.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.pos.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.materials.count_documents = AsyncMock(return_value=5)
+    mock_db.styles.count_documents = AsyncMock(return_value=8)
+    mock_db.pos.count_documents = AsyncMock(return_value=0)
+    mock_db.jobs.count_documents = AsyncMock(return_value=0)
+
+    req = MagicMock()
+
+    # Step 1: Banking summary returns Total Cash in Hand = 15,000 + 10,000 = 25,000
+    res_summary = await get_reconciliation_summary(req)
+    assert res_summary["summary"]["total_cash_in_hand"] == 25000.0
+    assert res_summary["summary"]["total_cash_withdrawn"] == 30000.0
+
+    # Step 2: Dashboard stats live computation also reflects Total Cash in Hand = 25,000
+    dash_stats = await server._compute_dashboard_stats_live()
+    assert dash_stats["total_cash_in_hand"] == 25000.0
+
+    # Step 3: Draw down cash: Pool 1 spends ₹5,000 (remaining: ₹10,000), Pool 2 spends ₹8,000 (remaining: ₹2,000)
+    cash_ledger_docs[0]["remaining_balance"] = 10000.0
+    cash_ledger_docs[1]["remaining_balance"] = 2000.0
+
+    # Step 4: Verify both banking summary and dashboard stats immediately reflect the updated ₹12,000 total cash in hand
+    res_summary_updated = await get_reconciliation_summary(req)
+    assert res_summary_updated["summary"]["total_cash_in_hand"] == 12000.0
+
+    dash_stats_updated = await server._compute_dashboard_stats_live()
+    assert dash_stats_updated["total_cash_in_hand"] == 12000.0
+
+
+@pytest.mark.anyio
+async def test_full_end_to_end_bank_reconciliation_workflow(monkeypatch):
+    """
+    Comprehensive End-to-End Walkthrough of the full banking & reconciliation journey:
+    1. Create Bank Account with opening balance.
+    2. Import CSV Statement with deduplication safeguards.
+    3. Auto-reconcile & match client revenue and expenses.
+    4. Confirm Cash Withdrawal, creating an active cash_ledger pool.
+    5. Disburse Karigar Wage Payment & Cash Expense atomically from the cash pool.
+    6. Verify Total Cash in Hand updates in real time.
+    7. Verify Statement Line Reclassification Guard prevents orphaning active dependents.
+    8. Finalize and Lock Reconciliation Period (blocking subsequent edits).
+    9. Export 7-tab Accountant / CA Audit Excel Workbook and verify balance proof.
+    10. Unlock period with admin audit reason.
+    """
+    import io
+    import openpyxl
+    from fastapi import UploadFile
+    import server
+    import routes.banking
+    from routes.banking import (
+        create_bank_account,
+        import_bank_statement,
+        match_statement_line,
+        confirm_cash_withdrawal,
+        confirm_transfer_pair,
+        lock_reconciliation_period,
+        unlock_reconciliation_period,
+        export_reconciliation_report,
+        get_reconciliation_summary,
+    )
+    import routes.workers
+    import routes.expenses
+    from routes.workers import create_wage_payment
+    from routes.expenses import create_expense
+    from models.workers import WagePaymentIn
+    from models.expenses import ExpenseIn
+    from models.banking import CashWithdrawalConfirmIn, PeriodLockIn, PeriodUnlockIn
+
+    # In-memory realistic collections
+    accounts_store = {}
+    lines_store = {}
+    cash_ledger_store = {}
+    wage_payments_store = {}
+    expenses_store = {}
+    payments_store = {}
+    locks_store = []
+
+    mock_db = MagicMock()
+
+    class MockCursor:
+        def __init__(self, docs):
+            self.docs = list(docs) if docs else []
+
+        def sort(self, *args, **kwargs):
+            return self
+
+        def skip(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        async def to_list(self, length=None):
+            return list(self.docs)
+
+    # Generic mongo find/update mocks backed by our in-memory stores
+    def _mock_find_accounts(query=None):
+        docs = list(accounts_store.values())
+        return MockCursor(docs)
+
+    def _mock_find_lines(query=None):
+        docs = list(lines_store.values())
+        if query:
+            if "bank_account_id" in query:
+                docs = [d for d in docs if str(d.get("bank_account_id")) == str(query["bank_account_id"])]
+        return MockCursor(docs)
+
+    def _mock_find_cash(query=None):
+        docs = list(cash_ledger_store.values())
+        if query and "bank_account_id" in query:
+            docs = [d for d in docs if str(d.get("bank_account_id")) == str(query["bank_account_id"])]
+        return MockCursor(docs)
+
+    def _mock_find_wage_payments(query=None):
+        docs = list(wage_payments_store.values())
+        if query:
+            if "cash_ledger_id" in query:
+                docs = [d for d in docs if str(d.get("cash_ledger_id")) == str(query["cash_ledger_id"])]
+            if "worker_id" in query:
+                docs = [d for d in docs if str(d.get("worker_id")) == str(query["worker_id"])]
+        return MockCursor(docs)
+
+    def _mock_find_expenses(query=None):
+        docs = list(expenses_store.values())
+        if query and "cash_ledger_id" in query:
+            docs = [d for d in docs if str(d.get("cash_ledger_id")) == str(query["cash_ledger_id"])]
+        return MockCursor(docs)
+
+    mock_db.bank_accounts.find = MagicMock(side_effect=_mock_find_accounts)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.cash_ledger.find = MagicMock(side_effect=_mock_find_cash)
+    mock_db.wage_payments.find = MagicMock(side_effect=_mock_find_wage_payments)
+    mock_db.expenses.find = MagicMock(side_effect=_mock_find_expenses)
+    mock_db.payments.find = MagicMock(return_value=MockCursor(list(payments_store.values())))
+    mock_db.online_settlements.find = MagicMock(return_value=MockCursor([]))
+    mock_db.jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.pos.find = MagicMock(return_value=MockCursor([]))
+    mock_db.materials.count_documents = AsyncMock(return_value=10)
+    mock_db.styles.count_documents = AsyncMock(return_value=12)
+    mock_db.pos.count_documents = AsyncMock(return_value=0)
+    mock_db.jobs.count_documents = AsyncMock(return_value=0)
+    mock_db.production_jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.styles.find = MagicMock(return_value=MockCursor([]))
+
+    async def _mock_find_one_account(query):
+        return accounts_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_line(query):
+        return lines_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_cash(query):
+        return cash_ledger_store.get(str(query.get("_id")))
+
+    async def _mock_insert_account(doc):
+        aid = ObjectId()
+        doc["_id"] = aid
+        accounts_store[str(aid)] = doc
+        return MagicMock(inserted_id=aid)
+
+    async def _mock_insert_lines(docs):
+        inserted_ids = []
+        for d in docs:
+            lid = ObjectId()
+            d["_id"] = lid
+            lines_store[str(lid)] = d
+            inserted_ids.append(lid)
+        return MagicMock(inserted_ids=inserted_ids)
+
+    async def _mock_insert_cash(doc):
+        cid = ObjectId()
+        doc["_id"] = cid
+        cash_ledger_store[str(cid)] = doc
+        return MagicMock(inserted_id=cid)
+
+    async def _mock_insert_wage_payment(doc):
+        wpid = ObjectId()
+        doc["_id"] = wpid
+        wage_payments_store[str(wpid)] = doc
+        return MagicMock(inserted_id=wpid)
+
+    async def _mock_insert_expense(doc):
+        eid = ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+
+    async def _mock_update_line(query, update):
+        lid_str = str(query.get("_id"))
+        if lid_str in lines_store:
+            if "$set" in update:
+                lines_store[lid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_update_cash(query, update):
+        cid_str = str(query.get("_id"))
+        if cid_str in cash_ledger_store:
+            entry = cash_ledger_store[cid_str]
+            # Conditional $gte check
+            if "$gte" in query.get("remaining_balance", {}):
+                req_bal = query["remaining_balance"]["$gte"]
+                if entry.get("remaining_balance", 0.0) < req_bal:
+                    return MagicMock(matched_count=0, modified_count=0)
+            if "$inc" in update:
+                inc_val = update["$inc"].get("remaining_balance", 0.0)
+                entry["remaining_balance"] = round(entry.get("remaining_balance", 0.0) + inc_val, 2)
+            if "$set" in update:
+                entry.update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_find_one_lock(query):
+        for l in locks_store:
+            if l.get("status") == "locked":
+                # Check date overlap
+                if query.get("period_to", {}).get("$gte") and l.get("period_to") < query["period_to"]["$gte"]:
+                    continue
+                if query.get("period_from", {}).get("$lte") and l.get("period_from") > query["period_from"]["$lte"]:
+                    continue
+                return l
+        return None
+
+    async def _mock_update_lock(query, update, upsert=False):
+        for l in locks_store:
+            matches_id = ("_id" in query and (str(l.get("_id")) == str(query["_id"]) or l.get("_id") == query["_id"]))
+            matches_key = (bool(query.get("bank_account_id")) and l.get("bank_account_id") == query.get("bank_account_id") and l.get("period_from") == query.get("period_from"))
+            if matches_id or matches_key:
+                if "$set" in update:
+                    l.update(update["$set"])
+                if "$push" in update:
+                    l.setdefault("history", []).append(update["$push"]["history"])
+                return MagicMock(matched_count=1, modified_count=1)
+        if upsert:
+            new_lock = dict(query)
+            if "$set" in update:
+                new_lock.update(update["$set"])
+            if "$setOnInsert" in update:
+                new_lock.update(update["$setOnInsert"])
+            new_lock["_id"] = ObjectId()
+            locks_store.append(new_lock)
+            return MagicMock(matched_count=0, upserted_id=new_lock["_id"])
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_find_one_wage_payment(query):
+        return wage_payments_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_expense(query):
+        return expenses_store.get(str(query.get("_id")))
+
+    async def _mock_insert_lock(doc):
+        lid = ObjectId()
+        doc["_id"] = lid
+        locks_store.append(doc)
+        return MagicMock(inserted_id=lid)
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_account)
+    mock_db.bank_accounts.insert_one = AsyncMock(side_effect=_mock_insert_account)
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=_mock_find_one_line)
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=_mock_insert_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=_mock_find_one_cash)
+    mock_db.cash_ledger.insert_one = AsyncMock(side_effect=_mock_insert_cash)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=_mock_update_cash)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=_mock_insert_wage_payment)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=_mock_find_one_wage_payment)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=_mock_insert_expense)
+    mock_db.expenses.find_one = AsyncMock(side_effect=_mock_find_one_expense)
+    mock_db.audit_logs.insert_one = AsyncMock(return_value=MagicMock())
+    mock_db.reconciliation_locks.find_one = AsyncMock(side_effect=_mock_find_one_lock)
+    mock_db.reconciliation_locks.insert_one = AsyncMock(side_effect=_mock_insert_lock)
+    mock_db.reconciliation_locks.update_one = AsyncMock(side_effect=_mock_update_lock)
+
+    # Mock workers
+    worker_id = ObjectId()
+    worker_doc = {
+        "_id": worker_id,
+        "name": "Mukesh Karigar",
+        "phone": "9876543210",
+        "active": True,
+        "rate_per_pair": 20.0,
+    }
+    mock_db.workers.find_one = AsyncMock(return_value=worker_doc)
+    mock_db.workers.find = MagicMock(return_value=MockCursor([worker_doc]))
+    mock_db.advances.find = MagicMock(return_value=MockCursor([]))
+
+    admin_user = {"role": "admin", "email": "founder@sskfootcare.com", "name": "SSK Founder"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(routes.workers, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.expenses, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    # -------------------------------------------------------------------------
+    # STEP 1: Create Bank Account
+    # -------------------------------------------------------------------------
+    acc_res = await create_bank_account(
+        BankAccountIn(
+            name="HDFC Factory Primary",
+            bank_name="HDFC Bank",
+            account_number_last4="4321",
+            account_number="50200098764321",
+            ifsc="HDFC0004321",
+            branch="Sanjay Place Agra",
+            account_type="b2b_client",
+            opening_balance=50000.0,
+        ),
+        req,
+    )
+    acc_id = acc_res["id"]
+    assert acc_res["name"] == "HDFC Factory Primary"
+    assert acc_res["opening_balance"] == 50000.0
+
+    # -------------------------------------------------------------------------
+    # STEP 2: Import CSV Statement & Verify Deduplication Safeguards (Stage 4)
+    # -------------------------------------------------------------------------
+    csv_content = (
+        "Date,Narration,Chq/Ref Number,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        "2026-08-05,NEFT CR - BAXTER RETAIL CLIENT PAYMENT,UTR001,,40000.00,90000.00\n"
+        "2026-08-10,NEFT DR - FACTORY SHED RENT AUGUST,RENT001,10000.00,,80000.00\n"
+        "2026-08-15,ATM CASH WDL - SELF FOR FACTORY WAGES,ATM991,15000.00,,65000.00\n"
+        "2026-08-20,NEFT DR - TRF TO UCO BANK FACTORY,TRF992,5000.00,,60000.00\n"
+    ).encode("utf-8")
+
+    file1 = UploadFile(filename="statement_aug_2026.csv", file=io.BytesIO(csv_content))
+    import_res1 = await import_bank_statement(id=acc_id, file=file1, dry_run=False, confirm_account_update=False, request=req)
+    assert import_res1["inserted_count"] == 4
+    assert import_res1["skipped_count"] == 0
+    assert len(lines_store) == 4
+
+    # Re-import identical statement file: 0 inserted, 4 skipped
+    file2 = UploadFile(filename="statement_aug_2026.csv", file=io.BytesIO(csv_content))
+    import_res2 = await import_bank_statement(id=acc_id, file=file2, dry_run=False, confirm_account_update=False, request=req)
+    assert import_res2["inserted_count"] == 0
+    assert import_res2["skipped_count"] == 4
+    assert len(lines_store) == 4
+
+    # Locate individual imported statement lines
+    all_lines = list(lines_store.values())
+    line_rev = next(l for l in all_lines if l["credit_amount"] == 40000.0)
+    line_rent = next(l for l in all_lines if l["debit_amount"] == 10000.0)
+    line_cash = next(l for l in all_lines if l["debit_amount"] == 15000.0)
+    line_trf = next(l for l in all_lines if l["debit_amount"] == 5000.0)
+
+    # -------------------------------------------------------------------------
+    # STEP 3: Match Client Revenue & Factory Rent
+    # -------------------------------------------------------------------------
+    client_pay_id = ObjectId()
+    payments_store[str(client_pay_id)] = {
+        "_id": client_pay_id,
+        "client_name": "Baxter Retail Pvt Ltd",
+        "payment_no": "PAY-2026-AUG-01",
+        "amount": 40000.0,
+    }
+    await match_statement_line(
+        id=str(line_rev["_id"]),
+        payload=BankStatementLineUpdate(
+            match_status="matched",
+            matched_to={"type": "payment", "ref_id": str(client_pay_id)},
+        ),
+        request=req,
+    )
+
+    rent_exp_id = ObjectId()
+    expenses_store[str(rent_exp_id)] = {
+        "_id": rent_exp_id,
+        "payee": "Agra Industrial Landlords",
+        "category": "Rent & Utilities",
+        "amount": 10000.0,
+    }
+    await match_statement_line(
+        id=str(line_rent["_id"]),
+        payload=BankStatementLineUpdate(
+            match_status="matched",
+            matched_to={"type": "expense", "ref_id": str(rent_exp_id)},
+        ),
+        request=req,
+    )
+
+    # -------------------------------------------------------------------------
+    # STEP 4: Confirm Cash Withdrawal & Create Cash Pool (Stage 1 & 2 Foundation)
+    # -------------------------------------------------------------------------
+    cash_confirm_res = await confirm_cash_withdrawal(
+        payload=CashWithdrawalConfirmIn(statement_line_id=str(line_cash["_id"])),
+        request=req,
+    )
+    assert cash_confirm_res["ok"] is True
+    cash_ledger_id = cash_confirm_res["cash_ledger_id"]
+    assert cash_ledger_store[cash_ledger_id]["amount"] == 15000.0
+    assert cash_ledger_store[cash_ledger_id]["remaining_balance"] == 15000.0
+
+    # -------------------------------------------------------------------------
+    # STEP 5: Disburse Karigar Wage Payment & Cash Expense from Cash Pool (Stages 1-3)
+    # -------------------------------------------------------------------------
+    # 5a. Pay Karigar Wage: ₹8,000
+    wage_res = await create_wage_payment(
+        wid=str(worker_id),
+        payload=WagePaymentIn(
+            worker_id=str(worker_id),
+            amount=8000.0,
+            date="2026-08-16",
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="cash",
+            cash_ledger_id=cash_ledger_id,
+            allow_overpayment=True,
+            override_reason="Bi-weekly approved piece-rate payout",
+        ),
+        request=req,
+    )
+    assert wage_res["amount"] == 8000.0
+    assert wage_res["paid_via"] == "cash"
+    assert cash_ledger_store[cash_ledger_id]["remaining_balance"] == 7000.0
+
+    # 5b. Pay Cash Expense: ₹2,000 for Factory Tea & Refreshments
+    exp_res = await create_expense(
+        ExpenseIn(
+            category="Office & Administrative",
+            payee="Factory Canteen Vendor",
+            amount=2000.0,
+            date="2026-08-17",
+            paid_via="cash",
+            cash_ledger_id=cash_ledger_id,
+            notes="August bi-weekly tea and refreshments for karigars",
+        ),
+        req,
+    )
+    assert exp_res["amount"] == 2000.0
+    assert exp_res["paid_via"] == "cash"
+    assert cash_ledger_store[cash_ledger_id]["remaining_balance"] == 5000.0
+
+    # -------------------------------------------------------------------------
+    # STEP 6: Verify Live "Total Cash in Hand" Metric
+    # -------------------------------------------------------------------------
+    summary_res = await get_reconciliation_summary(req)
+    assert summary_res["summary"]["total_cash_in_hand"] == 5000.0
+    assert summary_res["summary"]["total_cash_withdrawn"] == 15000.0
+
+    # -------------------------------------------------------------------------
+    # STEP 7: Reclassification Safeguard (Stage 5)
+    # -------------------------------------------------------------------------
+    # Attempting to reclassify the withdrawal line to unmatched/transfer while dependents exist must be BLOCKED
+    with pytest.raises(HTTPException) as exc_reclassify:
+        await match_statement_line(
+            id=str(line_cash["_id"]),
+            payload=BankStatementLineUpdate(match_status="unmatched"),
+            request=req,
+        )
+    assert exc_reclassify.value.status_code == 400
+    assert "active dependent records" in exc_reclassify.value.detail
+
+    # -------------------------------------------------------------------------
+    # STEP 8: Lock Reconciliation Period (Stage 8)
+    # -------------------------------------------------------------------------
+    lock_res = await lock_reconciliation_period(
+        PeriodLockIn(
+            bank_account_id=acc_id,
+            period_from="2026-08-01",
+            period_to="2026-08-31",
+            notes="August 2026 finalized and submitted for GST & CA audit",
+        ),
+        req,
+    )
+    assert lock_res["ok"] is True
+    assert lock_res["lock"]["status"] == "locked"
+
+    # Attempting any edits on August statement lines while locked must be BLOCKED
+    with pytest.raises(HTTPException) as exc_locked:
+        await match_statement_line(
+            id=str(line_rev["_id"]),
+            payload=BankStatementLineUpdate(match_status="unmatched"),
+            request=req,
+        )
+    assert exc_locked.value.status_code == 400
+    assert "finalized and locked" in exc_locked.value.detail
+
+    # -------------------------------------------------------------------------
+    # STEP 9: Export CA / Accountant Reconciliation Workbook (Stage 9)
+    # -------------------------------------------------------------------------
+    export_response = await export_reconciliation_report(
+        request=req,
+        bank_account_id=acc_id,
+        from_date="2026-08-01",
+        to_date="2026-08-31",
+        format="excel",
+    )
+    assert export_response.status_code == 200
+    assert export_response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    wb = openpyxl.load_workbook(io.BytesIO(export_response.body))
+    assert "Executive Summary" in wb.sheetnames
+    assert "1. Revenue & Receipts" in wb.sheetnames
+    assert "2. Operating Expenses" in wb.sheetnames
+    assert "4. Cash & Karigar Wages" in wb.sheetnames
+
+    # Check cash sheet shows withdrawal + karigar wage + cash expense breakdown
+    ws_cash = wb["4. Cash & Karigar Wages"]
+    assert ws_cash["C4"].value == 15000.0  # Total withdrawal
+    assert ws_cash["D4"].value == 10000.0  # Disbursed (8k wage + 2k expense)
+    assert ws_cash["E4"].value == 5000.0   # Remaining Cash in Hand
+    assert "Mukesh Karigar" in ws_cash["G4"].value
+    assert "Office & Administrative" in ws_cash["G4"].value
+
+    # -------------------------------------------------------------------------
+    # STEP 10: Admin Unlock
+    # -------------------------------------------------------------------------
+    unlock_res = await unlock_reconciliation_period(
+        PeriodUnlockIn(
+            bank_account_id=acc_id,
+            period_from="2026-08-01",
+            period_to="2026-08-31",
+            reason="Admin unlocking to adjust misallocated transfer line",
+        ),
+        req,
+    )
+    assert unlock_res["ok"] is True
+    assert locks_store[0]["status"] == "unlocked"
+
+
+
+
+
+
+
+
 
 
 

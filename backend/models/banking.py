@@ -110,3 +110,18 @@ class CashWithdrawalConfirmIn(BaseModel):
     notes: Optional[str] = Field("", description="Optional notes or reference for the cash ledger entry")
 
 
+class PeriodLockIn(BaseModel):
+    bank_account_id: Optional[str] = Field(None, description="Specific bank account ID or 'all' / None for all accounts")
+    period_from: str = Field(..., description="Start date of the lock period (YYYY-MM-DD)")
+    period_to: str = Field(..., description="End date of the lock period (YYYY-MM-DD)")
+    reason: Optional[str] = Field("Monthly reconciliation finalized", description="Reason for locking period")
+
+
+class PeriodUnlockIn(BaseModel):
+    bank_account_id: Optional[str] = Field(None, description="Specific bank account ID or 'all' / None for all accounts")
+    period_from: str = Field(..., description="Start date of the locked period to unlock (YYYY-MM-DD)")
+    period_to: str = Field(..., description="End date of the locked period to unlock (YYYY-MM-DD)")
+    reason: str = Field("Admin correction", description="Reason for unlocking period (audit logged)")
+
+
+

@@ -5,7 +5,8 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import {
   AlertTriangle, Clock, ArrowRight, Receipt, Wrench,
-  Factory, ShoppingBag, BarChart3, Database, Calendar
+  Factory, ShoppingBag, BarChart3, Database, Calendar,
+  Wallet, Coins, Landmark
 } from "lucide-react";
 
 const STAGE_COLORS = {
@@ -187,29 +188,53 @@ export default function Dashboard() {
 
         {/* ── Stat Tiles ────────────────────────────────────────── */}
         {dashTab === "consolidated" && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <StatTile label="Grand Total Revenue" value={inr(stats.revenue)} sub="B2B + Online Commerce" accent="#0F172A" />
             <StatTile label="Total WIP Pairs" value={stats.pairs_in_wip} sub="across both branches" accent="#C27842" />
             <StatTile label="Active Styles" value={stats.styles_count} sub="available in catalog" accent="#16A34A" />
             <StatTile label="Materials Count" value={stats.materials_count} sub="raw materials registered" accent="#2563EB" />
+            <Link to="/banking" className="block hover:opacity-95 transition-opacity" data-testid="dashboard-cash-in-hand-tile">
+              <StatTile
+                label="Total Cash on Hand"
+                value={inr(stats.total_cash_in_hand || 0)}
+                sub="Live Cash Pool Balance →"
+                accent="#059669"
+              />
+            </Link>
           </div>
         )}
 
         {dashTab === "b2b" && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <StatTile label="B2B Grand Total" value={inr(stats.b2b.revenue)} sub="from B2B POs" accent="#0F172A" />
             <StatTile label="B2B WIP Pairs" value={stats.b2b.wip} sub="active on production floor" accent="#C27842" />
             <StatTile label="Dispatched Pairs" value={stats.b2b.dispatched} sub="lifetime B2B delivery" accent="#16A34A" />
             <StatTile label="Active Purchase Orders" value={stats.b2b.total_pos} sub={`${stats.b2b.pending_pos} pending`} accent="#2563EB" />
+            <Link to="/banking" className="block hover:opacity-95 transition-opacity">
+              <StatTile
+                label="Cash on Hand"
+                value={inr(stats.total_cash_in_hand || 0)}
+                sub="Live Cash Pool →"
+                accent="#059669"
+              />
+            </Link>
           </div>
         )}
 
         {dashTab === "online" && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <StatTile label="Online Grand Total" value={inr(stats.online.revenue)} sub="from marketplace CSVs" accent="#0F172A" />
             <StatTile label="Online WIP Pairs" value={stats.online.wip} sub="active online orders" accent="#C27842" />
             <StatTile label="Dispatched Pairs" value={stats.online.dispatched} sub="fulfilled marketplace shipments" accent="#16A34A" />
             <StatTile label="Total Import Rows" value={stats.online.total_qty} sub={`${stats.online.total_orders} imported orders`} accent="#2563EB" />
+            <Link to="/banking" className="block hover:opacity-95 transition-opacity">
+              <StatTile
+                label="Cash on Hand"
+                value={inr(stats.total_cash_in_hand || 0)}
+                sub="Live Cash Pool →"
+                accent="#059669"
+              />
+            </Link>
           </div>
         )}
 

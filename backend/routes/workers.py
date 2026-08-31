@@ -1,6 +1,6 @@
-"""Workers, Karigars, Worker Auth/Login, Self-Service & Advances Routes."""
-
 import os
+import asyncio
+from collections import defaultdict
 from typing import Optional, List
 from io import BytesIO
 from datetime import datetime, timezone
@@ -27,6 +27,16 @@ from rate_limiter import pdf_rate_limiter
 from pdf_card import build_production_card, build_production_card_dual_a4
 
 workers_router = APIRouter(prefix="/api", tags=["Workers & Karigars"])
+
+_wage_payment_locks = defaultdict(asyncio.Lock)
+_wage_locks_mutex = asyncio.Lock()
+
+
+async def _get_worker_wage_lock(worker_id: str, period_from: str, period_to: str) -> asyncio.Lock:
+    key = f"{worker_id}:{period_from}:{period_to}"
+    async with _wage_locks_mutex:
+        return _wage_payment_locks[key]
+
 
 PRODUCTION_STAGES = [
     "procurement", "cutting", "folding", "attachment",
@@ -875,19 +885,10 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
     if payload.amount <= 0:
         raise HTTPException(400, "Payment amount must be greater than 0")
 
-    # 1. Validation for payment channel
+    # 1. Validate payment details
     if payload.paid_via == "cash":
         if not payload.cash_ledger_id:
             raise HTTPException(400, "cash_ledger_id is required when paid_via is 'cash'")
-        cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
-        if not cash_entry:
-            raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
-        remaining_balance = float(cash_entry.get("remaining_balance") or 0.0)
-        if payload.amount > remaining_balance + 0.001:
-            raise HTTPException(
-                400,
-                f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining_balance:.2f}, Requested payment: ₹{payload.amount:.2f}",
-            )
     elif payload.paid_via == "bank_transfer":
         if not payload.bank_account_id:
             raise HTTPException(400, "bank_account_id is required when paid_via is 'bank_transfer'")
@@ -897,74 +898,94 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
     else:
         raise HTTPException(400, f"Unsupported paid_via '{payload.paid_via}'")
 
-    # 2. Hard block by default on overpayment
-    # Cross-reference against compute_payroll owed amount for that worker and period
-    from routes.pos import compute_payroll
-    payroll_data = await compute_payroll(db=db, from_date=payload.period_from, to_date=payload.period_to)
-    worker_row = next((r for r in payroll_data.get("rows", []) if str(r.get("worker_id")) == str(wid)), None)
-    computed_owed = float(worker_row.get("net_payable") or 0.0) if worker_row else 0.0
+    # 2. Serialize overpayment check, deduction & insertion per worker/period
+    lock = await _get_worker_wage_lock(str(wid), payload.period_from, payload.period_to)
+    async with lock:
+        from routes.pos import compute_payroll
+        payroll_data = await compute_payroll(db=db, from_date=payload.period_from, to_date=payload.period_to)
+        worker_row = next((r for r in payroll_data.get("rows", []) if str(r.get("worker_id")) == str(wid)), None)
+        computed_owed = float(worker_row.get("net_payable") or 0.0) if worker_row else 0.0
 
-    # Query existing wage payments for this worker and period
-    existing_payments = []
-    if hasattr(db, "wage_payments") and db.wage_payments is not None:
-        try:
-            cursor = db.wage_payments.find({
-                "worker_id": str(wid),
-                "period_from": payload.period_from,
-                "period_to": payload.period_to,
-            })
-            if hasattr(cursor, "to_list"):
-                res = cursor.to_list(500)
-                if hasattr(res, "__await__"):
-                    existing_payments = await res
-                elif isinstance(res, list):
-                    existing_payments = res
-        except Exception:
-            existing_payments = []
+        existing_payments = []
+        if hasattr(db, "wage_payments") and db.wage_payments is not None:
+            try:
+                cursor = db.wage_payments.find({
+                    "worker_id": str(wid),
+                    "period_from": payload.period_from,
+                    "period_to": payload.period_to,
+                })
+                if hasattr(cursor, "to_list"):
+                    res = cursor.to_list(500)
+                    if hasattr(res, "__await__"):
+                        existing_payments = await res
+                    elif isinstance(res, list):
+                        existing_payments = res
+            except Exception:
+                existing_payments = []
 
-    already_paid = sum(float(p.get("amount") or 0.0) for p in existing_payments)
+        already_paid = sum(float(p.get("amount") or 0.0) for p in existing_payments)
 
-    if already_paid + payload.amount > computed_owed + 0.01:
-        # Overpayment attempted!
-        override = (payload.override_reason or "").strip()
-        if not override:
-            remaining_owed = max(0.0, round(computed_owed - already_paid, 2))
-            raise HTTPException(
-                400,
-                f"Payment amount ₹{payload.amount:.2f} exceeds owed amount for period {payload.period_from} to {payload.period_to} "
-                f"(total computed owed: ₹{computed_owed:.2f}, already paid: ₹{already_paid:.2f}, remaining owed: ₹{remaining_owed:.2f}). "
-                f"A non-empty override_reason is required to record an overpayment.",
+        if already_paid + payload.amount > computed_owed + 0.01:
+            override = (payload.override_reason or "").strip()
+            if not override:
+                remaining_owed = max(0.0, round(computed_owed - already_paid, 2))
+                raise HTTPException(
+                    400,
+                    f"Payment amount ₹{payload.amount:.2f} exceeds owed amount for period {payload.period_from} to {payload.period_to} "
+                    f"(total computed owed: ₹{computed_owed:.2f}, already paid: ₹{already_paid:.2f}, remaining owed: ₹{remaining_owed:.2f}). "
+                    f"A non-empty override_reason is required to record an overpayment.",
+                )
+
+        # 3. Draw down cash_ledger atomically if paid_via is cash
+        if payload.paid_via == "cash":
+            result = await db.cash_ledger.update_one(
+                {"_id": oid(payload.cash_ledger_id), "remaining_balance": {"$gte": round(payload.amount, 2)}},
+                {"$inc": {"remaining_balance": -round(payload.amount, 2)}},
             )
+            if result.modified_count == 0:
+                cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+                if not cash_entry:
+                    raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
+                remaining_balance = float(cash_entry.get("remaining_balance") or 0.0)
+                raise HTTPException(
+                    400,
+                    f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining_balance:.2f}, Requested payment: ₹{payload.amount:.2f}",
+                )
 
-    # 3. Draw down cash_ledger if paid_via is cash
-    if payload.paid_via == "cash":
-        await db.cash_ledger.update_one(
-            {"_id": oid(payload.cash_ledger_id)},
-            {"$inc": {"remaining_balance": -round(payload.amount, 2)}},
-        )
+        # 4. Insert wage payment record
+        now = now_iso()
+        user_email = u.get("email") or u.get("name", "")
+        wage_payment_doc = {
+            "worker_id": str(wid),
+            "worker_name": payload.worker_name or worker.get("name", ""),
+            "amount": round(payload.amount, 2),
+            "period_from": payload.period_from,
+            "period_to": payload.period_to,
+            "paid_via": payload.paid_via,
+            "cash_ledger_id": payload.cash_ledger_id,
+            "bank_account_id": payload.bank_account_id,
+            "date": payload.date,
+            "paid_by": payload.paid_by or user_email,
+            "notes": payload.notes or "",
+            "override_reason": payload.override_reason.strip() if payload.override_reason else None,
+            "created_at": now,
+            "created_by": user_email,
+        }
+        try:
+            res = await db.wage_payments.insert_one(wage_payment_doc)
+        except Exception as e:
+            if payload.paid_via == "cash" and payload.cash_ledger_id:
+                try:
+                    await db.cash_ledger.update_one(
+                        {"_id": oid(payload.cash_ledger_id)},
+                        {"$inc": {"remaining_balance": round(payload.amount, 2)}}
+                    )
+                except Exception:
+                    pass
+            raise e
 
-    # 4. Insert wage payment record
-    now = now_iso()
-    user_email = u.get("email") or u.get("name", "")
-    wage_payment_doc = {
-        "worker_id": str(wid),
-        "worker_name": payload.worker_name or worker.get("name", ""),
-        "amount": round(payload.amount, 2),
-        "period_from": payload.period_from,
-        "period_to": payload.period_to,
-        "paid_via": payload.paid_via,
-        "cash_ledger_id": payload.cash_ledger_id,
-        "bank_account_id": payload.bank_account_id,
-        "date": payload.date,
-        "paid_by": payload.paid_by or user_email,
-        "notes": payload.notes or "",
-        "override_reason": payload.override_reason.strip() if payload.override_reason else None,
-        "created_at": now,
-        "created_by": user_email,
-    }
-    res = await db.wage_payments.insert_one(wage_payment_doc)
-    created = await db.wage_payments.find_one({"_id": res.inserted_id})
-    return stringify(created)
+        created = await db.wage_payments.find_one({"_id": res.inserted_id})
+        return stringify(created)
 
 
 @workers_router.get("/workers/{wid}/wage-payments")

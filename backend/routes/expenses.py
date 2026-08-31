@@ -144,20 +144,22 @@ async def create_expense(payload: ExpenseIn, request: Request):
     if payload.paid_via == "cash":
         if not payload.cash_ledger_id:
             raise HTTPException(400, "cash_ledger_id is required when paid_via is 'cash'")
-        cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
-        if not cash_entry:
-            raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
-        remaining = float(cash_entry.get("remaining_balance") or 0.0)
-        if amount > remaining + 0.001:
+
+        # Atomic conditional decrement to eliminate concurrency race conditions
+        result = await db.cash_ledger.update_one(
+            {"_id": oid(payload.cash_ledger_id), "remaining_balance": {"$gte": round(amount, 2)}},
+            {"$inc": {"remaining_balance": -round(amount, 2)}},
+        )
+        if result.modified_count == 0:
+            # Check why it failed for a clear user error message
+            cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+            if not cash_entry:
+                raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
+            remaining = float(cash_entry.get("remaining_balance") or 0.0)
             raise HTTPException(
                 400,
                 f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
             )
-        # Decrement cash_ledger entry's remaining balance
-        await db.cash_ledger.update_one(
-            {"_id": oid(payload.cash_ledger_id)},
-            {"$inc": {"remaining_balance": -round(amount, 2)}}
-        )
         bank_account_id = None
         cash_ledger_id = str(payload.cash_ledger_id)
     else:
