@@ -72,7 +72,7 @@ class BankAccountUpdate(BaseModel):
 
 
 class MatchedTo(BaseModel):
-    type: Literal["payment", "settlement", "expense", "vendor_payment", "transfer"]
+    type: Literal["payment", "settlement", "expense", "vendor_payment", "transfer", "cash_withdrawal"]
     ref_id: str
 
 
@@ -86,6 +86,7 @@ class BankStatementLineIn(BaseModel):
     running_balance: Optional[float] = Field(None, description="Running balance reported by bank")
     match_status: Literal["unmatched", "matched", "transfer", "ignored"] = Field("unmatched", description="Reconciliation status")
     matched_to: Optional[MatchedTo] = Field(None, description="Linked internal record reference")
+    remarks: Optional[str] = ""
     imported_at: Optional[str] = None
     imported_by: Optional[str] = None
 
@@ -95,10 +96,17 @@ class BankStatementLineUpdate(BaseModel):
     matched_to: Optional[MatchedTo] = None
     narration: Optional[str] = None
     reference_no: Optional[str] = None
+    remarks: Optional[str] = ""
 
 
 class TransferConfirmIn(BaseModel):
     from_line_id: str = Field(..., description="ID of the debit statement line (sending account)")
     to_line_id: str = Field(..., description="ID of the credit statement line (receiving account)")
     notes: Optional[str] = ""
+
+
+class CashWithdrawalConfirmIn(BaseModel):
+    statement_line_id: str = Field(..., description="ID of the debit statement line (withdrawn from bank)")
+    notes: Optional[str] = Field("", description="Optional notes or reference for the cash ledger entry")
+
 

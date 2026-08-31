@@ -20,7 +20,15 @@ import {
   Clock,
   ShieldCheck,
   TrendingUp,
+  Coins,
+  Wallet,
 } from "lucide-react";
+
+const isCashWithdrawalCandidate = (line) => {
+  if (!line || Number(line.debit_amount || 0) <= 0) return false;
+  const n = line.narration || "";
+  return /(?:^|[\s\-_/.,:])(ATM|CASH|SELF|CWDR|NFS|EAW|CSH|SELF\s*CHQ|SELF\s*CHEQUE|CASH\s*WDL|CASH\s*WITHDRAWAL)(?:$|[\s\-_/.,:])/i.test(n);
+};
 
 export default function BankReconciliation() {
   const [accounts, setAccounts] = useState([]);
@@ -40,6 +48,17 @@ export default function BankReconciliation() {
   // Transfer suggestions
   const [suggestedTransfers, setSuggestedTransfers] = useState([]);
   const [transferLoading, setTransferLoading] = useState(false);
+
+  // Cash withdrawal suggestions
+  const [suggestedCashWithdrawals, setSuggestedCashWithdrawals] = useState([]);
+  const [cashLoading, setCashLoading] = useState(false);
+  const [showCashModal, setShowCashModal] = useState(false);
+  const [activeCashLine, setActiveCashLine] = useState(null);
+
+  // Cash Breakdown Modal state
+  const [showCashBreakdownModal, setShowCashBreakdownModal] = useState(false);
+  const [selectedCashBreakdownId, setSelectedCashBreakdownId] = useState(null);
+  const [selectedCashLine, setSelectedCashLine] = useState(null);
 
   // ERP Unmatched candidates
   const [erpCandidates, setErpCandidates] = useState([]);
@@ -124,6 +143,22 @@ export default function BankReconciliation() {
     }
   }, []);
 
+  const fetchSuggestedCashWithdrawals = useCallback(async () => {
+    setCashLoading(true);
+    try {
+      const params = {};
+      if (selectedAccountId && selectedAccountId !== "all") {
+        params.bank_account_id = selectedAccountId;
+      }
+      const { data } = await http.get("/banking/cash-withdrawals/suggested", { params });
+      setSuggestedCashWithdrawals(data.candidates || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setCashLoading(false);
+    }
+  }, [selectedAccountId]);
+
   const fetchErpCandidates = useCallback(async () => {
     setErpLoading(true);
     try {
@@ -151,8 +186,9 @@ export default function BankReconciliation() {
     fetchSummary();
     fetchStatementLines();
     fetchSuggestedTransfers();
+    fetchSuggestedCashWithdrawals();
     fetchErpCandidates();
-  }, [selectedAccountId, fetchSummary, fetchStatementLines, fetchSuggestedTransfers, fetchErpCandidates]);
+  }, [selectedAccountId, fetchSummary, fetchStatementLines, fetchSuggestedTransfers, fetchSuggestedCashWithdrawals, fetchErpCandidates]);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Action Handlers
@@ -198,6 +234,23 @@ export default function BankReconciliation() {
     }
   };
 
+  const handleConfirmCashWithdrawal = async (lineId, notes = "") => {
+    try {
+      await http.post("/banking/cash-withdrawals/confirm", {
+        statement_line_id: lineId,
+        notes: notes || "Confirmed cash withdrawal",
+      });
+      notify("Cash withdrawal confirmed and added to Cash in Hand ledger!", "success");
+      setShowCashModal(false);
+      setActiveCashLine(null);
+      fetchSummary();
+      fetchStatementLines();
+      fetchSuggestedCashWithdrawals();
+    } catch (e) {
+      notify(e.message || "Failed to confirm cash withdrawal", "error");
+    }
+  };
+
   const handleManualMatch = async (lineId, targetType, refId) => {
     try {
       await http.patch(`/banking/statement-lines/${lineId}/match`, {
@@ -225,6 +278,21 @@ export default function BankReconciliation() {
       fetchStatementLines();
     } catch (e) {
       notify(e.message || "Failed to update line", "error");
+    }
+  };
+
+  const handleUpdateRemarks = async (lineId, newRemarks) => {
+    try {
+      await http.patch(`/banking/statement-lines/${lineId}/match`, {
+        remarks: newRemarks,
+      });
+      setStatementLines((prev) =>
+        prev.map((l) => (l.id === lineId ? { ...l, remarks: newRemarks } : l))
+      );
+      notify("Remark saved successfully.", "success");
+    } catch (e) {
+      notify(e.message || "Failed to update remark", "error");
+      throw e;
     }
   };
 
@@ -496,6 +564,24 @@ export default function BankReconciliation() {
             </button>
 
             <button
+              onClick={() => setActiveTab("cash_withdrawals")}
+              data-testid="tab-cash-withdrawals"
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
+                activeTab === "cash_withdrawals"
+                  ? "border-[#0F172A] text-[#0F172A] bg-slate-50"
+                  : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
+              }`}
+            >
+              <Coins className="w-3.5 h-3.5" />
+              <span>Suggested Cash Withdrawals</span>
+              {suggestedCashWithdrawals.length > 0 && (
+                <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-full bg-amber-500 text-white" data-testid="cash-suggestions-count">
+                  {suggestedCashWithdrawals.length}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => setActiveTab("erp_expected")}
               data-testid="tab-erp-expected"
               className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
@@ -577,6 +663,7 @@ export default function BankReconciliation() {
                         <th className="px-4 py-3">Reference No</th>
                         <th className="px-4 py-3 text-right">Debit (Out)</th>
                         <th className="px-4 py-3 text-right">Credit (In)</th>
+                        <th className="px-4 py-3">Remarks</th>
                         <th className="px-4 py-3 text-right">Action</th>
                       </tr>
                     </thead>
@@ -589,8 +676,15 @@ export default function BankReconciliation() {
                             <td className="px-4 py-3 whitespace-nowrap">
                               <span className="font-bold text-slate-900">{acc ? acc.name : "Account"}</span>
                             </td>
-                            <td className="px-4 py-3 max-w-xs truncate text-slate-800 font-medium" title={line.narration}>
-                              {line.narration}
+                            <td className="px-4 py-3 max-w-xs text-slate-800 font-medium">
+                              <div className="truncate" title={line.narration}>{line.narration}</div>
+                              {isCashWithdrawalCandidate(line) && (
+                                <div className="mt-0.5">
+                                  <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold uppercase bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded" title="Narration pattern suggests cash withdrawal">
+                                    ⚡ Suggested Cash Withdrawal
+                                  </span>
+                                </div>
+                              )}
                             </td>
                             <td className="px-4 py-3 font-mono text-slate-500">{line.reference_no || "-"}</td>
                             <td className="px-4 py-3 text-right font-mono font-bold text-red-600">
@@ -599,8 +693,28 @@ export default function BankReconciliation() {
                             <td className="px-4 py-3 text-right font-mono font-bold text-emerald-700">
                               {line.credit_amount > 0 ? inr(line.credit_amount) : "-"}
                             </td>
+                            <td className="px-4 py-3">
+                              <InlineRemarkCell
+                                lineId={line.id}
+                                initialRemarks={line.remarks}
+                                onSave={handleUpdateRemarks}
+                              />
+                            </td>
                             <td className="px-4 py-3 text-right whitespace-nowrap">
                               <div className="flex items-center justify-end gap-1.5">
+                                {line.debit_amount > 0 && isCashWithdrawalCandidate(line) && (
+                                  <button
+                                    onClick={() => {
+                                      setActiveCashLine(line);
+                                      setShowCashModal(true);
+                                    }}
+                                    className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-[10px] px-2.5 py-1.5 border-2 border-amber-600 shadow-ind flex items-center gap-1"
+                                    title="Confirm this line as cash withdrawal into Cash in Hand ledger"
+                                    data-testid={`confirm-cash-btn-${line.id}`}
+                                  >
+                                    <Coins className="w-3 h-3" /> Confirm Cash
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => {
                                     setActiveLineForMatch(line);
@@ -698,6 +812,72 @@ export default function BankReconciliation() {
                           className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-emerald-600 shadow-ind flex items-center gap-1.5 transition-colors"
                         >
                           <Check className="w-3.5 h-3.5" /> Confirm Transfer
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+
+          {/* TAB: SUGGESTED CASH WITHDRAWALS */}
+          {activeTab === "cash_withdrawals" && (
+            <Card className="p-4 sm:p-6 space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b-2 border-slate-100">
+                <div>
+                  <h3 className="font-black text-slate-900 text-sm uppercase tracking-wide">Suggested Cash Withdrawals</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Unmatched debit transactions matching cash withdrawal indicators (ATM, CASH, SELF, etc.). Confirming adds to the Cash in Hand ledger.
+                  </p>
+                </div>
+                <BtnSecondary onClick={fetchSuggestedCashWithdrawals} className="flex items-center gap-1.5 py-1.5">
+                  <RefreshCw className={`w-3.5 h-3.5 ${cashLoading ? "animate-spin" : ""}`} /> Refresh
+                </BtnSecondary>
+              </div>
+
+              {suggestedCashWithdrawals.length === 0 ? (
+                <div className="text-center py-12 text-slate-500 space-y-2">
+                  <CheckCircle2 className="w-10 h-10 mx-auto text-slate-400 opacity-60" />
+                  <p className="font-bold text-slate-900 text-sm">No cash withdrawal suggestions found.</p>
+                  <p className="text-xs text-slate-500">
+                    Statement debits with ATM / Cash / Self in narrations will surface here for confirmation.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {suggestedCashWithdrawals.map((line) => (
+                    <div
+                      key={line.id}
+                      className="p-4 bg-white border-2 border-amber-200 hover:border-amber-400 flex items-center justify-between gap-4 flex-wrap transition-colors"
+                    >
+                      <div className="flex-1 min-w-[240px] space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300">
+                            Cash In-Hand Candidate
+                          </span>
+                          <span className="text-xs font-bold text-slate-900">{line.bank_account_name || "Account"}</span>
+                          <span className="text-xs font-mono text-slate-500">{line.date}</span>
+                        </div>
+                        <div className="text-base font-mono text-amber-900 font-bold">-{inr(line.amount || line.debit_amount)}</div>
+                        <div className="text-xs text-slate-700 font-medium" title={line.narration}>
+                          {line.narration}
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-mono">
+                          Ref: {line.reference_no || "-"} • {line.suggestion_reason || "Pattern match"}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setActiveCashLine(line);
+                            setShowCashModal(true);
+                          }}
+                          data-testid={`confirm-cash-suggestion-${line.id}`}
+                          className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 transition-colors"
+                        >
+                          <Coins className="w-3.5 h-3.5" /> Confirm Cash In-Hand
                         </button>
                       </div>
                     </div>
@@ -829,6 +1009,7 @@ export default function BankReconciliation() {
                       <th className="px-4 py-3 text-right">Credit</th>
                       <th className="px-4 py-3 text-right">Running Balance</th>
                       <th className="px-4 py-3">Matched Entity</th>
+                      <th className="px-4 py-3">Remarks</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -865,12 +1046,48 @@ export default function BankReconciliation() {
                         </td>
                         <td className="px-4 py-3 text-xs text-slate-600">
                           {line.matched_to ? (
-                            <span className="font-mono text-[10px] text-blue-800 bg-blue-50 px-1.5 py-0.5 border border-blue-200 font-bold">
-                              {line.matched_to.type} #{String(line.matched_to.ref_id).slice(-6)}
-                            </span>
+                            line.matched_to.type === "cash_withdrawal" ? (
+                              <button
+                                onClick={() => {
+                                  setSelectedCashBreakdownId(line.matched_to.ref_id);
+                                  setSelectedCashLine(line);
+                                  setShowCashBreakdownModal(true);
+                                }}
+                                data-testid={`cash-breakdown-btn-${line.id}`}
+                                className="font-mono text-[10px] text-amber-900 bg-amber-50 hover:bg-amber-100 px-2 py-1 border border-amber-300 font-bold flex flex-col gap-0.5 text-left transition-colors cursor-pointer shadow-sm group rounded"
+                                title="Click to view what this cash withdrawal funded (karigar disbursements & remaining balance)"
+                              >
+                                <div className="flex items-center gap-1">
+                                  <Coins className="w-3 h-3 text-amber-600 group-hover:scale-110 transition-transform" />
+                                  <span>Cash In-Hand #{String(line.matched_to.ref_id).slice(-6)}</span>
+                                </div>
+                                {line.cash_ledger_info && (
+                                  <div className="text-[9px] text-amber-800 font-sans font-medium">
+                                    {line.cash_ledger_info.wage_payment_count > 0 ? (
+                                      <span>
+                                        ₹{inr(line.cash_ledger_info.allocated_amount)} paid ({line.cash_ledger_info.wage_payment_count}) • ₹{inr(line.cash_ledger_info.remaining_balance)} rem
+                                      </span>
+                                    ) : (
+                                      <span>₹{inr(line.cash_ledger_info.remaining_balance)} unallocated</span>
+                                    )}
+                                  </div>
+                                )}
+                              </button>
+                            ) : (
+                              <span className="font-mono text-[10px] text-blue-800 bg-blue-50 px-1.5 py-0.5 border border-blue-200 font-bold">
+                                {line.matched_to.type} #{String(line.matched_to.ref_id).slice(-6)}
+                              </span>
+                            )
                           ) : (
                             "-"
                           )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <InlineRemarkCell
+                            lineId={line.id}
+                            initialRemarks={line.remarks}
+                            onSave={handleUpdateRemarks}
+                          />
                         </td>
                       </tr>
                     ))}
@@ -923,6 +1140,33 @@ export default function BankReconciliation() {
             setShowAccountModal(false);
             notify("Bank account created!", "success");
             fetchAccounts();
+          }}
+        />
+      )}
+
+      {/* 4. CONFIRM CASH WITHDRAWAL MODAL */}
+      {showCashModal && activeCashLine && (
+        <ConfirmCashWithdrawalModal
+          line={activeCashLine}
+          accounts={accounts}
+          onClose={() => {
+            setShowCashModal(false);
+            setActiveCashLine(null);
+          }}
+          onConfirm={handleConfirmCashWithdrawal}
+        />
+      )}
+
+      {/* 5. CASH WITHDRAWAL BREAKDOWN / AUDIT TRAIL MODAL */}
+      {showCashBreakdownModal && (selectedCashBreakdownId || selectedCashLine) && (
+        <CashWithdrawalBreakdownModal
+          cashLedgerId={selectedCashBreakdownId}
+          line={selectedCashLine}
+          accounts={accounts}
+          onClose={() => {
+            setShowCashBreakdownModal(false);
+            setSelectedCashBreakdownId(null);
+            setSelectedCashLine(null);
           }}
         />
       )}
@@ -1363,3 +1607,331 @@ function AddBankAccountModal({ onClose, onSuccess }) {
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Confirm Cash Withdrawal Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
+  const [notes, setNotes] = useState(line.narration || "");
+  const [loading, setLoading] = useState(false);
+  const acc = accounts.find((a) => a.id === line.bank_account_id);
+  const amount = line.amount || line.debit_amount || 0;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await onConfirm(line.id, notes);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white border-2 border-slate-900 max-w-md w-full shadow-2xl animate-in zoom-in-95">
+        <div className="p-4 border-b-2 border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Coins className="w-5 h-5 text-amber-600" />
+            <h3 className="font-black text-slate-900 text-sm uppercase">Confirm Cash Withdrawal</h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-4 space-y-4">
+          <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+            <p className="font-bold">This transaction looks like a cash withdrawal.</p>
+            <p className="text-[11px] text-amber-800">
+              Confirming will create an entry in the <strong>Cash in Hand</strong> ledger with initial balance equal to withdrawal amount (₹{inr(amount)}), and mark this statement line as fully reconciled.
+            </p>
+          </div>
+
+          <div className="p-3 bg-slate-50 border border-slate-200 text-xs space-y-1.5 font-mono">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Bank Account:</span>
+              <span className="font-bold text-slate-900">{acc ? acc.name : "Account"}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Date:</span>
+              <span className="text-slate-800">{line.date}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Amount Withdrawn:</span>
+              <span className="text-base font-bold text-red-600 font-mono">-{inr(amount)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Narration:</span>
+              <span className="text-slate-700 max-w-[200px] truncate text-right">{line.narration}</span>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-600">Notes / Purpose (Optional)</label>
+            <input
+              type="text"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g. Factory floor daily expenses / petty cash"
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#2563EB] focus:outline-none"
+            />
+          </div>
+
+          <div className="pt-2 flex items-center justify-end gap-2 border-t-2 border-slate-100">
+            <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
+            <button
+              type="submit"
+              disabled={loading}
+              data-testid="modal-confirm-cash-btn"
+              className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {loading ? "Confirming..." : "Confirm Cash In-Hand"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+function InlineRemarkCell({ lineId, initialRemarks, onSave }) {
+  const [val, setVal] = useState(initialRemarks || "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState(initialRemarks || "");
+
+  useEffect(() => {
+    setVal(initialRemarks || "");
+    setLastSaved(initialRemarks || "");
+  }, [initialRemarks]);
+
+  const handleBlur = async () => {
+    const trimmed = val;
+    if (trimmed === lastSaved) return;
+    setIsSaving(true);
+    try {
+      await onSave(lineId, trimmed);
+      setLastSaved(trimmed);
+    } catch {
+      setVal(lastSaved);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleKeyDown = async (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      await handleBlur();
+      e.target.blur();
+    } else if (e.key === "Escape") {
+      setVal(lastSaved);
+      e.target.blur();
+    }
+  };
+
+  return (
+    <div className="relative flex items-center min-w-[140px] max-w-[220px]">
+      <input
+        type="text"
+        value={val}
+        placeholder="Add remark..."
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        data-testid={`remarks-input-${lineId}`}
+        disabled={isSaving}
+        className="w-full text-xs px-2.5 py-1.5 border border-slate-300 bg-white hover:border-slate-400 focus:border-[#2563EB] focus:ring-1 focus:ring-[#2563EB] focus:outline-none transition-colors text-slate-800 placeholder:text-slate-400 disabled:opacity-50"
+      />
+      {isSaving && (
+        <span className="absolute right-2 text-[10px] text-[#2563EB] font-bold font-mono animate-pulse">...</span>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Cash Withdrawal Audit Trail & Karigar Disbursements Breakdown
+// ─────────────────────────────────────────────────────────────────────────────
+function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const acc = line ? accounts.find((a) => a.id === line.bank_account_id) : null;
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchDetail = async () => {
+      setLoading(true);
+      try {
+        if (cashLedgerId) {
+          const { data } = await http.get(`/banking/cash-ledger/${cashLedgerId}`);
+          if (isMounted) setDetail(data);
+        } else if (line?.cash_ledger_info) {
+          if (isMounted) setDetail(line.cash_ledger_info);
+        }
+      } catch (err) {
+        console.error("Failed to load cash ledger detail", err);
+        if (line?.cash_ledger_info && isMounted) {
+          setDetail(line.cash_ledger_info);
+        }
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    fetchDetail();
+    return () => {
+      isMounted = false;
+    };
+  }, [cashLedgerId, line]);
+
+  const withdrawalAmount = Number(detail?.withdrawal_amount || line?.debit_amount || line?.cash_ledger_info?.withdrawal_amount || 0);
+  const allocatedAmount = Number(detail?.allocated_amount ?? line?.cash_ledger_info?.allocated_amount ?? 0);
+  const remainingBalance = Number(detail?.remaining_balance ?? line?.cash_ledger_info?.remaining_balance ?? (withdrawalAmount - allocatedAmount));
+  const wagePayments = detail?.wage_payments || line?.cash_ledger_info?.wage_payments || [];
+  const pctAllocated = withdrawalAmount > 0 ? Math.min(100, Math.round((allocatedAmount / withdrawalAmount) * 100)) : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white border-2 border-slate-900 max-w-2xl w-full shadow-2xl animate-in zoom-in-95 flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="p-4 border-b-2 border-slate-100 flex items-center justify-between bg-amber-50/50">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-amber-100 border border-amber-300 text-amber-900 rounded">
+              <Coins className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-black text-slate-900 text-sm uppercase tracking-wide">
+                Cash Withdrawal Audit Trail
+              </h3>
+              <p className="text-xs text-slate-500 font-mono">
+                Ref: #{String(cashLedgerId || line?.matched_to?.ref_id || "ledger").slice(-8)} {line?.date ? `• Statement Date: ${line.date}` : ""}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 p-1">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content Body */}
+        <div className="p-6 space-y-5 overflow-y-auto flex-1">
+          {/* Statement metadata banner */}
+          {line && (
+            <div className="p-3 bg-slate-50 border border-slate-200 text-xs font-mono flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <span className="text-slate-500">Bank Account: </span>
+                <span className="font-bold text-slate-800">{acc ? acc.name : "Primary Account"}</span>
+              </div>
+              <div className="max-w-[300px] truncate" title={line.narration}>
+                <span className="text-slate-500">Narration: </span>
+                <span className="text-slate-700">{line.narration}</span>
+              </div>
+            </div>
+          )}
+
+          {/* KPI Metrics */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="p-3 bg-white border-2 border-slate-200">
+              <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Withdrawn Amount</div>
+              <div className="text-lg font-mono font-bold text-slate-900 mt-0.5">₹{inr(withdrawalAmount)}</div>
+              <div className="text-[10px] text-slate-400 font-mono mt-0.5">Gross Bank Debit</div>
+            </div>
+
+            <div className="p-3 bg-white border-2 border-emerald-200 bg-emerald-50/20">
+              <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">Disbursed to Karigars</div>
+              <div className="text-lg font-mono font-bold text-emerald-700 mt-0.5">₹{inr(allocatedAmount)}</div>
+              <div className="text-[10px] text-emerald-600 font-mono mt-0.5">{wagePayments.length} payment(s) recorded</div>
+            </div>
+
+            <div className="p-3 bg-white border-2 border-amber-200 bg-amber-50/20">
+              <div className="text-[10px] uppercase font-bold text-amber-900 tracking-wider">Unallocated Cash in Hand</div>
+              <div className="text-lg font-mono font-bold text-amber-900 mt-0.5">₹{inr(remainingBalance)}</div>
+              <div className="text-[10px] text-amber-700 font-mono mt-0.5">Available for future wages</div>
+            </div>
+          </div>
+
+          {/* Allocation Progress */}
+          <div className="space-y-1.5">
+            <div className="flex justify-between text-xs font-mono text-slate-600 font-bold">
+              <span>Disbursement Progress: {pctAllocated}%</span>
+              <span>₹{inr(allocatedAmount)} / ₹{inr(withdrawalAmount)}</span>
+            </div>
+            <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+              <div
+                className="bg-emerald-600 h-full transition-all duration-300"
+                style={{ width: `${pctAllocated}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Linked Disbursements Table */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-800">
+                Where did this cash actually go? ({wagePayments.length} Linked Karigar Payouts)
+              </h4>
+            </div>
+
+            {loading ? (
+              <div className="py-8 text-center text-slate-500 font-mono text-xs">
+                <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-slate-400" />
+                Loading linked wage payments...
+              </div>
+            ) : wagePayments.length === 0 ? (
+              <div className="p-6 text-center border-2 border-dashed border-slate-200 bg-slate-50 text-slate-500 space-y-1">
+                <Wallet className="w-8 h-8 mx-auto text-slate-400 opacity-60" />
+                <p className="font-bold text-xs text-slate-700">No wage disbursements recorded yet from this withdrawal.</p>
+                <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
+                  The full amount (₹{inr(withdrawalAmount)}) is currently sitting as unallocated cash in hand. When wage payments are recorded with paid_via="cash" drawing from this withdrawal, they will automatically appear here.
+                </p>
+              </div>
+            ) : (
+              <div className="border-2 border-slate-200 overflow-x-auto max-h-60">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-100 sticky top-0 text-[10px] font-bold uppercase tracking-wider text-slate-600 border-b-2 border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2">Date</th>
+                      <th className="px-3 py-2">Karigar / Worker</th>
+                      <th className="px-3 py-2 text-right">Amount Paid</th>
+                      <th className="px-3 py-2">Period Covered</th>
+                      <th className="px-3 py-2">Notes & Audit Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 font-mono">
+                    {wagePayments.map((wp) => (
+                      <tr key={wp.id || wp._id} className="hover:bg-slate-50">
+                        <td className="px-3 py-2 text-slate-700 whitespace-nowrap">{wp.date}</td>
+                        <td className="px-3 py-2 font-bold text-slate-900 font-sans">{wp.worker_name || `Worker #${String(wp.worker_id).slice(-6)}`}</td>
+                        <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">₹{inr(wp.amount)}</td>
+                        <td className="px-3 py-2 text-[11px] text-slate-600 whitespace-nowrap">
+                          {wp.period_from && wp.period_to ? `${wp.period_from} → ${wp.period_to}` : "-"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600 font-sans max-w-xs">
+                          <div>{wp.notes || "-"}</div>
+                          {wp.override_reason && (
+                            <span className="inline-block mt-0.5 text-[9px] bg-red-100 text-red-900 border border-red-200 px-1 py-0.5 rounded font-mono font-bold">
+                              ⚡ Overpayment Override: {wp.override_reason}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t-2 border-slate-100 flex items-center justify-end bg-slate-50">
+          <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+

@@ -6,7 +6,7 @@ from bson import ObjectId
 
 import server
 from routes.workers import workers_router
-from models.workers import WorkerIn, SetPinIn, WorkerLoginIn, AdvanceIn
+from models.workers import WorkerIn, SetPinIn, WorkerLoginIn, AdvanceIn, WagePaymentIn
 from auth import hash_password
 
 
@@ -28,6 +28,9 @@ class MockWorkersDB:
         self.jobs_store = {}
         self.notifications_store = []
         self.styles_store = {}
+        self.cash_ledger_store = {}
+        self.wage_payments_store = {}
+        self.bank_accounts_store = {}
 
         self.workers = MagicMock()
         self.workers.find = MagicMock(side_effect=self._find_workers)
@@ -53,6 +56,19 @@ class MockWorkersDB:
         self.styles = MagicMock()
         self.styles.find_one = AsyncMock(side_effect=self._find_one_style)
         self.styles.find = MagicMock(side_effect=self._find_styles)
+
+        self.cash_ledger = MagicMock()
+        self.cash_ledger.find_one = AsyncMock(side_effect=self._find_one_cash)
+        self.cash_ledger.find = MagicMock(side_effect=self._find_cash)
+        self.cash_ledger.update_one = AsyncMock(side_effect=self._update_cash)
+
+        self.wage_payments = MagicMock()
+        self.wage_payments.find_one = AsyncMock(side_effect=self._find_one_wage_payment)
+        self.wage_payments.find = MagicMock(side_effect=self._find_wage_payments)
+        self.wage_payments.insert_one = AsyncMock(side_effect=self._insert_wage_payment)
+
+        self.bank_accounts = MagicMock()
+        self.bank_accounts.find_one = AsyncMock(side_effect=self._find_one_bank_account)
 
     def _find_workers(self, query=None):
         return MockCursor(list(self.workers_store.values()))
@@ -127,6 +143,49 @@ class MockWorkersDB:
 
     def _find_styles(self, query=None):
         return MockCursor(list(self.styles_store.values()))
+
+    async def _find_one_cash(self, query):
+        oid_str = str(query.get("_id"))
+        return self.cash_ledger_store.get(oid_str)
+
+    def _find_cash(self, query=None):
+        return MockCursor(list(self.cash_ledger_store.values()))
+
+    async def _update_cash(self, query, update):
+        oid_str = str(query.get("_id"))
+        if oid_str in self.cash_ledger_store:
+            doc = self.cash_ledger_store[oid_str]
+            if "$inc" in update:
+                for k, v in update["$inc"].items():
+                    doc[k] = round(doc.get(k, 0.0) + v, 2)
+            if "$set" in update:
+                doc.update(update["$set"])
+        return MagicMock(matched_count=1)
+
+    async def _find_one_wage_payment(self, query):
+        oid_str = str(query.get("_id"))
+        return self.wage_payments_store.get(oid_str)
+
+    def _find_wage_payments(self, query=None):
+        docs = list(self.wage_payments_store.values())
+        if query:
+            if "worker_id" in query:
+                docs = [d for d in docs if str(d.get("worker_id")) == str(query["worker_id"])]
+            if "period_from" in query:
+                docs = [d for d in docs if d.get("period_from") == query["period_from"]]
+            if "period_to" in query:
+                docs = [d for d in docs if d.get("period_to") == query["period_to"]]
+        return MockCursor(docs)
+
+    async def _insert_wage_payment(self, doc):
+        oid = ObjectId()
+        doc["_id"] = oid
+        self.wage_payments_store[str(oid)] = doc
+        return MagicMock(inserted_id=oid)
+
+    async def _find_one_bank_account(self, query):
+        oid_str = str(query.get("_id"))
+        return self.bank_accounts_store.get(oid_str)
 
 
 @pytest.fixture
@@ -252,3 +311,271 @@ def test_advances_and_ledger(client, mock_workers_env):
     res = client.delete(f"/api/advances/{aid}")
     assert res.status_code == 200
     assert res.json()["ok"] is True
+
+
+def test_wage_payment_in_model():
+    wp = WagePaymentIn(
+        worker_id="w123",
+        worker_name="Ramesh",
+        amount=1500.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="cash",
+        cash_ledger_id="cash_1",
+        date="2026-08-16",
+        notes="First fortnight payout",
+        override_reason=None,
+    )
+    assert wp.amount == 1500.0
+    assert wp.paid_via == "cash"
+    assert wp.cash_ledger_id == "cash_1"
+
+
+@pytest.mark.anyio
+async def test_wage_payment_exact_match_success_and_cash_ledger_drawdown(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Manish",
+        "rate_per_pair": 20.0,
+        "skill": "cutting",
+        "active": True,
+    }
+
+    # Setup a production job completed by Manish in 2026-08-01 to 2026-08-15
+    jid = str(ObjectId())
+    mock_workers_env.jobs_store[jid] = {
+        "_id": ObjectId(jid),
+        "po_number": "PO-100",
+        "style_code": "ST-01",
+        "color": "Black",
+        "size": "7",
+        "updated_at": "2026-08-05T10:00:00Z",
+        "stage": "cutting",
+        "quantity": 100,
+        "completed_qty": 100,
+        "assignments": {"cutting": {"worker_id": wid, "completed_qty": 100, "rate_per_pair": 20.0}},
+        "history": [
+            {"event": "stage_update", "stage": "cutting", "role": "cutting", "worker_id": wid, "completed_qty": 100, "rate_per_pair": 20.0, "at": "2026-08-05T10:00:00Z"}
+        ],
+    }
+
+    # Setup cash ledger entry with 5000 remaining balance
+    cash_id = str(ObjectId())
+    mock_workers_env.cash_ledger_store[cash_id] = {
+        "_id": ObjectId(cash_id),
+        "amount": 5000.0,
+        "remaining_balance": 5000.0,
+        "date": "2026-08-01",
+        "notes": "Bank ATM cash withdrawal",
+    }
+
+    # 1. Check payroll computed owed (100 pairs * 20 = 2000)
+    from routes.pos import compute_payroll
+    payroll = await compute_payroll(db=mock_workers_env, from_date="2026-08-01", to_date="2026-08-15")
+    row = next(r for r in payroll["rows"] if r["worker_id"] == wid)
+    assert row["net_payable"] == 2000.0
+    assert row["actual_paid"] == 0.0
+    assert row["remaining_owed"] == 2000.0
+
+    # 2. Record wage payment matching exact owed amount (2000)
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "worker_name": "Manish",
+        "amount": 2000.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": cash_id,
+        "date": "2026-08-16",
+        "notes": "Settled in full via cash",
+    })
+    assert res.status_code == 200
+    wp_data = res.json()
+    assert wp_data["amount"] == 2000.0
+    assert wp_data["paid_via"] == "cash"
+
+    # 3. Confirm cash_ledger entry remaining_balance decreased from 5000 to 3000
+    assert mock_workers_env.cash_ledger_store[cash_id]["remaining_balance"] == 3000.0
+
+    # 4. Confirm report_payroll now shows actual_paid == 2000, remaining_owed == 0, payment_status == 'paid'
+    payroll_after = await compute_payroll(db=mock_workers_env, from_date="2026-08-01", to_date="2026-08-15")
+    row_after = next(r for r in payroll_after["rows"] if r["worker_id"] == wid)
+    assert row_after["actual_paid"] == 2000.0
+    assert row_after["remaining_owed"] == 0.0
+    assert row_after["payment_status"] == "paid"
+    assert row_after["is_overpaid"] is False
+
+
+@pytest.mark.anyio
+async def test_wage_payment_overpayment_rejected_without_override(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Sunil",
+        "rate_per_pair": 10.0,
+        "skill": "stitching",
+        "active": True,
+    }
+
+    # Worker has 1000 computed owed
+    jid = str(ObjectId())
+    mock_workers_env.jobs_store[jid] = {
+        "_id": ObjectId(jid),
+        "updated_at": "2026-08-05T10:00:00Z",
+        "stage": "stitching",
+        "quantity": 100,
+        "completed_qty": 100,
+        "assignments": {"stitching": {"worker_id": wid, "completed_qty": 100, "rate_per_pair": 10.0}},
+        "history": [
+            {"event": "stage_update", "stage": "stitching", "role": "stitching", "worker_id": wid, "completed_qty": 100, "rate_per_pair": 10.0, "at": "2026-08-05T10:00:00Z"}
+        ],
+    }
+
+    cash_id = str(ObjectId())
+    mock_workers_env.cash_ledger_store[cash_id] = {
+        "_id": ObjectId(cash_id),
+        "amount": 10000.0,
+        "remaining_balance": 10000.0,
+    }
+
+    # Attempt to pay 1500 (> 1000) with no override_reason
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "amount": 1500.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": cash_id,
+        "date": "2026-08-16",
+        "override_reason": "",
+    })
+    assert res.status_code == 400
+    assert "override_reason is required" in res.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_wage_payment_overpayment_accepted_with_override_and_visible_in_payroll(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Sunil",
+        "rate_per_pair": 10.0,
+        "skill": "stitching",
+        "active": True,
+    }
+
+    jid = str(ObjectId())
+    mock_workers_env.jobs_store[jid] = {
+        "_id": ObjectId(jid),
+        "updated_at": "2026-08-05T10:00:00Z",
+        "stage": "stitching",
+        "quantity": 100,
+        "completed_qty": 100,
+        "assignments": {"stitching": {"worker_id": wid, "completed_qty": 100, "rate_per_pair": 10.0}},
+        "history": [
+            {"event": "stage_update", "stage": "stitching", "role": "stitching", "worker_id": wid, "completed_qty": 100, "rate_per_pair": 10.0, "at": "2026-08-05T10:00:00Z"}
+        ],
+    }
+
+    cash_id = str(ObjectId())
+    mock_workers_env.cash_ledger_store[cash_id] = {
+        "_id": ObjectId(cash_id),
+        "amount": 10000.0,
+        "remaining_balance": 10000.0,
+    }
+
+    # Attempt same overpayment with valid override_reason
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "amount": 1500.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": cash_id,
+        "date": "2026-08-16",
+        "override_reason": "Advance folded into this payment for festival expenses",
+    })
+    assert res.status_code == 200
+    assert res.json()["override_reason"] == "Advance folded into this payment for festival expenses"
+
+    # Confirm payroll reflects overpayment and reason clearly
+    from routes.pos import compute_payroll
+    payroll = await compute_payroll(db=mock_workers_env, from_date="2026-08-01", to_date="2026-08-15")
+    row = next(r for r in payroll["rows"] if r["worker_id"] == wid)
+    assert row["computed_owed"] == 1000.0
+    assert row["actual_paid"] == 1500.0
+    assert row["is_overpaid"] is True
+    assert row["payment_status"] == "overpaid"
+    assert "Advance folded into this payment" in row["override_reason"]
+
+
+def test_wage_payment_overdrawing_cash_ledger_rejected(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Kailash",
+        "rate_per_pair": 10.0,
+        "skill": "lasting",
+        "active": True,
+    }
+
+    cash_id = str(ObjectId())
+    mock_workers_env.cash_ledger_store[cash_id] = {
+        "_id": ObjectId(cash_id),
+        "amount": 500.0,
+        "remaining_balance": 200.0,  # Only 200 left in cash pool
+    }
+
+    # Attempt to pay 500 when only 200 left in cash ledger
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "amount": 500.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": cash_id,
+        "date": "2026-08-16",
+        "override_reason": "Approved",
+    })
+    assert res.status_code == 400
+    assert "Insufficient cash in ledger entry" in res.json()["detail"]
+
+
+def test_wage_payment_bank_transfer_success(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Kailash",
+        "rate_per_pair": 10.0,
+        "skill": "lasting",
+        "active": True,
+    }
+
+    bank_acc_id = str(ObjectId())
+    mock_workers_env.bank_accounts_store[bank_acc_id] = {
+        "_id": ObjectId(bank_acc_id),
+        "name": "HDFC Primary Current A/C",
+    }
+
+    # Bank transfer payment with override
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "amount": 1000.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "bank_transfer",
+        "bank_account_id": bank_acc_id,
+        "date": "2026-08-16",
+        "override_reason": "Direct NEFT wage payout",
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["paid_via"] == "bank_transfer"
+    assert data["bank_account_id"] == bank_acc_id
+
+    # List payments for worker
+    res = client.get(f"/api/workers/{wid}/wage-payments")
+    assert res.status_code == 200
+    assert len(res.json()) == 1
+

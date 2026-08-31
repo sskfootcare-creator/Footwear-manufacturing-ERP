@@ -213,9 +213,76 @@ async def list_statement_lines(
 
     docs = await db.bank_statement_lines.find(q).sort([("date", -1), ("_id", -1)]).skip(skip).limit(limit).to_list(limit)
     total = await db.bank_statement_lines.count_documents(q)
+
+    # Collect cash_ledger IDs for cash_withdrawal lines to populate audit trail details
+    cash_ledger_ids = [
+        d["matched_to"]["ref_id"]
+        for d in docs
+        if isinstance(d.get("matched_to"), dict) and d["matched_to"].get("type") == "cash_withdrawal" and d["matched_to"].get("ref_id")
+    ]
+    cash_ledger_map = {}
+    if cash_ledger_ids and hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            cl_obj_ids = []
+            for cid in cash_ledger_ids:
+                try:
+                    cl_obj_ids.append(_oid(cid))
+                except Exception:
+                    pass
+            cl_cursor = db.cash_ledger.find({"_id": {"$in": cl_obj_ids}})
+            if hasattr(cl_cursor, "to_list"):
+                res = cl_cursor.to_list(len(cl_obj_ids) + 10)
+                if hasattr(res, "__await__"):
+                    cl_docs = await res
+                elif isinstance(res, list):
+                    cl_docs = res
+                else:
+                    cl_docs = []
+                cash_ledger_map = {str(c["_id"]): c for c in cl_docs}
+        except Exception:
+            cash_ledger_map = {}
+
+    wage_payments_by_cl = {}
+    if cash_ledger_ids and hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": [str(c) for c in cash_ledger_ids]}})
+            if hasattr(wp_cursor, "to_list"):
+                res = wp_cursor.to_list(1000)
+                if hasattr(res, "__await__"):
+                    wp_docs = await res
+                elif isinstance(res, list):
+                    wp_docs = res
+                else:
+                    wp_docs = []
+                for wp in wp_docs:
+                    clid = str(wp.get("cash_ledger_id"))
+                    wage_payments_by_cl.setdefault(clid, []).append(wp)
+        except Exception:
+            wage_payments_by_cl = {}
+
+    items = []
+    for d in docs:
+        sd = stringify(d)
+        if isinstance(d.get("matched_to"), dict) and d["matched_to"].get("type") == "cash_withdrawal":
+            ref_id = str(d["matched_to"].get("ref_id"))
+            cl_doc = cash_ledger_map.get(ref_id, {})
+            wps = wage_payments_by_cl.get(ref_id, [])
+            allocated = round(sum(float(wp.get("amount") or 0.0) for wp in wps), 2)
+            withdrawn = float(cl_doc.get("amount") or d.get("debit_amount") or 0.0)
+            rem = float(cl_doc.get("remaining_balance") if cl_doc.get("remaining_balance") is not None else (withdrawn - allocated))
+            sd["cash_ledger_info"] = {
+                "cash_ledger_id": ref_id,
+                "withdrawal_amount": withdrawn,
+                "remaining_balance": round(rem, 2),
+                "allocated_amount": allocated,
+                "wage_payment_count": len(wps),
+                "wage_payments": [stringify(wp) for wp in wps],
+            }
+        items.append(sd)
+
     return {
         "total": total,
-        "items": [stringify(d) for d in docs],
+        "items": items,
     }
 
 
@@ -585,6 +652,7 @@ async def _handle_statement_import(
             "running_balance": float(bal_val) if bal_val is not None else None,
             "match_status": "unmatched",
             "matched_to": None,
+            "remarks": "",
             "imported_at": now,
             "imported_by": user_email,
         }
@@ -951,7 +1019,229 @@ async def reconcile_bank_account(
 # Transfer Pairs & Reconciliation Summary (Stage 4 & Stage 5)
 # ---------------------------------------------------------------------------
 
-from models.banking import TransferConfirmIn
+from models.banking import TransferConfirmIn, CashWithdrawalConfirmIn
+
+# Common cash withdrawal narration indicators: ATM, CASH, SELF, CWDR, NFS, EAW, etc.
+_CASH_WITHDRAWAL_REGEX = re.compile(
+    r'(?:^|[\s\-_/.,:])(ATM|CASH|SELF|CWDR|NFS|EAW|CSH|SELF\s*CHQ|SELF\s*CHEQUE|CASH\s*WDL|CASH\s*WITHDRAWAL)(?:$|[\s\-_/.,:])',
+    re.IGNORECASE,
+)
+
+
+def _is_cash_withdrawal_candidate(narration: Optional[str]) -> bool:
+    if not narration:
+        return False
+    return bool(_CASH_WITHDRAWAL_REGEX.search(narration))
+
+
+@banking_router.get("/banking/cash-withdrawals/suggested")
+@banking_router.get("/bank-accounts/cash-withdrawals/suggested")
+async def get_suggested_cash_withdrawals(
+    request: Request,
+    bank_account_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Scan unmatched debit statement lines for potential cash withdrawal patterns (ATM, CASH, SELF, etc.)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    q: Dict[str, Any] = {
+        "match_status": "unmatched",
+        "debit_amount": {"$gt": 0},
+    }
+    if bank_account_id and bank_account_id != "all":
+        q["bank_account_id"] = str(bank_account_id)
+    if from_date or to_date:
+        dq = {}
+        if from_date:
+            dq["$gte"] = str(from_date)
+        if to_date:
+            dq["$lte"] = str(to_date)
+        q["date"] = dq
+
+    docs = await db.bank_statement_lines.find(q).sort("date", -1).to_list(5000)
+
+    # Fetch accounts map
+    accounts = await db.bank_accounts.find({}).to_list(1000)
+    acc_map = {str(a["_id"]): a.get("name", "Unknown Account") for a in accounts}
+
+    candidates = []
+    for d in docs:
+        narration = d.get("narration") or ""
+        if _is_cash_withdrawal_candidate(narration):
+            c_doc = stringify(d)
+            c_doc["bank_account_name"] = acc_map.get(str(d.get("bank_account_id")), "Unknown Account")
+            c_doc["amount"] = float(d.get("debit_amount") or 0.0)
+            c_doc["suggestion_reason"] = "Narration matches cash withdrawal pattern (ATM/CASH/SELF)"
+            candidates.append(c_doc)
+
+    return {
+        "ok": True,
+        "total_suggestions": len(candidates),
+        "candidates": candidates,
+    }
+
+
+@banking_router.post("/banking/cash-withdrawals/confirm")
+@banking_router.post("/bank-accounts/cash-withdrawals/confirm")
+async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Request):
+    """Explicitly confirm a statement line as cash withdrawal, create cash_ledger entry, and mark line matched."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    line = await db.bank_statement_lines.find_one({"_id": _oid(payload.statement_line_id)})
+    if not line:
+        raise HTTPException(404, f"Statement line '{payload.statement_line_id}' not found")
+
+    amount = float(line.get("debit_amount") or 0.0)
+    if amount <= 0:
+        raise HTTPException(400, "Cash withdrawal line must have a debit amount > 0")
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "")
+
+    # Create document in new collection cash_ledger
+    cash_ledger_doc = {
+        "bank_account_id": str(line.get("bank_account_id")),
+        "source_statement_line_id": str(line["_id"]),
+        "date": line.get("date"),
+        "amount": amount,
+        "remaining_balance": amount,
+        "notes": payload.notes or line.get("narration") or "Cash withdrawal from bank",
+        "created_at": now,
+        "created_by": user_email,
+    }
+    res = await db.cash_ledger.insert_one(cash_ledger_doc)
+    cash_ledger_id = str(res.inserted_id)
+
+    # Update statement line to matched with matched_to: cash_withdrawal
+    await db.bank_statement_lines.update_one(
+        {"_id": line["_id"]},
+        {"$set": {
+            "match_status": "matched",
+            "matched_to": {
+                "type": "cash_withdrawal",
+                "ref_id": cash_ledger_id,
+            },
+            "updated_at": now,
+            "updated_by": user_email,
+        }}
+    )
+
+    return {
+        "ok": True,
+        "message": "Cash withdrawal successfully confirmed and added to Cash Ledger.",
+        "statement_line_id": str(line["_id"]),
+        "cash_ledger_id": cash_ledger_id,
+        "amount": amount,
+        "remaining_balance": amount,
+    }
+
+
+@banking_router.get("/banking/cash-ledger")
+@banking_router.get("/bank-accounts/cash-ledger")
+async def list_cash_ledger(
+    request: Request,
+    bank_account_id: Optional[str] = None,
+    limit: int = 200,
+):
+    """List cash ledger entries and total cash-in-hand remaining balance with linked wage disbursements."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    q: Dict[str, Any] = {}
+    if bank_account_id and bank_account_id != "all":
+        q["bank_account_id"] = str(bank_account_id)
+
+    docs = await db.cash_ledger.find(q).sort("date", -1).to_list(limit)
+    total_withdrawn = sum(float(d.get("amount") or 0.0) for d in docs)
+    total_remaining_balance = sum(float(d.get("remaining_balance") or 0.0) for d in docs)
+
+    # Populate linked wage payments per cash_ledger entry
+    cash_ids = [str(d["_id"]) for d in docs]
+    wage_payments_by_cl = {}
+    if cash_ids and hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_cursor = db.wage_payments.find({"cash_ledger_id": {"$in": cash_ids}})
+            if hasattr(wp_cursor, "to_list"):
+                res = wp_cursor.to_list(1000)
+                if hasattr(res, "__await__"):
+                    wp_docs = await res
+                elif isinstance(res, list):
+                    wp_docs = res
+                else:
+                    wp_docs = []
+                for wp in wp_docs:
+                    clid = str(wp.get("cash_ledger_id"))
+                    wage_payments_by_cl.setdefault(clid, []).append(wp)
+        except Exception:
+            wage_payments_by_cl = {}
+
+    items = []
+    for d in docs:
+        sd = stringify(d)
+        wps = wage_payments_by_cl.get(str(d["_id"]), [])
+        allocated = round(sum(float(wp.get("amount") or 0.0) for wp in wps), 2)
+        withdrawn = float(d.get("amount") or 0.0)
+        rem = float(d.get("remaining_balance") if d.get("remaining_balance") is not None else (withdrawn - allocated))
+        sd["allocated_amount"] = allocated
+        sd["remaining_balance"] = round(rem, 2)
+        sd["wage_payment_count"] = len(wps)
+        sd["wage_payments"] = [stringify(wp) for wp in wps]
+        items.append(sd)
+
+    return {
+        "ok": True,
+        "total_count": len(docs),
+        "total_withdrawn": round(total_withdrawn, 2),
+        "total_remaining_balance": round(total_remaining_balance, 2),
+        "items": items,
+    }
+
+
+@banking_router.get("/banking/cash-ledger/{cash_ledger_id}")
+@banking_router.get("/bank-accounts/cash-ledger/{cash_ledger_id}")
+async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
+    """Get cash ledger entry details with all linked wage payments funded by this withdrawal."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
+    db = _get_db(request)
+
+    doc = await db.cash_ledger.find_one({"_id": _oid(cash_ledger_id)})
+    if not doc:
+        raise HTTPException(404, f"Cash ledger entry '{cash_ledger_id}' not found")
+
+    wage_payments = []
+    if hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_cursor = db.wage_payments.find({"cash_ledger_id": str(cash_ledger_id)})
+            if hasattr(wp_cursor, "to_list"):
+                res = wp_cursor.to_list(500)
+                if hasattr(res, "__await__"):
+                    wage_payments = await res
+                elif isinstance(res, list):
+                    wage_payments = res
+        except Exception:
+            wage_payments = []
+
+    wage_payments_list = [stringify(wp) for wp in wage_payments]
+    allocated_amount = round(sum(float(wp.get("amount") or 0.0) for wp in wage_payments), 2)
+    withdrawal_amount = float(doc.get("amount") or 0.0)
+    remaining_balance = float(doc.get("remaining_balance") if doc.get("remaining_balance") is not None else (withdrawal_amount - allocated_amount))
+
+    return {
+        "ok": True,
+        "cash_ledger": stringify(doc),
+        "withdrawal_amount": withdrawal_amount,
+        "allocated_amount": allocated_amount,
+        "remaining_balance": round(remaining_balance, 2),
+        "wage_payments": wage_payments_list,
+        "wage_payment_count": len(wage_payments_list),
+    }
 
 
 @banking_router.get("/banking/transfers/suggested")
@@ -1218,8 +1508,30 @@ async def get_reconciliation_summary(
                     acc_stat["matched_expenses"] += debit
             else:
                 unmatched_expenses += debit
-                if acc_stat:
-                    acc_stat["unmatched_expenses"] += debit
+    for acc_id_key, acc_stat in per_account_stats.items():
+        acc_stat["total_reconciled_credits"] = round(acc_stat["matched_income"], 2)
+        acc_stat["total_reconciled_debits"] = round(acc_stat["matched_expenses"], 2)
+        acc_stat["net_statement_flow"] = round(acc_stat["income"] - acc_stat["expenses"], 2)
+
+    # Cash in hand remaining balance from cash_ledger
+    cash_docs = []
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            cash_q: Dict[str, Any] = {}
+            if bank_account_id and bank_account_id != "all":
+                cash_q["bank_account_id"] = str(bank_account_id)
+            cursor = db.cash_ledger.find(cash_q)
+            if hasattr(cursor, "to_list"):
+                res = cursor.to_list(5000)
+                if hasattr(res, "__await__"):
+                    cash_docs = await res
+                elif isinstance(res, list):
+                    cash_docs = res
+        except Exception:
+            cash_docs = []
+
+    total_cash_in_hand = round(sum(float(cd.get("remaining_balance") or 0.0) for cd in cash_docs), 2)
+    total_cash_withdrawn = round(sum(float(cd.get("amount") or 0.0) for cd in cash_docs), 2)
 
     net_operating_cashflow = round(total_income - total_expenses, 2)
 
@@ -1242,6 +1554,8 @@ async def get_reconciliation_summary(
             "transfer_lines_count": transfer_count,
             "ignored_lines_count": ignored_count,
             "total_statement_lines": len(docs),
+            "total_cash_in_hand": total_cash_in_hand,
+            "total_cash_withdrawn": total_cash_withdrawn,
         },
         "accounts": list(per_account_stats.values()),
     }

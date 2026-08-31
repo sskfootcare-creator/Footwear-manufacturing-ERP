@@ -65,3 +65,19 @@ class ReadyForPickupIn(BaseModel):
     size_breakdown: Optional[dict] = None  # e.g. {"4": 120, "5": 120, "6": 240} or {job_id: qty}
 
 
+class WagePaymentIn(BaseModel):
+    worker_id: str
+    worker_name: Optional[str] = ""
+    amount: float
+    period_from: str
+    period_to: str
+    paid_via: Literal["cash", "bank_transfer"]
+    cash_ledger_id: Optional[str] = None
+    bank_account_id: Optional[str] = None
+    date: str
+    paid_by: Optional[str] = ""
+    notes: Optional[str] = ""
+    override_reason: Optional[str] = None
+
+
+

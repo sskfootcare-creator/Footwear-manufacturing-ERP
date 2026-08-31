@@ -20,7 +20,7 @@ from models.orders import (
 )
 from models.workers import (
     WorkerIn, AssignmentUpdate, BulkAssign, AdvanceIn,
-    SetPinIn, WorkerLoginIn, ReadyForPickupIn
+    SetPinIn, WorkerLoginIn, ReadyForPickupIn, WagePaymentIn
 )
 from models.vendors import (
     DEFAULT_CREDIT_DAYS, PAYMENT_MODES, GRNLineItem, GRNIn, PaymentIn,
@@ -63,7 +63,7 @@ from models.banking import (
     BankAccountIn, BankAccountUpdate, MatchedTo,
     BankStatementLineIn, BankStatementLineUpdate,
     StatementImportConfigIn, StatementImportConfigUpdate, STATEMENT_CANONICAL_FIELDS,
-    TransferConfirmIn,
+    TransferConfirmIn, CashWithdrawalConfirmIn,
 )
 
 
@@ -83,7 +83,7 @@ __all__ = [
     "PRODUCTION_STAGES", "POLineItem", "POIn", "ProductionStageUpdate", "ProductionJobDoc",
     # Workers
     "WorkerIn", "AssignmentUpdate", "BulkAssign", "AdvanceIn",
-    "SetPinIn", "WorkerLoginIn", "ReadyForPickupIn",
+    "SetPinIn", "WorkerLoginIn", "ReadyForPickupIn", "WagePaymentIn",
     # Vendors
     "DEFAULT_CREDIT_DAYS", "PAYMENT_MODES", "GRNLineItem", "GRNIn", "PaymentIn",
     "VendorIn", "VendorUpdate", "VendorPOLineItem", "VendorPOIn", "VendorPOUpdate",
@@ -117,5 +117,5 @@ __all__ = [
     # Banking & Reconciliation
     "BankAccountIn", "BankAccountUpdate", "MatchedTo", "BankStatementLineIn", "BankStatementLineUpdate",
     "StatementImportConfigIn", "StatementImportConfigUpdate", "STATEMENT_CANONICAL_FIELDS",
-    "TransferConfirmIn",
+    "TransferConfirmIn", "CashWithdrawalConfirmIn",
 ]

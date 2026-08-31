@@ -13,10 +13,13 @@ from models.banking import (
     BankStatementLineIn,
     BankStatementLineUpdate,
     MatchedTo,
+    TransferConfirmIn,
+    CashWithdrawalConfirmIn,
 )
 from models.vendors import PaymentIn
 from models.expenses import ExpenseIn, ExpenseUpdate, RecurringExpenseIn
 from models.online_reconciliation import SettlementImportIn, DailyPaymentRow, NonOrderDeductionRow
+import routes.banking as banking_routes
 from routes.banking import (
     list_bank_accounts,
     create_bank_account,
@@ -26,6 +29,11 @@ from routes.banking import (
     list_statement_lines,
     create_statement_lines,
     match_statement_line,
+    _is_cash_withdrawal_candidate,
+    get_suggested_cash_withdrawals,
+    confirm_cash_withdrawal,
+    list_cash_ledger,
+    get_cash_ledger_detail,
 )
 
 
@@ -70,11 +78,27 @@ def test_bank_statement_line_models_validation():
         running_balance=195231.25,
         match_status="matched",
         matched_to=MatchedTo(type="settlement", ref_id="settle_123"),
+        remarks="Initial remark",
     )
     assert line.credit_amount == 45230.75
     assert line.match_status == "matched"
     assert line.matched_to.type == "settlement"
     assert line.matched_to.ref_id == "settle_123"
+    assert line.remarks == "Initial remark"
+
+    # Default remarks should be empty string
+    line_default = BankStatementLineIn(
+        bank_account_id=str(ObjectId()),
+        date="2026-08-15",
+        narration="Test line",
+    )
+    assert line_default.remarks == ""
+
+    # BankStatementLineUpdate remarks
+    update_with_remarks = BankStatementLineUpdate(remarks="Updated remark note")
+    assert update_with_remarks.remarks == "Updated remark note"
+    update_default = BankStatementLineUpdate()
+    assert update_default.remarks == ""
 
 
 def test_payment_and_expense_models_backward_compatibility():
@@ -259,11 +283,19 @@ async def test_bank_statement_lines_routes(monkeypatch):
     match_payload = BankStatementLineUpdate(
         match_status="matched",
         matched_to=MatchedTo(type="settlement", ref_id="settle_myntra_aug25"),
+        remarks="Verified against order batch #44",
     )
     match_res = await match_statement_line(str(line_id), match_payload, req)
     assert match_res["match_status"] == "matched"
     assert match_res["matched_to"]["type"] == "settlement"
     assert match_res["matched_to"]["ref_id"] == "settle_myntra_aug25"
+
+    # 3. Update remark only
+    remark_doc = {**matched_doc, "remarks": "Updated remark only"}
+    mock_db.bank_statement_lines.find_one = AsyncMock(return_value=remark_doc)
+    remark_payload = BankStatementLineUpdate(remarks="Updated remark only")
+    remark_res = await match_statement_line(str(line_id), remark_payload, req)
+    assert remark_res["remarks"] == "Updated remark only"
 
 
 @pytest.mark.anyio
@@ -1420,6 +1452,337 @@ async def test_auto_reconcile_expense_with_pre_set_bank_account(monkeypatch):
     assert res["no_match_count"] == 1
     assert str(line_id) not in updated_stmt
     mock_db.expenses.update_one.assert_not_called()
+
+
+def test_matched_to_cash_withdrawal_model():
+    """Verify MatchedTo model accepts cash_withdrawal type."""
+    m = MatchedTo(type="cash_withdrawal", ref_id="cash_123")
+    assert m.type == "cash_withdrawal"
+    assert m.ref_id == "cash_123"
+
+
+def test_cash_withdrawal_pattern_detection():
+    """Verify pattern detector detects ATM, CASH, SELF, CWDR, etc. in narrations."""
+    assert _is_cash_withdrawal_candidate("ATM WDL / 9876 / KOTAK") is True
+    assert _is_cash_withdrawal_candidate("CHQ PAID - SELF") is True
+    assert _is_cash_withdrawal_candidate("SELF CHEQUE 504011") is True
+    assert _is_cash_withdrawal_candidate("CASH WITHDRAWAL BRANCH AGRA") is True
+    assert _is_cash_withdrawal_candidate("CWDR-4321-NEW DELHI") is True
+    assert _is_cash_withdrawal_candidate("EAW CASH DISPENSE") is True
+
+    # Negative patterns
+    assert _is_cash_withdrawal_candidate("NEFT-MYNTRA DESIGNS-SETTLEMENT") is False
+    assert _is_cash_withdrawal_candidate("RTGS TO RELIANCE RETAIL") is False
+    assert _is_cash_withdrawal_candidate("MONTHLY WAREHOUSE RENT") is False
+    assert _is_cash_withdrawal_candidate("") is False
+    assert _is_cash_withdrawal_candidate(None) is False
+
+
+@pytest.mark.anyio
+async def test_cash_withdrawal_routes_and_cash_ledger(monkeypatch):
+    """Verify suggested cash withdrawals, confirmation flow, cash_ledger collection, and summary."""
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = ObjectId()
+    line_id = ObjectId()
+    cash_ledger_id = ObjectId()
+
+    # 1. Mock statement line for suggestion
+    atm_line_doc = {
+        "_id": line_id,
+        "bank_account_id": str(acc_id),
+        "date": "2026-08-28",
+        "narration": "ATM CASH WDL - SELF CHQ",
+        "reference_no": "ATM5566",
+        "debit_amount": 25000.0,
+        "credit_amount": 0.0,
+        "running_balance": 175000.0,
+        "match_status": "unmatched",
+    }
+
+    acc_doc = {
+        "_id": acc_id,
+        "name": "HDFC Primary Current",
+        "bank_name": "HDFC Bank",
+        "account_type": "b2b_client",
+        "opening_balance": 200000.0,
+    }
+
+    mock_db.bank_statement_lines.find = MagicMock(return_value=MagicMock(
+        sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[atm_line_doc])))
+    ))
+    mock_db.bank_accounts.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[acc_doc])))
+
+    req = MagicMock()
+
+    # 2. Get suggested cash withdrawals
+    suggestions_res = await get_suggested_cash_withdrawals(req, bank_account_id=str(acc_id))
+    assert suggestions_res["ok"] is True
+    assert suggestions_res["total_suggestions"] == 1
+    candidate = suggestions_res["candidates"][0]
+    assert candidate["id"] == str(line_id)
+    assert candidate["amount"] == 25000.0
+    assert "cash withdrawal pattern" in candidate["suggestion_reason"]
+
+    # 3. Confirm cash withdrawal
+    mock_db.bank_statement_lines.find_one = AsyncMock(return_value=atm_line_doc)
+    mock_db.cash_ledger.insert_one = AsyncMock(return_value=MagicMock(inserted_id=cash_ledger_id))
+    mock_db.bank_statement_lines.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+
+    confirm_payload = CashWithdrawalConfirmIn(
+        statement_line_id=str(line_id),
+        notes="Cash drawn for factory floor weekly expenses",
+    )
+    confirm_res = await confirm_cash_withdrawal(confirm_payload, req)
+    assert confirm_res["ok"] is True
+    assert confirm_res["cash_ledger_id"] == str(cash_ledger_id)
+    assert confirm_res["amount"] == 25000.0
+    assert confirm_res["remaining_balance"] == 25000.0
+
+    # Verify cash_ledger insert
+    inserted_cash_doc = mock_db.cash_ledger.insert_one.call_args[0][0]
+    assert inserted_cash_doc["amount"] == 25000.0
+    assert inserted_cash_doc["remaining_balance"] == 25000.0
+    assert inserted_cash_doc["bank_account_id"] == str(acc_id)
+    assert inserted_cash_doc["source_statement_line_id"] == str(line_id)
+    assert inserted_cash_doc["notes"] == "Cash drawn for factory floor weekly expenses"
+
+    # Verify statement line update to matched_to: cash_withdrawal
+    updated_stmt_set = mock_db.bank_statement_lines.update_one.call_args[0][1]["$set"]
+    assert updated_stmt_set["match_status"] == "matched"
+    assert updated_stmt_set["matched_to"]["type"] == "cash_withdrawal"
+    assert updated_stmt_set["matched_to"]["ref_id"] == str(cash_ledger_id)
+
+    # 4. List cash ledger entries
+    created_cash_doc = {
+        "_id": cash_ledger_id,
+        "bank_account_id": str(acc_id),
+        "source_statement_line_id": str(line_id),
+        "date": "2026-08-28",
+        "amount": 25000.0,
+        "remaining_balance": 25000.0,
+        "notes": "Cash drawn for factory floor weekly expenses",
+    }
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(
+        sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[created_cash_doc])))
+    ))
+
+    ledger_res = await list_cash_ledger(req, bank_account_id=str(acc_id))
+    assert ledger_res["ok"] is True
+    assert ledger_res["total_count"] == 1
+    assert ledger_res["total_withdrawn"] == 25000.0
+    assert ledger_res["total_remaining_balance"] == 25000.0
+    assert len(ledger_res["items"]) == 1
+
+    # 5. Reconciliation Summary with confirmed cash withdrawal
+    matched_line_doc = {
+        **atm_line_doc,
+        "match_status": "matched",
+        "matched_to": {"type": "cash_withdrawal", "ref_id": str(cash_ledger_id)},
+    }
+    mock_db.bank_statement_lines.find = MagicMock(return_value=MagicMock(
+        to_list=AsyncMock(return_value=[matched_line_doc])
+    ))
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(
+        to_list=AsyncMock(return_value=[created_cash_doc])
+    ))
+
+    summary_res = await routes.banking.get_reconciliation_summary(req, bank_account_id=str(acc_id))
+    assert summary_res["ok"] is True
+    summary_data = summary_res["summary"]
+    # Reconciled debit (matched expense)
+    assert summary_data["matched_expenses"] == 25000.0
+    assert summary_data["unmatched_expenses"] == 0.0
+    assert summary_data["total_cash_in_hand"] == 25000.0
+    account_stats = summary_res["accounts"][0]
+    assert account_stats["total_reconciled_debits"] == 25000.0
+
+
+@pytest.mark.anyio
+async def test_full_cash_withdrawal_to_wage_payments_audit_trail_flow(monkeypatch):
+    """
+    Full Flow Verification:
+    1. Import statement line with cash withdrawal.
+    2. Confirm statement line as cash_withdrawal -> creates cash_ledger entry.
+    3. Record wage payments for 3 workers funded by this cash_ledger entry.
+    4. View cash ledger detail & statement line detail:
+       - Confirm all linked wage payments are visible with correct amounts & workers.
+       - Confirm remaining unallocated balance is correctly shown (15000 - 13500 = 1500).
+    """
+    mock_db = MagicMock()
+    acc_id = ObjectId()
+    line_id = ObjectId()
+    cash_ledger_id = ObjectId()
+
+    # 1. Statement line doc
+    atm_line_doc = {
+        "_id": line_id,
+        "bank_account_id": str(acc_id),
+        "date": "2026-08-25",
+        "narration": "ATM CASH WDL - SELF CHQ",
+        "reference_no": "ATM5544",
+        "debit_amount": 15000.0,
+        "credit_amount": 0.0,
+        "running_balance": 85000.0,
+        "match_status": "unmatched",
+    }
+
+    # Store maps for mock_db
+    statement_lines_store = {str(line_id): dict(atm_line_doc)}
+    cash_ledger_store = {}
+    wage_payments_store = {}
+
+    # Setup mock_db methods
+    async def mock_find_one_line(query):
+        return statement_lines_store.get(str(query.get("_id")))
+
+    async def mock_update_line(query, update):
+        lid = str(query.get("_id"))
+        if lid in statement_lines_store:
+            statement_lines_store[lid].update(update.get("$set", {}))
+        return MagicMock(matched_count=1)
+
+    async def mock_insert_cash(doc):
+        doc["_id"] = cash_ledger_id
+        cash_ledger_store[str(cash_ledger_id)] = doc
+        return MagicMock(inserted_id=cash_ledger_id)
+
+    async def mock_find_one_cash(query):
+        return cash_ledger_store.get(str(query.get("_id")))
+
+    async def mock_update_cash(query, update):
+        cid = str(query.get("_id"))
+        if cid in cash_ledger_store:
+            doc = cash_ledger_store[cid]
+            if "$inc" in update:
+                for k, v in update["$inc"].items():
+                    doc[k] = round(doc.get(k, 0.0) + v, 2)
+            if "$set" in update:
+                doc.update(update["$set"])
+        return MagicMock(matched_count=1)
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=mock_find_one_line)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=mock_update_line)
+    mock_db.cash_ledger.insert_one = AsyncMock(side_effect=mock_insert_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(
+        to_list=AsyncMock(side_effect=lambda limit: list(cash_ledger_store.values()))
+    ))
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(
+        to_list=AsyncMock(side_effect=lambda limit: list(wage_payments_store.values()))
+    ))
+    mock_db.bank_statement_lines.count_documents = AsyncMock(return_value=1)
+    mock_db.bank_statement_lines.find = MagicMock(return_value=MagicMock(
+        sort=MagicMock(return_value=MagicMock(
+            skip=MagicMock(return_value=MagicMock(
+                limit=MagicMock(return_value=MagicMock(
+                    to_list=AsyncMock(side_effect=lambda limit: list(statement_lines_store.values()))
+                ))
+            ))
+        ))
+    ))
+
+    req = MagicMock()
+    req.state = MagicMock()
+    req.state.user = {"email": "admin@sskfootcare.com", "role": "admin", "name": "Admin"}
+    monkeypatch.setattr(banking_routes, "_get_user", AsyncMock(return_value=req.state.user))
+    monkeypatch.setattr(banking_routes, "_get_db", lambda r: mock_db)
+
+    # 2. Confirm Cash Withdrawal
+    payload = CashWithdrawalConfirmIn(
+        statement_line_id=str(line_id),
+        notes="Cash withdrawal for factory floor worker payouts",
+    )
+    confirm_res = await confirm_cash_withdrawal(payload, req)
+    assert confirm_res["ok"] is True
+    assert confirm_res["amount"] == 15000.0
+    assert confirm_res["remaining_balance"] == 15000.0
+
+    # Verify statement line was marked matched
+    assert statement_lines_store[str(line_id)]["match_status"] == "matched"
+    assert statement_lines_store[str(line_id)]["matched_to"]["type"] == "cash_withdrawal"
+    assert statement_lines_store[str(line_id)]["matched_to"]["ref_id"] == str(cash_ledger_id)
+
+    # 3. Simulate 3 WagePaymentIn records drawing from this cash_ledger entry
+    w1_id, w2_id, w3_id = str(ObjectId()), str(ObjectId()), str(ObjectId())
+    wp1_doc = {
+        "_id": ObjectId(),
+        "worker_id": w1_id,
+        "worker_name": "Ramesh Karigar",
+        "amount": 5000.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": str(cash_ledger_id),
+        "date": "2026-08-26",
+        "notes": "Fortnightly wage payout",
+    }
+    wp2_doc = {
+        "_id": ObjectId(),
+        "worker_id": w2_id,
+        "worker_name": "Suresh Karigar",
+        "amount": 6000.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": str(cash_ledger_id),
+        "date": "2026-08-26",
+        "notes": "Piece-rate wages",
+    }
+    wp3_doc = {
+        "_id": ObjectId(),
+        "worker_id": w3_id,
+        "worker_name": "Dinesh Karigar",
+        "amount": 2500.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "cash",
+        "cash_ledger_id": str(cash_ledger_id),
+        "date": "2026-08-26",
+        "notes": "Stitching wages + bonus",
+        "override_reason": "Festival advance included",
+    }
+
+    # Save to wage payments store
+    wage_payments_store[str(wp1_doc["_id"])] = wp1_doc
+    wage_payments_store[str(wp2_doc["_id"])] = wp2_doc
+    wage_payments_store[str(wp3_doc["_id"])] = wp3_doc
+
+    # Draw down cash_ledger remaining_balance (5000 + 6000 + 2500 = 13500)
+    cash_ledger_store[str(cash_ledger_id)]["remaining_balance"] = 1500.0
+
+    # 4. View Cash Ledger Detail via GET /banking/cash-ledger/{id}
+    detail_res = await get_cash_ledger_detail(str(cash_ledger_id), req)
+    assert detail_res["ok"] is True
+    assert detail_res["withdrawal_amount"] == 15000.0
+    assert detail_res["allocated_amount"] == 13500.0
+    assert detail_res["remaining_balance"] == 1500.0
+    assert detail_res["wage_payment_count"] == 3
+
+    worker_names = [w["worker_name"] for w in detail_res["wage_payments"]]
+    assert "Ramesh Karigar" in worker_names
+    assert "Suresh Karigar" in worker_names
+    assert "Dinesh Karigar" in worker_names
+
+    # 5. View Statement Lines via GET /banking/statement-lines
+    lines_res = await list_statement_lines(req)
+    line_item = lines_res["items"][0]
+    assert line_item["matched_to"]["type"] == "cash_withdrawal"
+    assert "cash_ledger_info" in line_item
+
+    cl_info = line_item["cash_ledger_info"]
+    assert cl_info["withdrawal_amount"] == 15000.0
+    assert cl_info["allocated_amount"] == 13500.0
+    assert cl_info["remaining_balance"] == 1500.0
+    assert cl_info["wage_payment_count"] == 3
+
+
 
 
 

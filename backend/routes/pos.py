@@ -2604,6 +2604,10 @@ def extract_role_completions(j: dict, role: str, worker_map: dict) -> list[dict]
 
         # Check if total completed_qty recorded on assignments/job exceeds the milestones
         a = (j.get("assignments") or {}).get(role) or {}
+        if isinstance(a, str):
+            a = {"worker_id": a}
+        elif not isinstance(a, dict):
+            a = {}
         rfp = j.get("ready_for_pickup") or {}
 
         target_qty = prev_qty
@@ -2643,6 +2647,10 @@ def extract_role_completions(j: dict, role: str, worker_map: dict) -> list[dict]
 
     # Fallback when no history completion milestones exist (e.g. single snapshot or legacy jobs)
     a = (j.get("assignments") or {}).get(role) or {}
+    if isinstance(a, str):
+        a = {"worker_id": a}
+    elif not isinstance(a, dict):
+        a = {}
     rfp = j.get("ready_for_pickup") or {}
     c_by = a.get("completed_by")
     if not c_by and rfp.get("role") == role and rfp.get("completed_by"):
@@ -2907,12 +2915,84 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
             "by_role": {}, "jobs": [],
         }
 
+    # Query wage payment records for actual disbursements against this period
+    wp_q: dict = {}
+    if from_date:
+        wp_q["period_from"] = from_date
+    if to_date:
+        wp_q["period_to"] = to_date
+
+    wage_payments_list = []
+    if hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            cursor = db.wage_payments.find(wp_q if (from_date or to_date) else {})
+            if hasattr(cursor, "to_list"):
+                res = cursor.to_list(5000)
+                if hasattr(res, "__await__"):
+                    wage_payments_list = await res
+                elif isinstance(res, list):
+                    wage_payments_list = res
+        except Exception:
+            wage_payments_list = []
+
+    wp_by_worker = {}
+    for wp in wage_payments_list:
+        wid_key = str(wp.get("worker_id"))
+        wp_by_worker.setdefault(wid_key, []).append(wp)
+
+    for wid, wps in wp_by_worker.items():
+        if wid in earnings:
+            continue
+        w = worker_map.get(wid)
+        if not w:
+            continue
+        earnings[wid] = {
+            "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
+            "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
+            "bonus_pct": float(w.get("bonus_pct", 0) or 0),
+            "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
+            "total_pairs": 0, "total_earning": 0.0, "total_bonus": 0.0,
+            "advances_taken": 0.0, "advances_open": 0.0,
+            "payments_paid": 0.0,
+            "net_payable": 0.0,
+            "by_role": {}, "jobs": [],
+        }
+
     rows = list(earnings.values())
+
+    for r in rows:
+        wid = str(r["worker_id"])
+        w_payments = wp_by_worker.get(wid, [])
+        disbursed = round(sum(float(p.get("amount") or 0.0) for p in w_payments), 2)
+        net_payable = float(r.get("net_payable") or 0.0)
+        remaining_balance = round(net_payable - disbursed, 2)
+
+        override_reasons = [str(p["override_reason"]).strip() for p in w_payments if p.get("override_reason")]
+
+        r["computed_owed"] = net_payable
+        r["actual_paid"] = disbursed
+        r["disbursed_amount"] = disbursed
+        r["remaining_owed"] = remaining_balance
+        r["balance_owed"] = remaining_balance
+        r["is_overpaid"] = disbursed > net_payable + 0.01
+        r["override_reasons"] = override_reasons
+        r["override_reason"] = ", ".join(override_reasons) if override_reasons else None
+        r["payment_status"] = (
+            "overpaid" if disbursed > net_payable + 0.01
+            else "paid" if (disbursed >= net_payable and net_payable > 0)
+            else "partially_paid" if disbursed > 0
+            else "unpaid"
+        )
+        r["wage_payments"] = [stringify(p) for p in w_payments]
+
     rows.sort(key=lambda r: r["net_payable"], reverse=True)
     grand = round(sum(r["total_earning"] for r in rows), 2)
     grand_bonus = round(sum(r["total_bonus"] for r in rows), 2)
     grand_advances = round(sum(r["advances_open"] for r in rows), 2)
     grand_payments = round(sum(r["payments_paid"] for r in rows), 2)
+    grand_disbursed = round(sum(r.get("disbursed_amount", 0.0) for r in rows), 2)
+    grand_balance_owed = round(sum(r.get("balance_owed", 0.0) for r in rows), 2)
+
     return {
         "rows": rows,
         "grand_total": grand,
@@ -2920,6 +3000,10 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
         "grand_advances_open": grand_advances,
         "grand_payments": grand_payments,
         "grand_net_payable": round(grand + grand_bonus - grand_advances - grand_payments, 2),
+        "grand_disbursed": grand_disbursed,
+        "grand_actual_paid": grand_disbursed,
+        "grand_balance_owed": grand_balance_owed,
+        "grand_remaining_owed": grand_balance_owed,
         "worker_count": len(rows),
         "from_date": from_date, "to_date": to_date,
     }
