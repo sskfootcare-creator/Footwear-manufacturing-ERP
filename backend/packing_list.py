@@ -892,6 +892,8 @@ def _classify_header_simple(header: str) -> str:
         return "quantity"
     if h in ["ctn no", "ctn", "carton", "carton no", "box no", "box", "carton range"]:
         return "ctn_no"
+    if h in ["ean", "ean code", "ean_code", "barcode", "upc", "sku barcode"]:
+        return "ean"
     if h in ["mrp", "rate", "price", "unit price"]:
         return "price"
     # Check if header is a numeric size like "39", "42", "8", "8.5"
@@ -943,16 +945,17 @@ def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict]
             sc = c.get("style_code") or ""
             col = c.get("color") or ""
             sz = str(c.get("size") or "")
+            ean = c.get("ean_code") or ""
             q = c.get("qty") or 0
             box_num = c.get("box_number") or 1
-            if grouped_cartons and grouped_cartons[-1]["key"] == (sc, col, sz, q) and grouped_cartons[-1]["end_box"] + 1 == box_num:
+            if grouped_cartons and grouped_cartons[-1]["key"] == (sc, col, sz, ean, q) and grouped_cartons[-1]["end_box"] + 1 == box_num:
                 grouped_cartons[-1]["count"] += 1
                 grouped_cartons[-1]["end_box"] = box_num
                 grouped_cartons[-1]["total_pairs"] += q
             else:
                 grouped_cartons.append({
-                    "key": (sc, col, sz, q),
-                    "style_code": sc, "color": col, "size": sz, "qty_per_box": q,
+                    "key": (sc, col, sz, ean, q),
+                    "style_code": sc, "color": col, "size": sz, "ean_code": ean, "qty_per_box": q,
                     "count": 1, "start_box": box_num, "end_box": box_num, "total_pairs": q
                 })
 
@@ -975,6 +978,8 @@ def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict]
                     cell.value = grp["color"]
                 elif cls == "size":
                     cell.value = grp["size"]
+                elif cls == "ean":
+                    cell.value = grp.get("ean_code") or ""
                 elif cls == "quantity":
                     cell.value = grp["total_pairs"]
                 elif cls == "ctn_no":

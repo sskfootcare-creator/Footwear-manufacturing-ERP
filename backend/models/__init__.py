@@ -65,6 +65,10 @@ from models.banking import (
     StatementImportConfigIn, StatementImportConfigUpdate, STATEMENT_CANONICAL_FIELDS,
     TransferConfirmIn, CashWithdrawalConfirmIn,
 )
+from models.po_ean import (
+    PoEanCodeIn, PoEanCodeDoc, PoEanImportFormatConfigIn, PoEanImportFormatConfigUpdate,
+    PoEanImportItem, PoEanImportRequest, PoEanImportResult,
+)
 
 
 __all__ = [
@@ -118,4 +122,7 @@ __all__ = [
     "BankAccountIn", "BankAccountUpdate", "MatchedTo", "BankStatementLineIn", "BankStatementLineUpdate",
     "StatementImportConfigIn", "StatementImportConfigUpdate", "STATEMENT_CANONICAL_FIELDS",
     "TransferConfirmIn", "CashWithdrawalConfirmIn",
+    # PO EAN Barcodes
+    "PoEanCodeIn", "PoEanCodeDoc", "PoEanImportFormatConfigIn", "PoEanImportFormatConfigUpdate",
+    "PoEanImportItem", "PoEanImportRequest", "PoEanImportResult",
 ]

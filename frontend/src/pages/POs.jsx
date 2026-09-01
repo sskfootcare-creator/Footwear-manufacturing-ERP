@@ -23,9 +23,11 @@ import {
   FileDown,
   Truck,
   Package,
+  Barcode,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
 import PackingListPreviewModal from "../components/PackingListPreviewModal";
+import PoEanCodesModal from "../components/PoEanCodesModal";
 
 import { API } from "../lib/api";
 
@@ -79,6 +81,8 @@ export default function POs() {
   const [loadingInvoices, setLoadingInvoices] = useState(false);
   const [previewPo, setPreviewPo] = useState(null);
   const [invoiceModalOpen, setInvoiceModalOpen] = useState(false);
+  const [selectedPoForEan, setSelectedPoForEan] = useState(null);
+  const [poEanModalOpen, setPoEanModalOpen] = useState(false);
 
   const handleInvoiceClick = async (po) => {
     setSelectedPoForInvoices(po);
@@ -544,6 +548,17 @@ export default function POs() {
                           <Package className="w-4 h-4" />
                         </button>
                         <button
+                          onClick={() => {
+                            setSelectedPoForEan(p);
+                            setPoEanModalOpen(true);
+                          }}
+                          className="text-slate-600 hover:text-[#0D9488] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
+                          title="Client Barcodes / EAN Import"
+                          data-testid={`ean-${p.po_number}`}
+                        >
+                          <Barcode className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => openView(p)}
                           className="text-slate-600 hover:text-[#2563EB] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
                           data-testid={`view-po-${p.po_number}`}
@@ -918,6 +933,53 @@ export default function POs() {
           width="max-w-4xl"
         >
           <div className="space-y-4 text-sm">
+            {/* PO-level Document & Barcode Actions Toolbar */}
+            <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg flex flex-wrap items-center justify-between gap-2.5">
+              <div className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                PO Documents &amp; Operations
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => handleInvoiceClick(view)}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
+                  data-testid="detail-invoice-btn"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-[#C27842]" />
+                  <span>Tax Invoice</span>
+                </button>
+                <a
+                  href={`${API}/pos/${view.id}/challan.pdf`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
+                  data-testid="detail-challan-btn"
+                >
+                  <Truck className="w-3.5 h-3.5 text-[#F97316]" />
+                  <span>Dispatch Challan</span>
+                </a>
+                <button
+                  onClick={() => downloadPacking(view)}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
+                  data-testid="detail-packing-btn"
+                >
+                  <Package className="w-3.5 h-3.5 text-[#16A34A]" />
+                  <span>Packing List</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedPoForEan(view);
+                    setPoEanModalOpen(true);
+                  }}
+                  className="px-3 py-1.5 text-xs font-bold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px] transition-colors"
+                  data-testid="detail-upload-barcode-btn"
+                  title="Upload and manage client barcode EAN mappings for this PO"
+                >
+                  <Barcode className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Upload Barcode File</span>
+                </button>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <Field label="Client" value={view.client_name} />
               <Field label="Client GSTIN" value={view.client_gstin || "—"} />
@@ -1173,6 +1235,12 @@ export default function POs() {
         po={previewPo}
         isOpen={!!previewPo}
         onClose={() => setPreviewPo(null)}
+      />
+      <PoEanCodesModal
+        po={selectedPoForEan}
+        isOpen={poEanModalOpen}
+        onClose={() => setPoEanModalOpen(false)}
+        onUpdated={load}
       />
     </div>
   );

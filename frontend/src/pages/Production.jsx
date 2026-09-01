@@ -4,7 +4,7 @@ import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2 } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
@@ -2909,6 +2909,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
   const [cartons, setCartons] = useState([]);
   const [eanCodes, setEanCodes] = useState({});
   const [eanInputs, setEanInputs] = useState({});
+  const [eanSourceMeta, setEanSourceMeta] = useState({}); // size -> { source: "client" | "global" | "manual", originalVal: string }
   const [cartonRows, setCartonRows] = useState({}); // size -> array of carton quantities
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -2919,29 +2920,60 @@ function PackCartonDialog({ group, style, onClose, load }) {
     setLoading(true);
     setError("");
     try {
-      const [cartonsRes, eanRes] = await Promise.all([
+      const poId = group.po_id || group.rows?.[0]?.po_id;
+      const styleCode = group.style_code || group.rows?.[0]?.style_code;
+      const color = group.color || group.rows?.[0]?.color || "";
+
+      const promises = [
         http.get(`/packing/cartons?job_ids=${jobIds}`),
         http.get(`/packing/ean-codes?style_id=${group.style_id}&color=${encodeURIComponent(group.color)}`),
-      ]);
+      ];
+      if (poId) {
+        promises.push(http.get(`/pos/${poId}/ean-codes`).catch(() => ({ data: { items: [] } })));
+      }
+
+      const [cartonsRes, eanRes, poEanRes] = await Promise.all(promises);
       const existingCartons = cartonsRes.data || [];
       setCartons(existingCartons);
-      
-      const eans = {};
-      for (const item of eanRes.data || []) {
-        eans[item.size] = item.ean_code;
-      }
-      setEanCodes(eans);
-      
-      // Initialize EAN inputs
-      setEanInputs(prev => {
-        const next = { ...prev };
-        for (const sz of group.sizes) {
-          if (next[sz] === undefined) {
-            next[sz] = eans[sz] || "";
+
+      // 1. Look up po_ean_codes for this job group's po_id + style_code + color
+      const poEans = {};
+      if (poEanRes?.data?.items) {
+        for (const item of poEanRes.data.items) {
+          const matchStyle = (item.style_code || "").trim().toLowerCase() === (styleCode || "").trim().toLowerCase();
+          const matchColor = !item.color || !color || (item.color || "").trim().toLowerCase() === (color || "").trim().toLowerCase();
+          if (matchStyle && matchColor && item.size && item.ean_code) {
+            poEans[String(item.size)] = item.ean_code.trim();
           }
         }
-        return next;
-      });
+      }
+
+      // 2. Global sku_ean_codes fallback
+      const globalEans = {};
+      for (const item of eanRes.data || []) {
+        if (item.size && item.ean_code) {
+          globalEans[String(item.size)] = item.ean_code.trim();
+        }
+      }
+
+      const sources = {};
+      const initialInputs = {};
+
+      for (const sz of group.sizes) {
+        if (poEans[sz]) {
+          initialInputs[sz] = poEans[sz];
+          sources[sz] = { source: "client", originalVal: poEans[sz] };
+        } else if (globalEans[sz]) {
+          initialInputs[sz] = globalEans[sz];
+          sources[sz] = { source: "global", originalVal: globalEans[sz] };
+        } else {
+          initialInputs[sz] = "";
+          sources[sz] = { source: "manual", originalVal: "" };
+        }
+      }
+
+      setEanSourceMeta(sources);
+      setEanInputs(initialInputs);
 
       // Initialize carton rows
       const rowsMap = {};
@@ -3104,7 +3136,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
                       <tr className="text-left text-[9px] uppercase tracking-wider text-slate-600 font-bold">
                         <th className="px-3 py-2 w-16 sticky left-0 z-10 bg-slate-50">Size</th>
                         <th className="px-3 py-2 text-right w-24">Completed Qty</th>
-                        <th className="px-3 py-2 w-44">EAN Code</th>
+                        <th className="px-3 py-2 w-56">EAN Code</th>
                         <th className="px-3 py-2">Cartons Configuration (Row values)</th>
                         <th className="px-3 py-2 text-right w-36">Cartons Sum</th>
                         <th className="px-3 py-2 text-center w-24">Status</th>
@@ -3131,14 +3163,50 @@ function PackCartonDialog({ group, style, onClose, load }) {
                             {/* EAN Code */}
                             <td className="px-3 py-3">
                               {completed > 0 ? (
-                                <div className="space-y-1">
+                                <div className="space-y-1.5">
                                   <input
                                     value={eanInput}
                                     onChange={e => setEanInputs(prev => ({ ...prev, [sz]: e.target.value }))}
                                     placeholder="Enter/Scan EAN..."
-                                    className={`w-full border px-2 py-1 text-[11px] font-mono outline-none focus:border-teal-500 ${isEanMissing ? 'border-red-400 bg-red-50/30' : 'border-slate-300'}`}
+                                    data-testid={`ean-input-${sz}`}
+                                    className={`w-full border px-2 py-1 text-[11px] font-mono outline-none transition-colors focus:border-teal-500 ${isEanMissing ? 'border-red-400 bg-red-50/30' : 'border-slate-300'}`}
                                   />
-                                  {isEanMissing && <span className="text-[9px] text-red-500 font-bold block">* EAN required</span>}
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {eanSourceMeta[sz]?.source === "client" ? (
+                                      eanInput.trim() === eanSourceMeta[sz]?.originalVal ? (
+                                        <span
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                          data-testid={`ean-source-client-${sz}`}
+                                          title="Auto-filled from client barcode file"
+                                        >
+                                          <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                                          Auto-filled from client file
+                                        </span>
+                                      ) : (
+                                        <span
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200"
+                                          data-testid={`ean-source-modified-${sz}`}
+                                          title="Pre-filled from client file, then manually edited"
+                                        >
+                                          Manual override (edited)
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200"
+                                        data-testid={`ean-source-manual-${sz}`}
+                                        title="Needs manual entry — no matching barcode in client file for this size"
+                                      >
+                                        <AlertCircle className="w-2.5 h-2.5 text-amber-600" />
+                                        Needs manual entry
+                                      </span>
+                                    )}
+                                    {isEanMissing && (
+                                      <span className="text-[9px] text-red-500 font-bold block" data-testid={`ean-required-${sz}`}>
+                                        * Required
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               ) : (
                                 <span className="text-slate-400 italic">No items completed</span>
@@ -3221,6 +3289,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
             type="button"
             disabled={loading}
             onClick={handleConfirm}
+            data-testid="confirm-carton-packing-btn"
             className="px-6 py-2 bg-[#0D9488] hover:bg-[#0B7A70] text-white font-bold uppercase tracking-wider text-xs shadow-md disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
           >
             {isAlreadyInQcPack ? "Save Configuration" : "Confirm Packing & Move to QC & Pack"}

@@ -303,6 +303,10 @@ from routes.styles import (
     ListingFormatConfigUpdate,
     CatalogueExportRequest,
 )
+from routes.po_ean import (
+    po_ean_router,
+    _seed_po_ean_format_configs,
+)
 
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
@@ -974,6 +978,7 @@ app.include_router(pos_router)
 app.include_router(online_orders_router)
 app.include_router(styles_router)
 app.include_router(banking_router)
+app.include_router(po_ean_router)
 
 
 
@@ -1282,6 +1287,27 @@ async def on_startup():
         await db.bank_statement_lines.create_index([("bank_account_id", 1), ("date", -1)], name="statement_acc_date")
     except Exception as e:
         log.warning(f"Could not create bank_statement_lines indexes: {e}")
+
+    try:
+        await db.po_ean_format_configs.create_index("name", unique=True, name="po_ean_format_name_unique")
+    except Exception as e:
+        log.warning(f"Could not create po_ean_format_configs indexes: {e}")
+
+    try:
+        await db.po_ean_codes.create_index(
+            [("po_id", 1), ("style_code", 1), ("color", 1), ("size", 1)],
+            unique=True, name="po_ean_codes_unique"
+        )
+        await db.po_ean_codes.create_index("po_id", name="po_ean_codes_po_id")
+    except Exception as e:
+        log.warning(f"Could not create po_ean_codes indexes: {e}")
+
+    try:
+        seeded_po_ean = await _seed_po_ean_format_configs(db)
+        if seeded_po_ean:
+            log.info(f"PO EAN formats registry: seeded {seeded_po_ean} default templates")
+    except Exception as e:
+        log.warning(f"PO EAN format registry seed failed: {e}")
 
     # ── One-time URL rewrites for image URLs that predate the current shape.
     # (1) legacy "/uploads/..." → "/api/uploads/..." so K8s ingress routes them

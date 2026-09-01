@@ -1408,7 +1408,18 @@ async def pack_carton(payload: CartonIn, request: Request):
         raise HTTPException(404, "Job not found")
     
     ean_code = ""
-    if job.get("style_id"):
+    po_id = job.get("po_id")
+    if po_id:
+        po_ean_doc = await db.po_ean_codes.find_one({
+            "po_id": str(po_id),
+            "style_code": job.get("style_code"),
+            "color": job.get("color"),
+            "size": payload.size,
+        })
+        if po_ean_doc and po_ean_doc.get("ean_code"):
+            ean_code = po_ean_doc["ean_code"]
+
+    if not ean_code and job.get("style_id"):
         ean_doc = await db.sku_ean_codes.find_one({
             "style_id": str(job["style_id"]),
             "color": job.get("color"),
@@ -1487,8 +1498,14 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
 
     carton_docs = []
     ean_map = {}
+    if po_id:
+        async for e in db.po_ean_codes.find({"po_id": str(po_id), "style_code": style_code, "color": color}):
+            if e.get("size") and e.get("ean_code"):
+                ean_map[e["size"]] = e["ean_code"]
+
     async for e in db.sku_ean_codes.find({"style_id": str(style_id), "color": color}):
-        ean_map[e["size"]] = e["ean_code"]
+        if e.get("size") and e["size"] not in ean_map:
+            ean_map[e["size"]] = e["ean_code"]
 
     job_by_size = {job.get("size"): str(job["_id"]) for job in job_objs}
 
