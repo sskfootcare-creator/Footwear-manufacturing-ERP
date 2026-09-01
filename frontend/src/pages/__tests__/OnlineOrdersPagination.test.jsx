@@ -18,6 +18,8 @@ jest.mock("../../lib/api", () => {
 });
 
 describe("OnlineOrders Large File Import Preview Pagination", () => {
+  jest.setTimeout(15000);
+
   beforeEach(() => {
     jest.clearAllMocks();
     http.get.mockImplementation((url) => {

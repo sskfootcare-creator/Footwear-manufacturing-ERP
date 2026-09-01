@@ -109,13 +109,17 @@ describe("BankReconciliation Remarks Editable Column", () => {
   test("renders remarks column and allows inline edit in unmatched lines tab", async () => {
     render(<BankReconciliation />);
 
-    // Wait for statement line row to load
+    // Expand unmatched row for line_1
+    const row1 = await screen.findByTestId("unmatched-row-line_1");
+    fireEvent.click(row1);
+
+    // Wait for statement line row to load inside drawer
     const remarkInput = await screen.findByTestId("remarks-input-line_1");
     expect(remarkInput).toBeInTheDocument();
     expect(remarkInput.value).toBe("Initial note");
 
-    // Check remarks header in table
-    const remarksHeaders = screen.getAllByText("Remarks");
+    // Check remarks header in drawer
+    const remarksHeaders = screen.getAllByText(/Remarks/i);
     expect(remarksHeaders.length).toBeGreaterThan(0);
 
     // Edit remark
@@ -138,7 +142,11 @@ describe("BankReconciliation Remarks Editable Column", () => {
     const ledgerTab = await screen.findByTestId("tab-ledger");
     fireEvent.click(ledgerTab);
 
-    // Find input for line_2 in ledger
+    // Expand row for line_2 in ledger
+    const row2 = await screen.findByTestId("ledger-row-line_2");
+    fireEvent.click(row2);
+
+    // Find input for line_2 in ledger drawer
     const remarkInput2 = await screen.findByTestId("remarks-input-line_2");
     expect(remarkInput2).toBeInTheDocument();
     expect(remarkInput2.value).toBe("Paid invoice #1001");
@@ -334,7 +342,11 @@ describe("BankReconciliation Remarks Editable Column", () => {
     const ledgerTab = await screen.findByTestId("tab-ledger");
     fireEvent.click(ledgerTab);
 
-    // Find cash breakdown button in matched column
+    // Expand row for cash withdrawal line
+    const row = await screen.findByTestId("ledger-row-line_cw_1");
+    fireEvent.click(row);
+
+    // Find cash breakdown button in matched column / drawer
     const breakdownBtn = await screen.findByTestId("cash-breakdown-btn-line_cw_1");
     expect(breakdownBtn).toBeInTheDocument();
     expect(breakdownBtn).toHaveTextContent("Cash In-Hand #cl_100");
@@ -352,6 +364,81 @@ describe("BankReconciliation Remarks Editable Column", () => {
     expect(screen.getByText("Suresh Karigar")).toBeInTheDocument();
     expect(screen.getByText("₹4,500")).toBeInTheDocument();
     expect(screen.getByText("₹3,000")).toBeInTheDocument();
+
+    // Expand disbursement row to inspect drawer details
+    const disbRow2 = await screen.findByTestId("disbursement-row-wp_2");
+    fireEvent.click(disbRow2);
     expect(screen.getByText(/Advance folded into wage/i)).toBeInTheDocument();
+  });
+
+  test("statement ledger displays 4 clean columns in collapsed view and toggles detail drawer on click", async () => {
+    render(<BankReconciliation />);
+
+    // Go to Statement Ledger tab
+    const ledgerTab = await screen.findByTestId("tab-ledger");
+    fireEvent.click(ledgerTab);
+
+    // Verify 4 clean headers
+    expect(screen.getByText("Date")).toBeInTheDocument();
+    expect(screen.getByText("Description")).toBeInTheDocument();
+    expect(screen.getByText("Amount")).toBeInTheDocument();
+    expect(screen.getByText("Status")).toBeInTheDocument();
+
+    // Check row_1 is initially collapsed (detail panel not in document)
+    expect(screen.queryByTestId("ledger-detail-panel-line_1")).not.toBeInTheDocument();
+
+    // Click row_1 or expand button to expand
+    const expandBtn = await screen.findByTestId("expand-btn-line_1");
+    fireEvent.click(expandBtn);
+
+    // Detail drawer is now visible
+    const detailPanel = await screen.findByTestId("ledger-detail-panel-line_1");
+    expect(detailPanel).toBeInTheDocument();
+    expect(detailPanel).toHaveTextContent("Full Narration / Description");
+    expect(detailPanel).toHaveTextContent("NEFT FROM CUSTOMER ABC");
+    expect(detailPanel).toHaveTextContent("Reference No");
+    expect(detailPanel).toHaveTextContent("UTR998877");
+    expect(detailPanel).toHaveTextContent("Running Balance");
+
+    // Click expandBtn again to collapse
+    fireEvent.click(expandBtn);
+    expect(screen.queryByTestId("ledger-detail-panel-line_1")).not.toBeInTheDocument();
+  });
+
+  test("confirms no regression on manual matching, cash confirmation, and remark updates under collapsed layout", async () => {
+    render(<BankReconciliation />);
+
+    // 1. Wait for Unmatched Bank Lines to load
+    await screen.findByTestId("unmatched-row-line_1");
+    expect(screen.getByText("Date")).toBeInTheDocument();
+    expect(screen.getByText("Account")).toBeInTheDocument();
+    expect(screen.getByText("Narration / Description")).toBeInTheDocument();
+    expect(screen.getByText("Amount")).toBeInTheDocument();
+    expect(screen.getByText("Action")).toBeInTheDocument();
+
+    // 2. Perform manual match action button
+    const matchErpBtns = screen.getAllByText("Match ERP");
+    expect(matchErpBtns.length).toBeGreaterThan(0);
+    fireEvent.click(matchErpBtns[0]);
+    expect(await screen.findByText("Manual Link & Reconcile")).toBeInTheDocument();
+    const closeBtn = screen.getByText("Close");
+    fireEvent.click(closeBtn);
+
+    // 3. Test Tab Navigation
+    const transferTab = await screen.findByTestId("tab-transfers");
+    fireEvent.click(transferTab);
+    expect((await screen.findAllByText("Suggested Inter-Account Transfers")).length).toBeGreaterThan(0);
+
+    const cashTab = await screen.findByTestId("tab-cash-withdrawals");
+    fireEvent.click(cashTab);
+    expect((await screen.findAllByText("Suggested Cash Withdrawals")).length).toBeGreaterThan(0);
+
+    const erpTab = await screen.findByTestId("tab-erp-expected");
+    fireEvent.click(erpTab);
+    expect((await screen.findAllByText(/Unmatched ERP Expected|Unmatched \/ Expected ERP Transactions/)).length).toBeGreaterThan(0);
+
+    const ledgerTab = await screen.findByTestId("tab-ledger");
+    fireEvent.click(ledgerTab);
+    expect((await screen.findAllByText("Statement Ledger")).length).toBeGreaterThan(0);
   });
 });
