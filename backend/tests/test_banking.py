@@ -12,9 +12,11 @@ from models.banking import (
     BankAccountUpdate,
     BankStatementLineIn,
     BankStatementLineUpdate,
-    MatchedTo,
-    TransferConfirmIn,
     CashWithdrawalConfirmIn,
+    CashLedgerCreateIn,
+    MatchedTo,
+    PeriodLockIn,
+    PeriodUnlockIn,
 )
 from models.vendors import PaymentIn
 from models.expenses import ExpenseIn, ExpenseUpdate, RecurringExpenseIn
@@ -32,6 +34,8 @@ from routes.banking import (
     _is_cash_withdrawal_candidate,
     get_suggested_cash_withdrawals,
     confirm_cash_withdrawal,
+    create_cash_ledger_entry,
+    delete_cash_ledger_entry,
     list_cash_ledger,
     get_cash_ledger_detail,
 )
@@ -1533,6 +1537,7 @@ async def test_cash_withdrawal_routes_and_cash_ledger(monkeypatch):
 
     # 3. Confirm cash withdrawal
     mock_db.bank_statement_lines.find_one = AsyncMock(return_value=atm_line_doc)
+    mock_db.cash_ledger.find_one = AsyncMock(return_value=None)
     mock_db.cash_ledger.insert_one = AsyncMock(return_value=MagicMock(inserted_id=cash_ledger_id))
     mock_db.bank_statement_lines.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
 
@@ -3644,6 +3649,199 @@ async def test_full_end_to_end_bank_reconciliation_workflow(monkeypatch):
     )
     assert unlock_res["ok"] is True
     assert locks_store[0]["status"] == "unlocked"
+
+
+@pytest.mark.anyio
+async def test_direct_cash_ledger_creation_and_statement_linking(monkeypatch):
+    """
+    Full realistic workflow:
+    1. Record a manual cash withdrawal of ₹50,000 today ('2026-09-01').
+    2. Disburse wages to 2 workers (Ramesh: ₹15,000, Mukesh: ₹12,000) and 1 cash expense (Agra Packaging: ₹3,000).
+       -> Remaining balance decrements to ₹20,000.
+    3. Import bank statement a week later on '2026-09-08' with debit line of ₹50,000.
+    4. Suggested cash withdrawals identifies matching unlinked manual entry and displays remaining balance of ₹20,000.
+    5. Confirming the link ties the statement line to the existing cash_ledger entry without duplicating or resetting balance.
+    6. Verify full payment history (2 wages + 1 expense + linked statement line) is preserved.
+    """
+    acc_id = ObjectId()
+    cash_id = ObjectId()
+    line_id = ObjectId()
+
+    cash_store = {}
+    stmt_store = {}
+    accounts_store = {
+        str(acc_id): {
+            "_id": acc_id,
+            "name": "HDFC Primary",
+            "bank_name": "HDFC",
+            "account_number_last4": "5432",
+            "account_type": "b2b_client",
+            "active": True,
+        }
+    }
+
+    mock_db = MagicMock()
+    monkeypatch.setattr(banking_routes, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(banking_routes, "_get_user", AsyncMock(return_value={"email": "admin@ssk.com", "role": "admin"}))
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=lambda q: accounts_store.get(str(q.get("_id"))))
+    mock_db.reconciliation_locks.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    async def mock_insert_cash(doc):
+        doc["_id"] = cash_id
+        cash_store[str(cash_id)] = doc
+        return MagicMock(inserted_id=cash_id)
+
+    async def mock_find_one_cash(q):
+        if "_id" in q:
+            return cash_store.get(str(q["_id"]))
+        if "source_statement_line_id" in q:
+            for c in cash_store.values():
+                if c.get("source_statement_line_id") in [None, ""] and abs(c.get("amount", 0) - q.get("amount", 0)) <= 1.0:
+                    return c
+        return None
+
+    async def mock_update_cash(q, u):
+        cid = str(q["_id"])
+        if cid in cash_store:
+            cash_store[cid].update(u.get("$set", {}))
+        return MagicMock(matched_count=1)
+
+    mock_db.cash_ledger.insert_one = AsyncMock(side_effect=mock_insert_cash)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=mock_find_one_cash)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_update_cash)
+
+    req = MagicMock()
+
+    # ── Step 1: Record manual cash withdrawal today ('2026-09-01') for ₹50,000
+    create_payload = CashLedgerCreateIn(
+        bank_account_id=str(acc_id),
+        amount=50000.0,
+        date="2026-09-01",
+        notes="Cash drawn for factory worker wages and petty expenses",
+    )
+    res = await create_cash_ledger_entry(create_payload, req)
+    assert res["ok"] is True
+    assert res["amount"] == 50000.0
+    assert res["remaining_balance"] == 50000.0
+    assert cash_store[str(cash_id)]["source_statement_line_id"] is None
+
+    # ── Step 2: Pay two workers' wages and one cash expense from it today
+    # Wage 1: Ramesh Karigar (₹15,000)
+    # Wage 2: Mukesh Karigar (₹12,000)
+    # Expense: Agra Packaging Store (₹3,000)
+    # Remaining balance decrements atomically: 50,000 - 15,000 - 12,000 - 3,000 = 20,000
+    cash_store[str(cash_id)]["remaining_balance"] = 50000.0 - 15000.0 - 12000.0 - 3000.0
+
+    wage_doc_1 = {
+        "_id": ObjectId(),
+        "worker_name": "Ramesh Karigar",
+        "amount": 15000.0,
+        "date": "2026-09-01",
+        "cash_ledger_id": str(cash_id),
+    }
+    wage_doc_2 = {
+        "_id": ObjectId(),
+        "worker_name": "Mukesh Karigar",
+        "amount": 12000.0,
+        "date": "2026-09-01",
+        "cash_ledger_id": str(cash_id),
+    }
+    expense_doc = {
+        "_id": ObjectId(),
+        "payee": "Agra Packaging Store",
+        "category": "Packaging & Printing",
+        "amount": 3000.0,
+        "date": "2026-09-01",
+        "cash_ledger_id": str(cash_id),
+    }
+    mock_db.wage_payments.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[wage_doc_1, wage_doc_2])))
+    mock_db.wage_payments.count_documents = AsyncMock(return_value=2)
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[expense_doc])))
+    mock_db.expenses.count_documents = AsyncMock(return_value=1)
+
+    # ── Step 3: Import bank statement 1 week later on '2026-09-08' showing ₹50,000 withdrawal
+    stmt_line = {
+        "_id": line_id,
+        "bank_account_id": str(acc_id),
+        "date": "2026-09-08",
+        "narration": "ATM CASH WDL / HDFC / 5432",
+        "debit_amount": 50000.0,
+        "credit_amount": 0.0,
+        "match_status": "unmatched",
+    }
+    stmt_store[str(line_id)] = stmt_line
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=lambda q: stmt_store.get(str(q.get("_id"))))
+    async def mock_update_stmt(q, u):
+        lid = str(q["_id"])
+        if lid in stmt_store:
+            stmt_store[lid].update(u.get("$set", {}))
+        return MagicMock(matched_count=1)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=mock_update_stmt)
+
+    # ── Step 4: Check suggestions - correctly matches existing unlinked entry with ₹20,000 remaining
+    mock_db.bank_statement_lines.find = MagicMock(return_value=MagicMock(
+        sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[stmt_line])))
+    ))
+    mock_db.bank_accounts.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=list(accounts_store.values()))))
+    mock_db.cash_ledger.find = MagicMock(return_value=MagicMock(
+        sort=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[cash_store[str(cash_id)]])))
+    ))
+
+    suggestions = await get_suggested_cash_withdrawals(req, bank_account_id=str(acc_id))
+    assert suggestions["ok"] is True
+    assert suggestions["total_suggestions"] == 1
+    cand = suggestions["candidates"][0]
+    assert cand["is_existing_manual_entry"] is True
+    assert cand["existing_cash_ledger_id"] == str(cash_id)
+    assert cand["existing_cash_ledger_amount"] == 50000.0
+    assert cand["existing_cash_ledger_remaining"] == 20000.0
+    assert cand["existing_cash_ledger_date"] == "2026-09-01"
+
+    # ── Step 5: User accepts link in modal / 1-click action
+    confirm_res = await confirm_cash_withdrawal(
+        CashWithdrawalConfirmIn(
+            statement_line_id=str(line_id),
+            existing_cash_ledger_id=str(cash_id),
+            notes="ATM CASH WDL / HDFC / 5432",
+        ),
+        req,
+    )
+    assert confirm_res["ok"] is True
+    assert confirm_res["is_linked_to_existing"] is True
+    assert confirm_res["cash_ledger_id"] == str(cash_id)
+    assert confirm_res["remaining_balance"] == 20000.0  # Balance preserved!
+    assert stmt_store[str(line_id)]["match_status"] == "matched"
+    assert stmt_store[str(line_id)]["matched_to"]["ref_id"] == str(cash_id)
+    assert cash_store[str(cash_id)]["source_statement_line_id"] == str(line_id)
+    # Verify no duplicate entry created in cash_ledger (exactly 1 document exists)
+    assert len(cash_store) == 1
+
+    # ── Step 6: Verify full payment history is preserved in list_cash_ledger and detail
+    ledger_res = await list_cash_ledger(req, bank_account_id=str(acc_id))
+    assert ledger_res["ok"] is True
+    assert ledger_res["total_count"] == 1
+    assert ledger_res["total_withdrawn"] == 50000.0
+    assert ledger_res["total_remaining_balance"] == 20000.0
+    item = ledger_res["items"][0]
+    assert item["statement_linked"] is True
+    assert item["source_statement_line_id"] == str(line_id)
+    assert item["wage_payment_count"] == 2
+    assert item["expense_count"] == 1
+
+    # Detail breakdown check
+    detail_res = await get_cash_ledger_detail(str(cash_id), req)
+    assert detail_res["ok"] is True
+    assert detail_res["withdrawal_amount"] == 50000.0
+    assert detail_res["remaining_balance"] == 20000.0
+    assert detail_res["allocated_amount"] == 30000.0
+    assert len(detail_res["wage_payments"]) == 2
+    assert len(detail_res["expenses"]) == 1
+    assert detail_res["statement_linked"] is True
+    assert detail_res["source_statement_line_id"] == str(line_id)
+
+
 
 
 

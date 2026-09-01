@@ -15,6 +15,7 @@ from models.banking import (
     BankAccountUpdate,
     BankStatementLineIn,
     BankStatementLineUpdate,
+    CashLedgerCreateIn,
     PeriodLockIn,
     PeriodUnlockIn,
 )
@@ -1464,8 +1465,9 @@ async def get_suggested_cash_withdrawals(
     bank_account_id: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    date_window_days: int = Query(14, ge=0, le=60),
 ):
-    """Scan unmatched debit statement lines for potential cash withdrawal patterns (ATM, CASH, SELF, etc.)."""
+    """Scan unmatched debit statement lines for potential cash withdrawal patterns (ATM, CASH, SELF, etc.) and matching manual cash ledger entries."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = _get_db(request)
@@ -1490,14 +1492,67 @@ async def get_suggested_cash_withdrawals(
     accounts = await db.bank_accounts.find({}).to_list(1000)
     acc_map = {str(a["_id"]): a.get("name", "Unknown Account") for a in accounts}
 
+    # Fetch unlinked manual cash ledger entries (source_statement_line_id is None / empty)
+    unlinked_cl_q: Dict[str, Any] = {"source_statement_line_id": {"$in": [None, ""]}}
+    if bank_account_id and bank_account_id != "all":
+        unlinked_cl_q["bank_account_id"] = str(bank_account_id)
+    unlinked_cls = []
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            unlinked_cls = await db.cash_ledger.find(unlinked_cl_q).sort("date", -1).to_list(1000)
+        except Exception:
+            unlinked_cls = []
+
+    window_days = int(getattr(date_window_days, "default", date_window_days) or 14)
+
     candidates = []
+    matched_cl_ids = set()
     for d in docs:
         narration = d.get("narration") or ""
-        if _is_cash_withdrawal_candidate(narration):
+        stmt_amt = float(d.get("debit_amount") or 0.0)
+        stmt_dt = _parse_dt(d.get("date"))
+        line_acc_id = str(d.get("bank_account_id"))
+
+        # Look for matching unlinked manual cash entry:
+        # Cash is usually recorded on or slightly before statement import (cl_date <= stmt_date + 1 day leeway)
+        matching_cl = None
+        for cl in unlinked_cls:
+            cl_id = str(cl["_id"])
+            if cl_id in matched_cl_ids:
+                continue
+            cl_acc_id = str(cl.get("bank_account_id"))
+            if cl_acc_id == line_acc_id or not line_acc_id:
+                cl_amt = float(cl.get("amount") or 0.0)
+                cl_dt = _parse_dt(cl.get("date"))
+                if abs(cl_amt - stmt_amt) <= 1.0:
+                    if stmt_dt and cl_dt:
+                        diff_days = (stmt_dt - cl_dt).days
+                        # Manual entry was created on or before statement line (within date_window_days)
+                        if -1 <= diff_days <= window_days:
+                            matching_cl = cl
+                            break
+                    else:
+                        matching_cl = cl
+                        break
+
+        is_pattern_match = _is_cash_withdrawal_candidate(narration)
+
+        if matching_cl or is_pattern_match:
             c_doc = stringify(d)
-            c_doc["bank_account_name"] = acc_map.get(str(d.get("bank_account_id")), "Unknown Account")
-            c_doc["amount"] = float(d.get("debit_amount") or 0.0)
-            c_doc["suggestion_reason"] = "Narration matches cash withdrawal pattern (ATM/CASH/SELF)"
+            c_doc["bank_account_name"] = acc_map.get(line_acc_id, "Unknown Account")
+            c_doc["amount"] = stmt_amt
+            if matching_cl:
+                matched_cl_ids.add(str(matching_cl["_id"]))
+                c_doc["existing_cash_ledger_id"] = str(matching_cl["_id"])
+                c_doc["existing_cash_ledger_date"] = matching_cl.get("date")
+                c_doc["existing_cash_ledger_amount"] = float(matching_cl.get("amount") or 0.0)
+                c_doc["existing_cash_ledger_remaining"] = float(matching_cl.get("remaining_balance") or 0.0)
+                c_doc["existing_cash_ledger_notes"] = matching_cl.get("notes") or ""
+                c_doc["is_existing_manual_entry"] = True
+                c_doc["suggestion_reason"] = f"Matches existing manual cash withdrawal (₹{matching_cl.get('amount'):.2f} on {matching_cl.get('date')})"
+            else:
+                c_doc["is_existing_manual_entry"] = False
+                c_doc["suggestion_reason"] = "Narration matches cash withdrawal pattern (ATM/CASH/SELF)"
             candidates.append(c_doc)
 
     return {
@@ -1510,7 +1565,7 @@ async def get_suggested_cash_withdrawals(
 @banking_router.post("/banking/cash-withdrawals/confirm")
 @banking_router.post("/bank-accounts/cash-withdrawals/confirm")
 async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Request):
-    """Explicitly confirm a statement line as cash withdrawal, create cash_ledger entry, and mark line matched."""
+    """Explicitly confirm a statement line as cash withdrawal, link to existing cash_ledger or create new, and mark line matched."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = _get_db(request)
@@ -1532,20 +1587,64 @@ async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Req
 
     now = _now_iso()
     user_email = u.get("email") or u.get("name", "")
+    line_acc_id = str(line.get("bank_account_id"))
 
-    # Create document in new collection cash_ledger
-    cash_ledger_doc = {
-        "bank_account_id": str(line.get("bank_account_id")),
-        "source_statement_line_id": str(line["_id"]),
-        "date": line.get("date"),
-        "amount": amount,
-        "remaining_balance": amount,
-        "notes": payload.notes or line.get("narration") or "Cash withdrawal from bank",
-        "created_at": now,
-        "created_by": user_email,
-    }
-    res = await db.cash_ledger.insert_one(cash_ledger_doc)
-    cash_ledger_id = str(res.inserted_id)
+    cash_ledger_id = None
+    cash_ledger_doc = None
+    is_linked_existing = False
+
+    # 1. If explicit existing_cash_ledger_id provided, link to it
+    if payload.existing_cash_ledger_id:
+        cash_ledger_doc = await db.cash_ledger.find_one({"_id": _oid(payload.existing_cash_ledger_id)})
+        if not cash_ledger_doc:
+            raise HTTPException(404, f"Existing cash ledger entry '{payload.existing_cash_ledger_id}' not found")
+        if cash_ledger_doc.get("source_statement_line_id") and str(cash_ledger_doc["source_statement_line_id"]) != str(line["_id"]):
+            raise HTTPException(400, f"Cash ledger entry is already linked to statement line '{cash_ledger_doc['source_statement_line_id']}'")
+        cash_ledger_id = str(cash_ledger_doc["_id"])
+        is_linked_existing = True
+        await db.cash_ledger.update_one(
+            {"_id": cash_ledger_doc["_id"]},
+            {"$set": {
+                "source_statement_line_id": str(line["_id"]),
+                "bank_account_id": line_acc_id,
+                "updated_at": now,
+                "updated_by": user_email,
+            }}
+        )
+    else:
+        # Check if there is an exact matching unlinked manual cash ledger entry for this bank account, amount, and date
+        unlinked_match = await db.cash_ledger.find_one({
+            "bank_account_id": line_acc_id,
+            "amount": amount,
+            "date": line.get("date"),
+            "source_statement_line_id": {"$in": [None, ""]},
+        })
+        if unlinked_match:
+            cash_ledger_doc = unlinked_match
+            cash_ledger_id = str(unlinked_match["_id"])
+            is_linked_existing = True
+            await db.cash_ledger.update_one(
+                {"_id": unlinked_match["_id"]},
+                {"$set": {
+                    "source_statement_line_id": str(line["_id"]),
+                    "updated_at": now,
+                    "updated_by": user_email,
+                }}
+            )
+        else:
+            # Create document in cash_ledger
+            cash_ledger_doc = {
+                "bank_account_id": line_acc_id,
+                "source_statement_line_id": str(line["_id"]),
+                "date": line.get("date"),
+                "amount": amount,
+                "remaining_balance": amount,
+                "notes": payload.notes or line.get("narration") or "Cash withdrawal from bank",
+                "created_at": now,
+                "created_by": user_email,
+            }
+            res = await db.cash_ledger.insert_one(cash_ledger_doc)
+            cash_ledger_id = str(res.inserted_id)
 
     # Update statement line to matched with matched_to: cash_withdrawal
     await db.bank_statement_lines.update_one(
@@ -1561,14 +1660,111 @@ async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Req
         }}
     )
 
+    remaining_balance = float(cash_ledger_doc.get("remaining_balance") if cash_ledger_doc and "remaining_balance" in cash_ledger_doc else amount)
+
     return {
         "ok": True,
-        "message": "Cash withdrawal successfully confirmed and added to Cash Ledger.",
+        "message": "Cash withdrawal successfully linked to Cash Ledger." if is_linked_existing else "Cash withdrawal successfully confirmed and added to Cash Ledger.",
         "statement_line_id": str(line["_id"]),
         "cash_ledger_id": cash_ledger_id,
         "amount": amount,
+        "remaining_balance": remaining_balance,
+        "is_linked_to_existing": is_linked_existing,
+    }
+
+
+@banking_router.post("/banking/cash-ledger", status_code=201)
+@banking_router.post("/bank-accounts/cash-ledger", status_code=201)
+async def create_cash_ledger_entry(payload: CashLedgerCreateIn, request: Request):
+    """Directly create a cash_ledger entry (bank_account, amount, date) independent of bank statement import."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    acc = await db.bank_accounts.find_one({"_id": _oid(payload.bank_account_id)})
+    if not acc:
+        raise HTTPException(404, f"Bank account '{payload.bank_account_id}' not found")
+
+    amount = float(payload.amount or 0.0)
+    if amount <= 0:
+        raise HTTPException(400, "Cash withdrawal amount must be > 0")
+
+    await _check_period_locked(db, str(payload.bank_account_id), payload.date, "create manual cash withdrawal")
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "")
+
+    cash_ledger_doc = {
+        "bank_account_id": str(payload.bank_account_id),
+        "source_statement_line_id": None,
+        "date": payload.date,
+        "amount": amount,
+        "remaining_balance": amount,
+        "notes": payload.notes or f"Manual cash withdrawal from {acc.get('name', 'bank')}",
+        "created_at": now,
+        "created_by": user_email,
+    }
+    res = await db.cash_ledger.insert_one(cash_ledger_doc)
+    cash_ledger_doc["_id"] = res.inserted_id
+
+    return {
+        "ok": True,
+        "message": "Cash withdrawal entry recorded successfully.",
+        "cash_ledger": stringify(cash_ledger_doc),
+        "id": str(res.inserted_id),
+        "amount": amount,
         "remaining_balance": amount,
     }
+
+
+@banking_router.delete("/banking/cash-ledger/{cash_ledger_id}")
+@banking_router.delete("/bank-accounts/cash-ledger/{cash_ledger_id}")
+async def delete_cash_ledger_entry(cash_ledger_id: str, request: Request):
+    """Delete an unlinked manual cash_ledger entry (if it has no linked statement line and no wage payments/expenses)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    doc = await db.cash_ledger.find_one({"_id": _oid(cash_ledger_id)})
+    if not doc:
+        raise HTTPException(404, f"Cash ledger entry '{cash_ledger_id}' not found")
+
+    if doc.get("source_statement_line_id"):
+        raise HTTPException(
+            400,
+            f"Cannot delete cash ledger entry '{cash_ledger_id}': it is linked to bank statement line '{doc['source_statement_line_id']}'. "
+            f"Please unmatch or reclassify the statement line first."
+        )
+
+    wage_count = 0
+    if hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wage_count = await db.wage_payments.count_documents({"cash_ledger_id": str(cash_ledger_id)})
+        except Exception:
+            wage_count = 0
+    expense_count = 0
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            expense_count = await db.expenses.count_documents({"cash_ledger_id": str(cash_ledger_id)})
+        except Exception:
+            expense_count = 0
+
+    if wage_count > 0 or expense_count > 0:
+        details = []
+        if wage_count > 0:
+            details.append(f"{wage_count} wage payment(s)")
+        if expense_count > 0:
+            details.append(f"{expense_count} cash expense(s)")
+        raise HTTPException(
+            400,
+            f"Cannot delete cash ledger entry '{cash_ledger_id}': it has active dependent records ({' and '.join(details)}). "
+            f"Please delete or reassign the wage payments/expenses before deleting this entry."
+        )
+
+    await _check_period_locked(db, doc.get("bank_account_id"), doc.get("date"), "delete cash ledger entry")
+    await db.cash_ledger.delete_one({"_id": doc["_id"]})
+
+    return {"ok": True, "message": f"Cash ledger entry '{cash_ledger_id}' deleted successfully."}
 
 
 @banking_router.get("/banking/cash-ledger")
@@ -1671,6 +1867,9 @@ async def list_cash_ledger(
 
         sd["allocated_amount"] = allocated
         sd["remaining_balance"] = round(rem, 2)
+        sd["statement_linked"] = bool(d.get("source_statement_line_id"))
+        sd["source_statement_line_id"] = d.get("source_statement_line_id")
+        sd["is_manual_entry"] = not bool(d.get("source_statement_line_id"))
         sd["wage_payment_count"] = len(wps)
         sd["wage_payments"] = [stringify(wp) for wp in wps]
         sd["expense_count"] = len(exps)
@@ -1761,12 +1960,20 @@ async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
         })
     disbursements.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
 
+    cash_ledger_dict = stringify(doc)
+    cash_ledger_dict["statement_linked"] = bool(doc.get("source_statement_line_id"))
+    cash_ledger_dict["source_statement_line_id"] = doc.get("source_statement_line_id")
+    cash_ledger_dict["is_manual_entry"] = not bool(doc.get("source_statement_line_id"))
+
     return {
         "ok": True,
-        "cash_ledger": stringify(doc),
+        "cash_ledger": cash_ledger_dict,
         "withdrawal_amount": withdrawal_amount,
         "allocated_amount": allocated_amount,
         "remaining_balance": round(remaining_balance, 2),
+        "statement_linked": bool(doc.get("source_statement_line_id")),
+        "source_statement_line_id": doc.get("source_statement_line_id"),
+        "is_manual_entry": not bool(doc.get("source_statement_line_id")),
         "wage_payments": wage_payments_list,
         "wage_payment_count": len(wage_payments_list),
         "expenses": expenses_list,

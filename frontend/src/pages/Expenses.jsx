@@ -24,6 +24,7 @@ import {
   CheckCircle2,
   PauseCircle,
   PlayCircle,
+  Coins,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -90,6 +91,7 @@ export default function Expenses() {
 
   // Modals state
   const [modalOpen, setModalOpen] = useState(false);
+  const [showCashWithdrawalModal, setShowCashWithdrawalModal] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
@@ -532,6 +534,13 @@ export default function Expenses() {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCashWithdrawalModal(true)}
+              className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-amber-600 shadow-sm transition-colors"
+              data-testid="record-cash-withdrawal-btn"
+            >
+              <Coins className="w-3.5 h-3.5" /> Record Cash Withdrawal
+            </button>
             {activeTab === "recurring" ? (
               <BtnPrimary onClick={openNewRecurringModal} data-testid="add-recurring-btn" className="flex items-center gap-2">
                 <Plus className="w-4 h-4" /> New Recurring Template
@@ -1376,9 +1385,19 @@ export default function Expenses() {
                   </div>
                 ) : (
                   <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-amber-900 mb-1">
-                      Cash in Hand Withdrawal Pool *
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-amber-900">
+                        Cash in Hand Withdrawal Pool *
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setShowCashWithdrawalModal(true)}
+                        className="text-[10px] font-bold text-amber-800 hover:text-amber-950 underline flex items-center gap-1"
+                        data-testid="expense-add-cash-pool-btn"
+                      >
+                        <Plus className="w-3 h-3" /> New Cash Withdrawal
+                      </button>
+                    </div>
                     <select
                       value={form.cash_ledger_id || ""}
                       onChange={(e) => setForm({ ...form, cash_ledger_id: e.target.value })}
@@ -1464,6 +1483,174 @@ export default function Expenses() {
           </div>
         </div>
       )}
+
+      {/* ── RECORD DIRECT CASH WITHDRAWAL MODAL ─────────────────────────────── */}
+      {showCashWithdrawalModal && (
+        <RecordCashWithdrawalModal
+          bankAccounts={bankAccounts}
+          onClose={() => setShowCashWithdrawalModal(false)}
+          onSuccess={(newEntry) => {
+            setShowCashWithdrawalModal(false);
+            loadData();
+            if (newEntry && (newEntry.id || newEntry._id)) {
+              const newId = String(newEntry.id || newEntry._id);
+              if (modalOpen) {
+                setForm((prev) => ({ ...prev, paid_via: "cash", cash_ledger_id: newId }));
+              }
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Record Direct Cash Withdrawal Modal in Expenses
+// ─────────────────────────────────────────────────────────────────────────────
+function RecordCashWithdrawalModal({ bankAccounts, onClose, onSuccess }) {
+  const [formData, setFormData] = useState({
+    bank_account_id: bankAccounts[0]?.id || bankAccounts[0]?._id || "",
+    amount: "",
+    date: TODAY,
+    notes: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.bank_account_id) {
+      setError("Please select a bank account.");
+      return;
+    }
+    const amt = parseFloat(formData.amount);
+    if (!amt || amt <= 0) {
+      setError("Please enter a valid cash amount > 0.");
+      return;
+    }
+    if (!formData.date) {
+      setError("Please select a withdrawal date.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const res = await http.post("/banking/cash-ledger", {
+        ...formData,
+        amount: amt,
+      });
+      onSuccess(res.data?.cash_ledger || res.data);
+    } catch (err) {
+      setError(err.message || "Failed to record cash withdrawal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-amber-50/50">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-amber-800 font-bold">Finance / Cash In-Hand</div>
+            <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
+              <Coins className="w-4 h-4 text-amber-600" /> Record Cash Withdrawal
+            </h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+            <p className="font-bold">Record Physical Cash Withdrawal</p>
+            <p className="text-[11px] text-amber-800">
+              Creates a Cash in Hand entry immediately usable for cash expenses and wage payments without waiting for bank statement import.
+            </p>
+          </div>
+
+          {error && (
+            <div className="p-3 bg-red-50 border-2 border-red-300 text-red-800 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Bank Account *</div>
+            <select
+              value={formData.bank_account_id}
+              onChange={(e) => setFormData({ ...formData, bank_account_id: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-semibold focus:border-slate-800 focus:outline-none"
+              required
+              data-testid="record-cash-account-select"
+            >
+              <option value="">-- Select Bank Account --</option>
+              {bankAccounts.map((acc) => {
+                const accId = acc.id || acc._id;
+                return (
+                  <option key={accId} value={accId}>
+                    {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Amount (₹) *</div>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                placeholder="e.g. 25000"
+                value={formData.amount}
+                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono font-bold focus:border-slate-800 focus:outline-none"
+                required
+                data-testid="record-cash-amount-input"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Withdrawal Date *</div>
+              <input
+                type="date"
+                value={formData.date}
+                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-slate-800 focus:outline-none"
+                required
+                data-testid="record-cash-date-input"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Purpose / Notes (Optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. for worker wages this week"
+              value={formData.notes}
+              onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-slate-800 focus:outline-none"
+              data-testid="record-cash-notes-input"
+            />
+          </div>
+
+          <div className="pt-3 flex items-center justify-end gap-2 border-t-2 border-slate-200">
+            <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 disabled:opacity-50 transition-colors"
+              data-testid="record-cash-submit-btn"
+            >
+              {loading ? "Recording..." : "Record Cash Withdrawal"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

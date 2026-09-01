@@ -55,6 +55,7 @@ export default function BankReconciliation() {
   const [suggestedCashWithdrawals, setSuggestedCashWithdrawals] = useState([]);
   const [cashLoading, setCashLoading] = useState(false);
   const [showCashModal, setShowCashModal] = useState(false);
+  const [showRecordCashModal, setShowRecordCashModal] = useState(false);
   const [activeCashLine, setActiveCashLine] = useState(null);
 
   // Cash Breakdown Modal state
@@ -339,13 +340,22 @@ export default function BankReconciliation() {
     }
   };
 
-  const handleConfirmCashWithdrawal = async (lineId, notes = "") => {
+  const handleConfirmCashWithdrawal = async (lineId, notes = "", existingCashLedgerId = null) => {
     try {
-      await http.post("/banking/cash-withdrawals/confirm", {
+      const payload = {
         statement_line_id: lineId,
         notes: notes || "Confirmed cash withdrawal",
-      });
-      notify("Cash withdrawal confirmed and added to Cash in Hand ledger!", "success");
+      };
+      if (existingCashLedgerId) {
+        payload.existing_cash_ledger_id = existingCashLedgerId;
+      }
+      const res = await http.post("/banking/cash-withdrawals/confirm", payload);
+      notify(
+        res.data?.is_linked_to_existing
+          ? "Statement line linked to existing manual cash withdrawal entry!"
+          : "Cash withdrawal confirmed and added to Cash in Hand ledger!",
+        "success"
+      );
       setShowCashModal(false);
       setActiveCashLine(null);
       fetchSummary();
@@ -516,6 +526,14 @@ export default function BankReconciliation() {
               <RefreshCw className={`w-3.5 h-3.5 ${reconciling ? "animate-spin" : ""}`} />
               {reconciling ? "Reconciling..." : `Bulk Confirm (≥${minConfidenceThreshold}%)`}
             </BtnPrimary>
+
+            <button
+              onClick={() => setShowRecordCashModal(true)}
+              className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-amber-600 shadow-sm transition-colors"
+              data-testid="record-cash-withdrawal-btn"
+            >
+              <Coins className="w-3.5 h-3.5" /> + Record Cash Withdrawal
+            </button>
 
             {periodLocks.find(
               (l) =>
@@ -1027,16 +1045,25 @@ export default function BankReconciliation() {
           {/* TAB: SUGGESTED CASH WITHDRAWALS */}
           {activeTab === "cash_withdrawals" && (
             <Card className="p-4 sm:p-6 space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b-2 border-slate-100">
+              <div className="flex items-center justify-between pb-3 border-b-2 border-slate-100 flex-wrap gap-2">
                 <div>
                   <h3 className="font-black text-slate-900 text-sm uppercase tracking-wide">Suggested Cash Withdrawals</h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Unmatched debit transactions matching cash withdrawal indicators (ATM, CASH, SELF, etc.). Confirming adds to the Cash in Hand ledger.
+                    Unmatched debit transactions matching cash withdrawal indicators or existing manual cash withdrawals. Confirming links or creates Cash in Hand pool.
                   </p>
                 </div>
-                <BtnSecondary onClick={fetchSuggestedCashWithdrawals} className="flex items-center gap-1.5 py-1.5">
-                  <RefreshCw className={`w-3.5 h-3.5 ${cashLoading ? "animate-spin" : ""}`} /> Refresh
-                </BtnSecondary>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowRecordCashModal(true)}
+                    className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-3 py-1.5 border-2 border-amber-600 shadow-sm transition-colors"
+                    data-testid="tab-record-cash-btn"
+                  >
+                    <Coins className="w-3.5 h-3.5" /> + Record Cash Withdrawal
+                  </button>
+                  <BtnSecondary onClick={fetchSuggestedCashWithdrawals} className="flex items-center gap-1.5 py-1.5">
+                    <RefreshCw className={`w-3.5 h-3.5 ${cashLoading ? "animate-spin" : ""}`} /> Refresh
+                  </BtnSecondary>
+                </div>
               </div>
 
               {suggestedCashWithdrawals.length === 0 ? (
@@ -1044,7 +1071,7 @@ export default function BankReconciliation() {
                   <CheckCircle2 className="w-10 h-10 mx-auto text-slate-400 opacity-60" />
                   <p className="font-bold text-slate-900 text-sm">No cash withdrawal suggestions found.</p>
                   <p className="text-xs text-slate-500">
-                    Statement debits with ATM / Cash / Self in narrations will surface here for confirmation.
+                    Statement debits with ATM / Cash / Self in narrations or matching manual cash entries will surface here.
                   </p>
                 </div>
               ) : (
@@ -1052,13 +1079,23 @@ export default function BankReconciliation() {
                   {suggestedCashWithdrawals.map((line) => (
                     <div
                       key={line.id}
-                      className="p-4 bg-white border-2 border-amber-200 hover:border-amber-400 flex items-center justify-between gap-4 flex-wrap transition-colors"
+                      className={`p-4 bg-white border-2 flex items-center justify-between gap-4 flex-wrap transition-colors ${
+                        line.is_existing_manual_entry
+                          ? "border-emerald-300 hover:border-emerald-500 bg-emerald-50/10"
+                          : "border-amber-200 hover:border-amber-400"
+                      }`}
                     >
                       <div className="flex-1 min-w-[240px] space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300">
-                            Cash In-Hand Candidate
-                          </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {line.is_existing_manual_entry ? (
+                            <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-emerald-100 text-emerald-900 border border-emerald-300 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Matches Manual Entry
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300">
+                              Cash In-Hand Candidate
+                            </span>
+                          )}
                           <span className="text-xs font-bold text-slate-900">{line.bank_account_name || "Account"}</span>
                           <span className="text-xs font-mono text-slate-500">{line.date}</span>
                         </div>
@@ -1069,9 +1106,23 @@ export default function BankReconciliation() {
                         <div className="text-[10px] text-slate-500 font-mono">
                           Ref: {line.reference_no || "-"} • {line.suggestion_reason || "Pattern match"}
                         </div>
+                        {line.is_existing_manual_entry && (
+                          <div className="text-[11px] text-emerald-800 font-medium bg-emerald-50 p-1.5 border border-emerald-200">
+                            Linked to manual entry on {line.existing_cash_ledger_date} (₹{inr(line.existing_cash_ledger_remaining ?? line.amount)} remaining) • No duplicate will be created
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
+                        {line.is_existing_manual_entry ? (
+                          <button
+                            onClick={() => handleConfirmCashWithdrawal(line.id, line.narration, line.existing_cash_ledger_id)}
+                            data-testid={`link-cash-manual-${line.id}`}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-emerald-600 shadow-ind flex items-center gap-1.5 transition-colors"
+                          >
+                            <LinkIcon className="w-3.5 h-3.5" /> Link to Manual Entry
+                          </button>
+                        ) : null}
                         <button
                           onClick={() => {
                             setActiveCashLine(line);
@@ -1080,7 +1131,7 @@ export default function BankReconciliation() {
                           data-testid={`confirm-cash-suggestion-${line.id}`}
                           className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 transition-colors"
                         >
-                          <Coins className="w-3.5 h-3.5" /> Confirm Cash In-Hand
+                          <Coins className="w-3.5 h-3.5" /> {line.is_existing_manual_entry ? "Review & Link" : "Confirm Cash In-Hand"}
                         </button>
                       </div>
                     </div>
@@ -1402,6 +1453,22 @@ export default function BankReconciliation() {
             setSelectedLockToUnlock(null);
           }}
           onUnlock={handleUnlockPeriod}
+        />
+      )}
+
+      {/* 8. RECORD CASH WITHDRAWAL MODAL */}
+      {showRecordCashModal && (
+        <RecordCashWithdrawalModal
+          accounts={accounts}
+          initialAccountId={selectedAccountId}
+          onClose={() => setShowRecordCashModal(false)}
+          onSuccess={() => {
+            setShowRecordCashModal(false);
+            notify("Manual cash withdrawal entry recorded successfully!", "success");
+            fetchSummary();
+            fetchStatementLines();
+            fetchSuggestedCashWithdrawals();
+          }}
         />
       )}
     </div>
@@ -1862,12 +1929,13 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
   const [loading, setLoading] = useState(false);
   const acc = accounts.find((a) => a.id === line.bank_account_id);
   const amount = line.amount || line.debit_amount || 0;
+  const isExisting = Boolean(line.is_existing_manual_entry || line.existing_cash_ledger_id);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await onConfirm(line.id, notes);
+      await onConfirm(line.id, notes, line.existing_cash_ledger_id || null);
     } finally {
       setLoading(false);
     }
@@ -1879,7 +1947,9 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
         <div className="p-4 border-b-2 border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Coins className="w-5 h-5 text-amber-600" />
-            <h3 className="font-black text-slate-900 text-sm uppercase">Confirm Cash Withdrawal</h3>
+            <h3 className="font-black text-slate-900 text-sm uppercase">
+              {isExisting ? "Link Statement to Cash Entry" : "Confirm Cash Withdrawal"}
+            </h3>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
             <X className="w-4 h-4" />
@@ -1887,12 +1957,26 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
-          <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
-            <p className="font-bold">This transaction looks like a cash withdrawal.</p>
-            <p className="text-[11px] text-amber-800">
-              Confirming will create an entry in the <strong>Cash in Hand</strong> ledger with initial balance equal to withdrawal amount (₹{inr(amount)}), and mark this statement line as fully reconciled.
-            </p>
-          </div>
+          {isExisting ? (
+            <div className="p-3 bg-emerald-50 border border-emerald-300 text-xs text-emerald-950 space-y-1">
+              <p className="font-bold flex items-center gap-1.5 text-emerald-800">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Matches Existing Manual Cash Withdrawal
+              </p>
+              <p className="text-[11px] text-emerald-800">
+                Found unlinked manual entry of <strong>₹{inr(line.existing_cash_ledger_amount || amount)}</strong> recorded on {line.existing_cash_ledger_date || line.date} (₹{inr(line.existing_cash_ledger_remaining ?? amount)} remaining balance).
+              </p>
+              <p className="text-[10px] text-emerald-700">
+                Confirming will link this statement line directly to that entry without resetting disbursements or creating a duplicate.
+              </p>
+            </div>
+          ) : (
+            <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+              <p className="font-bold">This transaction looks like a cash withdrawal.</p>
+              <p className="text-[11px] text-amber-800">
+                Confirming will create an entry in the <strong>Cash in Hand</strong> ledger with initial balance equal to withdrawal amount (₹{inr(amount)}), and mark this statement line as fully reconciled.
+              </p>
+            </div>
+          )}
 
           <div className="p-3 bg-slate-50 border border-slate-200 text-xs space-y-1.5 font-mono">
             <div className="flex justify-between">
@@ -1932,7 +2016,154 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
               data-testid="modal-confirm-cash-btn"
               className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 disabled:opacity-50"
             >
-              {loading ? "Confirming..." : "Confirm Cash In-Hand"}
+              {loading ? "Linking..." : isExisting ? "Link to Manual Entry" : "Confirm Cash In-Hand"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Record Direct Cash Withdrawal Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function RecordCashWithdrawalModal({ accounts, initialAccountId, onClose, onSuccess }) {
+  const [formData, setFormData] = useState({
+    bank_account_id: initialAccountId && initialAccountId !== "all" ? initialAccountId : accounts[0]?.id || "",
+    amount: "",
+    date: new Date().toISOString().slice(0, 10),
+    notes: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.bank_account_id) {
+      setError("Please select a bank account.");
+      return;
+    }
+    const amt = parseFloat(formData.amount);
+    if (!amt || amt <= 0) {
+      setError("Please enter a valid cash amount > 0.");
+      return;
+    }
+    if (!formData.date) {
+      setError("Please select a withdrawal date.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      await http.post("/banking/cash-ledger", {
+        ...formData,
+        amount: amt,
+      });
+      onSuccess();
+    } catch (err) {
+      setError(err.message || "Failed to record cash withdrawal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-amber-50/50">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-amber-800 font-bold">Finance / Cash Management</div>
+            <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
+              <Coins className="w-4 h-4 text-amber-600" /> Record Cash Withdrawal
+            </h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+            <p className="font-bold">Instant Cash Recording (Same-Day Spending)</p>
+            <p className="text-[11px] text-amber-800">
+              Record physical cash withdrawn today so it can be immediately spent on Karigar wages or cash expenses. When your bank statement is later imported, the matching engine will automatically link to this entry without creating a duplicate.
+            </p>
+          </div>
+
+          {error && (
+            <div className="p-3 bg-red-50 border-2 border-red-300 text-red-800 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Bank Account *</div>
+            <select
+              value={formData.bank_account_id}
+              onChange={(e) => setFormData({ ...formData, bank_account_id: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              required
+              data-testid="record-cash-account-select"
+            >
+              <option value="">-- Select Bank Account --</option>
+              {accounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>
+                  {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Amount (₹) *</div>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                placeholder="e.g. 50000"
+                value={formData.amount}
+                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono font-bold focus:border-[#2563EB] focus:outline-none"
+                required
+                data-testid="record-cash-amount-input"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Withdrawal Date *</div>
+              <input
+                type="date"
+                value={formData.date}
+                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+                required
+                data-testid="record-cash-date-input"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Purpose / Notes (Optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. Factory Karigar weekly wages / petty cash"
+              value={formData.notes}
+              onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="record-cash-notes-input"
+            />
+          </div>
+
+          <div className="pt-3 flex items-center justify-end gap-2 border-t-2 border-slate-200">
+            <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-amber-600 shadow-ind flex items-center gap-1.5 disabled:opacity-50 transition-colors"
+              data-testid="record-cash-submit-btn"
+            >
+              {loading ? "Recording..." : "Record Cash Withdrawal"}
             </button>
           </div>
         </form>

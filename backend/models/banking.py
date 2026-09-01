@@ -107,6 +107,14 @@ class TransferConfirmIn(BaseModel):
 
 class CashWithdrawalConfirmIn(BaseModel):
     statement_line_id: str = Field(..., description="ID of the debit statement line (withdrawn from bank)")
+    existing_cash_ledger_id: Optional[str] = Field(None, description="Optional ID of existing manual cash ledger entry to link to")
+    notes: Optional[str] = Field("", description="Optional notes or reference for the cash ledger entry")
+
+
+class CashLedgerCreateIn(BaseModel):
+    bank_account_id: str = Field(..., description="ID of the bank account where cash was withdrawn")
+    amount: float = Field(..., gt=0, description="Cash withdrawal amount (must be > 0)")
+    date: str = Field(..., description="Date of cash withdrawal (YYYY-MM-DD)")
     notes: Optional[str] = Field("", description="Optional notes or reference for the cash ledger entry")
 
 

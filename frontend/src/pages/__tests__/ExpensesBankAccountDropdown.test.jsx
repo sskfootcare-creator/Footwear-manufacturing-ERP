@@ -283,5 +283,102 @@ describe("Expenses Bank Account Selection", () => {
       );
     });
   });
+
+  it("allows recording a direct cash withdrawal and immediately using it for cash expense", async () => {
+    let cashEntries = [];
+    http.get.mockImplementation((url) => {
+      if (url === "/banking/accounts") {
+        return Promise.resolve({
+          data: [
+            {
+              id: "bank_acc_101",
+              name: "HDFC Primary",
+              bank_name: "HDFC Bank",
+              account_number_last4: "5432",
+              account_type: "online_channel",
+              active: true,
+            },
+          ],
+        });
+      }
+      if (url === "/banking/cash-ledger") {
+        return Promise.resolve({
+          data: {
+            items: cashEntries,
+          },
+        });
+      }
+      if (url === "/expenses") return Promise.resolve({ data: [] });
+      if (url === "/reports/pnl") return Promise.resolve({ data: { revenue: 0, expenses: 0, gross_profit: 0, net_profit: 0 } });
+      if (url === "/expenses/due-queue") return Promise.resolve({ data: [] });
+      if (url === "/expenses/recurring") return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: [] });
+    });
+
+    render(<Expenses />);
+
+    // Click Record Cash Withdrawal in Expenses action bar
+    const recordCashBtn = await screen.findByTestId("record-cash-withdrawal-btn");
+    fireEvent.click(recordCashBtn);
+
+    // Modal appears
+    const accountSelect = await screen.findByTestId("record-cash-account-select");
+    const amountInput = screen.getByTestId("record-cash-amount-input");
+    const notesInput = screen.getByTestId("record-cash-notes-input");
+
+    fireEvent.change(accountSelect, { target: { value: "bank_acc_101" } });
+    fireEvent.change(amountInput, { target: { value: "50000" } });
+    fireEvent.change(notesInput, { target: { value: "for worker wages this week" } });
+
+    // Mock direct cash-ledger creation response
+    http.post.mockImplementation((url, payload) => {
+      if (url === "/banking/cash-ledger") {
+        const newDoc = {
+          id: "cash_leg_new_999",
+          bank_account_id: payload.bank_account_id,
+          amount: payload.amount,
+          remaining_balance: payload.amount,
+          date: payload.date,
+          notes: payload.notes,
+        };
+        cashEntries = [newDoc];
+        return Promise.resolve({
+          data: {
+            ok: true,
+            cash_ledger: newDoc,
+          },
+        });
+      }
+      if (url === "/expenses") {
+        return Promise.resolve({ data: { id: "exp_1" } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const submitCashBtn = screen.getByTestId("record-cash-submit-btn");
+    fireEvent.click(submitCashBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith("/banking/cash-ledger", {
+        bank_account_id: "bank_acc_101",
+        amount: 50000,
+        date: expect.any(String),
+        notes: "for worker wages this week",
+      });
+    });
+
+    // Now open Add Expense modal
+    const addExpenseBtn = screen.getByTestId("add-expense-btn");
+    fireEvent.click(addExpenseBtn);
+
+    const cashToggle = await screen.findByTestId("expense-pay-via-cash");
+    fireEvent.click(cashToggle);
+
+    // Newly recorded withdrawal is immediately available in dropdown
+    const cashDropdown = await screen.findByTestId("expense-form-cash-ledger");
+    expect(cashDropdown).toBeInTheDocument();
+    expect(await screen.findByText(/₹50,000 remaining/i)).toBeInTheDocument();
+  });
 });
+
 
