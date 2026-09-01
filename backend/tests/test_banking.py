@@ -5,7 +5,7 @@ from io import BytesIO
 from datetime import datetime, timezone
 from bson import ObjectId
 from unittest.mock import MagicMock, AsyncMock
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from models.banking import (
     BankAccountIn,
@@ -3840,6 +3840,156 @@ async def test_direct_cash_ledger_creation_and_statement_linking(monkeypatch):
     assert len(detail_res["expenses"]) == 1
     assert detail_res["statement_linked"] is True
     assert detail_res["source_statement_line_id"] == str(line_id)
+
+
+@pytest.mark.anyio
+async def test_opening_balance_correction_audit_and_period_lock_safety(monkeypatch):
+    """
+    Test Stage 2 opening balance correction:
+    1. Mandatory non-empty reason validation.
+    2. Locked period safety check (blocks correction if a locked period starts on/after opening balance date).
+    3. Audit logging in balance_corrections and account updates.
+    4. Retrieval of balance corrections history.
+    """
+    import routes.banking
+    from routes.banking import (
+        correct_account_opening_balance,
+        list_account_balance_corrections,
+    )
+    from models.banking import BalanceCorrectionIn
+
+    mock_db = MagicMock()
+    admin_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = ObjectId()
+    acc_doc = {
+        "_id": acc_id,
+        "name": "HDFC Primary Ops",
+        "bank_name": "HDFC Bank",
+        "opening_balance": 100000.0,
+        "opening_balance_date": "2026-08-01",
+        "balance_corrections": [],
+    }
+
+    accounts_store = {str(acc_id): dict(acc_doc)}
+    locks_store = []
+    corrections_store = []
+
+    # Mock bank_accounts collection
+    mock_acc_col = MagicMock()
+    async def mock_acc_find_one(q):
+        oid = str(q.get("_id"))
+        return accounts_store.get(oid)
+
+    async def mock_acc_update_one(q, u):
+        oid = str(q.get("_id"))
+        if oid in accounts_store:
+            if "$set" in u:
+                accounts_store[oid].update(u["$set"])
+            if "$push" in u:
+                for k, v in u["$push"].items():
+                    accounts_store[oid].setdefault(k, []).append(v)
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    mock_acc_col.find_one = AsyncMock(side_effect=mock_acc_find_one)
+    mock_acc_update_one_mock = AsyncMock(side_effect=mock_acc_update_one)
+    mock_acc_col.update_one = mock_acc_update_one_mock
+    mock_db.bank_accounts = mock_acc_col
+
+    # Mock reconciliation_locks collection
+    mock_locks_col = MagicMock()
+    async def mock_locks_find_one(q, sort=None):
+        status = q.get("status")
+        for l in locks_store:
+            if l.get("status") == status:
+                return l
+        return None
+    mock_locks_col.find_one = AsyncMock(side_effect=mock_locks_find_one)
+    mock_db.reconciliation_locks = mock_locks_col
+
+    # Mock balance_corrections collection
+    mock_corr_col = MagicMock()
+    async def mock_corr_insert_one(doc):
+        d = dict(doc)
+        d["_id"] = ObjectId()
+        corrections_store.append(d)
+        return MagicMock(inserted_id=d["_id"])
+
+    def mock_corr_find(q):
+        res = [c for c in corrections_store if c.get("bank_account_id") == q.get("bank_account_id")]
+        mock_cursor = MagicMock()
+        mock_cursor.sort = MagicMock(return_value=mock_cursor)
+        mock_cursor.to_list = AsyncMock(return_value=res)
+        return mock_cursor
+
+    mock_corr_col.insert_one = AsyncMock(side_effect=mock_corr_insert_one)
+    mock_corr_col.find = mock_corr_find
+    mock_db.balance_corrections = mock_corr_col
+
+    req = MagicMock(spec=Request)
+
+    # ── Test 1: Empty reason is rejected with 400
+    with pytest.raises(HTTPException) as exc1:
+        await correct_account_opening_balance(
+            str(acc_id),
+            BalanceCorrectionIn(new_opening_balance=125000.0, reason="   "),
+            req,
+        )
+    assert exc1.value.status_code == 400
+    assert "required" in exc1.value.detail.lower()
+
+    # ── Test 2: Locked period on or after opening balance date blocks correction
+    locks_store.append({
+        "_id": ObjectId(),
+        "bank_account_id": str(acc_id),
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-31",
+        "status": "locked",
+    })
+
+    with pytest.raises(HTTPException) as exc2:
+        await correct_account_opening_balance(
+            str(acc_id),
+            BalanceCorrectionIn(new_opening_balance=125000.0, reason="Data entry error, verified against passbook"),
+            req,
+        )
+    assert exc2.value.status_code == 400
+    assert "locked period starting" in exc2.value.detail
+    assert "unlock it first" in exc2.value.detail
+
+    # ── Test 3: Unlocking the period allows correction to succeed
+    locks_store[0]["status"] = "unlocked"
+
+    res = await correct_account_opening_balance(
+        str(acc_id),
+        BalanceCorrectionIn(new_opening_balance=125000.0, reason="Data entry error, verified against passbook"),
+        req,
+    )
+    assert res["ok"] is True
+    assert res["correction"]["old_value"] == 100000.0
+    assert res["correction"]["new_value"] == 125000.0
+    assert res["correction"]["reason"] == "Data entry error, verified against passbook"
+    assert res["correction"]["corrected_by"] == "admin@sskfootcare.com"
+
+    # Verify bank_account document updated
+    assert accounts_store[str(acc_id)]["opening_balance"] == 125000.0
+    assert accounts_store[str(acc_id)]["last_balance_correction"]["old_value"] == 100000.0
+    assert accounts_store[str(acc_id)]["last_balance_correction"]["new_value"] == 125000.0
+
+    # Verify audit collection record
+    assert len(corrections_store) == 1
+    assert corrections_store[0]["old_value"] == 100000.0
+    assert corrections_store[0]["new_value"] == 125000.0
+
+    # ── Test 4: List balance corrections history endpoint
+    hist_res = await list_account_balance_corrections(str(acc_id), req)
+    assert hist_res["ok"] is True
+    assert len(hist_res["corrections"]) == 1
+    assert hist_res["corrections"][0]["new_value"] == 125000.0
+    assert hist_res["corrections"][0]["reason"] == "Data entry error, verified against passbook"
 
 
 

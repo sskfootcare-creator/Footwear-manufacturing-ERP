@@ -26,6 +26,9 @@ import {
   Unlock,
   ChevronDown,
   ChevronRight,
+  Pencil,
+  Scale,
+  History,
 } from "lucide-react";
 
 const isCashWithdrawalCandidate = (line) => {
@@ -37,6 +40,7 @@ const isCashWithdrawalCandidate = (line) => {
 export default function BankReconciliation() {
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState("all");
+  const [editingAccount, setEditingAccount] = useState(null);
   const [activeTab, setActiveTab] = useState("unmatched_lines"); // unmatched_lines | transfers | erp_expected | ledger
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState(null);
@@ -75,6 +79,10 @@ export default function BankReconciliation() {
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [showManualMatchModal, setShowManualMatchModal] = useState(false);
   const [activeLineForMatch, setActiveLineForMatch] = useState(null);
+  const [showCorrectBalanceModal, setShowCorrectBalanceModal] = useState(false);
+  const [accountForCorrection, setAccountForCorrection] = useState(null);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [accountForHistory, setAccountForHistory] = useState(null);
 
   // Period Lock state
   const [showLockModal, setShowLockModal] = useState(false);
@@ -523,7 +531,14 @@ export default function BankReconciliation() {
         testId="bank-reconciliation-header"
         action={
           <div className="flex items-center gap-2 flex-wrap">
-            <BtnSecondary onClick={() => setShowAccountModal(true)} className="flex items-center gap-1.5" testId="add-account-btn">
+            <BtnSecondary
+              onClick={() => {
+                setEditingAccount(null);
+                setShowAccountModal(true);
+              }}
+              className="flex items-center gap-1.5"
+              testId="add-account-btn"
+            >
               <Plus className="w-3.5 h-3.5" /> Add Account
             </BtnSecondary>
             <BtnSecondary onClick={() => setShowImportModal(true)} className="flex items-center gap-1.5" testId="import-statement-btn">
@@ -569,6 +584,18 @@ export default function BankReconciliation() {
             >
               <Coins className="w-3.5 h-3.5" /> + Record Cash Withdrawal
             </button>
+
+            <BtnSecondary
+              onClick={() => {
+                const target = accounts.find((a) => a.id === selectedAccountId) || accounts[0];
+                setAccountForCorrection(target || null);
+                setShowCorrectBalanceModal(true);
+              }}
+              className="flex items-center gap-1.5 border-amber-300 text-amber-900 bg-amber-50 hover:bg-amber-100"
+              testId="correct-opening-balance-btn"
+            >
+              <Scale className="w-3.5 h-3.5 text-amber-700" /> Correct Opening Balance
+            </BtnSecondary>
 
             {periodLocks.find(
               (l) =>
@@ -625,6 +652,55 @@ export default function BankReconciliation() {
       />
 
       <div className="p-2 sm:p-4 lg:p-8 space-y-6">
+        {/* Balance Correction Alert Banner */}
+        {(() => {
+          const selectedAccountDoc = accounts.find((a) => a.id === selectedAccountId);
+          const activeAccountCorrection =
+            selectedAccountDoc?.last_balance_correction ||
+            (selectedAccountId === "all" ? accounts.find((a) => a.last_balance_correction)?.last_balance_correction : null);
+
+          if (!activeAccountCorrection) return null;
+
+          return (
+            <div
+              className="p-3.5 bg-amber-50/90 border-2 border-amber-300 flex items-center justify-between gap-4 flex-wrap text-xs text-amber-950 shadow-sm"
+              data-testid="balance-corrected-banner"
+            >
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 bg-amber-200 border border-amber-400 rounded text-amber-900">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="font-bold uppercase tracking-wider text-[11px] text-amber-900 block">
+                    Opening Balance Audit Correction Notice
+                  </span>
+                  <span>
+                    This account's starting balance was corrected on{" "}
+                    <strong className="font-mono">{activeAccountCorrection.corrected_at?.slice(0, 10)}</strong> from ₹
+                    {inr(activeAccountCorrection.old_value)} to ₹{inr(activeAccountCorrection.new_value)} by{" "}
+                    <strong>{activeAccountCorrection.corrected_by}</strong>. Reason: <em>"{activeAccountCorrection.reason}"</em>
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetId =
+                    selectedAccountId !== "all"
+                      ? selectedAccountId
+                      : accounts.find((a) => a.last_balance_correction)?.id || accounts[0]?.id;
+                  setAccountForHistory(targetId);
+                  setShowHistoryModal(true);
+                }}
+                className="px-3 py-1.5 bg-white border-2 border-amber-400 hover:bg-amber-100 font-bold uppercase text-[10px] text-amber-900 shadow-sm"
+                data-testid="view-correction-history-btn"
+              >
+                View Correction History
+              </button>
+            </div>
+          );
+        })()}
+
         {/* Account Selector Tabs */}
         <div className="flex items-center gap-2 border-b border-slate-200 overflow-x-auto overflow-y-hidden">
           <button
@@ -639,28 +715,47 @@ export default function BankReconciliation() {
             <Layers className="w-3.5 h-3.5" /> All Accounts
           </button>
           {accounts.map((acc) => (
-            <button
+            <div
               key={acc.id}
-              onClick={() => setSelectedAccountId(acc.id)}
-              data-testid={`tab-account-${acc.id}`}
-              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ${
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px whitespace-nowrap ${
                 selectedAccountId === acc.id
                   ? "border-[#1E3A8A] text-[#1E3A8A] bg-slate-50"
                   : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
               }`}
             >
-              <Landmark className="w-3.5 h-3.5" />
-              <span>{acc.name}</span>
-              <span
-                className={`text-[10px] uppercase font-bold px-1.5 py-0.5 border ${
-                  acc.account_type === "online_channel"
-                    ? "bg-purple-100 text-purple-800 border-purple-300"
-                    : "bg-blue-100 text-blue-800 border-blue-300"
-                }`}
+              <button
+                type="button"
+                onClick={() => setSelectedAccountId(acc.id)}
+                data-testid={`tab-account-${acc.id}`}
+                className="flex items-center gap-2"
               >
-                {acc.account_type === "online_channel" ? "Online" : "B2B"}
-              </span>
-            </button>
+                <Landmark className="w-3.5 h-3.5" />
+                <span>{acc.name}</span>
+                <span
+                  className={`text-[10px] uppercase font-bold px-1.5 py-0.5 border ${
+                    acc.account_type === "online_channel"
+                      ? "bg-purple-100 text-purple-800 border-purple-300"
+                      : "bg-blue-100 text-blue-800 border-blue-300"
+                  }`}
+                >
+                  {acc.account_type === "online_channel" ? "Online" : "B2B"}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditingAccount(acc);
+                  setShowAccountModal(true);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-200/60 transition-colors ml-1"
+                title={`Edit ${acc.name} details`}
+                data-testid={`edit-account-btn-${acc.id}`}
+                aria-label={`Edit ${acc.name}`}
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+            </div>
           ))}
         </div>
 
@@ -1652,14 +1747,55 @@ export default function BankReconciliation() {
         />
       )}
 
-      {/* 3. ADD BANK ACCOUNT MODAL */}
+      {/* 3. ADD / EDIT BANK ACCOUNT MODAL */}
       {showAccountModal && (
         <AddBankAccountModal
-          onClose={() => setShowAccountModal(false)}
-          onSuccess={() => {
+          account={editingAccount}
+          onClose={() => {
             setShowAccountModal(false);
-            notify("Bank account created!", "success");
+            setEditingAccount(null);
+          }}
+          onOpenCorrection={(acc) => {
+            setAccountForCorrection(acc);
+            setShowCorrectBalanceModal(true);
+          }}
+          onSuccess={() => {
+            const wasEditing = Boolean(editingAccount);
+            setShowAccountModal(false);
+            setEditingAccount(null);
+            notify(wasEditing ? "Bank account updated successfully!" : "Bank account created!", "success");
             fetchAccounts();
+          }}
+        />
+      )}
+
+      {/* 3B. CORRECT OPENING BALANCE MODAL */}
+      {showCorrectBalanceModal && (
+        <CorrectOpeningBalanceModal
+          account={accountForCorrection}
+          accounts={accounts}
+          onClose={() => {
+            setShowCorrectBalanceModal(false);
+            setAccountForCorrection(null);
+          }}
+          onSuccess={() => {
+            setShowCorrectBalanceModal(false);
+            setAccountForCorrection(null);
+            notify("Opening balance corrected and logged to audit trail!", "success");
+            fetchAccounts();
+            fetchSummary();
+          }}
+        />
+      )}
+
+      {/* 3C. BALANCE CORRECTION HISTORY AUDIT MODAL */}
+      {showHistoryModal && accountForHistory && (
+        <BalanceCorrectionHistoryModal
+          accountId={accountForHistory}
+          accounts={accounts}
+          onClose={() => {
+            setShowHistoryModal(false);
+            setAccountForHistory(null);
           }}
         />
       )}
@@ -2049,16 +2185,20 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-Modal: Add Bank Account Modal
+// Sub-Modal: Add / Edit Bank Account Modal
 // ─────────────────────────────────────────────────────────────────────────────
-function AddBankAccountModal({ onClose, onSuccess }) {
+function AddBankAccountModal({ account = null, onClose, onSuccess, onOpenCorrection }) {
+  const isEdit = Boolean(account && (account.id || account._id));
   const [formData, setFormData] = useState({
-    name: "",
-    bank_name: "HDFC",
-    account_number_last4: "",
-    account_type: "b2b_client",
-    opening_balance: 0,
-    opening_balance_date: new Date().toISOString().slice(0, 10),
+    name: account?.name || "",
+    bank_name: account?.bank_name || "HDFC",
+    account_number_last4: account?.account_number_last4 || "",
+    account_number: account?.account_number || "",
+    ifsc: account?.ifsc || "",
+    branch: account?.branch || "",
+    account_type: account?.account_type || "b2b_client",
+    opening_balance: account?.opening_balance ?? 0,
+    opening_balance_date: account?.opening_balance_date || new Date().toISOString().slice(0, 10),
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -2072,13 +2212,32 @@ function AddBankAccountModal({ onClose, onSuccess }) {
     setLoading(true);
     setError("");
     try {
-      await http.post("/banking/accounts", {
-        ...formData,
-        opening_balance: parseFloat(formData.opening_balance) || 0,
-      });
+      if (isEdit) {
+        const payload = {
+          name: formData.name.trim(),
+          bank_name: formData.bank_name.trim(),
+          account_number_last4: formData.account_number_last4.trim(),
+          account_number: formData.account_number.trim() || null,
+          ifsc: formData.ifsc.trim().toUpperCase() || null,
+          branch: formData.branch.trim() || null,
+          account_type: formData.account_type,
+        };
+        await http.patch(`/banking/accounts/${account.id || account._id}`, payload);
+      } else {
+        await http.post("/banking/accounts", {
+          ...formData,
+          name: formData.name.trim(),
+          bank_name: formData.bank_name.trim(),
+          account_number_last4: formData.account_number_last4.trim(),
+          account_number: formData.account_number.trim() || null,
+          ifsc: formData.ifsc.trim().toUpperCase() || null,
+          branch: formData.branch.trim() || null,
+          opening_balance: parseFloat(formData.opening_balance) || 0,
+        });
+      }
       onSuccess();
     } catch (err) {
-      setError(err.message || "Failed to create account");
+      setError(err.message || (isEdit ? "Failed to update account" : "Failed to create account"));
     } finally {
       setLoading(false);
     }
@@ -2089,12 +2248,15 @@ function AddBankAccountModal({ onClose, onSuccess }) {
       <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-slate-50">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Finance / Bank Setup</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">
+              {isEdit ? `Editing: ${account.name}` : "Finance / Bank Setup"}
+            </div>
             <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
-              <Landmark className="w-4 h-4 text-[#1E3A8A]" /> Add Bank Account
+              <Landmark className="w-4 h-4 text-[#1E3A8A]" />
+              {isEdit ? "Edit Bank Account" : "Add Bank Account"}
             </h3>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close modal">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -2114,6 +2276,7 @@ function AddBankAccountModal({ onClose, onSuccess }) {
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="account-name-input"
             />
           </div>
 
@@ -2126,6 +2289,7 @@ function AddBankAccountModal({ onClose, onSuccess }) {
                 value={formData.bank_name}
                 onChange={(e) => setFormData({ ...formData, bank_name: e.target.value })}
                 className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+                data-testid="account-bank-name-input"
               />
             </div>
             <div className="space-y-1">
@@ -2137,6 +2301,44 @@ function AddBankAccountModal({ onClose, onSuccess }) {
                 value={formData.account_number_last4}
                 onChange={(e) => setFormData({ ...formData, account_number_last4: e.target.value })}
                 className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+                data-testid="account-last4-input"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Full Account Number (Optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. 50200012345678"
+              value={formData.account_number}
+              onChange={(e) => setFormData({ ...formData, account_number: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+              data-testid="account-number-input"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">IFSC Code</div>
+              <input
+                type="text"
+                placeholder="e.g. HDFC0001234"
+                value={formData.ifsc}
+                onChange={(e) => setFormData({ ...formData, ifsc: e.target.value.toUpperCase() })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono uppercase focus:border-[#2563EB] focus:outline-none"
+                data-testid="account-ifsc-input"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Branch Name</div>
+              <input
+                type="text"
+                placeholder="e.g. Agra Main"
+                value={formData.branch}
+                onChange={(e) => setFormData({ ...formData, branch: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+                data-testid="account-branch-input"
               />
             </div>
           </div>
@@ -2147,6 +2349,7 @@ function AddBankAccountModal({ onClose, onSuccess }) {
               value={formData.account_type}
               onChange={(e) => setFormData({ ...formData, account_type: e.target.value })}
               className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="account-type-select"
             >
               <option value="online_channel">Online Channel Account (Myntra / Flipkart Settlements)</option>
               <option value="b2b_client">B2B Offline Account (Client Invoices & General Operations)</option>
@@ -2155,33 +2358,303 @@ function AddBankAccountModal({ onClose, onSuccess }) {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Opening Balance (₹)</div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 flex items-center justify-between">
+                <span>Opening Balance (₹)</span>
+                {isEdit && <span className="text-[9px] text-amber-700 font-semibold lowercase">read-only</span>}
+              </div>
               <input
                 type="number"
                 step="0.01"
+                disabled={isEdit}
                 value={formData.opening_balance}
                 onChange={(e) => setFormData({ ...formData, opening_balance: e.target.value })}
-                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+                className={`w-full border-2 px-3 py-2 text-sm font-mono focus:outline-none ${
+                  isEdit
+                    ? "border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed"
+                    : "border-slate-300 bg-white focus:border-[#2563EB]"
+                }`}
+                data-testid="account-opening-balance-input"
               />
+              {isEdit && (
+                <div className="flex items-center justify-between mt-1">
+                  <p className="text-[10px] text-slate-500 italic">
+                    Use 'Correct Opening Balance' to change this.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenCorrection?.(account);
+                    }}
+                    className="text-[10px] font-bold text-amber-800 hover:text-amber-950 underline"
+                    data-testid="modal-trigger-correct-balance"
+                  >
+                    Correct Opening Balance →
+                  </button>
+                </div>
+              )}
             </div>
             <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Opening Date</div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 flex items-center justify-between">
+                <span>Opening Date</span>
+                {isEdit && <span className="text-[9px] text-amber-700 font-semibold lowercase">read-only</span>}
+              </div>
               <input
                 type="date"
+                disabled={isEdit}
                 value={formData.opening_balance_date}
                 onChange={(e) => setFormData({ ...formData, opening_balance_date: e.target.value })}
-                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+                className={`w-full border-2 px-3 py-2 text-sm font-mono focus:outline-none ${
+                  isEdit
+                    ? "border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed"
+                    : "border-slate-300 bg-white focus:border-[#2563EB]"
+                }`}
+                data-testid="account-opening-date-input"
               />
             </div>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-2 border-t-2 border-slate-200">
             <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
-            <BtnPrimary type="submit" disabled={loading}>
-              {loading ? "Creating..." : "Save Account"}
+            <BtnPrimary type="submit" disabled={loading} testId="account-submit-btn">
+              {loading ? (isEdit ? "Saving..." : "Creating...") : (isEdit ? "Update Account" : "Save Account")}
             </BtnPrimary>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Correct Opening Balance Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function CorrectOpeningBalanceModal({ account, accounts, onClose, onSuccess }) {
+  const [selectedAccId, setSelectedAccId] = useState(account?.id || accounts[0]?.id || "");
+  const [newOpeningBalance, setNewOpeningBalance] = useState("");
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const targetAccount = accounts.find((a) => a.id === selectedAccId) || account;
+
+  useEffect(() => {
+    if (account?.id) {
+      setSelectedAccId(account.id);
+    }
+  }, [account]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedAccId) {
+      setError("Please select a bank account.");
+      return;
+    }
+    if (newOpeningBalance === "" || isNaN(Number(newOpeningBalance))) {
+      setError("Please enter a valid numeric opening balance.");
+      return;
+    }
+    if (!reason.trim()) {
+      setError("Correction reason is required and cannot be empty.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      await http.post(`/banking/accounts/${selectedAccId}/correct-opening-balance`, {
+        new_opening_balance: parseFloat(newOpeningBalance),
+        reason: reason.trim(),
+      });
+      onSuccess();
+    } catch (err) {
+      setError(err.message || "Failed to correct opening balance");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-amber-50">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-amber-800 font-bold">Finance / Audit Correction</div>
+            <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
+              <Scale className="w-4 h-4 text-amber-700" /> Correct Opening Balance
+            </h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close modal">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          {error && (
+            <div className="p-3 bg-red-50 border-2 border-red-300 text-red-800 text-xs font-medium" data-testid="correction-error-box">
+              {error}
+            </div>
+          )}
+
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 space-y-1">
+            <div className="font-bold text-slate-900 flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-600" /> Audit Policy Note
+            </div>
+            <p className="text-[11px] leading-relaxed text-slate-600">
+              Opening balance adjustments create a permanent audit entry. This change will be blocked if any locked reconciliation period predates or overlaps the balance date.
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Target Bank Account</div>
+            <select
+              value={selectedAccId}
+              onChange={(e) => setSelectedAccId(e.target.value)}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="correction-account-select"
+            >
+              {accounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>
+                  {acc.name} ({acc.bank_name} • Current: ₹{inr(acc.opening_balance || 0)})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {targetAccount && (
+            <div className="p-2.5 bg-blue-50/50 border border-blue-200 flex items-center justify-between text-xs">
+              <span className="text-slate-600">Current Starting Balance:</span>
+              <span className="font-mono font-bold text-slate-900">₹{inr(targetAccount.opening_balance || 0)}</span>
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+              New Opening Balance (₹) <span className="text-red-500">*</span>
+            </div>
+            <input
+              type="number"
+              step="0.01"
+              placeholder="e.g. 150000"
+              value={newOpeningBalance}
+              onChange={(e) => setNewOpeningBalance(e.target.value)}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+              data-testid="correction-balance-input"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+              Audit Reason / Justification <span className="text-red-500">*</span>
+            </div>
+            <textarea
+              rows={3}
+              placeholder="e.g. Data entry error during setup, verified against bank passbook / statement opening figure."
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full border-2 border-slate-300 bg-white p-2 text-xs focus:border-[#2563EB] focus:outline-none"
+              data-testid="correction-reason-input"
+            />
+            <p className="text-[10px] text-slate-500 italic">
+              Mandatory non-empty explanation for GST / Audit compliance.
+            </p>
+          </div>
+
+          <div className="pt-3 flex items-center justify-end gap-2 border-t-2 border-slate-200">
+            <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
+            <BtnPrimary
+              type="submit"
+              disabled={loading}
+              className="bg-amber-600 hover:bg-amber-700 border-amber-600"
+              testId="correction-submit-btn"
+            >
+              {loading ? "Recording..." : "Confirm & Record Correction"}
+            </BtnPrimary>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Balance Correction Audit History Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function BalanceCorrectionHistoryModal({ accountId, accounts, onClose }) {
+  const [corrections, setCorrections] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const acc = accounts.find((a) => a.id === accountId);
+
+  useEffect(() => {
+    if (!accountId) return;
+    setLoading(true);
+    http
+      .get(`/banking/accounts/${accountId}/balance-corrections`)
+      .then(({ data }) => setCorrections(data.corrections || []))
+      .catch((err) => console.error("Failed to load balance corrections", err))
+      .finally(() => setLoading(false));
+  }, [accountId]);
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-2xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[85vh]">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-slate-50">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">
+              Account: {acc?.name || "Bank Account"}
+            </div>
+            <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
+              <History className="w-4 h-4 text-[#1E3A8A]" /> Balance Correction Audit Trail
+            </h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close modal">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 overflow-y-auto space-y-4">
+          {loading ? (
+            <div className="py-8 text-center text-xs text-slate-500">Loading audit history...</div>
+          ) : corrections.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">No balance corrections recorded for this account.</div>
+          ) : (
+            <div className="border-2 border-slate-200 overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse font-mono">
+                <thead className="bg-slate-100 text-[10px] uppercase font-bold text-slate-600 border-b-2 border-slate-200">
+                  <tr>
+                    <th className="px-3 py-2">Date & Time</th>
+                    <th className="px-3 py-2 text-right">Old Balance</th>
+                    <th className="px-3 py-2 text-right">New Balance</th>
+                    <th className="px-3 py-2">Reason</th>
+                    <th className="px-3 py-2">Corrected By</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {corrections.map((c, idx) => (
+                    <tr key={c.id || idx} className="hover:bg-slate-50" data-testid={`correction-row-${idx}`}>
+                      <td className="px-3 py-2 text-slate-700 whitespace-nowrap">
+                        {c.corrected_at ? c.corrected_at.slice(0, 16).replace("T", " ") : "-"}
+                      </td>
+                      <td className="px-3 py-2 text-right text-slate-500 whitespace-nowrap">
+                        ₹{inr(c.old_value)}
+                      </td>
+                      <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">
+                        ₹{inr(c.new_value)}
+                      </td>
+                      <td className="px-3 py-2 font-sans text-slate-800 max-w-xs">{c.reason}</td>
+                      <td className="px-3 py-2 text-slate-600 text-[11px] whitespace-nowrap">{c.corrected_by}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 border-t-2 border-slate-200 bg-slate-50 flex justify-end">
+          <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        </div>
       </div>
     </div>
   );

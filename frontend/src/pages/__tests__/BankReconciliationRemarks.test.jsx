@@ -441,4 +441,134 @@ describe("BankReconciliation Remarks Editable Column", () => {
     fireEvent.click(ledgerTab);
     expect((await screen.findAllByText("Statement Ledger")).length).toBeGreaterThan(0);
   });
+
+  test("allows editing bank account details with prefilled fields and read-only opening balance via PATCH", async () => {
+    render(<BankReconciliation />);
+
+    // Wait for accounts to load and find edit button next to account tab
+    const editBtn = await screen.findByTestId("edit-account-btn-acc_1");
+    expect(editBtn).toBeInTheDocument();
+    fireEvent.click(editBtn);
+
+    // Modal opens in Edit mode
+    expect(await screen.findByText("Edit Bank Account")).toBeInTheDocument();
+    expect(screen.getByText("Editing: HDFC Primary Current A/C")).toBeInTheDocument();
+
+    const nameInput = screen.getByTestId("account-name-input");
+    expect(nameInput.value).toBe("HDFC Primary Current A/C");
+
+    const bankNameInput = screen.getByTestId("account-bank-name-input");
+    expect(bankNameInput.value).toBe("HDFC Bank");
+
+    const last4Input = screen.getByTestId("account-last4-input");
+    expect(last4Input.value).toBe("1234");
+
+    const openingBalInput = screen.getByTestId("account-opening-balance-input");
+    expect(openingBalInput).toBeDisabled();
+    expect(screen.getByText(/Use 'Correct Opening Balance' to change this/i)).toBeInTheDocument();
+
+    // Modify name and bank details
+    fireEvent.change(nameInput, { target: { value: "HDFC Primary Ops A/C" } });
+    fireEvent.change(bankNameInput, { target: { value: "HDFC Bank Ltd" } });
+
+    // Submit form
+    const submitBtn = screen.getByTestId("account-submit-btn");
+    expect(submitBtn).toHaveTextContent("Update Account");
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(http.patch).toHaveBeenCalledWith("/banking/accounts/acc_1", {
+        name: "HDFC Primary Ops A/C",
+        bank_name: "HDFC Bank Ltd",
+        account_number_last4: "1234",
+        account_number: null,
+        ifsc: null,
+        branch: null,
+        account_type: "b2b_client",
+      });
+    });
+  });
+
+  test("allows correcting opening balance with mandatory reason and displays correction banner & audit history", async () => {
+    http.post.mockResolvedValue({ data: { ok: true } });
+    http.get.mockImplementation((url) => {
+      if (url === "/banking/accounts") {
+        return Promise.resolve({
+          data: [
+            {
+              ...mockAccounts[0],
+              last_balance_correction: {
+                corrected_at: "2026-09-01T10:00:00Z",
+                corrected_by: "admin@sskfootcare.com",
+                reason: "Data entry error, verified against passbook",
+                old_value: 100000,
+                new_value: 150000,
+              },
+            },
+          ],
+        });
+      }
+      if (url === "/banking/reconciliation/summary") return Promise.resolve({ data: mockSummary });
+      if (url === "/banking/statement-lines") return Promise.resolve({ data: { items: [] } });
+      if (url === "/banking/transfers/suggested") return Promise.resolve({ data: { pairs: [] } });
+      if (url === "/banking/cash-withdrawals/suggested") return Promise.resolve({ data: { candidates: [] } });
+      if (url.includes("/balance-corrections")) {
+        return Promise.resolve({
+          data: {
+            ok: true,
+            corrections: [
+              {
+                id: "corr_1",
+                bank_account_id: "acc_1",
+                old_value: 100000,
+                new_value: 150000,
+                reason: "Data entry error, verified against passbook",
+                corrected_by: "admin@sskfootcare.com",
+                corrected_at: "2026-09-01T10:00:00Z",
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(<BankReconciliation />);
+
+    // Check correction banner is rendered
+    expect(await screen.findByTestId("balance-corrected-banner")).toBeInTheDocument();
+    expect(screen.getByText(/Opening Balance Audit Correction Notice/i)).toBeInTheDocument();
+
+    // Click "View Correction History" button
+    const viewHistoryBtn = screen.getByTestId("view-correction-history-btn");
+    fireEvent.click(viewHistoryBtn);
+
+    // Modal opens showing audit trail table
+    expect(await screen.findByText("Balance Correction Audit Trail")).toBeInTheDocument();
+    expect(await screen.findByTestId("correction-row-0")).toBeInTheDocument();
+    expect(screen.getAllByText("Data entry error, verified against passbook").length).toBeGreaterThanOrEqual(1);
+    const closeBtn = screen.getByText("Close");
+    fireEvent.click(closeBtn);
+
+    // Click "Correct Opening Balance" action button in header
+    const correctBtn = screen.getByTestId("correct-opening-balance-btn");
+    fireEvent.click(correctBtn);
+
+    expect((await screen.findAllByText("Correct Opening Balance")).length).toBeGreaterThanOrEqual(1);
+    const balanceInput = screen.getByTestId("correction-balance-input");
+    const reasonInput = screen.getByTestId("correction-reason-input");
+
+    fireEvent.change(balanceInput, { target: { value: "175000" } });
+    fireEvent.change(reasonInput, { target: { value: "Second audit adjustment" } });
+
+    const submitBtn = screen.getByTestId("correction-submit-btn");
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith("/banking/accounts/acc_1/correct-opening-balance", {
+        new_opening_balance: 175000,
+        reason: "Second audit adjustment",
+      });
+    });
+  });
 });

@@ -60,7 +60,7 @@ from models.online_reconciliation import (
 )
 from models.notifications import NotificationIn
 from models.banking import (
-    BankAccountIn, BankAccountUpdate, MatchedTo,
+    BankAccountIn, BankAccountUpdate, BalanceCorrectionIn, MatchedTo,
     BankStatementLineIn, BankStatementLineUpdate,
     StatementImportConfigIn, StatementImportConfigUpdate, STATEMENT_CANONICAL_FIELDS,
     TransferConfirmIn, CashWithdrawalConfirmIn,

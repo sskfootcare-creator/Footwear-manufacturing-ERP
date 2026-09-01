@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, 
 from models.banking import (
     BankAccountIn,
     BankAccountUpdate,
+    BalanceCorrectionIn,
     BankStatementLineIn,
     BankStatementLineUpdate,
     CashLedgerCreateIn,
@@ -178,7 +179,112 @@ async def delete_bank_account(id: str, request: Request):
     res = await db.bank_accounts.delete_one({"_id": _oid(id)})
     if res.deleted_count == 0:
         raise HTTPException(404, "Bank account not found")
-    return {"ok": True, "message": "Bank account deleted."}
+    return {"ok": True, "message": "Bank account deleted"}
+
+
+@banking_router.post("/banking/accounts/{id}/correct-opening-balance")
+@banking_router.post("/bank-accounts/{id}/correct-opening-balance")
+async def correct_account_opening_balance(id: str, payload: BalanceCorrectionIn, request: Request):
+    """
+    Correct a bank account's opening balance with mandatory audit reason and period-lock safety check.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Correction reason is required and cannot be empty.")
+
+    account = await db.bank_accounts.find_one({"_id": _oid(id)})
+    if not account:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+
+    old_value = float(account.get("opening_balance") or 0.0)
+    new_value = float(payload.new_opening_balance)
+    opening_balance_date = account.get("opening_balance_date")
+
+    # Safety check: does this account have any locked period starting on or after opening_balance_date?
+    acc_id_str = str(account.get("_id", id))
+    lock_query = {
+        "status": "locked",
+        "bank_account_id": {"$in": [acc_id_str, "all", None, ""]},
+    }
+    if opening_balance_date:
+        lock_query["period_from"] = {"$gte": opening_balance_date}
+
+    locked_period = await db.reconciliation_locks.find_one(lock_query, sort=[("period_from", 1)])
+    if not locked_period and not opening_balance_date:
+        locked_period = await db.reconciliation_locks.find_one({
+            "status": "locked",
+            "bank_account_id": {"$in": [acc_id_str, "all", None, ""]},
+        }, sort=[("period_from", 1)])
+
+    if locked_period:
+        p_start = locked_period.get("period_from", "unknown")
+        raise HTTPException(
+            status_code=400,
+            detail=f"This account has a locked period starting {p_start} — unlock it first if you need to correct a balance that predates it, since the locked period's figures were computed against the current balance and would become inconsistent"
+        )
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "admin")
+
+    correction_doc = {
+        "bank_account_id": acc_id_str,
+        "old_value": old_value,
+        "new_value": new_value,
+        "reason": reason,
+        "corrected_by": user_email,
+        "corrected_at": now,
+    }
+
+    await db.balance_corrections.insert_one(dict(correction_doc))
+
+    await db.bank_accounts.update_one(
+        {"_id": account["_id"]},
+        {
+            "$set": {
+                "opening_balance": new_value,
+                "updated_at": now,
+                "updated_by": user_email,
+                "last_balance_correction": {
+                    "corrected_at": now,
+                    "corrected_by": user_email,
+                    "reason": reason,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                },
+            },
+            "$push": {
+                "balance_corrections": correction_doc
+            }
+        }
+    )
+
+    log.info(f"Opening balance for account {acc_id_str} corrected from {old_value} to {new_value} by {user_email}. Reason: {reason}")
+
+    return {
+        "ok": True,
+        "message": "Opening balance successfully corrected.",
+        "correction": stringify(correction_doc),
+        "account": stringify(await db.bank_accounts.find_one({"_id": account["_id"]})),
+    }
+
+
+@banking_router.get("/banking/accounts/{id}/balance-corrections")
+@banking_router.get("/bank-accounts/{id}/balance-corrections")
+async def list_account_balance_corrections(id: str, request: Request):
+    """List all balance correction audit records for a bank account."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    docs = await db.balance_corrections.find({"bank_account_id": str(id)}).sort("corrected_at", -1).to_list(200)
+    return {
+        "ok": True,
+        "corrections": [stringify(d) for d in docs],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2193,6 +2299,9 @@ async def get_reconciliation_summary(
             "bank_name": acc_doc.get("bank_name"),
             "account_type": acc_doc.get("account_type"),
             "opening_balance": acc_doc.get("opening_balance", 0.0),
+            "opening_balance_date": acc_doc.get("opening_balance_date"),
+            "last_balance_correction": acc_doc.get("last_balance_correction"),
+            "balance_corrections_count": len(acc_doc.get("balance_corrections") or []),
             "income": 0.0,
             "matched_income": 0.0,
             "unmatched_income": 0.0,

@@ -71,6 +71,11 @@ class BankAccountUpdate(BaseModel):
     active: Optional[bool] = None
 
 
+class BalanceCorrectionIn(BaseModel):
+    new_opening_balance: float = Field(..., description="New corrected opening balance in INR")
+    reason: str = Field(..., min_length=1, description="Audit reason for balance correction")
+
+
 class MatchedTo(BaseModel):
     type: Literal["payment", "settlement", "expense", "vendor_payment", "transfer", "cash_withdrawal"]
     ref_id: str
