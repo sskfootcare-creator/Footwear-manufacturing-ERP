@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
 from bson import ObjectId
@@ -168,11 +169,14 @@ async def list_po_ean_format_configs(request: Request, active: Optional[bool] = 
 @po_ean_router.post("/po-ean-formats")
 async def create_po_ean_format_config(payload: PoEanImportFormatConfigIn, request: Request):
     u = await _get_user(request)
-    require_roles("admin", "manager")(u)
+    require_roles("admin", "manager", "production")(u)
     db = _get_db(request)
     existing = await db.po_ean_format_configs.find_one({"name": payload.name})
     if existing:
-        raise HTTPException(400, f"Format config with name '{payload.name}' already exists")
+        upd = payload.model_dump()
+        upd["updated_at"] = now_iso()
+        await db.po_ean_format_configs.update_one({"_id": existing["_id"]}, {"$set": upd})
+        return {"ok": True, "id": str(existing["_id"]), "updated": True}
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
@@ -183,7 +187,7 @@ async def create_po_ean_format_config(payload: PoEanImportFormatConfigIn, reques
 @po_ean_router.put("/po-ean-formats/{fmt_id}")
 async def update_po_ean_format_config(fmt_id: str, payload: PoEanImportFormatConfigUpdate, request: Request):
     u = await _get_user(request)
-    require_roles("admin", "manager")(u)
+    require_roles("admin", "manager", "production")(u)
     db = _get_db(request)
     existing = await db.po_ean_format_configs.find_one({"_id": oid(fmt_id)})
     if not existing:
@@ -207,6 +211,129 @@ async def delete_po_ean_format_config(fmt_id: str, request: Request):
     return {"ok": True}
 
 
+def _suggest_ean_column_map(headers: List[str]) -> Dict[str, Optional[str]]:
+    """Heuristically suggest column mappings for style_code, color, size, ean_code, po_number."""
+    suggestions: Dict[str, Optional[str]] = {
+        "style_code": None,
+        "color": None,
+        "size": None,
+        "ean_code": None,
+        "po_number": None,
+    }
+    patterns = {
+        "style_code": ["style code", "style_code", "style no", "style_no", "styleno", "style", "article no", "article_no", "article", "sku", "item code", "item_code", "model"],
+        "color": ["color", "colour", "shade", "clr", "color name", "colour name", "color/shade"],
+        "size": ["size", "sz", "size no", "size_no", "sizes", "shoe size"],
+        "ean_code": ["ean code", "ean_code", "ean", "barcode", "bar code", "bar_code", "eancode", "gtin", "upc", "ean-13", "ean13"],
+        "po_number": ["po number", "po_number", "po no", "po_no", "pono", "po #", "purchase order", "order no", "po"],
+    }
+    # 1. Exact / normalized match
+    for field, field_patterns in patterns.items():
+        for pat in field_patterns:
+            pat_norm = re.sub(r"[^a-z0-9]", "", pat.lower())
+            for h in headers:
+                h_norm = re.sub(r"[^a-z0-9]", "", str(h or "").lower())
+                if h_norm == pat_norm:
+                    suggestions[field] = h
+                    break
+            if suggestions[field]:
+                break
+
+    # 2. Substring match fallback
+    for field, field_patterns in patterns.items():
+        if suggestions[field]:
+            continue
+        for pat in field_patterns:
+            pat_lower = pat.lower()
+            for h in headers:
+                h_lower = str(h or "").strip().lower()
+                if pat_lower in h_lower:
+                    suggestions[field] = h
+                    break
+            if suggestions[field]:
+                break
+
+    return suggestions
+
+
+@po_ean_router.post("/po-ean/preview-headers", dependencies=[Depends(upload_rate_limiter)])
+@po_ean_router.post("/pos/{po_id}/ean-codes/preview-headers", dependencies=[Depends(upload_rate_limiter)])
+async def preview_po_ean_headers(
+    request: Request,
+    po_id: Optional[str] = None,
+    file: UploadFile = File(...),
+    sheet_locator_json: Optional[str] = Form(None),
+    header_locator_json: Optional[str] = Form(None),
+    skip_rows_after_header: Optional[int] = Form(0),
+):
+    """
+    Lightweight endpoint: inspect headers and sample rows of an uploaded file without full import.
+    Returns detected column names, sample rows, and heuristic suggested column map.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = _get_db(request)
+
+    po = None
+    if po_id:
+        try:
+            po = await db.pos.find_one({"_id": oid(po_id)})
+        except Exception:
+            pass
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    sheet_loc_data = {"type": "first_sheet"}
+    if sheet_locator_json:
+        try:
+            sheet_loc_data = json.loads(sheet_locator_json)
+        except Exception:
+            pass
+
+    header_loc_data = {"type": "fixed_row", "row": 0}
+    if header_locator_json:
+        try:
+            header_loc_data = json.loads(header_locator_json)
+        except Exception:
+            pass
+
+    skip_rows = int(skip_rows_after_header or 0)
+
+    sheet_loc = SheetLocator(**sheet_loc_data)
+    header_loc = HeaderLocator(**header_loc_data)
+
+    from routes.online_orders import _parse_tabular_bytes
+    try:
+        headers, parsed_rows = _parse_tabular_bytes(
+            content=content,
+            filename=file.filename,
+            sheet_locator=sheet_loc,
+            header_locator=header_loc,
+            skip_rows_after_header=skip_rows,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Error parsing tabular file: {str(e)}")
+
+    suggested_map = _suggest_ean_column_map(headers)
+
+    return {
+        "ok": True,
+        "filename": file.filename,
+        "headers": headers,
+        "sample_rows": parsed_rows[:5],
+        "total_rows": len(parsed_rows),
+        "suggested_column_map": suggested_map,
+        "sheet_locator": sheet_loc_data,
+        "header_locator": header_loc_data,
+        "po_number": po.get("po_number") if po else None,
+        "client_name": (po.get("client_name") or po.get("client") or "") if po else "",
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: Parse File and Resolve Style / Color / Size / EAN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,14 +341,20 @@ def _resolve_mapped_field_value(row: dict, col_name: Optional[str]) -> str:
     if not col_name:
         return ""
     col_str = str(col_name).strip()
+    val = ""
     if col_str in row:
-        return str(row[col_str] or "").strip()
-    # Case-insensitive fallback
-    col_lower = col_str.lower()
-    for k, v in row.items():
-        if k and str(k).strip().lower() == col_lower:
-            return str(v or "").strip()
-    return ""
+        val = str(row[col_str] if row[col_str] is not None else "").strip()
+    else:
+        # Case-insensitive fallback
+        col_lower = col_str.lower()
+        for k, v in row.items():
+            if k and str(k).strip().lower() == col_lower:
+                val = str(v if v is not None else "").strip()
+                break
+    # Normalize integer float representations from formula cells (e.g., "8901000000001.0" -> "8901000000001", "7.0" -> "7")
+    if val.endswith(".0") and val[:-2].replace("-", "").isdigit():
+        val = val[:-2]
+    return val
 
 
 async def _resolve_style_for_row(
@@ -338,6 +471,26 @@ async def preview_po_ean_upload(
             cfg_dict = json.loads(config_json)
         except Exception:
             raise HTTPException(400, "Invalid config_json format")
+    elif po.get("barcode_format_id"):
+        cfg_doc = await db.po_ean_format_configs.find_one({"_id": oid(po["barcode_format_id"])})
+        if cfg_doc:
+            cfg_dict = cfg_doc
+    elif po.get("client_name") or po.get("client"):
+        c_name = po.get("client_name") or po.get("client") or ""
+        cfg_doc = await db.po_ean_format_configs.find_one({
+            "client_name": {"$regex": f"^{re.escape(c_name)}$", "$options": "i"},
+            "active": True,
+        })
+        if not cfg_doc and c_name:
+            all_cfgs = await db.po_ean_format_configs.find({"active": True}).to_list(100)
+            c_clean = c_name.strip().lower()
+            for cfg in all_cfgs:
+                cf_client = (cfg.get("client_name") or "").strip().lower()
+                if cf_client and (cf_client in c_clean or c_clean in cf_client):
+                    cfg_doc = cfg
+                    break
+        if cfg_doc:
+            cfg_dict = cfg_doc
 
     sheet_loc_data = cfg_dict.get("sheet_locator") or {"type": "first_sheet"}
     header_loc_data = cfg_dict.get("header_locator") or {"type": "fixed_row", "row": 0}
@@ -546,9 +699,17 @@ async def import_po_ean_codes(
         elif po.get("client_name") or po.get("client"):
             c_name = po.get("client_name") or po.get("client") or ""
             cfg_doc = await db.po_ean_format_configs.find_one({
-                "client_name": {"$regex": f"^{c_name}$", "$options": "i"},
+                "client_name": {"$regex": f"^{re.escape(c_name)}$", "$options": "i"},
                 "active": True
             })
+            if not cfg_doc and c_name:
+                all_cfgs = await db.po_ean_format_configs.find({"active": True}).to_list(100)
+                c_clean = c_name.strip().lower()
+                for cfg in all_cfgs:
+                    cf_client = (cfg.get("client_name") or "").strip().lower()
+                    if cf_client and (cf_client in c_clean or c_clean in cf_client):
+                        cfg_doc = cfg
+                        break
             if cfg_doc:
                 cfg_dict = cfg_doc
 
@@ -556,6 +717,12 @@ async def import_po_ean_codes(
         header_loc_data = cfg_dict.get("header_locator") or {"type": "fixed_row", "row": 0}
         skip_rows = int(cfg_dict.get("skip_rows_after_header") or 0)
         column_map = cfg_dict.get("column_map") or {}
+
+        if not column_map:
+            raise HTTPException(
+                400,
+                "No column mapping found for this file/client. Please map the columns before importing.",
+            )
 
         sheet_loc = SheetLocator(**sheet_loc_data)
         header_loc = HeaderLocator(**header_loc_data)

@@ -304,4 +304,118 @@ describe("PoEanCodesModal Component", () => {
       expect(onUpdated).toHaveBeenCalled();
     });
   });
+
+  test("allows user to inspect detected headers, map columns to standard fields, and save reusable format", async () => {
+    const mockHeadersResponse = {
+      ok: true,
+      filename: "zecode_export.xlsx",
+      headers: ["Style", "Colour", "Size", "Barcode", "MiscInfo"],
+      sample_rows: [
+        { Style: "SSK-101", Colour: "Black", Size: "7", Barcode: "8901234500001", MiscInfo: "XYZ" },
+      ],
+      suggested_column_map: {
+        style_code: "Style",
+        color: "Colour",
+        size: "Size",
+        ean_code: "Barcode",
+      },
+    };
+
+    const mockSavedFormat = {
+      id: "fmt_zecode_standard",
+      name: "Zecode Standard",
+      client_name: "Bata India",
+      active: true,
+      column_map: {
+        style_code: "Style",
+        color: "Colour",
+        size: "Size",
+        ean_code: "Barcode",
+      },
+    };
+
+    const mockPreviewAfterSave = {
+      ok: true,
+      filename: "zecode_export.xlsx",
+      total_rows: 1,
+      po_matched_count: 1,
+      duplicate_keys: [],
+      extracted_items: [
+        {
+          row_number: 1,
+          style_code: "SSK-101",
+          color: "Black",
+          size: "7",
+          ean_code: "8901234500001",
+          is_po_match: true,
+          exists_in_db: false,
+        },
+      ],
+    };
+
+    http.post.mockImplementation((url, data) => {
+      if (url.includes("preview-headers")) {
+        return Promise.resolve({ data: mockHeadersResponse });
+      }
+      if (url === "/po-ean-formats") {
+        return Promise.resolve({ data: { ok: true, id: "fmt_zecode_standard" } });
+      }
+      if (url.includes("preview-upload")) {
+        return Promise.resolve({ data: mockPreviewAfterSave });
+      }
+      if (url.includes("/import")) {
+        return Promise.resolve({ data: { ok: true, imported: 1 } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(
+      <PoEanCodesModal
+        po={mockPo}
+        isOpen={true}
+        onClose={jest.fn()}
+        onUpdated={jest.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByTestId("tab-upload-eans"));
+
+    // Select '+ Create New Mapping' from dropdown
+    const formatSelect = screen.getByTestId("select-po-ean-format");
+    fireEvent.change(formatSelect, { target: { value: "__new__" } });
+
+    // Upload file
+    const file = new File(["dummy"], "zecode_export.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    fireEvent.change(screen.getByTestId("po-ean-file-input"), {
+      target: { files: [file] },
+    });
+
+    // Column mapping panel appears
+    expect(await screen.findByTestId("column-mapping-panel")).toBeInTheDocument();
+    expect(screen.getByText("Map File Columns & Create Template")).toBeInTheDocument();
+
+    // Verify template name input is prefilled or editable
+    const templateNameInput = screen.getByTestId("input-template-name");
+    fireEvent.change(templateNameInput, { target: { value: "Zecode Standard" } });
+
+    // Verify headers are listed
+    expect(screen.getAllByText("Style").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Colour").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Barcode").length).toBeGreaterThan(0);
+
+    // Verify dropdown values
+    const styleSelect = screen.getByTestId("select-map-style");
+    expect(styleSelect.value).toBe("style_code");
+
+    // Click Save Template & Preview Import
+    const saveBtn = screen.getByTestId("save-mapping-btn");
+    fireEvent.click(saveBtn);
+
+    // Verify preview container renders extracted items
+    expect(await screen.findByTestId("po-ean-preview-container")).toBeInTheDocument();
+    expect(screen.getByTestId("metric-total-rows")).toHaveTextContent("1");
+    expect(screen.getByTestId("metric-matched-rows")).toHaveTextContent("1");
+  });
 });

@@ -44,8 +44,8 @@ class PoEanImportFormatConfigIn(BaseModel):
     def _validate_column_map(cls, v):
         if not isinstance(v, dict):
             raise PydanticCustomError("column_map_type", "column_map must be an object")
-        # Ensure at least style_code (or external_style), color, size, and ean_code are defined
-        required_fields = ["style_code", "color", "size", "ean_code"]
+        # Ensure at least style_code (or external_style), size, and ean_code are defined
+        required_fields = ["style_code", "size", "ean_code"]
         for f in required_fields:
             if not v.get(f):
                 # allow style_code fallback to external_sku or style_ref
