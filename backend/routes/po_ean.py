@@ -368,9 +368,10 @@ async def _resolve_style_for_row(
     """
     Resolve raw style / SKU reference to internal style_code, color, size.
     Checks:
-    1. Direct match with a style in PO line items
-    2. Direct match with any style in db.styles (by code)
-    3. Resolver via sku_map (resolve_style)
+    1. Direct match with style_code / external_sku / description in PO line items
+    2. Color & size guided line item match (matching model number/digits or normalized code)
+    3. Direct match with any style in db.styles (by code or name)
+    4. Resolver via sku_map (resolve_style or direct external_sku / model lookup)
     """
     style_code = raw_style
     color = raw_color
@@ -378,33 +379,109 @@ async def _resolve_style_for_row(
     matched = False
     style_id = None
 
-    # Check direct in PO line items
-    for line in po_lines:
-        po_code = line.get("style_code") or line.get("code") or ""
-        if po_code.lower() == raw_style.lower():
-            style_code = po_code
-            matched = True
-            style_id = str(line.get("style_id") or "")
-            break
+    clean_raw_style = str(raw_style or "").strip()
+    clean_raw_color = str(raw_color or "").strip()
+    clean_raw_size = str(raw_size or "").strip()
+    digits_raw = [d for d in re.findall(r"\d{3,}", clean_raw_style) if len(d) >= 3]
 
-    # Check direct in db.styles
+    def _norm(s: str) -> str:
+        if not s:
+            return ""
+        st = re.sub(r"[^a-zA-Z0-9]", "", str(s)).upper()
+        if st.startswith("5ZE") and len(st) > 5:
+            st = st[3:]
+        return st
+
+    norm_raw = _norm(clean_raw_style)
+
+    # Stage 1: Exact matching in PO line items (prioritize lines where color and size match)
+    candidate_line = None
+    for line in po_lines:
+        po_sc = str(line.get("style_code") or line.get("code") or "").strip()
+        po_ext = str(line.get("external_sku") or line.get("external_code") or "").strip()
+        po_desc = str(line.get("description") or "").strip()
+        po_col = str(line.get("color") or "").strip()
+        po_sz = str(line.get("size") or "").strip()
+
+        col_matches = (not clean_raw_color) or (not po_col) or (clean_raw_color.lower() == po_col.lower())
+        sz_matches = (not clean_raw_size) or (not po_sz) or (clean_raw_size.lower() == po_sz.lower())
+
+        is_exact_style = (
+            clean_raw_style.lower() in (po_sc.lower(), po_ext.lower()) or
+            (norm_raw and norm_raw in (_norm(po_sc), _norm(po_ext))) or
+            (norm_raw and norm_raw in _norm(po_desc))
+        )
+
+        if is_exact_style:
+            if col_matches and sz_matches:
+                candidate_line = line
+                break
+            elif not candidate_line:
+                candidate_line = line
+
+    # Stage 2: Digits / model-token matching in PO lines guided by color and size
+    if not candidate_line and digits_raw:
+        for line in po_lines:
+            po_sc = str(line.get("style_code") or line.get("code") or "").strip()
+            po_ext = str(line.get("external_sku") or line.get("external_code") or "").strip()
+            po_desc = str(line.get("description") or "").strip()
+            po_col = str(line.get("color") or "").strip()
+            po_sz = str(line.get("size") or "").strip()
+
+            col_matches = (not clean_raw_color) or (not po_col) or (clean_raw_color.lower() == po_col.lower())
+            sz_matches = (not clean_raw_size) or (not po_sz) or (clean_raw_size.lower() == po_sz.lower())
+
+            if not (col_matches and sz_matches):
+                continue
+
+            # Check if any digits match in ext_sku or desc or style_code
+            if any(d in po_ext or d in po_desc or d in po_sc for d in digits_raw):
+                candidate_line = line
+                break
+
+    if candidate_line:
+        style_code = candidate_line.get("style_code") or candidate_line.get("code") or style_code
+        color = candidate_line.get("color") or color
+        size = str(candidate_line.get("size") or size)
+        style_id = str(candidate_line.get("style_id") or "")
+        matched = True
+
+    # Stage 3: Check direct in db.styles
     if not matched and db is not None:
-        st_doc = await db.styles.find_one({"code": {"$regex": f"^{raw_style}$", "$options": "i"}})
+        st_doc = await db.styles.find_one({"code": {"$regex": f"^{re.escape(clean_raw_style)}$", "$options": "i"}})
+        if not st_doc and norm_raw:
+            st_doc = await db.styles.find_one({"code": {"$regex": f"^{re.escape(norm_raw)}$", "$options": "i"}})
         if st_doc:
-            style_code = st_doc.get("code", raw_style)
+            style_code = st_doc.get("code", style_code)
             style_id = str(st_doc["_id"])
             matched = True
 
-    # Resolver via resolve_style if available
+    # Stage 4: Resolver via db.sku_map or resolve_style
+    if not matched and db is not None:
+        try:
+            # Check direct sku_map
+            sm_doc = await db.sku_map.find_one({
+                "$or": [
+                    {"client_sku": {"$regex": f"^{re.escape(clean_raw_style)}", "$options": "i"}},
+                    {"external_sku": {"$regex": f"^{re.escape(clean_raw_style)}", "$options": "i"}},
+                    {"client_sku": {"$regex": f"^{re.escape(norm_raw)}", "$options": "i"}},
+                ]
+            })
+            if sm_doc and (sm_doc.get("internal_style") or sm_doc.get("style_code")):
+                style_code = sm_doc.get("internal_style") or sm_doc.get("style_code")
+                matched = True
+        except Exception as e:
+            log.debug(f"sku_map find error: {e}")
+
     if not matched and db is not None:
         try:
             from routes.sku_map import resolve_style
             res = await resolve_style(
                 source_type="client_barcode",
                 source_name=client_name or "Client",
-                external_sku=raw_style,
-                external_color=raw_color,
-                external_size=raw_size,
+                external_sku=clean_raw_style,
+                external_color=clean_raw_color,
+                external_size=clean_raw_size,
                 db=db,
             )
             if res.get("matched") and res.get("style_code"):
@@ -526,15 +603,22 @@ async def preview_po_ean_upload(
             "errors": ["No data rows found after applying sheet and header locators"],
         }
 
-    po_lines = po.get("items") or []
-    # Build a lookup set of (style_code.lower(), color.lower(), size.lower()) from PO line items
+    po_lines = po.get("line_items") or po.get("items") or []
+    # Build lookup sets from PO line items
     po_item_set = set()
+    po_style_size_set = set()
+    po_ext_set = set()
     for item in po_lines:
-        sc = str(item.get("style_code") or "").strip().lower()
+        sc = str(item.get("style_code") or item.get("code") or "").strip().lower()
         col = str(item.get("color") or "").strip().lower()
         sz = str(item.get("size") or "").strip().lower()
+        ext = str(item.get("external_sku") or item.get("external_code") or "").strip().lower()
         if sc and sz:
             po_item_set.add((sc, col, sz))
+            po_style_size_set.add((sc, sz))
+        if ext and sz:
+            po_ext_set.add((ext, col, sz))
+            po_ext_set.add((ext, sz))
 
     extracted_items = []
     seen_in_batch = {}
@@ -561,13 +645,21 @@ async def preview_po_ean_upload(
             raw_style=raw_style,
             raw_color=raw_color,
             raw_size=raw_size,
-            client_name=po.get("client", ""),
+            client_name=po.get("client_name") or po.get("client", ""),
             po_lines=po_lines,
             db=db,
         )
 
         key = (resolved_style.strip().lower(), (resolved_color or "").strip().lower(), str(resolved_size or "").strip().lower())
-        is_po_match = key in po_item_set or (key[0], "", key[2]) in po_item_set
+        key_raw = (raw_style.strip().lower(), (raw_color or "").strip().lower(), str(raw_size or "").strip().lower())
+        is_po_match = (
+            style_matched or
+            key in po_item_set or
+            (key[0], "", key[2]) in po_item_set or
+            (key[0], key[2]) in po_style_size_set or
+            key_raw in po_ext_set or
+            (key_raw[0], key_raw[2]) in po_ext_set
+        )
         if is_po_match:
             po_matched_count += 1
 
@@ -773,6 +865,7 @@ async def import_po_ean_codes(
             key_ext_sz = (raw_style.strip().lower(), str(raw_size or "").strip().lower())
 
             is_valid_po_item = (
+                style_matched or
                 key_exact in po_exact_set or
                 key_style_sz in po_style_size_set or
                 key_ext_exact in po_ext_set or
