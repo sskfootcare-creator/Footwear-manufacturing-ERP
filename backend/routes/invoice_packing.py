@@ -753,15 +753,137 @@ async def list_po_invoices(pid: str, request: Request):
     if not doc:
         raise HTTPException(404, "PO not found")
     po_number = doc.get("po_number")
-    query_or = [{"po_id": pid}]
+    query_or = [{"po_id": pid}, {"po_id": oid(pid)}]
     if po_number:
         query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
+    
+    # Also find jobs belonging to this PO so invoices generated from these jobs are linked
+    jobs = await db.production_jobs.find(
+        {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
+        {"_id": 1}
+    ).to_list(5000)
+    job_ids = [str(j["_id"]) for j in jobs]
+    if job_ids:
+        query_or.append({"job_ids": {"$in": job_ids}})
     
     docs = await db.invoices.find({"$or": query_or}, {"file_b64": 0}).sort("created_at", -1).to_list(100)
     inv_ids = [str(d["_id"]) for d in docs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
     grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
-    return [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    # Attach dispatch records if present
+    dr_map = {}
+    if inv_ids:
+        drs = await db.dispatch_records.find(
+            {"invoice_id": {"$in": inv_ids}},
+            {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0}
+        ).to_list(100)
+        for dr in drs:
+            dr_map[str(dr.get("invoice_id"))] = stringify(dr)
+
+    decorated = []
+    for d in docs:
+        dec = _decorate_invoice(d, pay_map, grn_map)
+        inv_id_str = str(d["_id"])
+        if inv_id_str in dr_map:
+            dec["dispatch_record"] = dr_map[inv_id_str]
+            dec["dispatch_record_id"] = dr_map[inv_id_str].get("id") or dr_map[inv_id_str].get("_id")
+        
+        pairs_in_inv = 0
+        for li in d.get("line_items_snapshot", []):
+            pairs_in_inv += int(li.get("quantity") or 0)
+        dec["pairs_count"] = pairs_in_inv
+        decorated.append(dec)
+
+    return decorated
+
+
+@invoice_packing_router.get("/pos/{pid}/documents")
+async def get_po_production_documents(pid: str, request: Request):
+    """Retrieve all production documents (invoices, dispatch records, packing lists) linked to a PO."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    doc = await db.pos.find_one({"_id": oid(pid)})
+    if not doc:
+        raise HTTPException(404, "PO not found")
+    po_number = doc.get("po_number")
+    query_or = [{"po_id": pid}, {"po_id": oid(pid)}]
+    if po_number:
+        query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
+    
+    jobs = await db.production_jobs.find(
+        {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
+        {"_id": 1, "job_number": 1, "stage": 1, "status": 1, "quantity": 1, "completed_qty": 1, "style_code": 1, "color": 1, "size": 1}
+    ).to_list(5000)
+    job_ids = [str(j["_id"]) for j in jobs]
+    if job_ids:
+        query_or.append({"job_ids": {"$in": job_ids}})
+
+    # Fetch Invoices
+    docs = await db.invoices.find({"$or": query_or}, {"file_b64": 0}).sort("created_at", -1).to_list(100)
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+
+    # Fetch Dispatch Records
+    dr_query = [{"po_ids": pid}, {"po_ids": oid(pid)}]
+    if po_number:
+        dr_query.extend([{"po_numbers": po_number}, {"po_numbers": {"$in": [po_number]}}])
+    if job_ids:
+        dr_query.append({"job_ids": {"$in": job_ids}})
+    if inv_ids:
+        dr_query.append({"invoice_id": {"$in": inv_ids}})
+
+    dr_docs = await db.dispatch_records.find(
+        {"$or": dr_query},
+        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0}
+    ).sort("dispatched_at", -1).to_list(100)
+
+    dr_by_inv = {str(dr.get("invoice_id")): stringify(dr) for dr in dr_docs if dr.get("invoice_id")}
+
+    decorated_invoices = []
+    total_dispatched_pairs = 0
+    for d in docs:
+        dec = _decorate_invoice(d, pay_map, grn_map)
+        inv_id_str = str(d["_id"])
+        if inv_id_str in dr_by_inv:
+            dec["dispatch_record"] = dr_by_inv[inv_id_str]
+            dec["dispatch_record_id"] = dr_by_inv[inv_id_str].get("id") or dr_by_inv[inv_id_str].get("_id")
+        
+        pairs_in_inv = 0
+        for li in d.get("line_items_snapshot", []):
+            pairs_in_inv += int(li.get("quantity") or 0)
+        dec["pairs_count"] = pairs_in_inv
+        total_dispatched_pairs += pairs_in_inv
+        decorated_invoices.append(dec)
+
+    # Jobs summary
+    stage_counts = {}
+    total_job_pairs = 0
+    completed_job_pairs = 0
+    for j in jobs:
+        st = j.get("stage", "cutting")
+        stage_counts[st] = stage_counts.get(st, 0) + 1
+        q = int(j.get("quantity") or 0)
+        total_job_pairs += q
+        if j.get("status") in ("completed", "dispatched"):
+            completed_job_pairs += q
+
+    return {
+        "po_id": pid,
+        "po_number": po_number,
+        "client_name": doc.get("client_name"),
+        "total_po_quantity": doc.get("total_quantity", total_job_pairs),
+        "total_dispatched_pairs": total_dispatched_pairs,
+        "jobs_summary": {
+            "total_jobs": len(jobs),
+            "stage_counts": stage_counts,
+            "total_job_pairs": total_job_pairs,
+            "completed_job_pairs": completed_job_pairs,
+        },
+        "invoices": decorated_invoices,
+        "dispatch_records": [stringify(dr) for dr in dr_docs],
+    }
 
 
 @invoice_packing_router.get("/pos/{pid}/invoice.pdf", dependencies=[Depends(pdf_rate_limiter)])

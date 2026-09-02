@@ -96,16 +96,16 @@ export function Badge({ children, color = "slate" }) {
 export function ConfirmDialog({ open, title = "Confirm Action", message, onConfirm, onCancel }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4" data-testid="confirm-dialog">
-      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-sm">
-        <div className="px-5 py-4 border-b-2 border-slate-200">
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4 overflow-y-auto" data-testid="confirm-dialog">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-sm my-auto max-h-[90vh] flex flex-col">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex-shrink-0">
           <div className="text-[10px] uppercase tracking-[0.2em] text-[#DC2626] font-bold">Confirmation Required</div>
           <div className="font-bold text-base mt-1">{title}</div>
         </div>
-        <div className="p-5 text-sm text-slate-600 leading-relaxed">
+        <div className="p-5 text-sm text-slate-600 leading-relaxed overflow-y-auto">
           {message}
         </div>
-        <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex gap-2 justify-end">
+        <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex gap-2 justify-end flex-shrink-0">
           <BtnSecondary onClick={onCancel}>Cancel</BtnSecondary>
           <button
             onClick={onConfirm}

@@ -528,31 +528,32 @@ export default function Materials() {
 
 export function Drawer({ title, onClose, children, width = "max-w-lg" }) {
   useEffect(() => {
+    const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = "unset";
+      document.body.style.overflow = prev || "";
     };
   }, []);
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end"
+      className="fixed inset-0 z-50 flex justify-end overflow-hidden"
       data-testid="drawer-overlay"
     >
       <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        className="fixed inset-0 bg-black/40 backdrop-blur-sm"
         onClick={onClose}
       />
       <div
         className={`relative w-full ${width} bg-white border-l-2 border-slate-200 shadow-2xl flex flex-col h-full z-10`}
       >
-        <div className="px-4 sm:px-6 py-4 border-b-2 border-slate-200 flex items-center justify-between">
+        <div className="px-4 sm:px-6 py-4 border-b-2 border-slate-200 flex items-center justify-between flex-shrink-0 bg-white">
           <h2 className="text-lg font-bold tracking-tight">{title}</h2>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100">
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6">{children}</div>
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 overscroll-contain" style={{ WebkitOverflowScrolling: "touch" }}>{children}</div>
       </div>
     </div>
   );
