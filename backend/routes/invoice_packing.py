@@ -36,6 +36,7 @@ from models.invoice_packing import (
     PackingTemplateIn,
 )
 
+
 log = logging.getLogger("erp")
 
 invoice_packing_router = APIRouter(prefix="/api", tags=["Invoice & Packing List"])
