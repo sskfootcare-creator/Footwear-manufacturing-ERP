@@ -248,6 +248,7 @@ from routes.styles import (
     styles_router,
     suggest_gst_pct,
     get_gst_config,
+    get_effective_bom,
     compute_style_costing,
     compute_style_costing_from_jobs,
     compute_style_costing_async,

@@ -1,7 +1,10 @@
-"""Raw Materials & BOM Pydantic Models."""
-
+import uuid
 from typing import Optional, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+
+def _gen_line_id() -> str:
+    return uuid.uuid4().hex[:8]
 
 
 class MaterialIn(BaseModel):
@@ -27,18 +30,44 @@ class MaterialIn(BaseModel):
 
 
 class BomItem(BaseModel):
-    material_id: str
-    material_name: str
-    material_code: str
-    unit: str
-    rate: float
-    quantity: float
-    yield_per_unit: float = 1
-    waste_pct: float = 0
+    line_id: Optional[str] = Field(default_factory=_gen_line_id)
+    material_id: Optional[str] = ""
+    material_name: Optional[str] = ""
+    material_code: Optional[str] = ""
+    unit: Optional[str] = ""
+    rate: float = 0.0
+    quantity: float = 0.0
+    yield_per_unit: float = 1.0
+    waste_pct: float = 0.0
     section: str = "Other"
     component: Optional[str] = None
     with_eva: Optional[bool] = None
     color: Optional[str] = ""   # the specific color chosen for THIS style's BOM line — free text
+
+    @field_validator("line_id", mode="before")
+    @classmethod
+    def _ensure_line_id(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return _gen_line_id()
+        return str(v).strip()
+
+
+class BomLineOverride(BaseModel):
+    line_id: Optional[str] = None   # references a base BOM line's line_id to override; None = this is a brand-new line added only for this color
+    removed: bool = False           # true = drop this base line entirely for this color (e.g. a component not used in one color)
+    # all fields below: None = inherit from the base line; set = override it
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    material_code: Optional[str] = None
+    unit: Optional[str] = None
+    rate: Optional[float] = None
+    quantity: Optional[float] = None
+    yield_per_unit: Optional[float] = None
+    waste_pct: Optional[float] = None
+    section: Optional[str] = None
+    component: Optional[str] = None
+    with_eva: Optional[bool] = None
+    color: Optional[str] = None
 
 
 

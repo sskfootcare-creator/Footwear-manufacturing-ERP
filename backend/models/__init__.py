@@ -9,7 +9,7 @@ from models.styles import (
     ColorMasterIn, ColorMasterUpdate
 )
 from models.materials import (
-    MaterialIn, BomItem, LaborItem, QuantityUpdate, InventoryMovement
+    MaterialIn, BomItem, BomLineOverride, LaborItem, QuantityUpdate, InventoryMovement
 )
 from models.components import (
     ComponentUpdate, ComponentIn, ComponentMasterUpdate, ComponentBulkMatrix,
@@ -79,7 +79,7 @@ __all__ = [
     "PLANNED_COMPONENTS", "StyleIn", "PlannedComponent", "StyleLifecycleUpsert", "OnlineStatusPatchIn",
     "ColorMasterIn", "ColorMasterUpdate",
     # Materials
-    "MaterialIn", "BomItem", "LaborItem", "QuantityUpdate", "InventoryMovement",
+    "MaterialIn", "BomItem", "BomLineOverride", "LaborItem", "QuantityUpdate", "InventoryMovement",
     # Components
     "ComponentUpdate", "ComponentIn", "ComponentMasterUpdate", "ComponentBulkMatrix",
     "ComponentMovementIn", "StyleComponentMappingIn", "StyleComponentMappingUpdate",

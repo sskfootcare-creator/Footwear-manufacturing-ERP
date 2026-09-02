@@ -155,17 +155,17 @@ async def next_payment_no(db=None) -> str:
 
 # ── Costing & Profitability Helpers ──────────────────────────────────────────
 
-async def compute_style_costing_async(style: dict, db=None) -> dict:
+async def compute_style_costing_async(style: dict, db=None, color: Optional[str] = None) -> dict:
     db = db if db is not None else get_db()
     import server
     if hasattr(server, "compute_style_costing_async"):
-        return await server.compute_style_costing_async(style, db)
+        return await server.compute_style_costing_async(style, db, color=color)
     if hasattr(server, "compute_style_costing_from_jobs"):
         try:
             style_id = str(style.get("_id", style.get("id", "")))
             style_code = style.get("code", "")
             if not style_id and not style_code:
-                return server.compute_style_costing_from_jobs(style, [])
+                return server.compute_style_costing_from_jobs(style, [], color=color)
             qc = []
             if style_id:
                 qc.append({"style_id": style_id})
@@ -174,15 +174,16 @@ async def compute_style_costing_async(style: dict, db=None) -> dict:
             fetched_jobs = await db.production_jobs.find(
                 {"$or": qc} if len(qc) > 1 else qc[0]
             ).to_list(500)
-            return server.compute_style_costing_from_jobs(style, fetched_jobs)
+            return server.compute_style_costing_from_jobs(style, fetched_jobs, color=color)
         except Exception:
-            return server.compute_style_costing_from_jobs(style, [])
+            return server.compute_style_costing_from_jobs(style, [], color=color)
     return {}
 
 
 async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> dict:
     db = db if db is not None else get_db()
-    c = await compute_style_costing_async(style_obj, db)
+    po_color = po_line.get("color")
+    c = await compute_style_costing_async(style_obj, db, color=po_color)
     bom_cost = float(c.get("materials_cost", 0))
     overhead = float(c.get("overhead_cost", 0))
     packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
@@ -330,9 +331,8 @@ async def _attach_po_profitability(po_docs: list, db=None):
             sid = str(item.get("style_id") or "")
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
-                costing = costing_cache.get(code) or costing_cache.get(sid)
-                if costing is None:
-                    # In-memory lookup from grouped jobs dict without DB queries
+                item_color = item.get("color")
+                if item_color and style_doc.get("color_bom_overrides"):
                     style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
                     style_code_str = style_doc.get("code", "")
                     matched_jobs = []
@@ -347,7 +347,26 @@ async def _attach_po_profitability(po_docs: list, db=None):
                         if job_id_key not in seen_job_ids:
                             seen_job_ids.add(job_id_key)
                             matched_jobs.append(job)
-                    costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
+                    costing = compute_style_costing_from_jobs(style_doc, matched_jobs, color=item_color)
+                else:
+                    costing = costing_cache.get(code) or costing_cache.get(sid)
+                    if costing is None:
+                        # In-memory lookup from grouped jobs dict without DB queries
+                        style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
+                        style_code_str = style_doc.get("code", "")
+                        matched_jobs = []
+                        seen_job_ids = set()
+                        for job in jobs_by_style_id.get(style_id_str, []):
+                            job_id_key = str(job.get("_id", id(job)))
+                            if job_id_key not in seen_job_ids:
+                                seen_job_ids.add(job_id_key)
+                                matched_jobs.append(job)
+                        for job in jobs_by_style_code.get(style_code_str, []):
+                            job_id_key = str(job.get("_id", id(job)))
+                            if job_id_key not in seen_job_ids:
+                                seen_job_ids.add(job_id_key)
+                                matched_jobs.append(job)
+                        costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
 
                 bom_cost = float(costing.get("materials_cost", 0))
                 overhead = float(costing.get("overhead_cost", 0))
@@ -1063,8 +1082,8 @@ async def get_b2b_profitability(
 
         qty = int(it.get("quantity") or it.get("qty") or it.get("pairs") or 1)
         if style_doc:
-            costing = costing_cache.get(code) or costing_cache.get(sid)
-            if costing is None:
+            item_color = it.get("color")
+            if item_color and style_doc.get("color_bom_overrides"):
                 style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
                 style_code_str = style_doc.get("code", "")
                 matched_jobs = []
@@ -1079,7 +1098,25 @@ async def get_b2b_profitability(
                     if job_id_key not in seen_job_ids:
                         seen_job_ids.add(job_id_key)
                         matched_jobs.append(job)
-                costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
+                costing = compute_style_costing_from_jobs(style_doc, matched_jobs, color=item_color)
+            else:
+                costing = costing_cache.get(code) or costing_cache.get(sid)
+                if costing is None:
+                    style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
+                    style_code_str = style_doc.get("code", "")
+                    matched_jobs = []
+                    seen_job_ids = set()
+                    for job in jobs_by_style_id.get(style_id_str, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    for job in jobs_by_style_code.get(style_code_str, []):
+                        job_id_key = str(job.get("_id", id(job)))
+                        if job_id_key not in seen_job_ids:
+                            seen_job_ids.add(job_id_key)
+                            matched_jobs.append(job)
+                    costing = compute_style_costing_from_jobs(style_doc, matched_jobs)
 
             bom_cost = float(costing.get("materials_cost", 0))
             overhead = float(costing.get("overhead_cost", 0))

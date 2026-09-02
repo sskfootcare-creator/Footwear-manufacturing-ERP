@@ -2,10 +2,10 @@
 
 from enum import Enum
 from typing import List, Optional, Dict, Literal, Any
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
 
-from models.materials import BomItem, LaborItem
+from models.materials import BomItem, BomLineOverride, LaborItem
 
 OnlineStatus = Literal[
     "draft", "sample_approved", "photoshoot_completed", "catalog_completed",
@@ -55,6 +55,21 @@ class StyleIn(BaseModel):
     margin_pct: float = 25
     gst_pct: float = 5
     default_pairs_per_carton: Optional[Dict[str, Any]] = None
+    color_bom_overrides: Optional[Dict[str, List[BomLineOverride]]] = Field(default_factory=dict)
+
+    @field_validator("color_bom_overrides", mode="before")
+    @classmethod
+    def _validate_color_bom_overrides(cls, v):
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            return v
+        cleaned = {}
+        for k, lines in v.items():
+            if not isinstance(k, str) or not k.strip():
+                raise PydanticCustomError("color_name_empty", "Color override key cannot be empty")
+            cleaned[k.strip()] = lines
+        return cleaned
 
 
 class PlannedComponent(BaseModel):

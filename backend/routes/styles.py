@@ -30,6 +30,7 @@ from models.styles import (
     ONLINE_STATUS_SIDE_BRANCHES,
     PLANNED_COMPONENTS,
 )
+from models.materials import BomItem, BomLineOverride
 from models.plm import DEFAULT_PLM_FOLDERS
 from rate_limiter import upload_rate_limiter
 
@@ -196,10 +197,122 @@ async def get_gst_config():
     return FOOTWEAR_GST_CONFIG
 
 
-# ── Style Costing Engine ─────────────────────────────────────────────────────
-def compute_style_costing(style: dict) -> dict:
+def _parse_bom_item(b: Any) -> BomItem:
+    if isinstance(b, BomItem):
+        return b
+    if isinstance(b, dict):
+        d = dict(b)
+        raw_yld = d.get("yield_per_unit")
+        def_yld = d.get("default_yield_per_unit")
+        if raw_yld is not None and float(raw_yld) > 0:
+            yld = float(raw_yld)
+        elif def_yld is not None and float(def_yld) > 0:
+            yld = float(def_yld)
+        else:
+            yld = 1.0
+        return BomItem(
+            line_id=d.get("line_id"),
+            material_id=d.get("material_id") or "",
+            material_name=d.get("material_name") or "",
+            material_code=d.get("material_code") or "",
+            unit=d.get("unit") or "",
+            rate=float(d.get("rate") or 0.0),
+            quantity=float(d.get("quantity") or 0.0),
+            yield_per_unit=yld,
+            waste_pct=float(d.get("waste_pct") or 0.0),
+            section=d.get("section") or "Other",
+            component=d.get("component"),
+            with_eva=d.get("with_eva"),
+            color=d.get("color") or "",
+        )
+    return b
+
+
+def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]:
+    """
+    Return the effective BOM for a style given a specific color.
+    - Starts with style['bom'] (the base list).
+    - If color is None or has no entry in color_bom_overrides, returns base list unchanged.
+    - Otherwise, applies that color's overrides in order:
+        * removed=True: drops the base line matching that line_id from the result
+        * line_id matches existing line: replaces ONLY non-None fields (keeps base values for unspecified fields)
+        * line_id is None / doesn't match existing line: appends as a new line
+    - Returns computed merged List[BomItem] on the fly without duplicating storage.
+    """
+    base_raw = style.get("bom") or []
+    base_bom: List[BomItem] = [
+        _parse_bom_item(b)
+        for b in base_raw
+    ]
+
+    if not color:
+        return base_bom
+
+    overrides_dict = style.get("color_bom_overrides") or {}
+    color_overrides = overrides_dict.get(color)
+    if color_overrides is None and isinstance(color, str):
+        c_clean = color.strip().lower()
+        for k, v in overrides_dict.items():
+            if k and str(k).strip().lower() == c_clean:
+                color_overrides = v
+                break
+
+    if color_overrides is None:
+        return base_bom
+
+    result_lines: List[BomItem] = list(base_bom)
+
+    for ov in color_overrides:
+        if isinstance(ov, BomLineOverride):
+            ov_dict = ov.model_dump()
+        elif isinstance(ov, dict):
+            ov_dict = dict(ov)
+        else:
+            continue
+
+        line_id = ov_dict.get("line_id")
+        removed = bool(ov_dict.get("removed", False))
+
+        if removed:
+            if line_id:
+                result_lines = [b for b in result_lines if b.line_id != line_id]
+        else:
+            matched_idx = next((i for i, b in enumerate(result_lines) if line_id and b.line_id == line_id), None)
+            if matched_idx is not None:
+                curr_dict = result_lines[matched_idx].model_dump()
+                for field_name, field_val in ov_dict.items():
+                    if field_name in ("line_id", "removed"):
+                        continue
+                    if field_val is not None:
+                        curr_dict[field_name] = field_val
+                result_lines[matched_idx] = BomItem(**curr_dict)
+            else:
+                new_item_dict = {
+                    "material_id": ov_dict.get("material_id") or "",
+                    "material_name": ov_dict.get("material_name") or "",
+                    "material_code": ov_dict.get("material_code") or "",
+                    "unit": ov_dict.get("unit") or "",
+                    "rate": float(ov_dict.get("rate") if ov_dict.get("rate") is not None else 0.0),
+                    "quantity": float(ov_dict.get("quantity") if ov_dict.get("quantity") is not None else 0.0),
+                    "yield_per_unit": float(ov_dict.get("yield_per_unit") if ov_dict.get("yield_per_unit") is not None else 1.0),
+                    "waste_pct": float(ov_dict.get("waste_pct") if ov_dict.get("waste_pct") is not None else 0.0),
+                    "section": ov_dict.get("section") or "Other",
+                    "component": ov_dict.get("component"),
+                    "with_eva": ov_dict.get("with_eva"),
+                    "color": ov_dict.get("color") or "",
+                }
+                if line_id:
+                    new_item_dict["line_id"] = line_id
+                result_lines.append(BomItem(**new_item_dict))
+
+    return result_lines
+
+
+def compute_style_costing(style: dict, color: Optional[str] = None) -> dict:
+    effective_bom = get_effective_bom(style, color)
     materials_cost = 0.0
-    for b in style.get("bom", []):
+    for b_item in effective_bom:
+        b = b_item.model_dump() if hasattr(b_item, "model_dump") else (b_item if isinstance(b_item, dict) else dict(b_item))
         rate = float(b.get("rate", 0))
         qty = float(b.get("quantity", 0))
         raw_yld = b.get("yield_per_unit")
@@ -243,9 +356,9 @@ def compute_style_costing(style: dict) -> dict:
     }
 
 
-def compute_style_costing_from_jobs(style: dict, jobs: list) -> dict:
+def compute_style_costing_from_jobs(style: dict, jobs: list, color: Optional[str] = None) -> dict:
     """Computes style costing given a list of pre-fetched production jobs."""
-    c = compute_style_costing(style)
+    c = compute_style_costing(style, color=color)
     c["planned_labor_cost"] = c["labor_cost"]
     c["labor_source"] = "estimated"
     c["is_assigned"] = False
@@ -313,7 +426,7 @@ def compute_style_costing_from_jobs(style: dict, jobs: list) -> dict:
     return c
 
 
-async def compute_style_costing_async(style: dict, db=None) -> dict:
+async def compute_style_costing_async(style: dict, db=None, color: Optional[str] = None) -> dict:
     """Computes style costing, automatically incorporating real worker assignment rates."""
     if db is None:
         db = get_db()
@@ -322,7 +435,7 @@ async def compute_style_costing_async(style: dict, db=None) -> dict:
         style_code = style.get("code", "")
 
         if not style_id and not style_code:
-            return compute_style_costing_from_jobs(style, [])
+            return compute_style_costing_from_jobs(style, [], color=color)
 
         query_conditions = []
         if style_id:
@@ -333,16 +446,17 @@ async def compute_style_costing_async(style: dict, db=None) -> dict:
         fetched_jobs = await db.production_jobs.find(
             {"$or": query_conditions} if len(query_conditions) > 1 else query_conditions[0]
         ).to_list(500)
-        return compute_style_costing_from_jobs(style, fetched_jobs)
+        return compute_style_costing_from_jobs(style, fetched_jobs, color=color)
     except Exception:
-        return compute_style_costing_from_jobs(style, [])
+        return compute_style_costing_from_jobs(style, [], color=color)
 
 
 async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> dict:
     """Compute real profit for a PO line: unit_price (negotiated) minus actual costs."""
     if db is None:
         db = get_db()
-    c = await compute_style_costing_async(style_obj, db)
+    po_color = po_line.get("color")
+    c = await compute_style_costing_async(style_obj, db, color=po_color)
     bom_cost = float(c.get("materials_cost", 0))
     overhead = float(c.get("overhead_cost", 0))
     packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
@@ -2295,6 +2409,6 @@ async def catalogue_export_preview(payload: CatalogueExportRequest, request: Req
 
 
 @styles_router.post("/costing/preview")
-async def costing_preview(payload: StyleIn, request: Request):
+async def costing_preview(payload: StyleIn, request: Request, color: Optional[str] = None):
     await _get_user(request)
-    return compute_style_costing(payload.model_dump())
+    return compute_style_costing(payload.model_dump(), color=color)

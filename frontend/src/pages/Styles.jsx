@@ -30,6 +30,11 @@ import {
   Folder,
   AlertTriangle,
   CheckCircle,
+  Palette,
+  RotateCcw,
+  Undo2,
+  Layers,
+  Sparkles,
 } from "lucide-react";
 
 const ONLINE_CHANNELS = ["myntra", "flipkart", "nykaa", "website"];
@@ -82,6 +87,7 @@ const emptyStyle = {
   margin_pct: 25,
   gst_pct: 5,
   default_pairs_per_carton: {},
+  color_bom_overrides: {},
 };
 
 export default function Styles() {
@@ -112,6 +118,11 @@ export default function Styles() {
   // Catalogue codes for the currently-open style (group SKU + leaf SKUs)
   const [catalogueCodes, setCatalogueCodes] = useState(null);
   const [catalogueLoading, setCatalogueLoading] = useState(false);
+  // Color-specific BOM overrides state
+  const [selectedBomColor, setSelectedBomColor] = useState("");
+  const [colorMasterList, setColorMasterList] = useState([]);
+  const [newCustomColorInput, setNewCustomColorInput] = useState("");
+  const [colorSpecificAddMat, setColorSpecificAddMat] = useState(null);
   // Catalogue export modal state (Phase F)
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPlatform, setExportPlatform] = useState("myntra");
@@ -336,12 +347,14 @@ export default function Styles() {
     if (filter) queryParams.append("status", filter);
     if (search) queryParams.append("search", search);
     const qs = queryParams.toString() ? `?${queryParams.toString()}` : "";
-    const [s, m] = await Promise.all([
+    const [s, m, cm] = await Promise.all([
       http.get(`/styles/summary${qs}`),
       http.get("/materials"),
+      http.get("/color-master?active=true").catch(() => ({ data: [] })),
     ]);
     setStyles(s.data);
     setMaterials(m.data);
+    setColorMasterList(cm.data || []);
 
     const params = new URLSearchParams(window.location.search);
     const editCode = params.get("edit");
@@ -375,6 +388,8 @@ export default function Styles() {
     setAddingMapping(false);
     setEditingMappingId(null);
     setCatalogueCodes(null);
+    setSelectedBomColor("");
+    setColorSpecificAddMat(null);
     setOpen(true);
   };
   const startEdit = async (s) => {
@@ -384,6 +399,7 @@ export default function Styles() {
     setAddingMapping(false);
     setEditingMappingId(null);
     setCatalogueCodes(null);
+    setColorSpecificAddMat(null);
     setOpen(true);
 
     try {
@@ -392,25 +408,41 @@ export default function Styles() {
       const suggested = suggestGstPct(initialSell);
       const isOverride = fullStyle.gst_pct != null && Number(fullStyle.gst_pct) !== suggested;
       setIsGstOverridden(isOverride);
+      
+      const ensuredBom = (fullStyle.bom || []).map((b) => ({
+        ...b,
+        line_id: b.line_id || Math.random().toString(36).substring(2, 10),
+      }));
+
       setForm({
         code: fullStyle.code,
         name: fullStyle.name,
         category: fullStyle.category,
         image_url: fullStyle.image_url || "",
+        image_original_url: fullStyle.image_original_url || fullStyle.image_url || "",
         image_display_url: fullStyle.image_display_url || "",
         image_thumbnail_url: fullStyle.image_thumbnail_url || "",
         description: fullStyle.description || "",
         base_size: fullStyle.base_size || "7",
         insole_mould_name: fullStyle.insole_mould_name || "",
         sole_mould_name: fullStyle.sole_mould_name || "",
-        bom: fullStyle.bom || [],
+        bom: ensuredBom,
         labor: fullStyle.labor || [],
         overhead_pct: fullStyle.overhead_pct,
         packing_cost: fullStyle.packing_cost,
         margin_pct: fullStyle.margin_pct,
         gst_pct: fullStyle.gst_pct,
         default_pairs_per_carton: fullStyle.default_pairs_per_carton || {},
+        color_bom_overrides: fullStyle.color_bom_overrides || {},
       });
+
+      const overrideColors = Object.keys(fullStyle.color_bom_overrides || {});
+      if (overrideColors.length > 0) {
+        setSelectedBomColor(overrideColors[0]);
+      } else {
+        setSelectedBomColor("");
+      }
+
       loadStyleMappings(fullStyle.id);
       loadCatalogueCodes(fullStyle.id);
     } catch (e) {
@@ -430,8 +462,10 @@ export default function Styles() {
         margin_pct: Number(form.margin_pct),
         gst_pct: Number(form.gst_pct),
         default_pairs_per_carton: form.default_pairs_per_carton || {},
+        color_bom_overrides: form.color_bom_overrides || {},
         bom: form.bom.map((b) => ({
           ...b,
+          line_id: b.line_id || Math.random().toString(36).substring(2, 10),
           quantity: Number(b.quantity),
           yield_per_unit: Number(b.yield_per_unit || 1),
           waste_pct: Number(b.waste_pct || 0),
@@ -537,12 +571,15 @@ export default function Styles() {
     }));
   };
 
+  const generateLineId = () => Math.random().toString(36).substring(2, 10);
+
   const addBomRow = (material) => {
     setForm((f) => ({
       ...f,
       bom: [
         ...f.bom,
         {
+          line_id: generateLineId(),
           material_id: material.id,
           material_code: material.code,
           material_name: material.name,
@@ -575,6 +612,275 @@ export default function Styles() {
     setForm((f) => ({ ...f, labor: [...f.labor, { name: "Labor", rate: 0 }] }));
   const removeLabor = (i) =>
     setForm((f) => ({ ...f, labor: f.labor.filter((_, idx) => idx !== i) }));
+
+  // Color-specific BOM Overrides Helpers
+  const allColorOptions = useMemo(() => {
+    const list = [];
+    const seen = new Set();
+
+    // 1. Add from Color Master palette
+    (colorMasterList || []).forEach((cm) => {
+      const name = (cm.color_name || cm.name || cm.code || "").trim();
+      if (name && !seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        list.push(name);
+      }
+    });
+
+    // 2. Fallback default footwear palette if colorMasterList empty
+    const defaultPalette = [
+      "Tan", "Beige", "Black", "Brown", "Navy", "Blue", "White", "Cream",
+      "Maroon", "Grey", "Olive", "Red", "Pink", "Gold", "Silver", "Green",
+      "Yellow", "Orange", "Purple", "Rose Gold", "Nude"
+    ];
+    defaultPalette.forEach((name) => {
+      if (!seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        list.push(name);
+      }
+    });
+
+    // 3. Add any colors entered in base BOM lines
+    (form.bom || []).forEach((b) => {
+      const col = (b.color || "").trim();
+      if (col && !seen.has(col.toLowerCase())) {
+        seen.add(col.toLowerCase());
+        list.push(col);
+      }
+    });
+
+    return list;
+  }, [colorMasterList, form.bom]);
+
+  const availableBomColors = useMemo(() => {
+    const set = new Set();
+    (catalogueCodes?.colors || []).forEach((c) => c && set.add(c.trim()));
+    (form.bom || []).forEach((b) => b.color && set.add(b.color.trim()));
+    Object.keys(form.color_bom_overrides || {}).forEach((c) => c && set.add(c.trim()));
+    if (selectedBomColor) set.add(selectedBomColor.trim());
+    return Array.from(set);
+  }, [catalogueCodes, form.bom, form.color_bom_overrides, selectedBomColor]);
+
+  useEffect(() => {
+    if (availableBomColors.length > 0 && (!selectedBomColor || !availableBomColors.includes(selectedBomColor))) {
+      setSelectedBomColor(availableBomColors[0]);
+    }
+  }, [availableBomColors, selectedBomColor]);
+
+  const updateLineOverride = (colorName, lineId, field, val) => {
+    if (!colorName || !lineId) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = [...(prevMap[colorName] || [])];
+      const baseLine = f.bom.find((b) => b.line_id === lineId);
+      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
+
+      const parsedVal = (field === "rate" || field === "quantity" || field === "yield_per_unit" || field === "waste_pct")
+        ? Number(val)
+        : val;
+
+      if (existingIdx >= 0) {
+        colorOverrides[existingIdx] = {
+          ...colorOverrides[existingIdx],
+          [field]: parsedVal,
+        };
+      } else if (baseLine) {
+        colorOverrides.push({
+          line_id: lineId,
+          removed: false,
+          material_id: baseLine.material_id,
+          material_name: baseLine.material_name,
+          material_code: baseLine.material_code,
+          unit: baseLine.unit,
+          rate: Number(baseLine.rate),
+          quantity: Number(baseLine.quantity),
+          yield_per_unit: Number(baseLine.yield_per_unit || 1),
+          waste_pct: Number(baseLine.waste_pct || 0),
+          section: baseLine.section,
+          component: baseLine.component,
+          with_eva: baseLine.with_eva,
+          color: baseLine.color,
+          [field]: parsedVal,
+        });
+      }
+
+      return {
+        ...f,
+        color_bom_overrides: {
+          ...prevMap,
+          [colorName]: colorOverrides,
+        },
+      };
+    });
+  };
+
+  const updateLineMaterial = (colorName, lineId, matObj) => {
+    if (!colorName || !lineId || !matObj) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = [...(prevMap[colorName] || [])];
+      const baseLine = f.bom.find((b) => b.line_id === lineId);
+      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
+
+      const matFields = {
+        material_id: matObj.id,
+        material_code: matObj.code,
+        material_name: matObj.name,
+        unit: matObj.unit,
+        rate: Number(matObj.rate || 0),
+        yield_per_unit: Number(matObj.default_yield_per_unit ?? 1),
+      };
+
+      if (existingIdx >= 0) {
+        colorOverrides[existingIdx] = {
+          ...colorOverrides[existingIdx],
+          ...matFields,
+        };
+      } else if (baseLine) {
+        colorOverrides.push({
+          line_id: lineId,
+          removed: false,
+          quantity: Number(baseLine.quantity),
+          waste_pct: Number(baseLine.waste_pct || 0),
+          section: baseLine.section,
+          component: baseLine.component,
+          with_eva: baseLine.with_eva,
+          color: baseLine.color,
+          ...matFields,
+        });
+      }
+
+      return {
+        ...f,
+        color_bom_overrides: {
+          ...prevMap,
+          [colorName]: colorOverrides,
+        },
+      };
+    });
+  };
+
+  const removeLineForColor = (colorName, lineId) => {
+    if (!colorName || !lineId) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = [...(prevMap[colorName] || [])];
+      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
+
+      if (existingIdx >= 0) {
+        colorOverrides[existingIdx] = {
+          ...colorOverrides[existingIdx],
+          removed: true,
+        };
+      } else {
+        colorOverrides.push({
+          line_id: lineId,
+          removed: true,
+        });
+      }
+
+      return {
+        ...f,
+        color_bom_overrides: {
+          ...prevMap,
+          [colorName]: colorOverrides,
+        },
+      };
+    });
+  };
+
+  const resetLineToBase = (colorName, lineId) => {
+    if (!colorName || !lineId) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = (prevMap[colorName] || []).filter(
+        (ov) => ov.line_id !== lineId
+      );
+      const updatedMap = { ...prevMap };
+      if (colorOverrides.length === 0) {
+        delete updatedMap[colorName];
+      } else {
+        updatedMap[colorName] = colorOverrides;
+      }
+      return {
+        ...f,
+        color_bom_overrides: updatedMap,
+      };
+    });
+  };
+
+  const addColorSpecificLine = (colorName, matObj) => {
+    if (!colorName || !matObj) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = [...(prevMap[colorName] || [])];
+      colorOverrides.push({
+        line_id: null,
+        removed: false,
+        material_id: matObj.id,
+        material_code: matObj.code,
+        material_name: matObj.name,
+        unit: matObj.unit,
+        rate: Number(matObj.rate || 0),
+        quantity: 1,
+        yield_per_unit: Number(matObj.default_yield_per_unit ?? 1),
+        waste_pct: 5,
+        section: matObj.category || "Other",
+        color: colorName,
+      });
+      return {
+        ...f,
+        color_bom_overrides: {
+          ...prevMap,
+          [colorName]: colorOverrides,
+        },
+      };
+    });
+  };
+
+  const updateColorSpecificAddedLine = (colorName, overrideIdx, field, val) => {
+    if (!colorName) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = [...(prevMap[colorName] || [])];
+      if (colorOverrides[overrideIdx]) {
+        const parsedVal = (field === "rate" || field === "quantity" || field === "yield_per_unit" || field === "waste_pct")
+          ? Number(val)
+          : val;
+        colorOverrides[overrideIdx] = {
+          ...colorOverrides[overrideIdx],
+          [field]: parsedVal,
+        };
+      }
+      return {
+        ...f,
+        color_bom_overrides: {
+          ...prevMap,
+          [colorName]: colorOverrides,
+        },
+      };
+    });
+  };
+
+  const removeColorSpecificAddedLine = (colorName, overrideIdx) => {
+    if (!colorName) return;
+    setForm((f) => {
+      const prevMap = f.color_bom_overrides || {};
+      const colorOverrides = (prevMap[colorName] || []).filter(
+        (_, idx) => idx !== overrideIdx
+      );
+      const updatedMap = { ...prevMap };
+      if (colorOverrides.length === 0) {
+        delete updatedMap[colorName];
+      } else {
+        updatedMap[colorName] = colorOverrides;
+      }
+      return {
+        ...f,
+        color_bom_overrides: updatedMap,
+      };
+    });
+  };
 
   const onPreviewBulk = async (e) => {
     const file = e.target.files?.[0];
@@ -611,27 +917,80 @@ export default function Styles() {
     setBulkUploading(false);
   };
 
-  // live costing — uses (rate * qty / yield) * (1 + waste%)
+  // Helper to compute effective BOM for any given color
+  const getEffectiveBomForColor = (colorName) => {
+    const baseBom = form.bom || [];
+    if (!colorName || !form.color_bom_overrides?.[colorName]) {
+      return baseBom;
+    }
+    const overrides = form.color_bom_overrides[colorName] || [];
+    const removedLineIds = new Set(
+      overrides.filter((o) => o.removed && o.line_id).map((o) => o.line_id)
+    );
+
+    const merged = [];
+    // 1. Process base lines
+    baseBom.forEach((b) => {
+      if (removedLineIds.has(b.line_id)) return; // Dropped for this color
+      const ov = overrides.find((o) => o.line_id === b.line_id && !o.removed);
+      if (ov) {
+        merged.push({
+          ...b,
+          material_id: ov.material_id ?? b.material_id,
+          material_name: ov.material_name ?? b.material_name,
+          material_code: ov.material_code ?? b.material_code,
+          unit: ov.unit ?? b.unit,
+          rate: ov.rate !== undefined && ov.rate !== null ? ov.rate : b.rate,
+          quantity: ov.quantity !== undefined && ov.quantity !== null ? ov.quantity : b.quantity,
+          yield_per_unit: ov.yield_per_unit !== undefined && ov.yield_per_unit !== null ? ov.yield_per_unit : (b.yield_per_unit ?? 1),
+          waste_pct: ov.waste_pct !== undefined && ov.waste_pct !== null ? ov.waste_pct : (b.waste_pct ?? 0),
+          section: ov.section ?? b.section,
+          component: ov.component ?? b.component,
+          with_eva: ov.with_eva ?? b.with_eva,
+          color: ov.color ?? b.color,
+        });
+      } else {
+        merged.push(b);
+      }
+    });
+
+    // 2. Append color-specific added lines
+    overrides.forEach((o) => {
+      if (!o.line_id || !baseBom.some((b) => b.line_id === o.line_id)) {
+        if (!o.removed) {
+          merged.push(o);
+        }
+      }
+    });
+
+    return merged;
+  };
+
+  // live costing — uses effective BOM for the selected color (or base BOM)
   const costing = useMemo(() => {
-    const matCost = form.bom.reduce((s, b) => {
+    const effectiveBom = selectedBomColor ? getEffectiveBomForColor(selectedBomColor) : form.bom;
+    const matCost = effectiveBom.reduce((s, b) => {
       const yld = Number(b.yield_per_unit || 1) || 1;
       return (
         s +
-        ((Number(b.rate) * Number(b.quantity)) / yld) *
+        ((Number(b.rate || 0) * Number(b.quantity || 0)) / yld) *
           (1 + Number(b.waste_pct || 0) / 100)
       );
     }, 0);
     const laborKnown = form.labor.length > 0;
     const labCost = laborKnown
-      ? form.labor.reduce((s, l) => s + Number(l.rate), 0)
+      ? form.labor.reduce((s, l) => s + Number(l.rate || 0), 0)
       : 0;
     // When no labor is set, base excludes labor so Total Cost is not misleadingly understated
     const base = matCost + (laborKnown ? labCost : 0);
-    const oh = (base * Number(form.overhead_pct)) / 100;
-    const total = base + oh + Number(form.packing_cost);
-    const margin = (total * Number(form.margin_pct)) / 100;
+    const oh = (base * Number(form.overhead_pct || 0)) / 100;
+    const total = base + oh + Number(form.packing_cost || 0);
+    const margin = (total * Number(form.margin_pct || 0)) / 100;
     const sell = total + margin;
-    const gst = (sell * Number(form.gst_pct)) / 100;
+    const gst = (sell * Number(form.gst_pct || 0)) / 100;
+    const hasColorOverrides = Boolean(
+      selectedBomColor && (form.color_bom_overrides?.[selectedBomColor] || []).length > 0
+    );
     return {
       matCost,
       labCost,
@@ -643,8 +1002,10 @@ export default function Styles() {
       sell,
       gst,
       final: sell + gst,
+      hasColorOverrides,
+      colorName: selectedBomColor,
     };
-  }, [form]);
+  }, [form, selectedBomColor]);
 
   const suggestedGst = useMemo(() => suggestGstPct(costing.sell), [costing.sell]);
 
@@ -754,6 +1115,11 @@ export default function Styles() {
                             {s.in_online_pipeline && (
                               <Badge color="blue" data-testid={`online-badge-${s.code}`}>
                                 <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
+                              </Badge>
+                            )}
+                            {s.color_bom_overrides && Object.keys(s.color_bom_overrides).length > 0 && (
+                              <Badge color="purple" title={`${Object.keys(s.color_bom_overrides).length} custom color BOM(s) configured`} data-testid={`style-custom-bom-badge-${s.code}`}>
+                                <Palette className="w-3 h-3 inline mr-0.5" /> {Object.keys(s.color_bom_overrides).length} Custom Colors
                               </Badge>
                             )}
                             {hasGstMismatch && (
@@ -1152,6 +1518,522 @@ export default function Styles() {
                   </tbody>
                 </table>
               </div>
+            </div>
+
+            {/* Color-Specific BOM Overrides Section */}
+            <div className="border-2 border-purple-200 bg-purple-50/30 p-4 rounded-lg mt-6" data-testid="color-bom-overrides-section">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider flex items-center gap-1.5 text-purple-950">
+                    <Palette className="w-4 h-4 text-purple-600" />
+                    Color-Specific BOM Overrides
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Select a color variant to customize its materials, consumption, or rates. Colors with no overrides use the base BOM.
+                  </p>
+                </div>
+                {/* Color Selector Pills & Add Variant dropdown */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {availableBomColors.map((col) => {
+                    const isSelected = selectedBomColor === col;
+                    const ovCount = (form.color_bom_overrides?.[col] || []).length;
+                    const hasCustom = ovCount > 0;
+                    return (
+                      <button
+                        key={col}
+                        type="button"
+                        onClick={() => setSelectedBomColor(col)}
+                        className={`px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5 transition-all border ${
+                          isSelected
+                            ? "bg-purple-700 text-white border-purple-700 shadow-sm"
+                            : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                        }`}
+                        data-testid={`color-tab-${col}`}
+                      >
+                        <span>{col}</span>
+                        {hasCustom ? (
+                          <span
+                            className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                              isSelected
+                                ? "bg-amber-400 text-purple-950"
+                                : "bg-amber-100 text-amber-900 border border-amber-300"
+                            }`}
+                            data-testid={`custom-bom-badge-${col}`}
+                          >
+                            Custom BOM
+                          </span>
+                        ) : (
+                          <span
+                            className={`text-[10px] ${
+                              isSelected ? "text-purple-200" : "text-slate-400"
+                            }`}
+                            data-testid={`base-bom-text-${col}`}
+                          >
+                            using base BOM
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  {/* Add another color variant dropdown & custom color text input */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <select
+                      className="border border-purple-300 rounded px-2 py-1 text-xs bg-white text-slate-800 font-semibold shadow-sm hover:border-purple-500 cursor-pointer"
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          const c = e.target.value.trim();
+                          if (c) {
+                            setSelectedBomColor(c);
+                          }
+                        }
+                      }}
+                      data-testid="add-color-override-select"
+                    >
+                      <option value="">+ Customize Color…</option>
+                      {allColorOptions.map((colName) => (
+                        <option key={colName} value={colName}>
+                          {colName} {availableBomColors.includes(colName) ? "(Added)" : ""}
+                        </option>
+                      ))}
+                    </select>
+
+                    <div className="flex items-center gap-1 bg-white border border-purple-300 rounded px-1.5 py-0.5 shadow-sm">
+                      <input
+                        type="text"
+                        placeholder="Type custom color…"
+                        value={newCustomColorInput}
+                        onChange={(e) => setNewCustomColorInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && newCustomColorInput.trim()) {
+                            e.preventDefault();
+                            const c = newCustomColorInput.trim();
+                            setSelectedBomColor(c);
+                            setNewCustomColorInput("");
+                          }
+                        }}
+                        className="text-xs px-1.5 py-0.5 border-0 focus:outline-none w-28 placeholder:text-slate-400"
+                        data-testid="custom-color-text-input"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (newCustomColorInput.trim()) {
+                            const c = newCustomColorInput.trim();
+                            setSelectedBomColor(c);
+                            setNewCustomColorInput("");
+                          }
+                        }}
+                        className="text-xs px-2 py-0.5 bg-purple-700 hover:bg-purple-800 text-white rounded font-bold"
+                        data-testid="custom-color-add-btn"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Active color status indicator & Add line bar */}
+              {selectedBomColor ? (
+                <div>
+                  <div className="flex items-center justify-between mb-3 bg-white border border-purple-200 rounded p-2.5 flex-wrap gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">
+                        Selected Color:
+                      </span>
+                      <span className="font-bold text-sm text-purple-900">{selectedBomColor}</span>
+                      {(form.color_bom_overrides?.[selectedBomColor] || []).length > 0 ? (
+                        <Badge color="orange" data-testid={`custom-bom-indicator-${selectedBomColor}`}>
+                          Custom BOM ({(form.color_bom_overrides[selectedBomColor] || []).length} active override{(form.color_bom_overrides[selectedBomColor] || []).length > 1 ? "s" : ""})
+                        </Badge>
+                      ) : (
+                        <Badge color="slate" data-testid={`base-bom-indicator-${selectedBomColor}`}>
+                          using base BOM
+                        </Badge>
+                      )}
+                    </div>
+
+                    {/* Add color-specific line picker */}
+                    <div className="flex items-center gap-2">
+                      <div className="w-64">
+                        <SearchableSelect
+                          options={materials}
+                          value=""
+                          onChange={(id) => {
+                            const m = materials.find((x) => x.id === id);
+                            if (m) {
+                              addColorSpecificLine(selectedBomColor, m);
+                            }
+                          }}
+                          getKey={(m) => m.id}
+                          getLabel={(m) => `${m.code} — ${m.name}`}
+                          placeholder="+ Add color-specific line…"
+                          testId="add-color-line-select"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Effective BOM lines table for selectedBomColor */}
+                  <div className="overflow-x-auto bg-white border border-slate-200 rounded">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr className="text-left text-slate-600">
+                          <th className="px-2 py-2 font-bold">Material</th>
+                          <th className="px-2 py-2 font-bold">Section</th>
+                          <th className="px-2 py-2 font-bold">Color</th>
+                          <th className="px-2 py-2 font-bold text-right">Rate</th>
+                          <th className="px-2 py-2 font-bold text-right">Qty</th>
+                          <th className="px-2 py-2 font-bold text-right">Yield</th>
+                          <th className="px-2 py-2 font-bold text-right">Waste%</th>
+                          <th className="px-2 py-2 font-bold text-right">Cost/pair</th>
+                          <th className="px-2 py-2 font-bold text-center">Status</th>
+                          <th className="px-2 py-2 font-bold text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {form.bom.length === 0 && (
+                          <tr>
+                            <td colSpan="10" className="px-2 py-6 text-center text-slate-400">
+                              Base BOM is empty. Add base items first or add a color-specific line above.
+                            </td>
+                          </tr>
+                        )}
+                        {/* 1. Base BOM lines */}
+                        {form.bom.map((baseLine, bIdx) => {
+                          const colorOverrides = (form.color_bom_overrides || {})[selectedBomColor] || [];
+                          const ov = colorOverrides.find((o) => o.line_id === baseLine.line_id);
+                          const isRemoved = Boolean(ov?.removed);
+                          const isOverridden = Boolean(ov && !ov.removed);
+
+                          if (isRemoved) {
+                            return (
+                              <tr key={baseLine.line_id || bIdx} className="bg-red-50/50 text-slate-400" data-testid={`color-override-row-${baseLine.line_id}`}>
+                                <td className="px-2 py-2 line-through font-medium">
+                                  {baseLine.material_code} — {baseLine.material_name}
+                                </td>
+                                <td className="px-2 py-2 line-through">{baseLine.section}</td>
+                                <td className="px-2 py-2 line-through">{baseLine.color || "—"}</td>
+                                <td className="px-2 py-2 text-right line-through font-mono">₹{baseLine.rate}</td>
+                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.quantity}</td>
+                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.yield_per_unit || 1}</td>
+                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.waste_pct || 0}%</td>
+                                <td className="px-2 py-2 text-right line-through font-mono">—</td>
+                                <td className="px-2 py-2 text-center">
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
+                                    Removed for {selectedBomColor}
+                                  </span>
+                                </td>
+                                <td className="px-2 py-2 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => resetLineToBase(selectedBomColor, baseLine.line_id)}
+                                    className="text-xs text-blue-600 hover:text-blue-800 font-bold inline-flex items-center gap-1"
+                                    data-testid={`restore-line-${baseLine.line_id}`}
+                                  >
+                                    <RotateCcw className="w-3 h-3" /> Restore to Base
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          }
+
+                          // Effective values
+                          const effectiveMatCode = ov?.material_code ?? baseLine.material_code;
+                          const effectiveMatName = ov?.material_name ?? baseLine.material_name;
+                          const effectiveUnit = ov?.unit ?? baseLine.unit;
+                          const effectiveRate = ov?.rate ?? baseLine.rate;
+                          const effectiveQty = ov?.quantity ?? baseLine.quantity;
+                          const effectiveYield = ov?.yield_per_unit ?? (baseLine.yield_per_unit ?? 1);
+                          const effectiveWaste = ov?.waste_pct ?? (baseLine.waste_pct ?? 0);
+                          const effectiveSection = ov?.section ?? baseLine.section;
+                          const effectiveColor = ov?.color ?? baseLine.color;
+
+                          const yld = Number(effectiveYield || 1) || 1;
+                          const cost = ((Number(effectiveRate) * Number(effectiveQty)) / yld) * (1 + Number(effectiveWaste || 0) / 100);
+
+                          return (
+                            <tr
+                              key={baseLine.line_id || bIdx}
+                              className={`hover:bg-slate-50 transition-colors ${
+                                isOverridden ? "bg-amber-50/40" : ""
+                              }`}
+                              data-testid={`color-override-row-${baseLine.line_id}`}
+                            >
+                              <td className="px-2 py-1.5">
+                                <div className="space-y-1">
+                                  <div>
+                                    <div className={`font-mono font-bold ${ov?.material_code && ov?.material_code !== baseLine.material_code ? "text-amber-900 font-semibold" : "text-slate-800"}`}>
+                                      {effectiveMatCode}
+                                    </div>
+                                    <div className="text-[10px] text-slate-500 line-clamp-1">{effectiveMatName}</div>
+                                  </div>
+                                  <select
+                                    className="text-[11px] font-mono border border-slate-200 bg-slate-50 rounded px-1 py-0.5 w-full max-w-[180px] text-slate-700 hover:border-purple-400 focus:outline-none"
+                                    value={ov?.material_id || baseLine.material_id || ""}
+                                    onChange={(e) => {
+                                      const selectedM = materials.find((m) => m.id === e.target.value);
+                                      if (selectedM) {
+                                        updateLineMaterial(selectedBomColor, baseLine.line_id, selectedM);
+                                      }
+                                    }}
+                                    title="Switch material for this color variant"
+                                  >
+                                    <option value="" disabled>Change material…</option>
+                                    {materials.map((m) => (
+                                      <option key={m.id} value={m.id}>
+                                        {m.code} — {m.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  className={`border px-1 py-1 text-xs w-28 rounded font-mono ${
+                                    ov?.section !== undefined && ov?.section !== baseLine.section
+                                      ? "border-amber-400 bg-amber-50 font-semibold"
+                                      : "border-slate-300"
+                                  }`}
+                                  value={effectiveSection || ""}
+                                  onChange={(e) =>
+                                    updateLineOverride(selectedBomColor, baseLine.line_id, "section", e.target.value)
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  className={`border px-1 py-1 text-xs w-24 rounded ${
+                                    ov?.color !== undefined && ov?.color !== baseLine.color
+                                      ? "border-amber-400 bg-amber-50 font-semibold"
+                                      : "border-slate-300"
+                                  }`}
+                                  value={effectiveColor || ""}
+                                  onChange={(e) =>
+                                    updateLineOverride(selectedBomColor, baseLine.line_id, "color", e.target.value)
+                                  }
+                                  placeholder="e.g. Cream"
+                                />
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  <span className="text-[10px] text-slate-400">₹</span>
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    className={`w-16 text-right font-mono border px-1 py-1 text-xs rounded ${
+                                      ov?.rate !== undefined && ov?.rate !== baseLine.rate
+                                        ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
+                                        : "border-slate-300"
+                                    }`}
+                                    value={effectiveRate}
+                                    onChange={(e) =>
+                                      updateLineOverride(selectedBomColor, baseLine.line_id, "rate", e.target.value)
+                                    }
+                                  />
+                                  <span className="text-[10px] text-slate-400">/{effectiveUnit}</span>
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  className={`w-16 text-right font-mono border px-1 py-1 text-xs rounded ${
+                                    ov?.quantity !== undefined && ov?.quantity !== baseLine.quantity
+                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
+                                      : "border-slate-300"
+                                  }`}
+                                  value={effectiveQty}
+                                  onChange={(e) =>
+                                    updateLineOverride(selectedBomColor, baseLine.line_id, "quantity", e.target.value)
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <input
+                                  type="number"
+                                  step="0.5"
+                                  className={`w-14 text-right font-mono border px-1 py-1 text-xs rounded ${
+                                    ov?.yield_per_unit !== undefined && ov?.yield_per_unit !== baseLine.yield_per_unit
+                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
+                                      : "border-slate-300"
+                                  }`}
+                                  value={effectiveYield}
+                                  onChange={(e) =>
+                                    updateLineOverride(selectedBomColor, baseLine.line_id, "yield_per_unit", e.target.value)
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <input
+                                  type="number"
+                                  step="0.5"
+                                  className={`w-14 text-right font-mono border px-1 py-1 text-xs rounded ${
+                                    ov?.waste_pct !== undefined && ov?.waste_pct !== baseLine.waste_pct
+                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
+                                      : "border-slate-300"
+                                  }`}
+                                  value={effectiveWaste}
+                                  onChange={(e) =>
+                                    updateLineOverride(selectedBomColor, baseLine.line_id, "waste_pct", e.target.value)
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5 text-right font-mono font-bold text-slate-800">
+                                {inr(cost)}
+                              </td>
+                              <td className="px-2 py-1.5 text-center">
+                                {isOverridden ? (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                    Overridden
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400 italic">Inherited</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {isOverridden && (
+                                    <button
+                                      type="button"
+                                      onClick={() => resetLineToBase(selectedBomColor, baseLine.line_id)}
+                                      className="text-slate-600 hover:text-blue-700 text-xs font-semibold p-1 hover:bg-slate-100 rounded"
+                                      title="Reset to base BOM values"
+                                      data-testid={`reset-line-${baseLine.line_id}`}
+                                    >
+                                      <RotateCcw className="w-3.5 h-3.5 inline mr-0.5" />
+                                      Reset
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeLineForColor(selectedBomColor, baseLine.line_id)}
+                                    className="text-slate-400 hover:text-red-600 p-1 hover:bg-red-50 rounded"
+                                    title="Remove this line for this color"
+                                    data-testid={`remove-line-${baseLine.line_id}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 inline" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* 2. Color-specific added lines */}
+                        {((form.color_bom_overrides || {})[selectedBomColor] || [])
+                          .map((ov, ovIdx) => ({ ov, ovIdx }))
+                          .filter(({ ov }) => !ov.line_id || !form.bom.some((b) => b.line_id === ov.line_id))
+                          .map(({ ov, ovIdx }) => {
+                            const yld = Number(ov.yield_per_unit || 1) || 1;
+                            const cost = ((Number(ov.rate || 0) * Number(ov.quantity || 0)) / yld) * (1 + Number(ov.waste_pct || 0) / 100);
+                            return (
+                              <tr key={`added-${ovIdx}`} className="bg-emerald-50/40 hover:bg-emerald-50/60 transition-colors" data-testid={`added-color-line-${ovIdx}`}>
+                                <td className="px-2 py-1.5">
+                                  <div>
+                                    <div className="font-mono font-bold text-emerald-950">{ov.material_code}</div>
+                                    <div className="text-[10px] text-emerald-700">{ov.material_name}</div>
+                                  </div>
+                                </td>
+                                <td className="px-2 py-1.5">
+                                  <input
+                                    className="border border-emerald-300 bg-white px-1 py-1 text-xs w-28 rounded font-mono"
+                                    value={ov.section || ""}
+                                    onChange={(e) =>
+                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "section", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2 py-1.5">
+                                  <input
+                                    className="border border-emerald-300 bg-white px-1 py-1 text-xs w-24 rounded"
+                                    value={ov.color || ""}
+                                    onChange={(e) =>
+                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "color", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <span className="text-[10px] text-slate-400">₹</span>
+                                    <input
+                                      type="number"
+                                      step="0.5"
+                                      className="w-16 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded font-bold text-emerald-900"
+                                      value={ov.rate ?? 0}
+                                      onChange={(e) =>
+                                        updateColorSpecificAddedLine(selectedBomColor, ovIdx, "rate", e.target.value)
+                                      }
+                                    />
+                                    <span className="text-[10px] text-slate-400">/{ov.unit}</span>
+                                  </div>
+                                </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    className="w-16 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded font-bold text-emerald-900"
+                                    value={ov.quantity ?? 1}
+                                    onChange={(e) =>
+                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "quantity", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    className="w-14 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded"
+                                    value={ov.yield_per_unit ?? 1}
+                                    onChange={(e) =>
+                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "yield_per_unit", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    className="w-14 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded"
+                                    value={ov.waste_pct ?? 0}
+                                    onChange={(e) =>
+                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "waste_pct", e.target.value)
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2 py-1.5 text-right font-mono font-bold text-emerald-900">
+                                  {inr(cost)}
+                                </td>
+                                <td className="px-2 py-1.5 text-center">
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                    + Added Line
+                                  </span>
+                                </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => removeColorSpecificAddedLine(selectedBomColor, ovIdx)}
+                                    className="text-red-500 hover:text-red-700 p-1 hover:bg-red-50 rounded"
+                                    title="Delete color-specific line"
+                                    data-testid={`delete-added-line-${ovIdx}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 inline" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 bg-white border border-slate-200 rounded text-center text-xs text-slate-500 italic">
+                  No color selected. Select or add a planned color variant above to customize its BOM overrides.
+                </div>
+              )}
             </div>
 
               {/* Labor */}
@@ -1659,9 +2541,23 @@ export default function Styles() {
             {/* Live cost preview */}
             <div className="col-span-1">
               <div className="sticky top-0 bg-[#0F172A] text-white p-5 border-2 border-[#0F172A]">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-3 flex items-center gap-2">
-                  <CalcIcon className="w-3.5 h-3.5" /> Live Cost Sheet
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-2 flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5"><CalcIcon className="w-3.5 h-3.5" /> Live Cost Sheet</span>
+                  {selectedBomColor && (
+                    <span className="text-[9px] bg-purple-900 text-purple-200 border border-purple-500 px-1.5 py-0.5 rounded font-bold font-mono">
+                      {selectedBomColor}
+                    </span>
+                  )}
                 </div>
+                {costing.hasColorOverrides ? (
+                  <div className="text-[10px] text-amber-300 bg-amber-950/60 border border-amber-800 rounded px-2 py-1 mb-2 font-medium">
+                    ✦ Costing for variant: <span className="font-bold">{costing.colorName}</span> (Custom BOM)
+                  </div>
+                ) : selectedBomColor ? (
+                  <div className="text-[10px] text-slate-400 mb-2 italic">
+                    Costing for <span className="font-medium text-slate-300">{selectedBomColor}</span> (Base BOM)
+                  </div>
+                ) : null}
                 <CostRow label="Materials" value={inr(costing.matCost)} />
                 <CostRow
                   label="Labor"

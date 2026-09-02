@@ -20,6 +20,7 @@ from models.materials import (
 )
 from auth import require_roles
 from pdf_procurement import build_material_requirement
+from routes.styles import get_effective_bom
 
 log = logging.getLogger(__name__)
 
@@ -298,7 +299,9 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
         })
         if not st or not pairs:
             continue
-        for b in st.get("bom", []):
+        effective_bom = get_effective_bom(st, j.get("color"))
+        for b_item in effective_bom:
+            b = b_item.model_dump() if hasattr(b_item, "model_dump") else (b_item if isinstance(b_item, dict) else dict(b_item))
             mid = b.get("material_id") or b.get("material_code")
             code = b.get("material_code") or ""
             name = b.get("material_name") or ""
