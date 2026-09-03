@@ -402,17 +402,19 @@ async def _auto_consume_inventory(job: dict, by_email: str, db=None) -> bool:
         return False
     style_d = stringify(style)
     pairs = job.get("quantity", 0)
-    if not pairs or not style_d.get("bom"):
+    effective_bom = get_effective_bom(style_d, job.get("color"))
+    if not pairs or not effective_bom:
         return False
 
-    mat_codes = [b.get("material_code") for b in style_d["bom"]]
+    mat_codes = [b.material_code if hasattr(b, "material_code") else b.get("material_code") for b in effective_bom]
     materials = await db.materials.find({"code": {"$in": mat_codes}}).to_list(500)
     by_code = {m["code"]: m for m in materials}
 
     movements = []
     temp_balances = {}
-    for b in style_d["bom"]:
-        mat = by_code.get(b.get("material_code")) or {}
+    for b in effective_bom:
+        b_dict = b.model_dump() if hasattr(b, "model_dump") else (b if isinstance(b, dict) else dict(b))
+        mat = by_code.get(b_dict.get("material_code")) or {}
         raw_yld = b.get("yield_per_unit")
         def_yld = b.get("default_yield_per_unit") or mat.get("default_yield_per_unit")
         if raw_yld is not None and float(raw_yld) > 0:

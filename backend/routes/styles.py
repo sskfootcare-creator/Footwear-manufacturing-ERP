@@ -30,7 +30,7 @@ from models.styles import (
     ONLINE_STATUS_SIDE_BRANCHES,
     PLANNED_COMPONENTS,
 )
-from models.materials import BomItem, BomLineOverride, ColorMaterialOverride
+from models.materials import BomItem, BomLineOverride, ColorBomOverride, ColorMaterialOverride
 from models.plm import DEFAULT_PLM_FOLDERS
 from rate_limiter import upload_rate_limiter
 
@@ -277,21 +277,17 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
     """
     Return the effective BOM for a style given a specific color.
 
-    Contract:
+    Stage 2 Contract (Flexible Per-Color BOM Line Overrides):
     - Start with style["bom"] (the base list) unchanged.
-    - If color is None, or color has no entry in color_material_overrides, return the
-      base list as-is.
-    - Otherwise, for each base BOM line: if its "section" matches a key present in
-      color_material_overrides[color], replace that line's material_id/material_name/
-      material_code/rate with the override's values (and quantity if the override
-      specifies one, otherwise keep the base line's quantity) — keep yield_per_unit,
-      waste_pct, component, and everything else from the base line untouched. Lines
-      whose section isn't overridden for this color pass through unchanged.
-    - If a style has more than one base BOM line sharing the same overridable section
-      (e.g. two separate "upper" lines), apply the override to ALL of them.
-      (Flagged: Multi-line override applied to all matching section lines; never picks
-      one arbitrarily).
-    - Fallback: checks legacy color_bom_overrides if color_material_overrides has no entry.
+    - If color is None, or color has no overrides, return the base list as-is.
+    - Otherwise, for each override in color_bom_overrides[color]: find the base line
+      matching line_id, replace ONLY the non-None fields from the override, keep
+      everything else from the base line untouched. If an override's line_id doesn't
+      match any current base line (e.g. the base BOM was edited after the override was
+      created and that line was removed), skip it and flag as a warning rather than
+      erroring — don't silently break costing for the whole style over one stale
+      override reference.
+    - Fallback: checks color_material_overrides if color_bom_overrides has no entry for this color.
     """
     base_raw = style.get("bom") or []
     base_bom: List[BomItem] = [
@@ -302,7 +298,56 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
     if not color:
         return base_bom
 
-    # 1. Check color_material_overrides (Stage 1 & 2 Simple Per-Color Overrides)
+    # 1. Flexible Per-Color BOM Line Overrides (color_bom_overrides)
+    bom_overrides_dict = style.get("color_bom_overrides") or {}
+    color_bom_ovs = bom_overrides_dict.get(color)
+    if color_bom_ovs is None and isinstance(color, str):
+        c_clean = color.strip().lower()
+        for k, v in bom_overrides_dict.items():
+            if k and str(k).strip().lower() == c_clean:
+                color_bom_ovs = v
+                break
+
+    if color_bom_ovs and isinstance(color_bom_ovs, list):
+        result_lines: List[BomItem] = list(base_bom)
+        for ov in color_bom_ovs:
+            if isinstance(ov, (ColorBomOverride, BomLineOverride)):
+                ov_dict = ov.model_dump()
+            elif isinstance(ov, dict):
+                ov_dict = dict(ov)
+            else:
+                continue
+
+            line_id = ov_dict.get("line_id")
+            if not line_id:
+                log.warning(
+                    f"Style '{style.get('code') or style.get('name') or 'unknown'}': "
+                    f"override missing line_id for color '{color}' skipped"
+                )
+                continue
+
+            removed = bool(ov_dict.get("removed", False))
+            if removed:
+                result_lines = [b for b in result_lines if b.line_id != line_id]
+                continue
+
+            matched_idx = next((i for i, b in enumerate(result_lines) if b.line_id == line_id), None)
+            if matched_idx is not None:
+                curr_dict = result_lines[matched_idx].model_dump()
+                for field_name, field_val in ov_dict.items():
+                    if field_name in ("line_id", "removed"):
+                        continue
+                    if field_val is not None:
+                        curr_dict[field_name] = field_val
+                result_lines[matched_idx] = BomItem(**curr_dict)
+            else:
+                log.warning(
+                    f"Style '{style.get('code') or style.get('name') or 'unknown'}': "
+                    f"stale override line_id '{line_id}' for color '{color}' skipped (line not in base BOM)"
+                )
+        return result_lines
+
+    # 2. Section/Material Overrides Fallback (color_material_overrides)
     mat_overrides_dict = style.get("color_material_overrides") or {}
     color_mat_overrides = mat_overrides_dict.get(color)
     if color_mat_overrides is None and isinstance(color, str):
@@ -361,65 +406,7 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
                 result_lines.append(b)
         return result_lines
 
-    # 2. Fallback to legacy color_bom_overrides
-    overrides_dict = style.get("color_bom_overrides") or {}
-    color_overrides = overrides_dict.get(color)
-    if color_overrides is None and isinstance(color, str):
-        c_clean = color.strip().lower()
-        for k, v in overrides_dict.items():
-            if k and str(k).strip().lower() == c_clean:
-                color_overrides = v
-                break
-
-    if color_overrides is None:
-        return base_bom
-
-    result_lines: List[BomItem] = list(base_bom)
-
-    for ov in color_overrides:
-        if isinstance(ov, BomLineOverride):
-            ov_dict = ov.model_dump()
-        elif isinstance(ov, dict):
-            ov_dict = dict(ov)
-        else:
-            continue
-
-        line_id = ov_dict.get("line_id")
-        removed = bool(ov_dict.get("removed", False))
-
-        if removed:
-            if line_id:
-                result_lines = [b for b in result_lines if b.line_id != line_id]
-        else:
-            matched_idx = next((i for i, b in enumerate(result_lines) if line_id and b.line_id == line_id), None)
-            if matched_idx is not None:
-                curr_dict = result_lines[matched_idx].model_dump()
-                for field_name, field_val in ov_dict.items():
-                    if field_name in ("line_id", "removed"):
-                        continue
-                    if field_val is not None:
-                        curr_dict[field_name] = field_val
-                result_lines[matched_idx] = BomItem(**curr_dict)
-            else:
-                new_item_dict = {
-                    "material_id": ov_dict.get("material_id") or "",
-                    "material_name": ov_dict.get("material_name") or "",
-                    "material_code": ov_dict.get("material_code") or "",
-                    "unit": ov_dict.get("unit") or "",
-                    "rate": float(ov_dict.get("rate") if ov_dict.get("rate") is not None else 0.0),
-                    "quantity": float(ov_dict.get("quantity") if ov_dict.get("quantity") is not None else 0.0),
-                    "yield_per_unit": float(ov_dict.get("yield_per_unit") if ov_dict.get("yield_per_unit") is not None else 1.0),
-                    "waste_pct": float(ov_dict.get("waste_pct") if ov_dict.get("waste_pct") is not None else 0.0),
-                    "section": ov_dict.get("section") or "Other",
-                    "component": ov_dict.get("component"),
-                    "with_eva": ov_dict.get("with_eva"),
-                    "color": ov_dict.get("color") or "",
-                }
-                if line_id:
-                    new_item_dict["line_id"] = line_id
-                result_lines.append(BomItem(**new_item_dict))
-
-    return result_lines
+    return base_bom
 
 
 def compute_style_costing(style: dict, color: Optional[str] = None) -> dict:

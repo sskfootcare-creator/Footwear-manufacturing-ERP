@@ -108,22 +108,50 @@ class ColorMaterialOverride(BaseModel):
         return iter(self.model_dump())
 
 
-class BomLineOverride(BaseModel):
-    line_id: Optional[str] = None   # references a base BOM line's line_id to override; None = this is a brand-new line added only for this color
-    removed: bool = False           # true = drop this base line entirely for this color (e.g. a component not used in one color)
-    # all fields below: None = inherit from the base line; set = override it
+class ColorBomOverride(BaseModel):
+    line_id: str   # which base BOM line this override applies to
+    # all fields below optional — only set what actually differs for this color,
+    # anything left None inherits the base line's value
     material_id: Optional[str] = None
     material_name: Optional[str] = None
     material_code: Optional[str] = None
-    unit: Optional[str] = None
     rate: Optional[float] = None
     quantity: Optional[float] = None
     yield_per_unit: Optional[float] = None
     waste_pct: Optional[float] = None
+    removed: Optional[bool] = False
+    unit: Optional[str] = None
     section: Optional[str] = None
     component: Optional[str] = None
     with_eva: Optional[bool] = None
     color: Optional[str] = None
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+    def __setitem__(self, item, value):
+        setattr(self, item, value)
+
+    def __contains__(self, item):
+        return hasattr(self, item)
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+    def keys(self):
+        return self.model_dump().keys()
+
+    def values(self):
+        return self.model_dump().values()
+
+    def items(self):
+        return self.model_dump().items()
+
+    def __iter__(self):
+        return iter(self.model_dump())
+
+
+BomLineOverride = ColorBomOverride
 
 
 

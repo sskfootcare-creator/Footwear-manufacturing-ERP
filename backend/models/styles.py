@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Literal, Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
 
-from models.materials import BomItem, BomLineOverride, ColorMaterialOverride, LaborItem
+from models.materials import BomItem, BomLineOverride, ColorBomOverride, ColorMaterialOverride, LaborItem
 
 OnlineStatus = Literal[
     "draft", "sample_approved", "photoshoot_completed", "catalog_completed",
@@ -58,7 +58,7 @@ class StyleIn(BaseModel):
     color_material_overrides: Optional[Dict[str, Dict[str, ColorMaterialOverride]]] = Field(default_factory=dict)
     # outer key = color name, inner key = section ("upper" | "insole" | "cover" —
     # confirmed matching exact section naming / aliases used in BomItem.section)
-    color_bom_overrides: Optional[Dict[str, List[BomLineOverride]]] = Field(default_factory=dict)
+    color_bom_overrides: Optional[Dict[str, List[ColorBomOverride]]] = Field(default_factory=dict)
 
     @field_validator("color_material_overrides", mode="before")
     @classmethod

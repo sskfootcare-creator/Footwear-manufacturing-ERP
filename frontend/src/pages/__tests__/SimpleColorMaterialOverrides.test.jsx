@@ -18,12 +18,13 @@ jest.mock("../../lib/api", () => {
   };
 });
 
-describe("Simple Per-Color Material Overrides UI in Styles.jsx", () => {
+describe("Flexible Color BOM Overrides UI in Styles.jsx", () => {
   const mockMaterials = [
     { id: "mat-1", code: "MAT-BLK-UP", name: "Black Box Leather", category: "upper", rate: 100, unit: "sqft" },
     { id: "mat-2", code: "MAT-TAN-UP", name: "Tan Suede Leather", category: "upper", rate: 160, unit: "sqft" },
     { id: "mat-3", code: "MAT-INS-01", name: "Standard Insole Board", category: "insole", rate: 35, unit: "sheet" },
     { id: "mat-4", code: "MAT-COV-01", name: "Insole PU Cover", category: "cover", rate: 20, unit: "sqft" },
+    { id: "mat-5", code: "MAT-SOL-01", name: "TPR Unit Sole", category: "sole", rate: 55, unit: "pair" },
   ];
 
   const mockStyle = {
@@ -71,16 +72,7 @@ describe("Simple Per-Color Material Overrides UI in Styles.jsx", () => {
         section: "sole",
       },
     ],
-    color_material_overrides: {
-      "Tan": {
-        "upper": {
-          "material_id": "mat-2",
-          "material_name": "Tan Suede Leather",
-          "material_code": "MAT-TAN-UP",
-          "rate": 160.0,
-        },
-      },
-    },
+    color_bom_overrides: {},
     catalogue_codes: {
       colors: ["Black", "Tan"],
       sizes: ["6", "7", "8", "9"],
@@ -119,186 +111,93 @@ describe("Simple Per-Color Material Overrides UI in Styles.jsx", () => {
     });
   });
 
-  test("Renders style with dynamic section overrides based on style's base BOM", async () => {
+  test("Full flow: select color, override 2 lines, check indicators, check other colors unchanged, reset override", async () => {
     render(
       <MemoryRouter>
         <Styles />
       </MemoryRouter>
     );
 
-    // Wait for table to load style
+    // 1. Wait for table to load style
     await waitFor(() => {
       expect(screen.getByText("Classic Derby")).toBeInTheDocument();
     });
 
-    // Click the Edit button on the style card to open edit drawer
+    // 2. Open edit drawer
     const editBtn = screen.getByRole("button", { name: /^edit$/i });
     fireEvent.click(editBtn);
 
-    // Wait for drawer to open
+    // 3. Confirm color selector tabs are visible above BOM table
     await waitFor(() => {
-      expect(screen.getByTestId("color-bom-overrides-section")).toBeInTheDocument();
+      expect(screen.getByTestId("color-tab-base")).toBeInTheDocument();
+      expect(screen.getByTestId("color-tab-Tan")).toBeInTheDocument();
     });
 
-    // 1. Confirm the BOM table headers do NOT contain "Color"
-    const bomTableHeaders = screen.getAllByRole("columnheader").map((th) => th.textContent.trim());
-    expect(bomTableHeaders).not.toContain("Color");
-    expect(bomTableHeaders).toContain("Material");
-    expect(bomTableHeaders).toContain("Section");
-    expect(bomTableHeaders).toContain("Rate");
-    expect(bomTableHeaders).toContain("Qty");
+    // By default, Base BOM is active
+    expect(screen.getByTestId("bom-rate-line-up-1")).toHaveValue(100);
+    expect(screen.getByTestId("bom-qty-line-ins-1")).toHaveValue(1);
 
-    // 2. Confirm no per-line color text input in BOM table
-    expect(screen.queryByTestId("bom-color-0")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/line color/i)).not.toBeInTheDocument();
-
-    // 3. Confirm color selector pills: "Tan" has "Custom" badge and "Black" shows "Using base BOM"
-    expect(screen.getByTestId("color-tab-Tan")).toBeInTheDocument();
-    expect(screen.getByTestId("custom-bom-badge-Tan")).toBeInTheDocument();
-    expect(screen.getByTestId("custom-bom-badge-Tan").textContent).toBe("Custom");
-
-    expect(screen.getByTestId("color-tab-Black")).toBeInTheDocument();
-    expect(screen.getByTestId("base-bom-text-Black")).toBeInTheDocument();
-    expect(screen.getByTestId("base-bom-text-Black").textContent).toBe("Using base BOM");
-
-    // 4. Confirm dynamic override sections match the style's base BOM sections ("upper", "insole", "sole")
-    expect(screen.getByTestId("override-section-upper")).toBeInTheDocument();
-    expect(screen.getByTestId("override-section-insole")).toBeInTheDocument();
-    expect(screen.getByTestId("override-section-sole")).toBeInTheDocument();
-    // Sections NOT in this style's base BOM (like "cover") are not arbitrarily shown
-    expect(screen.queryByTestId("override-section-cover")).not.toBeInTheDocument();
-
-    // Upper override is set to Tan Suede Leather (₹160)
-    expect(screen.getByTestId("rate-upper-input")).toHaveValue(160);
-    expect(screen.getByTestId("reset-upper-btn")).toBeInTheDocument();
-
-    // Insole and Sole overrides are not set -> show "+ Pick ... Override"
-    expect(screen.getByTestId("add-insole-override")).toBeInTheDocument();
-    expect(screen.getByTestId("add-sole-override")).toBeInTheDocument();
-
-    // 5. Switch to Black tab -> shows Using base BOM everywhere
-    fireEvent.click(screen.getByTestId("color-tab-Black"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("base-bom-indicator-Black")).toBeInTheDocument();
-    });
-    expect(screen.getByTestId("add-upper-override")).toBeInTheDocument();
-    expect(screen.getByTestId("add-insole-override")).toBeInTheDocument();
-    expect(screen.getByTestId("add-sole-override")).toBeInTheDocument();
-  });
-
-  test("Allows user to override more than one material (multi-material override in a section & dropdown)", async () => {
-    const multiMatStyle = {
-      ...mockStyle,
-      id: "style-multi",
-      code: "STY-MULTI",
-      name: "Multi Material Sneaker",
-      bom: [
-        {
-          line_id: "line-vamp",
-          material_id: "mat-1",
-          material_code: "MAT-BLK-UP",
-          material_name: "Black Box Leather",
-          rate: 100,
-          quantity: 1.2,
-          yield_per_unit: 1.0,
-          waste_pct: 0,
-          section: "upper",
-          component: "Vamp",
-        },
-        {
-          line_id: "line-collar",
-          material_id: "mat-2",
-          material_code: "MAT-TAN-UP",
-          material_name: "Tan Suede Leather",
-          rate: 80,
-          quantity: 0.5,
-          yield_per_unit: 1.0,
-          waste_pct: 0,
-          section: "upper",
-          component: "Collar",
-        },
-        {
-          line_id: "line-ins",
-          material_id: "mat-3",
-          material_code: "MAT-INS-01",
-          material_name: "Standard Insole Board",
-          rate: 35,
-          quantity: 1.0,
-          yield_per_unit: 1.0,
-          waste_pct: 0,
-          section: "insole",
-        },
-      ],
-      color_material_overrides: {
-        "Tan": {
-          "line-vamp": {
-            material_id: "mat-2",
-            material_name: "Tan Suede Leather",
-            material_code: "MAT-TAN-UP",
-            rate: 160.0,
-          },
-        },
-      },
-    };
-
-    http.get.mockImplementation((url) => {
-      if (url.includes("/styles/summary")) {
-        return Promise.resolve({ data: [multiMatStyle] });
-      }
-      if (url === "/materials") {
-        return Promise.resolve({ data: mockMaterials });
-      }
-      if (url.includes("/color-master")) {
-        return Promise.resolve({ data: [{ color_name: "Black" }, { color_name: "Tan" }] });
-      }
-      if (url === "/styles/style-multi") {
-        return Promise.resolve({ data: multiMatStyle });
-      }
-      if (url.includes("/catalogue-codes")) {
-        return Promise.resolve({
-          data: { colors: ["Black", "Tan"], sizes: ["6", "7", "8"], rows: [] },
-        });
-      }
-      return Promise.resolve({ data: [] });
-    });
-
-    render(
-      <MemoryRouter>
-        <Styles />
-      </MemoryRouter>
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Multi Material Sneaker")).toBeInTheDocument();
-    });
-
-    const editBtn = screen.getByRole("button", { name: /^edit$/i });
-    fireEvent.click(editBtn);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("color-bom-overrides-section")).toBeInTheDocument();
-    });
-
-    // Switch to Tan tab where overrides are configured
+    // 4. Select "Tan" color tab
     fireEvent.click(screen.getByTestId("color-tab-Tan"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("custom-bom-indicator-Tan")).toBeInTheDocument();
+      expect(screen.getByText(/Editing effective BOM for/i)).toBeInTheDocument();
     });
 
-    // 1. Confirm + Add Material Override selector is present
-    expect(screen.getByTestId("add-extra-material-override-select")).toBeInTheDocument();
+    // Initially, lines show "Using base" indicator for Tan
+    expect(screen.getByTestId("base-bom-indicator-Tan-line-up-1")).toHaveTextContent("Using base");
+    expect(screen.getByTestId("base-bom-indicator-Tan-line-ins-1")).toHaveTextContent("Using base");
 
-    // 2. Both materials in the 'upper' section are rendered so the user can override more than one material
-    expect(screen.getByTestId("materials-count-upper")).toHaveTextContent(/2 Materials in this Section:/i);
-    expect(screen.getByText(/Vamp: Black Box Leather/i)).toBeInTheDocument();
-    expect(screen.getByText(/Collar: Tan Suede Leather/i)).toBeInTheDocument();
+    // 5. Override line 1 (upper): change rate from 100 to 175
+    const rateInput = screen.getByTestId("bom-rate-line-up-1");
+    fireEvent.change(rateInput, { target: { value: "175" } });
 
-    // Vamp has the override (₹160)
-    expect(screen.getByTestId("rate-upper-input")).toHaveValue(160);
+    // 6. Override line 2 (insole): change qty from 1.0 to 2.5
+    const qtyInput = screen.getByTestId("bom-qty-line-ins-1");
+    fireEvent.change(qtyInput, { target: { value: "2.5" } });
 
-    // Collar has its own override button to allow overriding a second material
-    expect(screen.getByTestId("add-upper-1-override")).toBeInTheDocument();
+    // 7. Confirm both show "Custom for Tan" indicator
+    await waitFor(() => {
+      expect(screen.getByTestId("custom-bom-indicator-Tan-line-up-1")).toHaveTextContent("Custom for Tan");
+      expect(screen.getByTestId("custom-bom-indicator-Tan-line-ins-1")).toHaveTextContent("Custom for Tan");
+    });
+
+    // Line 3 (sole) was untouched and still shows "Using base"
+    expect(screen.getByTestId("base-bom-indicator-Tan-line-sol-1")).toHaveTextContent("Using base");
+
+    // 8. Confirm other color (Black) still shows the base values
+    fireEvent.click(screen.getByTestId("color-tab-Black"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("base-bom-indicator-Black-line-up-1")).toHaveTextContent("Using base");
+      expect(screen.getByTestId("base-bom-indicator-Black-line-ins-1")).toHaveTextContent("Using base");
+    });
+
+    expect(screen.getByTestId("bom-rate-line-up-1")).toHaveValue(100);
+    expect(screen.getByTestId("bom-qty-line-ins-1")).toHaveValue(1);
+
+    // 9. Confirm Base BOM still shows original base values
+    fireEvent.click(screen.getByTestId("color-tab-base"));
+    expect(screen.getByTestId("bom-rate-line-up-1")).toHaveValue(100);
+    expect(screen.getByTestId("bom-qty-line-ins-1")).toHaveValue(1);
+
+    // 10. Switch back to Tan and test "Reset to base" on line 1
+    fireEvent.click(screen.getByTestId("color-tab-Tan"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("reset-override-line-up-1")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("reset-override-line-up-1"));
+
+    // Line 1 should now revert to "Using base" and rate should be 100 again!
+    await waitFor(() => {
+      expect(screen.getByTestId("base-bom-indicator-Tan-line-up-1")).toHaveTextContent("Using base");
+      expect(screen.getByTestId("bom-rate-line-up-1")).toHaveValue(100);
+    });
+
+    // Line 2 is still custom for Tan
+    expect(screen.getByTestId("custom-bom-indicator-Tan-line-ins-1")).toHaveTextContent("Custom for Tan");
+    expect(screen.getByTestId("bom-qty-line-ins-1")).toHaveValue(2.5);
   });
 });
