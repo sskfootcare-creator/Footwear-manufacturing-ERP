@@ -54,8 +54,26 @@ class BomItem(BaseModel):
     def __getitem__(self, item):
         return getattr(self, item)
 
+    def __setitem__(self, item, value):
+        setattr(self, item, value)
+
+    def __contains__(self, item):
+        return hasattr(self, item)
+
     def get(self, item, default=None):
         return getattr(self, item, default)
+
+    def keys(self):
+        return self.model_dump().keys()
+
+    def values(self):
+        return self.model_dump().values()
+
+    def items(self):
+        return self.model_dump().items()
+
+    def __iter__(self):
+        return iter(self.model_dump())
 
 
 class ColorMaterialOverride(BaseModel):
@@ -68,8 +86,26 @@ class ColorMaterialOverride(BaseModel):
     def __getitem__(self, item):
         return getattr(self, item)
 
+    def __setitem__(self, item, value):
+        setattr(self, item, value)
+
+    def __contains__(self, item):
+        return hasattr(self, item)
+
     def get(self, item, default=None):
         return getattr(self, item, default)
+
+    def keys(self):
+        return self.model_dump().keys()
+
+    def values(self):
+        return self.model_dump().values()
+
+    def items(self):
+        return self.model_dump().items()
+
+    def __iter__(self):
+        return iter(self.model_dump())
 
 
 class BomLineOverride(BaseModel):

@@ -232,34 +232,66 @@ def _match_section_override(line_section: str, overrides_map: dict):
     if not line_section or not overrides_map:
         return None
     sec_clean = line_section.strip().lower()
-    # 1. Exact match (case-insensitive)
+
+    # 1. Exact match (case-insensitive & stripped)
     for k, ov in overrides_map.items():
         if k and k.strip().lower() == sec_clean:
             return ov
-    # 2. Section category alias match
+
+    # 2. Specific category & alias match (ordered from specific to general)
     for k, ov in overrides_map.items():
         k_clean = k.strip().lower()
-        if k_clean == "upper" and "upper" in sec_clean:
+        # Lining
+        if "lining" in k_clean and "lining" in sec_clean:
             return ov
-        if k_clean == "cover" and ("cover" in sec_clean or "lining" in sec_clean or "sock" in sec_clean):
+        # Mid Layer / Reinforcement
+        if ("reinforce" in k_clean or "mid layer" in k_clean or "interlining" in k_clean) and (
+            "reinforce" in sec_clean or "mid layer" in sec_clean or "interlining" in sec_clean
+        ):
             return ov
-        if k_clean == "insole" and "insole" in sec_clean and "cover" not in sec_clean:
+        # Insole Cover / Sockliner
+        if ("cover" in k_clean or "sock" in k_clean) and ("cover" in sec_clean or "sock" in sec_clean):
             return ov
+        # Insole Board / Cushion (excluding cover)
+        if ("insole" in k_clean and "cover" not in k_clean and "sock" not in k_clean) and (
+            "insole" in sec_clean and "cover" not in sec_clean and "sock" not in sec_clean
+        ):
+            return ov
+        # Upper / Upper Top (excluding lining)
+        if "upper" in k_clean and "upper" in sec_clean and "lining" not in sec_clean:
+            return ov
+        # Sole / Bottom Layer
+        if ("sole" in k_clean or "bottom" in k_clean) and ("sole" in sec_clean or "bottom" in sec_clean):
+            return ov
+
+    # 3. Fallback: direct substring match
+    for k, ov in overrides_map.items():
+        k_clean = k.strip().lower()
+        if k_clean and (k_clean in sec_clean or sec_clean in k_clean):
+            return ov
+
     return None
 
 
 def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]:
     """
     Return the effective BOM for a style given a specific color.
-    - Starts with style['bom'] (the base list).
-    - If color is None, returns base list unchanged.
-    - Checks color_material_overrides (Simple Per-Color Material Overrides for Upper / Insole / Cover):
-      For each base BOM line: if its section matches a key in color_material_overrides[color],
-      replaces material_id, material_name, material_code, rate (and quantity if specified),
-      while preserving yield_per_unit, waste_pct, component, and other base fields.
-      Applies to all matching section lines.
-    - Fallback: checks legacy color_bom_overrides if present.
-    - Returns computed merged List[BomItem] on the fly without duplicating storage.
+
+    Contract:
+    - Start with style["bom"] (the base list) unchanged.
+    - If color is None, or color has no entry in color_material_overrides, return the
+      base list as-is.
+    - Otherwise, for each base BOM line: if its "section" matches a key present in
+      color_material_overrides[color], replace that line's material_id/material_name/
+      material_code/rate with the override's values (and quantity if the override
+      specifies one, otherwise keep the base line's quantity) — keep yield_per_unit,
+      waste_pct, component, and everything else from the base line untouched. Lines
+      whose section isn't overridden for this color pass through unchanged.
+    - If a style has more than one base BOM line sharing the same overridable section
+      (e.g. two separate "upper" lines), apply the override to ALL of them.
+      (Flagged: Multi-line override applied to all matching section lines; never picks
+      one arbitrarily).
+    - Fallback: checks legacy color_bom_overrides if color_material_overrides has no entry.
     """
     base_raw = style.get("bom") or []
     base_bom: List[BomItem] = [
@@ -283,7 +315,28 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
     if color_mat_overrides and isinstance(color_mat_overrides, dict):
         result_lines: List[BomItem] = []
         for b in base_bom:
-            ov = _match_section_override(b.section, color_mat_overrides)
+            ov = None
+            # 1. Exact match by line_id (if specified)
+            if b.line_id and b.line_id in color_mat_overrides:
+                ov = color_mat_overrides[b.line_id]
+            # 2. Match by component (e.g. Vamp, Collar, Trim)
+            elif b.component:
+                c_clean = str(b.component).strip().lower()
+                for k, v in color_mat_overrides.items():
+                    if str(k).strip().lower() == c_clean:
+                        ov = v
+                        break
+            # 3. Match by material_code
+            if ov is None and b.material_code:
+                mc_clean = str(b.material_code).strip().lower()
+                for k, v in color_mat_overrides.items():
+                    if str(k).strip().lower() == mc_clean:
+                        ov = v
+                        break
+            # 4. Fallback to section-level override
+            if ov is None:
+                ov = _match_section_override(b.section, color_mat_overrides)
+
             if ov is not None:
                 if isinstance(ov, ColorMaterialOverride):
                     ov_dict = ov.model_dump()
@@ -293,11 +346,11 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
                     ov_dict = {}
 
                 curr_dict = b.model_dump()
-                if "material_id" in ov_dict:
+                if "material_id" in ov_dict and ov_dict.get("material_id"):
                     curr_dict["material_id"] = str(ov_dict.get("material_id") or "")
-                if "material_name" in ov_dict:
+                if "material_name" in ov_dict and ov_dict.get("material_name"):
                     curr_dict["material_name"] = str(ov_dict.get("material_name") or "")
-                if "material_code" in ov_dict:
+                if "material_code" in ov_dict and ov_dict.get("material_code"):
                     curr_dict["material_code"] = str(ov_dict.get("material_code") or "")
                 if ov_dict.get("rate") is not None:
                     curr_dict["rate"] = float(ov_dict["rate"])
@@ -1640,6 +1693,17 @@ async def get_style(sid: str, request: Request, color: Optional[str] = None):
         for c_color in (set((d.get("color_material_overrides") or {}).keys()) | set((d.get("color_bom_overrides") or {}).keys()))
     }
     return d
+
+
+@styles_router.get("/styles/{sid}/effective-bom")
+async def get_style_effective_bom(sid: str, request: Request, color: Optional[str] = None):
+    await _get_user(request)
+    db = get_db()
+    d = await db.styles.find_one({"_id": oid(sid)})
+    if not d:
+        raise HTTPException(404, "Style not found")
+    eff = get_effective_bom(d, color=color)
+    return [b.model_dump() if hasattr(b, "model_dump") else b for b in eff]
 
 
 @styles_router.post("/styles")

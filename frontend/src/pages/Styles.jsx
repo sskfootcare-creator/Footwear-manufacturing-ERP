@@ -149,6 +149,7 @@ export default function Styles() {
   const [styleCardColors, setStyleCardColors] = useState({});
   const [drawerActiveTab, setDrawerActiveTab] = useState("all");
   const [showAllBomLinesForColor, setShowAllBomLinesForColor] = useState(false);
+  const [extraOverrideSections, setExtraOverrideSections] = useState([]);
   // Catalogue export modal state (Phase F)
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPlatform, setExportPlatform] = useState("myntra");
@@ -416,6 +417,7 @@ export default function Styles() {
     setCatalogueCodes(null);
     setSelectedBomColor("");
     setColorSpecificAddMat(null);
+    setExtraOverrideSections([]);
     setDrawerActiveTab("all");
     setOpen(true);
   };
@@ -427,6 +429,7 @@ export default function Styles() {
     setEditingMappingId(null);
     setCatalogueCodes(null);
     setColorSpecificAddMat(null);
+    setExtraOverrideSections([]);
     setDrawerActiveTab("all");
     setOpen(true);
 
@@ -623,7 +626,6 @@ export default function Styles() {
           yield_per_unit: material.default_yield_per_unit ?? 1,
           waste_pct: 5,
           section: material.category,
-          color: "",
         },
       ],
     }));
@@ -673,27 +675,26 @@ export default function Styles() {
       }
     });
 
-    // 3. Add any colors entered in base BOM lines
-    (form.bom || []).forEach((b) => {
-      const col = (b.color || "").trim();
-      if (col && !seen.has(col.toLowerCase())) {
-        seen.add(col.toLowerCase());
-        list.push(col);
+    // 3. Add planned colors from style's catalogue config if present
+    (catalogueCodes?.colors || []).forEach((c) => {
+      const name = (c || "").trim();
+      if (name && !seen.has(name.toLowerCase())) {
+        seen.add(name.toLowerCase());
+        list.push(name);
       }
     });
 
     return list;
-  }, [colorMasterList, form.bom]);
+  }, [colorMasterList, catalogueCodes]);
 
   const availableBomColors = useMemo(() => {
     const set = new Set();
     (catalogueCodes?.colors || []).forEach((c) => c && set.add(c.trim()));
-    (form.bom || []).forEach((b) => b.color && set.add(b.color.trim()));
     Object.keys(form.color_material_overrides || {}).forEach((c) => c && set.add(c.trim()));
     Object.keys(form.color_bom_overrides || {}).forEach((c) => c && set.add(c.trim()));
     if (selectedBomColor) set.add(selectedBomColor.trim());
     return Array.from(set);
-  }, [catalogueCodes, form.bom, form.color_material_overrides, form.color_bom_overrides, selectedBomColor]);
+  }, [catalogueCodes, form.color_material_overrides, form.color_bom_overrides, selectedBomColor]);
 
   useEffect(() => {
     if (availableBomColors.length > 0 && (!selectedBomColor || !availableBomColors.includes(selectedBomColor))) {
@@ -719,12 +720,27 @@ export default function Styles() {
     return 0;
   };
 
-  const setMaterialOverride = (colorName, sectionKey, materialObj, rateVal) => {
-    if (!colorName || !sectionKey || !materialObj) return;
+  const setMaterialOverride = (colorName, sectionKey, materialObj, rateVal, aliasKey, lineId) => {
+    if (!colorName || (!sectionKey && !lineId) || !materialObj) return;
     setForm((f) => {
       const prev = f.color_material_overrides || {};
       const colMap = { ...(prev[colorName] || {}) };
-      colMap[sectionKey] = {
+      const targetKey = lineId || aliasKey || sectionKey;
+      if (lineId) {
+        delete colMap[lineId];
+      } else {
+        delete colMap[sectionKey];
+        if (aliasKey) delete colMap[aliasKey];
+        for (const k of Object.keys(colMap)) {
+          if (
+            k.toLowerCase().trim() === sectionKey.toLowerCase().trim() ||
+            (aliasKey && k.toLowerCase().trim() === aliasKey.toLowerCase().trim())
+          ) {
+            delete colMap[k];
+          }
+        }
+      }
+      colMap[targetKey] = {
         material_id: materialObj.id,
         material_name: materialObj.name,
         material_code: materialObj.code,
@@ -740,14 +756,23 @@ export default function Styles() {
     });
   };
 
-  const updateOverrideRate = (colorName, sectionKey, newRate) => {
-    if (!colorName || !sectionKey) return;
+  const updateOverrideRate = (colorName, sectionKey, newRate, aliasKey, lineId) => {
+    if (!colorName || (!sectionKey && !lineId)) return;
     setForm((f) => {
       const prev = f.color_material_overrides || {};
       const colMap = { ...(prev[colorName] || {}) };
-      if (!colMap[sectionKey]) return f;
-      colMap[sectionKey] = {
-        ...colMap[sectionKey],
+      const existingKey =
+        (lineId && colMap[lineId] ? lineId : null) ||
+        Object.keys(colMap).find(
+          (k) =>
+            (lineId && k.toLowerCase().trim() === lineId.toLowerCase().trim()) ||
+            (sectionKey && k.toLowerCase().trim() === sectionKey.toLowerCase().trim()) ||
+            (aliasKey && k.toLowerCase().trim() === aliasKey.toLowerCase().trim())
+        ) || lineId || aliasKey || sectionKey;
+
+      if (!colMap[existingKey]) return f;
+      colMap[existingKey] = {
+        ...colMap[existingKey],
         rate: Number(newRate),
       };
       return {
@@ -760,12 +785,23 @@ export default function Styles() {
     });
   };
 
-  const clearMaterialOverride = (colorName, sectionKey) => {
-    if (!colorName || !sectionKey) return;
+  const clearMaterialOverride = (colorName, sectionKey, aliasKey, lineId) => {
+    if (!colorName || (!sectionKey && !lineId)) return;
     setForm((f) => {
       const prev = f.color_material_overrides || {};
       const colMap = { ...(prev[colorName] || {}) };
-      delete colMap[sectionKey];
+      if (lineId) delete colMap[lineId];
+      if (sectionKey) delete colMap[sectionKey];
+      if (aliasKey) delete colMap[aliasKey];
+      for (const k of Object.keys(colMap)) {
+        if (
+          (lineId && k.toLowerCase().trim() === lineId.toLowerCase().trim()) ||
+          (sectionKey && k.toLowerCase().trim() === sectionKey.toLowerCase().trim()) ||
+          (aliasKey && k.toLowerCase().trim() === aliasKey.toLowerCase().trim())
+        ) {
+          delete colMap[k];
+        }
+      }
       const updated = { ...prev };
       if (Object.keys(colMap).length === 0) {
         delete updated[colorName];
@@ -813,60 +849,260 @@ export default function Styles() {
     }
   };
 
-  const SIMPLE_OVERRIDE_SECTIONS = [
+  // Standard customizable footwear sections that vary across styles/colors
+  const STANDARD_CUSTOMIZABLE_SECTIONS = [
     {
-      key: "upper",
-      label: "Upper Material Override",
+      key: "Upper Top",
+      aliasKey: "upper",
+      rawSection: "Upper Top",
+      label: "Upper Top",
       testId: "upper",
-      hint: "Overrides base upper material (e.g. leather, fabric, mesh) for this color variant.",
-      matchSection: (s) => (s || "").toLowerCase().includes("upper"),
+      hint: "Upper vamp, collar, tongue, quarter, or strap material for this variant.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("upper") && !sl.includes("lining");
+      },
     },
     {
-      key: "insole",
-      label: "Insole Material Override",
-      testId: "insole",
-      hint: "Overrides base insole board / shank cushion core material for this color variant.",
-      matchSection: (s) => (s || "").toLowerCase().includes("insole") && !(s || "").toLowerCase().includes("cover"),
+      key: "Mid Layer / Reinforcement",
+      aliasKey: "reinforcement",
+      rawSection: "Mid Layer / Reinforcement",
+      label: "Reinforcement / Mid Layer",
+      testId: "reinforcement",
+      hint: "Interlining, toe puff, counter stiffener, or EVA cushion backing.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("reinforce") || sl.includes("mid layer") || sl.includes("interlining");
+      },
     },
     {
-      key: "cover",
-      label: "Cover Material Override",
+      key: "Lining",
+      aliasKey: "lining",
+      rawSection: "Lining",
+      label: "Lining",
+      testId: "lining",
+      hint: "Inner vamp/quarter lining (leather, textile, mesh) for this variant.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("lining") && !sl.includes("insole");
+      },
+    },
+    {
+      key: "Insole Cover (PU/Leather)",
+      aliasKey: "cover",
+      rawSection: "Insole Cover (PU/Leather)",
+      label: "Insole Cover",
       testId: "cover",
-      hint: "Overrides base insole cover, top sheet, or inner lining for this color variant.",
-      matchSection: (s) => (s || "").toLowerCase().includes("cover") || (s || "").toLowerCase().includes("lining") || (s || "").toLowerCase().includes("sock"),
+      hint: "Sockliner, top sheet, or insole pad covering for this variant.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("cover") || sl.includes("sock");
+      },
+    },
+    {
+      key: "Insole Board + Cushion",
+      aliasKey: "insole",
+      rawSection: "Insole Board + Cushion",
+      label: "Insole Board / Cushion",
+      testId: "insole",
+      hint: "Base shank board, bottom cushion, or core foundation for this variant.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("insole") && !sl.includes("cover") && !sl.includes("sock");
+      },
+    },
+    {
+      key: "Sole",
+      aliasKey: "sole",
+      rawSection: "Sole",
+      label: "Sole / Outsole",
+      testId: "sole",
+      hint: "Bottom unit, welt, heel, or outsole material for this variant.",
+      matchSection: (s) => {
+        const sl = (s || "").toLowerCase();
+        return sl.includes("sole") || sl.includes("bottom");
+      },
     },
   ];
+
+  // Dynamically derive override sections from standard sections, style's BOM, and custom user sections
+  const overrideSections = useMemo(() => {
+    const list = [];
+    const seen = new Set();
+    const baseBom = form.bom || [];
+
+    // 1. Include standard customizable sections that are present in this style's base BOM
+    STANDARD_CUSTOMIZABLE_SECTIONS.forEach((stdSec) => {
+      const isPresentInBom = baseBom.some((b) => stdSec.matchSection(b.section));
+      if (isPresentInBom) {
+        seen.add(stdSec.key.toLowerCase());
+        if (stdSec.aliasKey) seen.add(stdSec.aliasKey.toLowerCase());
+        list.push({ ...stdSec });
+      }
+    });
+
+    // 2. Add any distinct sections found in base BOM that did not match standard sections
+    baseBom.forEach((b) => {
+      const rawSec = (b.section || "").trim();
+      if (rawSec && !seen.has(rawSec.toLowerCase())) {
+        seen.add(rawSec.toLowerCase());
+        const secLower = rawSec.toLowerCase();
+        list.push({
+          key: rawSec,
+          aliasKey: secLower,
+          rawSection: rawSec,
+          label: rawSec,
+          testId: secLower.replace(/[^a-z0-9_-]/g, "-"),
+          hint: `Overrides base ${rawSec} material for this color variant.`,
+          matchSection: (s) => (s || "").trim().toLowerCase() === secLower,
+        });
+      }
+    });
+
+    // 3. Add any section keys present in color_material_overrides that weren't already added
+    Object.values(form.color_material_overrides || {}).forEach((colMap) => {
+      if (colMap && typeof colMap === "object") {
+        Object.keys(colMap).forEach((secKey) => {
+          const rawKey = (secKey || "").trim();
+          if (rawKey && !seen.has(rawKey.toLowerCase())) {
+            const matchingStd = STANDARD_CUSTOMIZABLE_SECTIONS.find(
+              (s) =>
+                s.key.toLowerCase() === rawKey.toLowerCase() ||
+                (s.aliasKey && s.aliasKey.toLowerCase() === rawKey.toLowerCase()) ||
+                s.matchSection(rawKey)
+            );
+            if (matchingStd) {
+              seen.add(matchingStd.key.toLowerCase());
+              if (matchingStd.aliasKey) seen.add(matchingStd.aliasKey.toLowerCase());
+              list.push({ ...matchingStd });
+            } else {
+              seen.add(rawKey.toLowerCase());
+              const secLower = rawKey.toLowerCase();
+              list.push({
+                key: rawKey,
+                aliasKey: secLower,
+                rawSection: rawKey,
+                label: rawKey,
+                testId: secLower.replace(/[^a-z0-9_-]/g, "-"),
+                hint: `Overrides base ${rawKey} material for this color variant.`,
+                matchSection: (s) => (s || "").trim().toLowerCase() === secLower,
+              });
+            }
+          }
+        });
+      }
+    });
+
+    // 4. Add any user-added extra sections
+    (extraOverrideSections || []).forEach((sec) => {
+      const rawSec = (sec || "").trim();
+      if (rawSec && !seen.has(rawSec.toLowerCase())) {
+        seen.add(rawSec.toLowerCase());
+        const secLower = rawSec.toLowerCase();
+        list.push({
+          key: rawSec,
+          aliasKey: secLower,
+          rawSection: rawSec,
+          label: rawSec,
+          testId: secLower.replace(/[^a-z0-9_-]/g, "-"),
+          hint: `Overrides base ${rawSec} material for this color variant.`,
+          matchSection: (s) => (s || "").trim().toLowerCase() === secLower,
+          isUserAdded: true,
+        });
+      }
+    });
+
+    return list;
+  }, [form.bom, form.color_material_overrides, extraOverrideSections]);
 
   // Helper to compute effective BOM for any given color
   const getEffectiveBomForColor = (colorName) => {
     const baseBom = form.bom || [];
     if (!colorName) return baseBom;
 
-    // 1. Simple Per-Color Material Overrides (Upper / Insole / Cover)
+    // Simple Per-Color Material Overrides
     const matOverrides = (form.color_material_overrides || {})[colorName];
     if (matOverrides && Object.keys(matOverrides).length > 0) {
       return baseBom.map((b) => {
-        const sec = (b.section || "").toLowerCase();
         let matchOv = null;
-        for (const [k, ov] of Object.entries(matOverrides)) {
-          const kLower = k.toLowerCase();
-          if (kLower === sec) {
-            matchOv = ov;
-            break;
-          }
-          if (kLower === "upper" && sec.includes("upper")) {
-            matchOv = ov;
-            break;
-          }
-          if (kLower === "cover" && (sec.includes("cover") || sec.includes("lining") || sec.includes("sock"))) {
-            matchOv = ov;
-            break;
-          }
-          if (kLower === "insole" && sec.includes("insole") && !sec.includes("cover")) {
-            matchOv = ov;
-            break;
+
+        // 1. Line ID match
+        if (b.line_id && matOverrides[b.line_id]) {
+          matchOv = matOverrides[b.line_id];
+        }
+
+        // 2. Component match
+        if (!matchOv && b.component) {
+          const cClean = String(b.component).trim().toLowerCase();
+          for (const [k, ov] of Object.entries(matOverrides)) {
+            if (k && k.trim().toLowerCase() === cClean) {
+              matchOv = ov;
+              break;
+            }
           }
         }
+
+        // 3. Material code match
+        if (!matchOv && b.material_code) {
+          const mcClean = String(b.material_code).trim().toLowerCase();
+          for (const [k, ov] of Object.entries(matOverrides)) {
+            if (k && k.trim().toLowerCase() === mcClean) {
+              matchOv = ov;
+              break;
+            }
+          }
+        }
+
+        // 4. Section exact or granular match
+        if (!matchOv) {
+          const sec = (b.section || "").toLowerCase();
+          // 4a. Exact match
+          for (const [k, ov] of Object.entries(matOverrides)) {
+            if (k && k.toLowerCase().trim() === sec.trim()) {
+              matchOv = ov;
+              break;
+            }
+          }
+          // 4b. Granular term match
+          if (!matchOv) {
+            for (const [k, ov] of Object.entries(matOverrides)) {
+              const kl = k.toLowerCase().trim();
+              if (kl.includes("lining") && sec.includes("lining")) {
+                matchOv = ov;
+                break;
+              }
+              if (
+                (kl.includes("reinforce") || kl.includes("mid layer") || kl.includes("interlining")) &&
+                (sec.includes("reinforce") || sec.includes("mid layer") || sec.includes("interlining"))
+              ) {
+                matchOv = ov;
+                break;
+              }
+              if ((kl.includes("cover") || kl.includes("sock")) && (sec.includes("cover") || sec.includes("sock"))) {
+                matchOv = ov;
+                break;
+              }
+              if (
+                kl.includes("insole") &&
+                !kl.includes("cover") &&
+                !kl.includes("sock") &&
+                (sec.includes("insole") && !sec.includes("cover") && !sec.includes("sock"))
+              ) {
+                matchOv = ov;
+                break;
+              }
+              if (kl.includes("upper") && sec.includes("upper") && !sec.includes("lining")) {
+                matchOv = ov;
+                break;
+              }
+              if ((kl.includes("sole") || kl.includes("bottom")) && (sec.includes("sole") || sec.includes("bottom"))) {
+                matchOv = ov;
+                break;
+              }
+            }
+          }
+        }
+
         if (matchOv) {
           return {
             ...b,
@@ -1616,7 +1852,7 @@ export default function Styles() {
                   Color Variants &amp; Material Pricing
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5 max-w-xl">
-                  Select a color variant to customize <strong>Upper Material</strong>, <strong>Insole Material</strong>, and <strong>Cover Material</strong>. All other parts (sole, box, consumables) inherit directly from the Base BOM.
+                  Select a color variant to customize materials and rates for any section present in the Base BOM. All non-overridden parts inherit directly from the Base BOM.
                 </p>
               </div>
 
@@ -1745,7 +1981,35 @@ export default function Styles() {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* + Add Material Override Dropdown */}
+                    <select
+                      className="border border-purple-300 rounded px-2.5 py-1 text-xs bg-white text-purple-900 font-semibold shadow-sm hover:border-purple-500 cursor-pointer"
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          const val = e.target.value;
+                          setExtraOverrideSections((prev) => (prev.includes(val) ? prev : [...prev, val]));
+                        }
+                      }}
+                      data-testid="add-extra-material-override-select"
+                    >
+                      <option value="">+ Add Material Override…</option>
+                      {(form.bom || []).map((b, idx) => {
+                        const label = `${b.section}${b.component ? ` (${b.component})` : ""}: ${b.material_name}`;
+                        return (
+                          <option key={b.line_id || idx} value={b.component || b.section}>
+                            {label}
+                          </option>
+                        );
+                      })}
+                      {STANDARD_CUSTOMIZABLE_SECTIONS.map((s) => (
+                        <option key={s.key} value={s.key}>
+                          {s.label} Section
+                        </option>
+                      ))}
+                    </select>
+
                     {hasCustomOverrides(selectedBomColor) && (
                       <button
                         type="button"
@@ -1767,12 +2031,18 @@ export default function Styles() {
                   </div>
                 </div>
 
-                {/* 3 Simple Optional Fields: Upper, Insole, Cover */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {SIMPLE_OVERRIDE_SECTIONS.map((sec) => {
+                {/* Section Material Override Fields (dynamically driven by Base BOM sections) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {overrideSections.map((sec) => {
                     const colOverrides = form.color_material_overrides?.[selectedBomColor] || {};
-                    const currentOv = colOverrides[sec.key];
-                    const isOverridden = !!currentOv;
+                    const currentOv =
+                      colOverrides[sec.key] ||
+                      (sec.aliasKey ? colOverrides[sec.aliasKey] : undefined) ||
+                      Object.entries(colOverrides).find(
+                        ([k]) =>
+                          k.toLowerCase().trim() === sec.key.toLowerCase().trim() ||
+                          (sec.aliasKey && k.toLowerCase().trim() === sec.aliasKey.toLowerCase().trim())
+                      )?.[1];
 
                     // Base line(s) matching this section
                     const baseLines = (form.bom || []).filter((b) => sec.matchSection(b.section));
@@ -1782,6 +2052,11 @@ export default function Styles() {
                     const baseAvgRate = baseLines.length > 0
                       ? Number(baseLines[0].rate || 0)
                       : 0;
+
+                    const hasAnyLineOverridden = baseLines.some(
+                      (b) => !!(colOverrides[b.line_id] || (b.component && colOverrides[b.component]))
+                    );
+                    const isOverridden = !!currentOv || hasAnyLineOverridden;
 
                     return (
                       <div
@@ -1814,7 +2089,102 @@ export default function Styles() {
                             </div>
                           </div>
 
-                          {isOverridden ? (
+                          {/* If section has multiple base BOM materials, show each material line so user can override more than one material! */}
+                          {baseLines.length > 1 ? (
+                            <div className="space-y-3">
+                              <div
+                                className="text-[10px] uppercase font-bold text-slate-600 tracking-wider"
+                                data-testid={`materials-count-${sec.testId}`}
+                              >
+                                {baseLines.length} Materials in this Section:
+                              </div>
+                              {baseLines.map((line, idx) => {
+                                const lineOv =
+                                  colOverrides[line.line_id] ||
+                                  (line.component && colOverrides[line.component]) ||
+                                  (idx === 0 ? currentOv : undefined);
+                                const isLineOverridden = !!lineOv;
+                                const lineAvgRate = Number(line.rate || 0);
+
+                                return (
+                                  <div
+                                    key={line.line_id || idx}
+                                    className="p-2.5 rounded border border-slate-200 bg-white/80 space-y-2"
+                                  >
+                                    <div className="flex items-center justify-between text-xs">
+                                      <span className="font-bold text-slate-800 truncate">
+                                        {line.component ? `${line.component}: ` : ""}{line.material_name}
+                                      </span>
+                                      <span className="text-[11px] font-mono text-slate-500">
+                                        Base: ₹{line.rate}
+                                      </span>
+                                    </div>
+                                    {isLineOverridden ? (
+                                      <div className="space-y-2">
+                                        <SearchableSelect
+                                          options={materials}
+                                          value={lineOv.material_id}
+                                          onChange={(id) => {
+                                            const m = materials.find((x) => x.id === id);
+                                            if (m) setMaterialOverride(selectedBomColor, sec.key, m, lineOv.rate, sec.aliasKey, line.line_id);
+                                          }}
+                                          getKey={(m) => m.id}
+                                          getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
+                                          placeholder="Change material…"
+                                          testId={idx === 0 ? `select-${sec.testId}-material` : `select-${sec.testId}-${idx}-material`}
+                                        />
+                                        <div className="flex items-center gap-2">
+                                          <div className="relative flex-1">
+                                            <span className="absolute left-2.5 top-1.5 text-xs text-slate-400 font-mono">₹</span>
+                                            <input
+                                              type="number"
+                                              step="0.01"
+                                              value={lineOv.rate}
+                                              onChange={(e) => updateOverrideRate(selectedBomColor, sec.key, e.target.value, sec.aliasKey, line.line_id)}
+                                              className="w-full pl-6 pr-2 py-1 text-xs border border-amber-400 rounded font-mono font-bold bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
+                                              data-testid={idx === 0 ? `rate-${sec.testId}-input` : `rate-${sec.testId}-${idx}-input`}
+                                            />
+                                          </div>
+                                          {lineAvgRate > 0 && lineOv.rate !== lineAvgRate && (
+                                            <span
+                                              className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                                lineOv.rate > lineAvgRate
+                                                  ? "text-amber-800 bg-amber-200"
+                                                  : "text-emerald-800 bg-emerald-200"
+                                              }`}
+                                            >
+                                              {lineOv.rate > lineAvgRate ? `+₹${(lineOv.rate - lineAvgRate).toFixed(1)}` : `-₹${(lineAvgRate - lineOv.rate).toFixed(1)}`}
+                                            </span>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => clearMaterialOverride(selectedBomColor, sec.key, sec.aliasKey, line.line_id)}
+                                            className="text-xs text-blue-700 hover:text-blue-900 font-semibold px-1 py-0.5 hover:underline"
+                                            data-testid={idx === 0 ? `reset-${sec.testId}-btn` : `reset-${sec.testId}-${idx}-btn`}
+                                          >
+                                            Reset
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <SearchableSelect
+                                        options={materials}
+                                        value=""
+                                        onChange={(id) => {
+                                          const m = materials.find((x) => x.id === id);
+                                          if (m) setMaterialOverride(selectedBomColor, sec.key, m, m.rate, sec.aliasKey, line.line_id);
+                                        }}
+                                        getKey={(m) => m.id}
+                                        getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
+                                        placeholder={`+ Override ${line.component || line.material_name}…`}
+                                        testId={idx === 0 ? `add-${sec.testId}-override` : `add-${sec.testId}-${idx}-override`}
+                                      />
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : isOverridden ? (
                             <div className="space-y-3">
                               <div>
                                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
@@ -1825,7 +2195,7 @@ export default function Styles() {
                                   value={currentOv.material_id}
                                   onChange={(id) => {
                                     const m = materials.find((x) => x.id === id);
-                                    if (m) setMaterialOverride(selectedBomColor, sec.key, m, currentOv.rate);
+                                    if (m) setMaterialOverride(selectedBomColor, sec.key, m, currentOv.rate, sec.aliasKey);
                                   }}
                                   getKey={(m) => m.id}
                                   getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
@@ -1845,7 +2215,7 @@ export default function Styles() {
                                       type="number"
                                       step="0.01"
                                       value={currentOv.rate}
-                                      onChange={(e) => updateOverrideRate(selectedBomColor, sec.key, e.target.value)}
+                                      onChange={(e) => updateOverrideRate(selectedBomColor, sec.key, e.target.value, sec.aliasKey)}
                                       className="w-full pl-6 pr-2 py-1 text-xs border border-amber-400 rounded font-mono font-bold bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
                                       data-testid={`rate-${sec.testId}-input`}
                                     />
@@ -1874,7 +2244,7 @@ export default function Styles() {
                                 value=""
                                 onChange={(id) => {
                                   const m = materials.find((x) => x.id === id);
-                                  if (m) setMaterialOverride(selectedBomColor, sec.key, m, m.rate);
+                                  if (m) setMaterialOverride(selectedBomColor, sec.key, m, m.rate, sec.aliasKey);
                                 }}
                                 getKey={(m) => m.id}
                                 getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
@@ -1888,11 +2258,11 @@ export default function Styles() {
                           )}
                         </div>
 
-                        {isOverridden && (
+                        {isOverridden && baseLines.length <= 1 && (
                           <div className="pt-3 mt-3 border-t border-amber-200/80 flex justify-end">
                             <button
                               type="button"
-                              onClick={() => clearMaterialOverride(selectedBomColor, sec.key)}
+                              onClick={() => clearMaterialOverride(selectedBomColor, sec.key, sec.aliasKey)}
                               className="text-xs text-blue-700 hover:text-blue-900 font-semibold flex items-center gap-1 hover:underline"
                               data-testid={`reset-${sec.testId}-btn`}
                             >

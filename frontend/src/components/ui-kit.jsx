@@ -81,7 +81,7 @@ export function Select({ label, testId, children, className = "", ...rest }) {
   );
 }
 
-export function Badge({ children, color = "slate" }) {
+export function Badge({ children, color = "slate", ...props }) {
   const map = {
     slate: "bg-slate-100 text-slate-800 border-slate-300",
     green: "bg-green-100 text-green-800 border-green-300",
@@ -89,8 +89,9 @@ export function Badge({ children, color = "slate" }) {
     red: "bg-red-100 text-red-800 border-red-300",
     blue: "bg-blue-100 text-blue-800 border-blue-300",
     orange: "bg-orange-100 text-orange-800 border-orange-300",
+    purple: "bg-purple-100 text-purple-800 border-purple-300",
   };
-  return <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border ${map[color]}`}>{children}</span>;
+  return <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border ${map[color] || map.slate}`} {...props}>{children}</span>;
 }
 
 export function ConfirmDialog({ open, title = "Confirm Action", message, onConfirm, onCancel, confirmText = "Confirm", cancelText = "Cancel" }) {

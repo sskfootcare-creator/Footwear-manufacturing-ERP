@@ -987,7 +987,12 @@ app.include_router(po_ean_router)
 @app.on_event("startup")
 async def on_startup():
     validate_jwt_secret()
-    global get_current_user
+    global get_current_user, client, db
+    try:
+        client = AsyncIOMotorClient(mongo_url)
+        db = client[os.environ["DB_NAME"]]
+    except Exception:
+        pass
     get_current_user = await get_current_user_factory(db)
     await db.users.create_index("email", unique=True)
     

@@ -56,6 +56,8 @@ class StyleIn(BaseModel):
     gst_pct: float = 5
     default_pairs_per_carton: Optional[Dict[str, Any]] = None
     color_material_overrides: Optional[Dict[str, Dict[str, ColorMaterialOverride]]] = Field(default_factory=dict)
+    # outer key = color name, inner key = section ("upper" | "insole" | "cover" —
+    # confirmed matching exact section naming / aliases used in BomItem.section)
     color_bom_overrides: Optional[Dict[str, List[BomLineOverride]]] = Field(default_factory=dict)
 
     @field_validator("color_material_overrides", mode="before")
