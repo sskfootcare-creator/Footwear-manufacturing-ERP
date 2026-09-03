@@ -891,7 +891,7 @@ export default function Production() {
       )}
 
       {bulkConfirm && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="bulk-assign-dialog">
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 overflow-y-auto" data-testid="bulk-assign-dialog">
           <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md">
             <div className="px-5 py-4 border-b-2 border-slate-200">
               <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Bulk Assignment</div>
@@ -1296,7 +1296,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
     if (rate === "" || rate === null || rate === undefined) setRate(w.rate_per_pair);
   };
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="assign-dialog">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 overflow-y-auto" data-testid="assign-dialog">
       <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
           <div>
@@ -1435,7 +1435,7 @@ function QuantityDialog({ group, row, onSave, onClose }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="qty-dialog">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 overflow-y-auto" data-testid="qty-dialog">
       <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
           <div>
@@ -1496,7 +1496,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
   const pick = (w) => { setPicked(w.id); setPhone(w.phone); };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" data-testid="whatsapp-dialog">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 overflow-y-auto" data-testid="whatsapp-dialog">
       <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-lg max-h-[100dvh] overflow-y-auto">
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between" style={{ background: "#25D366", color: "white" }}>
           <div>
@@ -2075,7 +2075,7 @@ function DetailModal({ group, onClose }) {
   const allHistory = group.rows.flatMap(r => (r.history || []).map(h => ({ ...h, size: r.size, qty: r.quantity })));
   allHistory.sort((a, b) => new Date(a.at) - new Date(b.at));
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="detail-modal">
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4 overflow-y-auto" data-testid="detail-modal">
       <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
         <div className="bg-[#0F172A] text-white px-6 py-4 flex items-baseline justify-between">
           <div>
@@ -2658,7 +2658,7 @@ function PackingListDialog({ payload, onClose, onSubmit }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-0 sm:p-4" data-testid="packing-dialog">
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-0 sm:p-4 overflow-y-auto" data-testid="packing-dialog">
       <div className="bg-white w-full sm:max-w-3xl max-h-[100dvh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
         <div className="bg-[#16A34A] text-white px-6 py-4 flex items-baseline justify-between">
           <div>
@@ -2787,7 +2787,7 @@ function ShortageModal({ state, onClose, navigate }) {
 
   if (loading) {
     return (
-      <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4">
+      <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4 overflow-y-auto">
         <Card className="p-8 max-w-sm w-full text-center space-y-4">
           <div className="w-10 h-10 border-4 border-[#C27842] border-t-transparent rounded-full animate-spin mx-auto" />
           <div className="text-sm font-bold text-slate-800">Calculating inventory requirements & shortage...</div>
@@ -2825,7 +2825,7 @@ function ShortageModal({ state, onClose, navigate }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="shortage-modal">
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4 overflow-y-auto" data-testid="shortage-modal">
       <div className="bg-white w-full max-w-4xl max-h-[85vh] overflow-y-auto border-2 border-slate-200 shadow-2xl flex flex-col">
         <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between shrink-0">
           <div>
@@ -3102,7 +3102,7 @@ function PackCartonDialog({ group, style, onClose, load }) {
   const isAlreadyInQcPack = group.stage === "qc_pack";
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4" data-testid="carton-pack-dialog">
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4 overflow-y-auto" data-testid="carton-pack-dialog">
       <div className="bg-white w-full max-w-5xl max-h-[92vh] border-2 border-slate-900 shadow-2xl flex flex-col rounded-none overflow-hidden">
         
         {/* Header */}
@@ -3405,7 +3405,7 @@ function DispatchDialog({ group, onClose, load }) {
   const ic = "w-full border border-slate-300 px-2.5 py-2.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none min-h-[44px]";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4 overflow-y-auto">
       <div className="bg-white shadow-2xl w-full sm:max-w-xl flex flex-col max-h-[100dvh]">
         {/* Header */}
         <div className="bg-[#0D9488] px-6 py-4 shrink-0 flex items-start justify-between gap-3">

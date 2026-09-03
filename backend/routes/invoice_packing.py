@@ -758,10 +758,12 @@ async def list_po_invoices(pid: str, request: Request):
         query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
     
     # Also find jobs belonging to this PO so invoices generated from these jobs are linked
-    jobs = await db.production_jobs.find(
-        {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
-        {"_id": 1}
-    ).to_list(5000)
+    jobs = []
+    if hasattr(db, "production_jobs"):
+        jobs = await db.production_jobs.find(
+            {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
+            {"_id": 1}
+        ).to_list(5000)
     job_ids = [str(j["_id"]) for j in jobs]
     if job_ids:
         query_or.append({"job_ids": {"$in": job_ids}})
@@ -811,10 +813,12 @@ async def get_po_production_documents(pid: str, request: Request):
     if po_number:
         query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
     
-    jobs = await db.production_jobs.find(
-        {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
-        {"_id": 1, "job_number": 1, "stage": 1, "status": 1, "quantity": 1, "completed_qty": 1, "style_code": 1, "color": 1, "size": 1}
-    ).to_list(5000)
+    jobs = []
+    if hasattr(db, "production_jobs"):
+        jobs = await db.production_jobs.find(
+            {"$or": [{"po_id": pid}, {"po_id": oid(pid)}, {"po_number": po_number}]},
+            {"_id": 1, "job_number": 1, "stage": 1, "status": 1, "quantity": 1, "completed_qty": 1, "style_code": 1, "color": 1, "size": 1}
+        ).to_list(5000)
     job_ids = [str(j["_id"]) for j in jobs]
     if job_ids:
         query_or.append({"job_ids": {"$in": job_ids}})

@@ -526,12 +526,17 @@ export default function Materials() {
   );
 }
 
+let activeDrawerCount = 0;
+
 export function Drawer({ title, onClose, children, width = "max-w-lg" }) {
   useEffect(() => {
-    const prev = document.body.style.overflow;
+    activeDrawerCount++;
     document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = prev || "";
+      activeDrawerCount = Math.max(0, activeDrawerCount - 1);
+      if (activeDrawerCount === 0) {
+        document.body.style.overflow = "";
+      }
     };
   }, []);
 

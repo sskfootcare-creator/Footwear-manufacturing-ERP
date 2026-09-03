@@ -1121,6 +1121,18 @@ async def list_styles_summary(
             "suggested_target_price": costing_full.get("suggested_target_price", 0.0),
             "is_assigned": costing_full.get("is_assigned", False),
         }
+        color_bom_overrides = d.get("color_bom_overrides") or {}
+        color_costing = {}
+        for c_color in color_bom_overrides.keys():
+            c_cost = compute_style_costing_from_jobs(d, matched_jobs, color=c_color)
+            color_costing[c_color] = {
+                "materials_cost": c_cost.get("materials_cost", 0.0),
+                "labor_cost": c_cost.get("labor_cost", 0.0),
+                "total_cost": c_cost.get("total_cost", 0.0),
+                "selling_price": c_cost.get("selling_price", 0.0),
+                "suggested_target_price": c_cost.get("suggested_target_price", 0.0),
+                "is_assigned": c_cost.get("is_assigned", False),
+            }
         out.append({
             "id": d.get("id"),
             "code": d.get("code"),
@@ -1138,6 +1150,8 @@ async def list_styles_summary(
             "in_online_pipeline": d.get("id") in pipeline_ids,
             "cost_summary": cost_summary,
             "costing": cost_summary,
+            "color_bom_overrides": color_bom_overrides,
+            "color_costing": color_costing,
         })
     return out
 
@@ -1218,6 +1232,10 @@ async def list_styles(
                 matched_jobs.append(job)
 
         d["costing"] = compute_style_costing_from_jobs(d, matched_jobs)
+        d["color_costing"] = {
+            c_color: compute_style_costing_from_jobs(d, matched_jobs, color=c_color)
+            for c_color in (d.get("color_bom_overrides") or {}).keys()
+        }
         d["in_online_pipeline"] = d["id"] in pipeline_ids
         out.append(d)
     return out
@@ -1545,14 +1563,18 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
 
 
 @styles_router.get("/styles/{sid}")
-async def get_style(sid: str, request: Request):
+async def get_style(sid: str, request: Request, color: Optional[str] = None):
     await _get_user(request)
     db = get_db()
     d = await db.styles.find_one({"_id": oid(sid)})
     if not d:
         raise HTTPException(404, "Not found")
     d = stringify(d)
-    d["costing"] = await compute_style_costing_async(d, db)
+    d["costing"] = await compute_style_costing_async(d, db, color=color)
+    d["color_costing"] = {
+        c_color: await compute_style_costing_async(d, db, color=c_color)
+        for c_color in (d.get("color_bom_overrides") or {}).keys()
+    }
     return d
 
 

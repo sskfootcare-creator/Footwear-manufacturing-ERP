@@ -2,11 +2,12 @@ import { useEffect, useState, useMemo } from "react";
 import { http, inr } from "../lib/api";
 import { PageHeader, Card, Select, Input } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
-import { Calculator as CalcIcon, UserCheck, Info } from "lucide-react";
+import { Calculator as CalcIcon, UserCheck, Info, Palette } from "lucide-react";
 
 export default function Costing() {
   const [styles, setStyles] = useState([]);
   const [selectedId, setSelectedId] = useState("");
+  const [selectedColor, setSelectedColor] = useState("");
   const [overrides, setOverrides] = useState({
     margin_pct: null,
     gst_pct: null,
@@ -21,16 +22,59 @@ export default function Costing() {
     [styles, selectedId],
   );
 
-  const adjusted = useMemo(() => {
+  const customColors = useMemo(
+    () => Object.keys(selected?.color_bom_overrides || {}),
+    [selected],
+  );
+
+  const effectiveBom = useMemo(() => {
+    if (!selected) return [];
+    const base = selected.bom || [];
+    if (!selectedColor || !selected.color_bom_overrides?.[selectedColor]) return base;
+    const overridesList = selected.color_bom_overrides[selectedColor] || [];
+    const removedLineIds = new Set(
+      overridesList.filter((o) => o.removed && o.line_id).map((o) => o.line_id)
+    );
+    const result = [];
+    base.forEach((item, idx) => {
+      const lid = item.line_id || `line_${idx}`;
+      if (removedLineIds.has(lid)) return;
+      const mod = overridesList.find((o) => !o.removed && o.line_id === lid);
+      if (mod) {
+        result.push({ ...item, ...mod, is_override: true });
+      } else {
+        result.push(item);
+      }
+    });
+    overridesList
+      .filter((o) => !o.line_id && !o.removed)
+      .forEach((custom) => {
+        result.push({ ...custom, is_custom_addition: true });
+      });
+    return result;
+  }, [selected, selectedColor]);
+
+  const activeCosting = useMemo(() => {
     if (!selected) return null;
+    if (selectedColor && selected.color_costing?.[selectedColor]) {
+      return {
+        ...selected.costing,
+        ...selected.color_costing[selectedColor],
+      };
+    }
+    return selected.costing;
+  }, [selected, selectedColor]);
+
+  const adjusted = useMemo(() => {
+    if (!selected || !activeCosting) return null;
     const margin_pct = overrides.margin_pct ?? selected.margin_pct;
     const gst_pct = overrides.gst_pct ?? selected.gst_pct;
-    const total = selected.costing.total_cost;
+    const total = activeCosting.total_cost;
     const margin = (total * margin_pct) / 100;
     const sell = total + margin;
     const gst = (sell * gst_pct) / 100;
     return { total, margin, sell, gst, final: sell + gst, margin_pct, gst_pct };
-  }, [selected, overrides]);
+  }, [selected, activeCosting, overrides]);
 
   return (
     <div>
@@ -88,7 +132,54 @@ export default function Costing() {
                   </div>
                 </div>
               )}
-              <Section title="Bill of Materials">
+              {customColors.length > 0 && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs uppercase font-bold text-slate-700 tracking-wider flex items-center gap-1.5">
+                      <Palette className="w-3.5 h-3.5 text-purple-600" /> Color Variant Costing
+                    </span>
+                    {selectedColor ? (
+                      <span className="text-[10px] font-bold text-purple-800 bg-purple-100 px-2 py-0.5 rounded border border-purple-200">
+                        {selectedColor} Custom BOM Active
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
+                        Standard Base BOM
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedColor("")}
+                      className={`px-3 py-1 text-xs font-bold rounded border transition-colors ${
+                        !selectedColor
+                          ? "bg-slate-900 text-white border-slate-900 shadow-sm"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
+                      }`}
+                      data-testid="costing-variant-base"
+                    >
+                      Base BOM
+                    </button>
+                    {customColors.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        onClick={() => setSelectedColor(color)}
+                        className={`px-3 py-1 text-xs font-bold rounded border transition-colors flex items-center gap-1.5 ${
+                          selectedColor === color
+                            ? "bg-purple-700 text-white border-purple-700 shadow-sm"
+                            : "bg-white text-purple-700 border-purple-300 hover:bg-purple-50"
+                        }`}
+                        data-testid={`costing-variant-${color}`}
+                      >
+                        <Palette className="w-3 h-3" /> {color}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <Section title={`Bill of Materials${selectedColor ? ` — ${selectedColor} Variant` : ""}`}>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs border-2 border-slate-200">
                   <thead className="bg-slate-50">
@@ -104,17 +195,27 @@ export default function Costing() {
                     </tr>
                   </thead>
                   <tbody>
-                    {selected.bom.map((b, i) => {
+                    {effectiveBom.map((b, i) => {
                       const yld = Number(b.yield_per_unit || 1) || 1;
                       const cost =
                         ((Number(b.rate) * Number(b.quantity)) / yld) *
                         (1 + Number(b.waste_pct || 0) / 100);
                       return (
-                        <tr key={i} className="border-t border-slate-200">
+                        <tr key={i} className={`border-t border-slate-200 ${b.is_custom_addition ? "bg-purple-50/50" : b.is_override ? "bg-amber-50/50" : ""}`}>
                           <td className="px-3 py-1.5 font-mono">
                             {b.material_code}
                           </td>
-                          <td className="px-3 py-1.5">{b.material_name}</td>
+                          <td className="px-3 py-1.5">
+                            <div className="flex items-center gap-1">
+                              <span>{b.material_name}</span>
+                              {b.is_custom_addition && (
+                                <span className="text-[9px] bg-purple-100 text-purple-700 font-bold px-1.5 py-0.2 rounded">Added</span>
+                              )}
+                              {b.is_override && (
+                                <span className="text-[9px] bg-amber-100 text-amber-700 font-bold px-1.5 py-0.2 rounded">Override</span>
+                              )}
+                            </div>
+                          </td>
                           <td className="px-3 py-1.5">
                             <span className="text-[10px] uppercase tracking-wider">
                               {b.section}
@@ -231,23 +332,34 @@ export default function Costing() {
                   </span>
                 )}
               </div>
+              {selectedColor && (
+                <div data-testid="active-variant-badge" className="mb-3 px-2.5 py-1.5 bg-purple-500/20 border border-purple-400 text-purple-200 text-xs rounded flex items-center justify-between">
+                  <span className="font-bold flex items-center gap-1.5">
+                    <Palette className="w-3.5 h-3.5 text-purple-300" />
+                    <span>Variant: {selectedColor}</span>
+                  </span>
+                  <span className="text-[10px] uppercase font-bold tracking-wider bg-purple-900/60 px-1.5 py-0.5 rounded text-purple-300">
+                    Custom BOM
+                  </span>
+                </div>
+              )}
               <div className="space-y-1">
                 <CRow
                   label="Materials"
-                  value={inr(selected.costing.materials_cost)}
+                  value={inr(activeCosting.materials_cost)}
                 />
                 <CRow
-                  label={selected.costing?.is_assigned ? "Labor (Job Assigned)" : "Labor (Estimated)"}
-                  value={inr(selected.costing.labor_cost)}
-                  accent={selected.costing?.is_assigned}
+                  label={activeCosting?.is_assigned ? "Labor (Job Assigned)" : "Labor (Estimated)"}
+                  value={inr(activeCosting.labor_cost)}
+                  accent={activeCosting?.is_assigned}
                 />
                 <CRow
                   label="Overhead"
-                  value={inr(selected.costing.overhead_cost)}
+                  value={inr(activeCosting.overhead_cost != null ? activeCosting.overhead_cost : selected.costing.overhead_cost)}
                 />
                 <CRow
                   label="Packing"
-                  value={inr(selected.costing.packing_cost)}
+                  value={inr(activeCosting.packing_cost != null ? activeCosting.packing_cost : selected.costing.packing_cost)}
                 />
                 <div className="border-t border-dashed border-slate-600 my-2" />
                 <CRow label="Total Cost of Production" value={inr(adjusted.total)} bold big />

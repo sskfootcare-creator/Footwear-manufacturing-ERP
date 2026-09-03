@@ -123,6 +123,7 @@ export default function Styles() {
   const [colorMasterList, setColorMasterList] = useState([]);
   const [newCustomColorInput, setNewCustomColorInput] = useState("");
   const [colorSpecificAddMat, setColorSpecificAddMat] = useState(null);
+  const [styleCardColors, setStyleCardColors] = useState({});
   // Catalogue export modal state (Phase F)
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPlatform, setExportPlatform] = useState("myntra");
@@ -1099,83 +1100,125 @@ export default function Styles() {
                 />
                 <div className="p-5">
                   {(() => {
-                      const targetPrice = s.costing?.suggested_target_price || s.costing?.selling_price || 0;
+                      const customColors = Object.keys(s.color_bom_overrides || {});
+                      const activeColor = styleCardColors[s.id] || "";
+                      const activeCosting = (activeColor && s.color_costing?.[activeColor]) ? s.color_costing[activeColor] : s.costing;
+                      const targetPrice = activeCosting?.suggested_target_price || activeCosting?.selling_price || 0;
                       const suggestedGstRate = suggestGstPct(targetPrice);
                       const hasGstMismatch = s.gst_pct != null && Number(s.gst_pct) !== suggestedGstRate;
                       return (
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="font-mono text-xs font-bold text-slate-500">
-                            {s.code}
+                        <>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="font-mono text-xs font-bold text-slate-500">
+                              {s.code}
+                            </div>
+                            <div className="flex gap-2 flex-wrap justify-end">
+                              <Badge color={s.status === "active" ? "green" : "gray"}>
+                                {s.status === "active" ? "Active" : "Inactive"}
+                              </Badge>
+                              <Badge color="orange">{s.category}</Badge>
+                              {s.in_online_pipeline && (
+                                <Badge color="blue" data-testid={`online-badge-${s.code}`}>
+                                  <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
+                                </Badge>
+                              )}
+                              {customColors.length > 0 && (
+                                <Badge color="purple" title={`${customColors.length} custom color BOM(s) configured`} data-testid={`style-custom-bom-badge-${s.code}`}>
+                                  <Palette className="w-3 h-3 inline mr-0.5" /> {customColors.length} Custom Colors
+                                </Badge>
+                              )}
+                              {hasGstMismatch && (
+                                <Badge
+                                  color="orange"
+                                  title={`Price ₹${targetPrice} suggests ${suggestedGstRate}% GST, currently set to ${s.gst_pct}% — check before invoicing.`}
+                                  data-testid={`gst-mismatch-badge-${s.code}`}
+                                >
+                                  <AlertTriangle className="w-3 h-3 inline mr-0.5 text-amber-600" /> Price suggests {suggestedGstRate}% GST (currently {s.gst_pct}%)
+                                </Badge>
+                              )}
+                            </div>
                           </div>
-                          <div className="flex gap-2 flex-wrap justify-end">
-                            <Badge color={s.status === "active" ? "green" : "gray"}>
-                              {s.status === "active" ? "Active" : "Inactive"}
-                            </Badge>
-                            <Badge color="orange">{s.category}</Badge>
-                            {s.in_online_pipeline && (
-                              <Badge color="blue" data-testid={`online-badge-${s.code}`}>
-                                <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
-                              </Badge>
-                            )}
-                            {s.color_bom_overrides && Object.keys(s.color_bom_overrides).length > 0 && (
-                              <Badge color="purple" title={`${Object.keys(s.color_bom_overrides).length} custom color BOM(s) configured`} data-testid={`style-custom-bom-badge-${s.code}`}>
-                                <Palette className="w-3 h-3 inline mr-0.5" /> {Object.keys(s.color_bom_overrides).length} Custom Colors
-                              </Badge>
-                            )}
-                            {hasGstMismatch && (
-                              <Badge
-                                color="orange"
-                                title={`Price ₹${targetPrice} suggests ${suggestedGstRate}% GST, currently set to ${s.gst_pct}% — check before invoicing.`}
-                                data-testid={`gst-mismatch-badge-${s.code}`}
-                              >
-                                <AlertTriangle className="w-3 h-3 inline mr-0.5 text-amber-600" /> Price suggests {suggestedGstRate}% GST (currently {s.gst_pct}%)
-                              </Badge>
-                            )}
+                          <h3 className="text-lg font-bold mb-1">{s.name}</h3>
+                          <p className="text-xs text-slate-500 line-clamp-2 mb-2">
+                            {s.description || "—"}
+                          </p>
+                          {(s.insole_mould_name || s.sole_mould_name) && (
+                            <div className="flex flex-wrap gap-2 my-2 py-1.5 px-2 bg-slate-50 border border-slate-200 rounded text-xs">
+                              {s.insole_mould_name && (
+                                <div data-testid={`style-insole-mould-${s.code}`}>
+                                  <span className="font-semibold text-slate-700">Insole Mold:</span>{" "}
+                                  <span className="font-mono text-slate-900">{s.insole_mould_name}</span>
+                                </div>
+                              )}
+                              {s.sole_mould_name && (
+                                <div data-testid={`style-sole-mould-${s.code}`}>
+                                  <span className="font-semibold text-slate-700">Sole Mold:</span>{" "}
+                                  <span className="font-mono text-slate-900">{s.sole_mould_name}</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {customColors.length > 0 && (
+                            <div className="my-2.5 p-2 bg-slate-50 border border-slate-200 rounded text-xs space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Color Variant Costing:</span>
+                                {activeColor && (
+                                  <span className="text-[10px] font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">Custom BOM active</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setStyleCardColors((prev) => ({ ...prev, [s.id]: "" }))}
+                                  className={`px-2 py-1 text-[11px] font-semibold rounded border transition-colors ${
+                                    !activeColor ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
+                                  }`}
+                                  data-testid={`variant-btn-base-${s.code}`}
+                                >
+                                  Base BOM
+                                </button>
+                                {customColors.map((color) => (
+                                  <button
+                                    key={color}
+                                    type="button"
+                                    onClick={() => setStyleCardColors((prev) => ({ ...prev, [s.id]: color }))}
+                                    className={`px-2 py-1 text-[11px] font-semibold rounded border transition-colors flex items-center gap-1 ${
+                                      activeColor === color
+                                        ? "bg-purple-700 text-white border-purple-700 shadow-sm"
+                                        : "bg-white text-purple-700 border-purple-300 hover:bg-purple-50"
+                                    }`}
+                                    data-testid={`variant-btn-${color}-${s.code}`}
+                                  >
+                                    <Palette className="w-2.5 h-2.5 inline" /> {color}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="border-t border-dashed border-slate-200 pt-3 space-y-1 text-xs">
+                            <Row
+                              label="Materials"
+                              value={inr(activeCosting?.materials_cost || 0)}
+                            />
+                            <Row
+                              label={activeCosting?.is_assigned ? "Labor (Assigned)" : "Labor"}
+                              value={inr(activeCosting?.labor_cost || 0)}
+                            />
+                            <Row
+                              label={activeCosting?.is_assigned ? "Total Cost (Actual)" : "Total cost"}
+                              value={inr(activeCosting?.total_cost || 0)}
+                              bold
+                            />
+                            <Row
+                              label={`Target Price (+${s.margin_pct}%)`}
+                              value={inr(activeCosting?.suggested_target_price || activeCosting?.selling_price || 0)}
+                              bold
+                              color={activeColor ? "#7E22CE" : "#C27842"}
+                            />
                           </div>
-                        </div>
+                        </>
                       );
                     })()}
-                  <h3 className="text-lg font-bold mb-1">{s.name}</h3>
-                  <p className="text-xs text-slate-500 line-clamp-2 mb-2">
-                    {s.description || "—"}
-                  </p>
-                  {(s.insole_mould_name || s.sole_mould_name) && (
-                    <div className="flex flex-wrap gap-2 my-2 py-1.5 px-2 bg-slate-50 border border-slate-200 rounded text-xs">
-                      {s.insole_mould_name && (
-                        <div data-testid={`style-insole-mould-${s.code}`}>
-                          <span className="font-semibold text-slate-700">Insole Mold:</span>{" "}
-                          <span className="font-mono text-slate-900">{s.insole_mould_name}</span>
-                        </div>
-                      )}
-                      {s.sole_mould_name && (
-                        <div data-testid={`style-sole-mould-${s.code}`}>
-                          <span className="font-semibold text-slate-700">Sole Mold:</span>{" "}
-                          <span className="font-mono text-slate-900">{s.sole_mould_name}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="border-t border-dashed border-slate-200 pt-3 space-y-1 text-xs">
-                    <Row
-                      label="Materials"
-                      value={inr(s.costing.materials_cost)}
-                    />
-                    <Row
-                      label={s.costing?.is_assigned ? "Labor (Assigned)" : "Labor"}
-                      value={inr(s.costing.labor_cost)}
-                    />
-                    <Row
-                      label={s.costing?.is_assigned ? "Total Cost (Actual)" : "Total cost"}
-                      value={inr(s.costing.total_cost)}
-                      bold
-                    />
-                    <Row
-                      label={`Target Price (+${s.margin_pct}%)`}
-                      value={inr(s.costing.suggested_target_price || s.costing.selling_price)}
-                      bold
-                      color="#C27842"
-                    />
-                  </div>
                   <div className="text-[10px] text-slate-500 italic pt-1 flex items-center gap-1" title="To hit target margin, quote around suggested price. For actual profit, see PO Profitability.">
                     <span>💡 Suggested target price (negotiation aid). For actual profit, see PO Profitability.</span>
                   </div>

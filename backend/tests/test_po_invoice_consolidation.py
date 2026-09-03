@@ -114,6 +114,7 @@ class MockDB:
         self.payments = MockCollection()
         self.grns = MockCollection()
         self.counters = MockCollection()
+        self.production_jobs = MockCollection()
 
 
 @pytest.fixture

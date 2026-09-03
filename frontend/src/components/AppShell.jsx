@@ -831,6 +831,12 @@ export default function AppShell() {
     navigate("/login");
   }, [logout, navigate]);
 
+  const location = useLocation();
+  useEffect(() => {
+    // Unconditionally clear any trapped body scroll locks on route change
+    document.body.style.overflow = "";
+  }, [location.pathname]);
+
   const openMore = useCallback(() => setMoreOpen(true), []);
   const closeMore = useCallback(() => setMoreOpen(false), []);
 

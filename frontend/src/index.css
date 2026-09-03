@@ -37,7 +37,8 @@
 html {
   margin: 0;
   padding: 0;
-  overflow-x: clip;
+  overflow-x: hidden;
+  overflow-y: auto;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -50,7 +51,8 @@ body {
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow-x: clip;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* Prevent iOS Mobile Safari auto-zoom on input focus */
