@@ -53,6 +53,28 @@ const SECTIONS = [
   "Other",
 ];
 
+// Helper to identify components that vary by color variant in footwear (Upper, Lining, Insole Cover/Sockliner)
+export const isColorDependentLine = (b) => {
+  if (!b) return false;
+  const s = (b.section || "").toLowerCase();
+  const n = (b.material_name || "").toLowerCase();
+  const c = (b.component || "").toLowerCase();
+  return (
+    s.includes("upper") ||
+    s.includes("lining") ||
+    s.includes("cover") ||
+    s.includes("insole cover") ||
+    s.includes("sock") ||
+    n.includes("upper") ||
+    n.includes("lining") ||
+    n.includes("insole cover") ||
+    n.includes("sockliner") ||
+    c.includes("upper") ||
+    c.includes("lining") ||
+    c.includes("insole")
+  );
+};
+
 // Footwear GST Rate Threshold Configuration (India)
 // Threshold: ₹2,500 per pair
 // Price <= 2500 -> 5% GST
@@ -87,6 +109,7 @@ const emptyStyle = {
   margin_pct: 25,
   gst_pct: 5,
   default_pairs_per_carton: {},
+  color_material_overrides: {},
   color_bom_overrides: {},
 };
 
@@ -124,6 +147,8 @@ export default function Styles() {
   const [newCustomColorInput, setNewCustomColorInput] = useState("");
   const [colorSpecificAddMat, setColorSpecificAddMat] = useState(null);
   const [styleCardColors, setStyleCardColors] = useState({});
+  const [drawerActiveTab, setDrawerActiveTab] = useState("all");
+  const [showAllBomLinesForColor, setShowAllBomLinesForColor] = useState(false);
   // Catalogue export modal state (Phase F)
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPlatform, setExportPlatform] = useState("myntra");
@@ -391,6 +416,7 @@ export default function Styles() {
     setCatalogueCodes(null);
     setSelectedBomColor("");
     setColorSpecificAddMat(null);
+    setDrawerActiveTab("all");
     setOpen(true);
   };
   const startEdit = async (s) => {
@@ -401,6 +427,7 @@ export default function Styles() {
     setEditingMappingId(null);
     setCatalogueCodes(null);
     setColorSpecificAddMat(null);
+    setDrawerActiveTab("all");
     setOpen(true);
 
     try {
@@ -434,10 +461,14 @@ export default function Styles() {
         margin_pct: fullStyle.margin_pct,
         gst_pct: fullStyle.gst_pct,
         default_pairs_per_carton: fullStyle.default_pairs_per_carton || {},
+        color_material_overrides: fullStyle.color_material_overrides || {},
         color_bom_overrides: fullStyle.color_bom_overrides || {},
       });
 
-      const overrideColors = Object.keys(fullStyle.color_bom_overrides || {});
+      const overrideColors = [
+        ...Object.keys(fullStyle.color_material_overrides || {}),
+        ...Object.keys(fullStyle.color_bom_overrides || {}),
+      ];
       if (overrideColors.length > 0) {
         setSelectedBomColor(overrideColors[0]);
       } else {
@@ -463,6 +494,7 @@ export default function Styles() {
         margin_pct: Number(form.margin_pct),
         gst_pct: Number(form.gst_pct),
         default_pairs_per_carton: form.default_pairs_per_carton || {},
+        color_material_overrides: form.color_material_overrides || {},
         color_bom_overrides: form.color_bom_overrides || {},
         bom: form.bom.map((b) => ({
           ...b,
@@ -657,10 +689,11 @@ export default function Styles() {
     const set = new Set();
     (catalogueCodes?.colors || []).forEach((c) => c && set.add(c.trim()));
     (form.bom || []).forEach((b) => b.color && set.add(b.color.trim()));
+    Object.keys(form.color_material_overrides || {}).forEach((c) => c && set.add(c.trim()));
     Object.keys(form.color_bom_overrides || {}).forEach((c) => c && set.add(c.trim()));
     if (selectedBomColor) set.add(selectedBomColor.trim());
     return Array.from(set);
-  }, [catalogueCodes, form.bom, form.color_bom_overrides, selectedBomColor]);
+  }, [catalogueCodes, form.bom, form.color_material_overrides, form.color_bom_overrides, selectedBomColor]);
 
   useEffect(() => {
     if (availableBomColors.length > 0 && (!selectedBomColor || !availableBomColors.includes(selectedBomColor))) {
@@ -668,303 +701,229 @@ export default function Styles() {
     }
   }, [availableBomColors, selectedBomColor]);
 
-  const updateLineOverride = (colorName, lineId, field, val) => {
-    if (!colorName || !lineId) return;
+  const hasCustomOverrides = (colorName) => {
+    if (!colorName) return false;
+    const matOv = form.color_material_overrides?.[colorName];
+    if (matOv && Object.keys(matOv).length > 0) return true;
+    const bomOv = form.color_bom_overrides?.[colorName];
+    if (bomOv && bomOv.length > 0) return true;
+    return false;
+  };
+
+  const getCustomOverrideCount = (colorName) => {
+    if (!colorName) return 0;
+    const matOv = form.color_material_overrides?.[colorName];
+    if (matOv) return Object.keys(matOv).length;
+    const bomOv = form.color_bom_overrides?.[colorName];
+    if (bomOv) return bomOv.length;
+    return 0;
+  };
+
+  const setMaterialOverride = (colorName, sectionKey, materialObj, rateVal) => {
+    if (!colorName || !sectionKey || !materialObj) return;
     setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = [...(prevMap[colorName] || [])];
-      const baseLine = f.bom.find((b) => b.line_id === lineId);
-      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
-
-      const parsedVal = (field === "rate" || field === "quantity" || field === "yield_per_unit" || field === "waste_pct")
-        ? Number(val)
-        : val;
-
-      if (existingIdx >= 0) {
-        colorOverrides[existingIdx] = {
-          ...colorOverrides[existingIdx],
-          [field]: parsedVal,
-        };
-      } else if (baseLine) {
-        colorOverrides.push({
-          line_id: lineId,
-          removed: false,
-          material_id: baseLine.material_id,
-          material_name: baseLine.material_name,
-          material_code: baseLine.material_code,
-          unit: baseLine.unit,
-          rate: Number(baseLine.rate),
-          quantity: Number(baseLine.quantity),
-          yield_per_unit: Number(baseLine.yield_per_unit || 1),
-          waste_pct: Number(baseLine.waste_pct || 0),
-          section: baseLine.section,
-          component: baseLine.component,
-          with_eva: baseLine.with_eva,
-          color: baseLine.color,
-          [field]: parsedVal,
-        });
-      }
-
+      const prev = f.color_material_overrides || {};
+      const colMap = { ...(prev[colorName] || {}) };
+      colMap[sectionKey] = {
+        material_id: materialObj.id,
+        material_name: materialObj.name,
+        material_code: materialObj.code,
+        rate: Number(rateVal !== undefined && rateVal !== null && rateVal !== "" ? rateVal : (materialObj.rate || 0)),
+      };
       return {
         ...f,
-        color_bom_overrides: {
-          ...prevMap,
-          [colorName]: colorOverrides,
+        color_material_overrides: {
+          ...prev,
+          [colorName]: colMap,
         },
       };
     });
   };
 
-  const updateLineMaterial = (colorName, lineId, matObj) => {
-    if (!colorName || !lineId || !matObj) return;
+  const updateOverrideRate = (colorName, sectionKey, newRate) => {
+    if (!colorName || !sectionKey) return;
     setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = [...(prevMap[colorName] || [])];
-      const baseLine = f.bom.find((b) => b.line_id === lineId);
-      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
-
-      const matFields = {
-        material_id: matObj.id,
-        material_code: matObj.code,
-        material_name: matObj.name,
-        unit: matObj.unit,
-        rate: Number(matObj.rate || 0),
-        yield_per_unit: Number(matObj.default_yield_per_unit ?? 1),
+      const prev = f.color_material_overrides || {};
+      const colMap = { ...(prev[colorName] || {}) };
+      if (!colMap[sectionKey]) return f;
+      colMap[sectionKey] = {
+        ...colMap[sectionKey],
+        rate: Number(newRate),
       };
-
-      if (existingIdx >= 0) {
-        colorOverrides[existingIdx] = {
-          ...colorOverrides[existingIdx],
-          ...matFields,
-        };
-      } else if (baseLine) {
-        colorOverrides.push({
-          line_id: lineId,
-          removed: false,
-          quantity: Number(baseLine.quantity),
-          waste_pct: Number(baseLine.waste_pct || 0),
-          section: baseLine.section,
-          component: baseLine.component,
-          with_eva: baseLine.with_eva,
-          color: baseLine.color,
-          ...matFields,
-        });
-      }
-
       return {
         ...f,
-        color_bom_overrides: {
-          ...prevMap,
-          [colorName]: colorOverrides,
+        color_material_overrides: {
+          ...prev,
+          [colorName]: colMap,
         },
       };
     });
   };
 
-  const removeLineForColor = (colorName, lineId) => {
-    if (!colorName || !lineId) return;
+  const clearMaterialOverride = (colorName, sectionKey) => {
+    if (!colorName || !sectionKey) return;
     setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = [...(prevMap[colorName] || [])];
-      const existingIdx = colorOverrides.findIndex((ov) => ov.line_id === lineId);
-
-      if (existingIdx >= 0) {
-        colorOverrides[existingIdx] = {
-          ...colorOverrides[existingIdx],
-          removed: true,
-        };
+      const prev = f.color_material_overrides || {};
+      const colMap = { ...(prev[colorName] || {}) };
+      delete colMap[sectionKey];
+      const updated = { ...prev };
+      if (Object.keys(colMap).length === 0) {
+        delete updated[colorName];
       } else {
-        colorOverrides.push({
-          line_id: lineId,
-          removed: true,
-        });
-      }
-
-      return {
-        ...f,
-        color_bom_overrides: {
-          ...prevMap,
-          [colorName]: colorOverrides,
-        },
-      };
-    });
-  };
-
-  const resetLineToBase = (colorName, lineId) => {
-    if (!colorName || !lineId) return;
-    setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = (prevMap[colorName] || []).filter(
-        (ov) => ov.line_id !== lineId
-      );
-      const updatedMap = { ...prevMap };
-      if (colorOverrides.length === 0) {
-        delete updatedMap[colorName];
-      } else {
-        updatedMap[colorName] = colorOverrides;
+        updated[colorName] = colMap;
       }
       return {
         ...f,
-        color_bom_overrides: updatedMap,
+        color_material_overrides: updated,
       };
     });
   };
 
-  const addColorSpecificLine = (colorName, matObj) => {
-    if (!colorName || !matObj) return;
-    setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = [...(prevMap[colorName] || [])];
-      colorOverrides.push({
-        line_id: null,
-        removed: false,
-        material_id: matObj.id,
-        material_code: matObj.code,
-        material_name: matObj.name,
-        unit: matObj.unit,
-        rate: Number(matObj.rate || 0),
-        quantity: 1,
-        yield_per_unit: Number(matObj.default_yield_per_unit ?? 1),
-        waste_pct: 5,
-        section: matObj.category || "Other",
-        color: colorName,
-      });
-      return {
-        ...f,
-        color_bom_overrides: {
-          ...prevMap,
-          [colorName]: colorOverrides,
-        },
-      };
-    });
-  };
-
-  const updateColorSpecificAddedLine = (colorName, overrideIdx, field, val) => {
+  const resetAllOverridesForColor = (colorName) => {
     if (!colorName) return;
     setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = [...(prevMap[colorName] || [])];
-      if (colorOverrides[overrideIdx]) {
-        const parsedVal = (field === "rate" || field === "quantity" || field === "yield_per_unit" || field === "waste_pct")
-          ? Number(val)
-          : val;
-        colorOverrides[overrideIdx] = {
-          ...colorOverrides[overrideIdx],
-          [field]: parsedVal,
-        };
-      }
+      const prevMat = { ...(f.color_material_overrides || {}) };
+      delete prevMat[colorName];
+      const prevBom = { ...(f.color_bom_overrides || {}) };
+      delete prevBom[colorName];
       return {
         ...f,
-        color_bom_overrides: {
-          ...prevMap,
-          [colorName]: colorOverrides,
-        },
+        color_material_overrides: prevMat,
+        color_bom_overrides: prevBom,
       };
     });
   };
 
-  const removeColorSpecificAddedLine = (colorName, overrideIdx) => {
+  const deleteColorVariant = (colorName) => {
     if (!colorName) return;
     setForm((f) => {
-      const prevMap = f.color_bom_overrides || {};
-      const colorOverrides = (prevMap[colorName] || []).filter(
-        (_, idx) => idx !== overrideIdx
-      );
-      const updatedMap = { ...prevMap };
-      if (colorOverrides.length === 0) {
-        delete updatedMap[colorName];
-      } else {
-        updatedMap[colorName] = colorOverrides;
-      }
+      const prevMat = { ...(f.color_material_overrides || {}) };
+      delete prevMat[colorName];
+      const prevBom = { ...(f.color_bom_overrides || {}) };
+      delete prevBom[colorName];
       return {
         ...f,
-        color_bom_overrides: updatedMap,
+        color_material_overrides: prevMat,
+        color_bom_overrides: prevBom,
       };
     });
-  };
-
-  const onPreviewBulk = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setBulkFile(file);
-    setBulkPreview(null);
-    setBulkErrors([]);
-    setBulkResult(null);
-    const formData = new FormData();
-    formData.append("file", file);
-    try {
-      const res = await http.post("/styles/bulk/preview", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setBulkPreview(res.data.preview || []);
-      setBulkErrors(res.data.errors || []);
-    } catch (err) {
-      alert("Preview failed: " + (err.response?.data?.detail || err.message));
+    if (selectedBomColor === colorName) {
+      const remaining = availableBomColors.filter((c) => c !== colorName);
+      setSelectedBomColor(remaining[0] || "");
     }
   };
 
-  const submitBulk = async () => {
-    if (!bulkPreview || bulkPreview.length === 0) return;
-    setBulkUploading(true);
-    try {
-      const res = await http.post("/styles/bulk", { styles: bulkPreview });
-      setBulkResult(res.data);
-      load();
-    } catch (err) {
-      alert(
-        "Bulk upload failed: " + (err.response?.data?.detail || err.message),
-      );
-    }
-    setBulkUploading(false);
-  };
+  const SIMPLE_OVERRIDE_SECTIONS = [
+    {
+      key: "upper",
+      label: "Upper Material Override",
+      testId: "upper",
+      hint: "Overrides base upper material (e.g. leather, fabric, mesh) for this color variant.",
+      matchSection: (s) => (s || "").toLowerCase().includes("upper"),
+    },
+    {
+      key: "insole",
+      label: "Insole Material Override",
+      testId: "insole",
+      hint: "Overrides base insole board / shank cushion core material for this color variant.",
+      matchSection: (s) => (s || "").toLowerCase().includes("insole") && !(s || "").toLowerCase().includes("cover"),
+    },
+    {
+      key: "cover",
+      label: "Cover Material Override",
+      testId: "cover",
+      hint: "Overrides base insole cover, top sheet, or inner lining for this color variant.",
+      matchSection: (s) => (s || "").toLowerCase().includes("cover") || (s || "").toLowerCase().includes("lining") || (s || "").toLowerCase().includes("sock"),
+    },
+  ];
 
   // Helper to compute effective BOM for any given color
   const getEffectiveBomForColor = (colorName) => {
     const baseBom = form.bom || [];
-    if (!colorName || !form.color_bom_overrides?.[colorName]) {
-      return baseBom;
-    }
-    const overrides = form.color_bom_overrides[colorName] || [];
-    const removedLineIds = new Set(
-      overrides.filter((o) => o.removed && o.line_id).map((o) => o.line_id)
-    );
+    if (!colorName) return baseBom;
 
-    const merged = [];
-    // 1. Process base lines
-    baseBom.forEach((b) => {
-      if (removedLineIds.has(b.line_id)) return; // Dropped for this color
-      const ov = overrides.find((o) => o.line_id === b.line_id && !o.removed);
-      if (ov) {
-        merged.push({
-          ...b,
-          material_id: ov.material_id ?? b.material_id,
-          material_name: ov.material_name ?? b.material_name,
-          material_code: ov.material_code ?? b.material_code,
-          unit: ov.unit ?? b.unit,
-          rate: ov.rate !== undefined && ov.rate !== null ? ov.rate : b.rate,
-          quantity: ov.quantity !== undefined && ov.quantity !== null ? ov.quantity : b.quantity,
-          yield_per_unit: ov.yield_per_unit !== undefined && ov.yield_per_unit !== null ? ov.yield_per_unit : (b.yield_per_unit ?? 1),
-          waste_pct: ov.waste_pct !== undefined && ov.waste_pct !== null ? ov.waste_pct : (b.waste_pct ?? 0),
-          section: ov.section ?? b.section,
-          component: ov.component ?? b.component,
-          with_eva: ov.with_eva ?? b.with_eva,
-          color: ov.color ?? b.color,
-        });
-      } else {
-        merged.push(b);
-      }
-    });
-
-    // 2. Append color-specific added lines
-    overrides.forEach((o) => {
-      if (!o.line_id || !baseBom.some((b) => b.line_id === o.line_id)) {
-        if (!o.removed) {
-          merged.push(o);
+    // 1. Simple Per-Color Material Overrides (Upper / Insole / Cover)
+    const matOverrides = (form.color_material_overrides || {})[colorName];
+    if (matOverrides && Object.keys(matOverrides).length > 0) {
+      return baseBom.map((b) => {
+        const sec = (b.section || "").toLowerCase();
+        let matchOv = null;
+        for (const [k, ov] of Object.entries(matOverrides)) {
+          const kLower = k.toLowerCase();
+          if (kLower === sec) {
+            matchOv = ov;
+            break;
+          }
+          if (kLower === "upper" && sec.includes("upper")) {
+            matchOv = ov;
+            break;
+          }
+          if (kLower === "cover" && (sec.includes("cover") || sec.includes("lining") || sec.includes("sock"))) {
+            matchOv = ov;
+            break;
+          }
+          if (kLower === "insole" && sec.includes("insole") && !sec.includes("cover")) {
+            matchOv = ov;
+            break;
+          }
         }
-      }
-    });
+        if (matchOv) {
+          return {
+            ...b,
+            material_id: matchOv.material_id ?? b.material_id,
+            material_name: matchOv.material_name ?? b.material_name,
+            material_code: matchOv.material_code ?? b.material_code,
+            rate: matchOv.rate !== undefined && matchOv.rate !== null ? Number(matchOv.rate) : b.rate,
+            quantity: matchOv.quantity !== undefined && matchOv.quantity !== null ? Number(matchOv.quantity) : b.quantity,
+          };
+        }
+        return b;
+      });
+    }
 
-    return merged;
+    // 2. Legacy color_bom_overrides fallback
+    const overrides = (form.color_bom_overrides || {})[colorName];
+    if (overrides && overrides.length > 0) {
+      const removedLineIds = new Set(
+        overrides.filter((o) => o.removed && o.line_id).map((o) => o.line_id)
+      );
+
+      const merged = [];
+      baseBom.forEach((b) => {
+        if (removedLineIds.has(b.line_id)) return;
+        const ov = overrides.find((o) => o.line_id === b.line_id && !o.removed);
+        if (ov) {
+          merged.push({
+            ...b,
+            material_id: ov.material_id ?? b.material_id,
+            material_name: ov.material_name ?? b.material_name,
+            material_code: ov.material_code ?? b.material_code,
+            unit: ov.unit ?? b.unit,
+            rate: ov.rate !== undefined && ov.rate !== null ? ov.rate : b.rate,
+            quantity: ov.quantity !== undefined && ov.quantity !== null ? ov.quantity : b.quantity,
+            yield_per_unit: ov.yield_per_unit !== undefined && ov.yield_per_unit !== null ? ov.yield_per_unit : (b.yield_per_unit ?? 1),
+            waste_pct: ov.waste_pct !== undefined && ov.waste_pct !== null ? ov.waste_pct : (b.waste_pct ?? 0),
+            section: ov.section ?? b.section,
+            component: ov.component ?? b.component,
+            with_eva: ov.with_eva ?? b.with_eva,
+            color: ov.color ?? b.color,
+          });
+        } else {
+          merged.push(b);
+        }
+      });
+
+      overrides.forEach((o) => {
+        if (!o.line_id || !baseBom.some((b) => b.line_id === o.line_id)) {
+          if (!o.removed) {
+            merged.push(o);
+          }
+        }
+      });
+      return merged;
+    }
+
+    return baseBom;
   };
 
   // live costing — uses effective BOM for the selected color (or base BOM)
@@ -990,7 +949,10 @@ export default function Styles() {
     const sell = total + margin;
     const gst = (sell * Number(form.gst_pct || 0)) / 100;
     const hasColorOverrides = Boolean(
-      selectedBomColor && (form.color_bom_overrides?.[selectedBomColor] || []).length > 0
+      selectedBomColor && (
+        Object.keys(form.color_material_overrides?.[selectedBomColor] || {}).length > 0 ||
+        (form.color_bom_overrides?.[selectedBomColor] || []).length > 0
+      )
     );
     return {
       matCost,
@@ -1100,7 +1062,10 @@ export default function Styles() {
                 />
                 <div className="p-5">
                   {(() => {
-                      const customColors = Object.keys(s.color_bom_overrides || {});
+                      const customColors = Array.from(new Set([
+                        ...Object.keys(s.color_material_overrides || {}),
+                        ...Object.keys(s.color_bom_overrides || {}),
+                      ]));
                       const activeColor = styleCardColors[s.id] || "";
                       const activeCosting = (activeColor && s.color_costing?.[activeColor]) ? s.color_costing[activeColor] : s.costing;
                       const targetPrice = activeCosting?.suggested_target_price || activeCosting?.selling_price || 0;
@@ -1279,163 +1244,251 @@ export default function Styles() {
             setFormError("");
           }}
           title={editId ? "Edit Style" : "New Style"}
-          width="max-w-5xl"
+          width="w-full max-w-[96vw] xl:max-w-7xl 2xl:max-w-[1600px]"
         >
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="col-span-1 lg:col-span-2 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  {/* Style Code is system-generated (SSK_XXXXX) and immutable —
-                      never accept manual input. Show a pill when known, else
-                      an "auto-assigned on save" hint. */}
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1">
-                    Style Code
-                  </label>
-                  {form.code ? (
-                    <div
-                      className="h-10 px-3 flex items-center gap-2 rounded-md border border-neutral-200 bg-neutral-50 font-mono text-sm text-neutral-900"
-                      data-testid="form-style-code"
-                    >
-                      <span className="font-semibold">{form.code}</span>
-                      <span className="ml-auto text-[10px] uppercase tracking-wider text-neutral-500 bg-white border border-neutral-200 rounded px-1.5 py-0.5">
-                        immutable
-                      </span>
-                    </div>
-                  ) : (
-                    <div
-                      className="h-10 px-3 flex items-center rounded-md border border-dashed border-neutral-300 bg-neutral-50/50 text-xs text-neutral-500 italic"
-                      data-testid="form-style-code-placeholder"
-                    >
-                      Auto-assigned on save (SSK_XXXXX)
-                    </div>
-                  )}
-                  {formError && (
-                    <p
-                      className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2"
-                      data-testid="form-style-error"
-                    >
-                      {formError}
-                    </p>
-                  )}
-                </div>
-                <Input
-                  label="Name"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  testId="form-style-name"
-                />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Input
-                  label="Category"
-                  value={form.category}
-                  onChange={(e) =>
-                    setForm({ ...form, category: e.target.value })
-                  }
-                />
-                <Input
-                  label="Base Size"
-                  value={form.base_size}
-                  onChange={(e) =>
-                    setForm({ ...form, base_size: e.target.value })
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Input
-                  label="Insole Mold Name"
-                  placeholder="e.g. INS-M01 / Flat Die"
-                  value={form.insole_mould_name || ""}
-                  onChange={(e) =>
-                    setForm({ ...form, insole_mould_name: e.target.value })
-                  }
-                  testId="form-style-insole-mould"
-                />
-                <Input
-                  label="Sole Mold Name"
-                  placeholder="e.g. SL-M05 / Runner Cup"
-                  value={form.sole_mould_name || ""}
-                  onChange={(e) =>
-                    setForm({ ...form, sole_mould_name: e.target.value })
-                  }
-                  testId="form-style-sole-mould"
-                />
-              </div>
-              <Input
-                label="Description"
-                value={form.description}
-                onChange={(e) =>
-                  setForm({ ...form, description: e.target.value })
-                }
-              />
+          {/* Quick Tabs / Jump Navigation Bar */}
+          <div className="sticky top-0 z-20 bg-white/95 backdrop-blur-sm border-b border-slate-200 -mt-4 sm:-mt-6 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3 shadow-sm">
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5">
+              <button
+                type="button"
+                onClick={() => setDrawerActiveTab("all")}
+                className={`px-3 py-1.5 text-xs font-bold rounded transition-colors whitespace-nowrap ${
+                  drawerActiveTab === "all"
+                    ? "bg-slate-900 text-white shadow-sm"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+                data-testid="tab-all-sections"
+              >
+                All Sections
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawerActiveTab("bom")}
+                className={`px-3 py-1.5 text-xs font-bold rounded transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  drawerActiveTab === "bom"
+                    ? "bg-[#C27842] text-white shadow-sm"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+                data-testid="tab-bom-materials"
+              >
+                <span>BOM &amp; Materials</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${drawerActiveTab === "bom" ? "bg-amber-800 text-amber-100" : "bg-slate-200 text-slate-700"}`}>
+                  {form.bom.length}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawerActiveTab("color_overrides")}
+                className={`px-3 py-1.5 text-xs font-bold rounded transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                  drawerActiveTab === "color_overrides"
+                    ? "bg-purple-700 text-white shadow-sm"
+                    : "bg-slate-100 text-purple-800 hover:bg-purple-100"
+                }`}
+                data-testid="tab-color-overrides"
+              >
+                <Palette className="w-3 h-3 inline" />
+                <span>Color Overrides</span>
+                {new Set([...Object.keys(form.color_material_overrides || {}), ...Object.keys(form.color_bom_overrides || {})]).size > 0 && (
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${drawerActiveTab === "color_overrides" ? "bg-purple-900 text-purple-200" : "bg-purple-200 text-purple-800"}`}>
+                    {new Set([...Object.keys(form.color_material_overrides || {}), ...Object.keys(form.color_bom_overrides || {})]).size}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawerActiveTab("costing")}
+                className={`px-3 py-1.5 text-xs font-bold rounded transition-colors whitespace-nowrap ${
+                  drawerActiveTab === "costing"
+                    ? "bg-slate-900 text-white shadow-sm"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+                data-testid="tab-labor-overheads"
+              >
+                Labor &amp; Overheads
+              </button>
+              {editId && (
+                <button
+                  type="button"
+                  onClick={() => setDrawerActiveTab("mappings")}
+                  className={`px-3 py-1.5 text-xs font-bold rounded transition-colors whitespace-nowrap ${
+                    drawerActiveTab === "mappings"
+                      ? "bg-amber-700 text-white shadow-sm"
+                      : "bg-slate-100 text-amber-800 hover:bg-amber-100"
+                  }`}
+                  data-testid="tab-catalogue-mappings"
+                >
+                  Catalogue &amp; Mappings
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <BtnPrimary
+                onClick={save}
+                className="bg-[#C27842] border-[#C27842] hover:bg-[#A65D24] text-xs px-3.5 py-1.5 shadow-sm"
+                data-testid="save-style-top-btn"
+              >
+                <Save className="w-3.5 h-3.5 inline mr-1 -mt-0.5" /> Save Style
+              </BtnPrimary>
+            </div>
+          </div>
 
-              {/* Image upload */}
-              <ImageUploader
-                label="Style Image"
-                maxSizeMB={8}
-                testIdPrefix="style-image"
-                value={{
-                  url: form.image_url,
-                  original_url: form.image_original_url || form.image_url,
-                  display_url: form.image_display_url,
-                  thumbnail_url: form.image_thumbnail_url,
-                }}
-                onChange={onImageChange}
-              />
-
-              {/* BOM */}
-              <div>
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 mt-4 mb-2">
-                  <h3 className="text-sm font-bold uppercase tracking-wider">
-                    Bill of Materials
-                  </h3>
-                  <div className="w-full sm:w-64">
-                    <SearchableSelect
-                      options={materials}
-                      value=""
-                      onChange={(id) => {
-                        const m = materials.find((x) => x.id === id);
-                        if (m) addBomRow(m);
-                      }}
-                      getKey={(m) => m.id}
-                      getLabel={(m) => `${m.code} — ${m.name}`}
-                      placeholder="+ Add material…"
-                      testId="bom-add-material"
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 pt-2">
+            <div className="col-span-1 xl:col-span-8 2xl:col-span-9 space-y-6">
+              {/* Section 1: Basic Details & BOM */}
+              {(drawerActiveTab === "all" || drawerActiveTab === "bom") && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      {/* Style Code is system-generated (SSK_XXXXX) and immutable —
+                          never accept manual input. Show a pill when known, else
+                          an "auto-assigned on save" hint. */}
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1">
+                        Style Code
+                      </label>
+                      {form.code ? (
+                        <div
+                          className="h-10 px-3 flex items-center gap-2 rounded-md border border-neutral-200 bg-neutral-50 font-mono text-sm text-neutral-900"
+                          data-testid="form-style-code"
+                        >
+                          <span className="font-semibold">{form.code}</span>
+                          <span className="ml-auto text-[10px] uppercase tracking-wider text-neutral-500 bg-white border border-neutral-200 rounded px-1.5 py-0.5">
+                            immutable
+                          </span>
+                        </div>
+                      ) : (
+                        <div
+                          className="h-10 px-3 flex items-center rounded-md border border-dashed border-neutral-300 bg-neutral-50/50 text-xs text-neutral-500 italic"
+                          data-testid="form-style-code-placeholder"
+                        >
+                          Auto-assigned on save (SSK_XXXXX)
+                        </div>
+                      )}
+                      {formError && (
+                        <p
+                          className="mt-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2"
+                          data-testid="form-style-error"
+                        >
+                          {formError}
+                        </p>
+                      )}
+                    </div>
+                    <Input
+                      label="Name"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      testId="form-style-name"
                     />
                   </div>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-2 border-slate-200">
-                  <thead className="bg-slate-50">
-                    <tr className="text-left">
-                      <th className="px-2 py-2 font-bold">Material</th>
-                      <th className="px-2 py-2 font-bold">Section</th>
-                      <th className="px-2 py-2 font-bold">Color</th>
-                      <th className="px-2 py-2 font-bold text-right">Rate</th>
-                      <th
-                        className="px-2 py-2 font-bold text-right"
-                        title="Material consumption per pair"
-                      >
-                        Qty
-                      </th>
-                      <th
-                        className="px-2 py-2 font-bold text-right"
-                        title="Pairs produced per 1 unit of material (e.g., 10 uppers per metre)"
-                      >
-                        Yield
-                      </th>
-                      <th className="px-2 py-2 font-bold text-right">Waste%</th>
-                      <th className="px-2 py-2 font-bold text-right">
-                        Cost/pair
-                      </th>
-                      <th />
-                    </tr>
-                  </thead>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input
+                      label="Category"
+                      value={form.category}
+                      onChange={(e) =>
+                        setForm({ ...form, category: e.target.value })
+                      }
+                    />
+                    <Input
+                      label="Base Size"
+                      value={form.base_size}
+                      onChange={(e) =>
+                        setForm({ ...form, base_size: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input
+                      label="Insole Mold Name"
+                      placeholder="e.g. INS-M01 / Flat Die"
+                      value={form.insole_mould_name || ""}
+                      onChange={(e) =>
+                        setForm({ ...form, insole_mould_name: e.target.value })
+                      }
+                      testId="form-style-insole-mould"
+                    />
+                    <Input
+                      label="Sole Mold Name"
+                      placeholder="e.g. SL-M05 / Runner Cup"
+                      value={form.sole_mould_name || ""}
+                      onChange={(e) =>
+                        setForm({ ...form, sole_mould_name: e.target.value })
+                      }
+                      testId="form-style-sole-mould"
+                    />
+                  </div>
+                  <Input
+                    label="Description"
+                    value={form.description}
+                    onChange={(e) =>
+                      setForm({ ...form, description: e.target.value })
+                    }
+                  />
+
+                  {/* Image upload */}
+                  <ImageUploader
+                    label="Style Image"
+                    maxSizeMB={8}
+                    testIdPrefix="style-image"
+                    value={{
+                      url: form.image_url,
+                      original_url: form.image_original_url || form.image_url,
+                      display_url: form.image_display_url,
+                      thumbnail_url: form.image_thumbnail_url,
+                    }}
+                    onChange={onImageChange}
+                  />
+
+                  {/* BOM */}
+                  <div>
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 mt-4 mb-2">
+                      <h3 className="text-sm font-bold uppercase tracking-wider">
+                        Bill of Materials
+                      </h3>
+                      <div className="w-full sm:w-64">
+                        <SearchableSelect
+                          options={materials}
+                          value=""
+                          onChange={(id) => {
+                            const m = materials.find((x) => x.id === id);
+                            if (m) addBomRow(m);
+                          }}
+                          getKey={(m) => m.id}
+                          getLabel={(m) => `${m.code} — ${m.name}`}
+                          placeholder="+ Add material…"
+                          testId="bom-add-material"
+                        />
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto border-2 border-slate-200 rounded shadow-sm overscroll-x-contain">
+                      <table className="w-full text-xs min-w-[760px]">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr className="text-left text-slate-700">
+                          <th className="px-3 py-2 font-bold">Material</th>
+                          <th className="px-3 py-2 font-bold">Section</th>
+                          <th className="px-3 py-2 font-bold text-right">Rate</th>
+                          <th
+                            className="px-3 py-2 font-bold text-right"
+                            title="Material consumption per pair"
+                          >
+                            Qty
+                          </th>
+                          <th
+                            className="px-3 py-2 font-bold text-right"
+                            title="Pairs produced per 1 unit of material (e.g., 10 uppers per metre)"
+                          >
+                            Yield
+                          </th>
+                          <th className="px-3 py-2 font-bold text-right">Waste%</th>
+                          <th className="px-3 py-2 font-bold text-right">
+                            Cost/pair
+                          </th>
+                          <th className="px-2 py-2 text-center">Action</th>
+                        </tr>
+                      </thead>
                   <tbody>
                     {form.bom.length === 0 && (
                       <tr>
                         <td
-                          colSpan="9"
+                          colSpan="8"
                           className="px-2 py-6 text-center text-slate-400"
                         >
                           No items. Add from dropdown above.
@@ -1488,18 +1541,6 @@ export default function Styles() {
                               placeholder="type or pick…"
                             />
                           </td>
-                          <td className="px-2 py-1.5">
-                            <input
-                              type="text"
-                              className="border border-slate-300 px-1 py-0.5 text-xs w-28 placeholder:text-slate-400"
-                              value={b.color || ""}
-                              onChange={(e) =>
-                                updateBom(i, "color", e.target.value)
-                              }
-                              data-testid={`bom-color-${i}`}
-                              placeholder="e.g. Tan, Navy…"
-                            />
-                          </td>
                           <td className="px-2 py-1.5 text-right font-mono">
                             ₹{b.rate}
                             <span className="text-[10px] text-slate-400">
@@ -1515,7 +1556,7 @@ export default function Styles() {
                                 updateBom(i, "quantity", e.target.value)
                               }
                               inputMode="decimal"
-                              className="w-16 text-right font-mono border border-slate-300 px-1 py-2 text-xs min-h-[44px]"
+                              className="w-16 text-right font-mono border border-slate-300 px-1 py-1 text-xs rounded"
                             />
                           </td>
                           <td className="px-2 py-1.5">
@@ -1527,7 +1568,7 @@ export default function Styles() {
                                 updateBom(i, "yield_per_unit", e.target.value)
                               }
                               inputMode="decimal"
-                              className="w-14 text-right font-mono border border-slate-300 px-1 py-2 text-xs min-h-[44px]"
+                              className="w-14 text-right font-mono border border-slate-300 px-1 py-1 text-xs rounded"
                               title="Pairs per 1 unit of material"
                               data-testid={`bom-yield-${i}`}
                             />
@@ -1541,7 +1582,7 @@ export default function Styles() {
                                 updateBom(i, "waste_pct", e.target.value)
                               }
                               inputMode="decimal"
-                              className="w-14 text-right font-mono border border-slate-300 px-1 py-2 text-xs min-h-[44px]"
+                              className="w-14 text-right font-mono border border-slate-300 px-1 py-1 text-xs rounded"
                             />
                           </td>
                           <td className="px-2 py-1.5 text-right font-mono font-bold">
@@ -1562,524 +1603,320 @@ export default function Styles() {
                 </table>
               </div>
             </div>
+          </div>
+        )}
 
-            {/* Color-Specific BOM Overrides Section */}
-            <div className="border-2 border-purple-200 bg-purple-50/30 p-4 rounded-lg mt-6" data-testid="color-bom-overrides-section">
-              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                <div>
-                  <h3 className="text-sm font-bold uppercase tracking-wider flex items-center gap-1.5 text-purple-950">
-                    <Palette className="w-4 h-4 text-purple-600" />
-                    Color-Specific BOM Overrides
-                  </h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Select a color variant to customize its materials, consumption, or rates. Colors with no overrides use the base BOM.
-                  </p>
-                </div>
-                {/* Color Selector Pills & Add Variant dropdown */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  {availableBomColors.map((col) => {
-                    const isSelected = selectedBomColor === col;
-                    const ovCount = (form.color_bom_overrides?.[col] || []).length;
-                    const hasCustom = ovCount > 0;
-                    return (
-                      <button
-                        key={col}
-                        type="button"
-                        onClick={() => setSelectedBomColor(col)}
-                        className={`px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5 transition-all border ${
-                          isSelected
-                            ? "bg-purple-700 text-white border-purple-700 shadow-sm"
-                            : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
-                        }`}
-                        data-testid={`color-tab-${col}`}
-                      >
-                        <span>{col}</span>
-                        {hasCustom ? (
-                          <span
-                            className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                              isSelected
-                                ? "bg-amber-400 text-purple-950"
-                                : "bg-amber-100 text-amber-900 border border-amber-300"
-                            }`}
-                            data-testid={`custom-bom-badge-${col}`}
-                          >
-                            Custom BOM
-                          </span>
-                        ) : (
-                          <span
-                            className={`text-[10px] ${
-                              isSelected ? "text-purple-200" : "text-slate-400"
-                            }`}
-                            data-testid={`base-bom-text-${col}`}
-                          >
-                            using base BOM
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+        {/* Section 2: Color Variants & Material Pricing */}
+        {(drawerActiveTab === "all" || drawerActiveTab === "color_overrides") && (
+          <div className="border-2 border-purple-200 bg-purple-50/20 p-5 rounded-lg mt-2" data-testid="color-bom-overrides-section">
+            <div className="flex items-start sm:items-center justify-between mb-4 flex-wrap gap-3">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-wider flex items-center gap-1.5 text-purple-950">
+                  <Palette className="w-4 h-4 text-purple-600" />
+                  Color Variants &amp; Material Pricing
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 max-w-xl">
+                  Select a color variant to customize <strong>Upper Material</strong>, <strong>Insole Material</strong>, and <strong>Cover Material</strong>. All other parts (sole, box, consumables) inherit directly from the Base BOM.
+                </p>
+              </div>
 
-                  {/* Add another color variant dropdown & custom color text input */}
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <select
-                      className="border border-purple-300 rounded px-2 py-1 text-xs bg-white text-slate-800 font-semibold shadow-sm hover:border-purple-500 cursor-pointer"
-                      value=""
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          const c = e.target.value.trim();
-                          if (c) {
-                            setSelectedBomColor(c);
-                          }
+              {/* Color Selector Pills & Add Variant dropdown */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {availableBomColors.map((col) => {
+                  const isSelected = selectedBomColor === col;
+                  const isCustom = hasCustomOverrides(col);
+                  return (
+                    <button
+                      key={col}
+                      type="button"
+                      onClick={() => setSelectedBomColor(col)}
+                      className={`px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5 transition-all border ${
+                        isSelected
+                          ? "bg-purple-700 text-white border-purple-700 shadow-sm"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                      }`}
+                      data-testid={`color-tab-${col}`}
+                    >
+                      <span>{col}</span>
+                      {isCustom ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            isSelected
+                              ? "bg-amber-400 text-purple-950"
+                              : "bg-amber-100 text-amber-900 border border-amber-300"
+                          }`}
+                          data-testid={`custom-bom-badge-${col}`}
+                        >
+                          Custom
+                        </span>
+                      ) : (
+                        <span
+                          className={`text-[10px] ${
+                            isSelected ? "text-purple-200" : "text-slate-400"
+                          }`}
+                          data-testid={`base-bom-text-${col}`}
+                        >
+                          Using base BOM
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+
+                {/* Add another color variant dropdown & custom color text input */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <select
+                    className="border border-purple-300 rounded px-2.5 py-1 text-xs bg-white text-slate-800 font-semibold shadow-sm hover:border-purple-500 cursor-pointer"
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        const c = e.target.value.trim();
+                        if (c) {
+                          setSelectedBomColor(c);
+                        }
+                      }
+                    }}
+                    data-testid="add-color-override-select"
+                  >
+                    <option value="">+ Add Color Variant…</option>
+                    {allColorOptions.map((colName) => (
+                      <option key={colName} value={colName}>
+                        {colName} {availableBomColors.includes(colName) ? "(Added)" : ""}
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="flex items-center gap-1 bg-white border border-purple-300 rounded px-1.5 py-0.5 shadow-sm">
+                    <input
+                      type="text"
+                      placeholder="Type custom color…"
+                      value={newCustomColorInput}
+                      onChange={(e) => setNewCustomColorInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && newCustomColorInput.trim()) {
+                          e.preventDefault();
+                          const c = newCustomColorInput.trim();
+                          setSelectedBomColor(c);
+                          setNewCustomColorInput("");
                         }
                       }}
-                      data-testid="add-color-override-select"
+                      className="text-xs px-1.5 py-0.5 border-0 focus:outline-none w-28 placeholder:text-slate-400"
+                      data-testid="custom-color-text-input"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (newCustomColorInput.trim()) {
+                          const c = newCustomColorInput.trim();
+                          setSelectedBomColor(c);
+                          setNewCustomColorInput("");
+                        }
+                      }}
+                      className="text-xs px-2 py-0.5 bg-purple-700 hover:bg-purple-800 text-white rounded font-bold"
+                      data-testid="custom-color-add-btn"
                     >
-                      <option value="">+ Customize Color…</option>
-                      {allColorOptions.map((colName) => (
-                        <option key={colName} value={colName}>
-                          {colName} {availableBomColors.includes(colName) ? "(Added)" : ""}
-                        </option>
-                      ))}
-                    </select>
-
-                    <div className="flex items-center gap-1 bg-white border border-purple-300 rounded px-1.5 py-0.5 shadow-sm">
-                      <input
-                        type="text"
-                        placeholder="Type custom color…"
-                        value={newCustomColorInput}
-                        onChange={(e) => setNewCustomColorInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && newCustomColorInput.trim()) {
-                            e.preventDefault();
-                            const c = newCustomColorInput.trim();
-                            setSelectedBomColor(c);
-                            setNewCustomColorInput("");
-                          }
-                        }}
-                        className="text-xs px-1.5 py-0.5 border-0 focus:outline-none w-28 placeholder:text-slate-400"
-                        data-testid="custom-color-text-input"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (newCustomColorInput.trim()) {
-                            const c = newCustomColorInput.trim();
-                            setSelectedBomColor(c);
-                            setNewCustomColorInput("");
-                          }
-                        }}
-                        className="text-xs px-2 py-0.5 bg-purple-700 hover:bg-purple-800 text-white rounded font-bold"
-                        data-testid="custom-color-add-btn"
-                      >
-                        Add
-                      </button>
-                    </div>
+                      Add
+                    </button>
                   </div>
                 </div>
               </div>
-
-              {/* Active color status indicator & Add line bar */}
-              {selectedBomColor ? (
-                <div>
-                  <div className="flex items-center justify-between mb-3 bg-white border border-purple-200 rounded p-2.5 flex-wrap gap-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">
-                        Selected Color:
-                      </span>
-                      <span className="font-bold text-sm text-purple-900">{selectedBomColor}</span>
-                      {(form.color_bom_overrides?.[selectedBomColor] || []).length > 0 ? (
-                        <Badge color="orange" data-testid={`custom-bom-indicator-${selectedBomColor}`}>
-                          Custom BOM ({(form.color_bom_overrides[selectedBomColor] || []).length} active override{(form.color_bom_overrides[selectedBomColor] || []).length > 1 ? "s" : ""})
-                        </Badge>
-                      ) : (
-                        <Badge color="slate" data-testid={`base-bom-indicator-${selectedBomColor}`}>
-                          using base BOM
-                        </Badge>
-                      )}
-                    </div>
-
-                    {/* Add color-specific line picker */}
-                    <div className="flex items-center gap-2">
-                      <div className="w-64">
-                        <SearchableSelect
-                          options={materials}
-                          value=""
-                          onChange={(id) => {
-                            const m = materials.find((x) => x.id === id);
-                            if (m) {
-                              addColorSpecificLine(selectedBomColor, m);
-                            }
-                          }}
-                          getKey={(m) => m.id}
-                          getLabel={(m) => `${m.code} — ${m.name}`}
-                          placeholder="+ Add color-specific line…"
-                          testId="add-color-line-select"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Effective BOM lines table for selectedBomColor */}
-                  <div className="overflow-x-auto bg-white border border-slate-200 rounded">
-                    <table className="w-full text-xs">
-                      <thead className="bg-slate-50 border-b border-slate-200">
-                        <tr className="text-left text-slate-600">
-                          <th className="px-2 py-2 font-bold">Material</th>
-                          <th className="px-2 py-2 font-bold">Section</th>
-                          <th className="px-2 py-2 font-bold">Color</th>
-                          <th className="px-2 py-2 font-bold text-right">Rate</th>
-                          <th className="px-2 py-2 font-bold text-right">Qty</th>
-                          <th className="px-2 py-2 font-bold text-right">Yield</th>
-                          <th className="px-2 py-2 font-bold text-right">Waste%</th>
-                          <th className="px-2 py-2 font-bold text-right">Cost/pair</th>
-                          <th className="px-2 py-2 font-bold text-center">Status</th>
-                          <th className="px-2 py-2 font-bold text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {form.bom.length === 0 && (
-                          <tr>
-                            <td colSpan="10" className="px-2 py-6 text-center text-slate-400">
-                              Base BOM is empty. Add base items first or add a color-specific line above.
-                            </td>
-                          </tr>
-                        )}
-                        {/* 1. Base BOM lines */}
-                        {form.bom.map((baseLine, bIdx) => {
-                          const colorOverrides = (form.color_bom_overrides || {})[selectedBomColor] || [];
-                          const ov = colorOverrides.find((o) => o.line_id === baseLine.line_id);
-                          const isRemoved = Boolean(ov?.removed);
-                          const isOverridden = Boolean(ov && !ov.removed);
-
-                          if (isRemoved) {
-                            return (
-                              <tr key={baseLine.line_id || bIdx} className="bg-red-50/50 text-slate-400" data-testid={`color-override-row-${baseLine.line_id}`}>
-                                <td className="px-2 py-2 line-through font-medium">
-                                  {baseLine.material_code} — {baseLine.material_name}
-                                </td>
-                                <td className="px-2 py-2 line-through">{baseLine.section}</td>
-                                <td className="px-2 py-2 line-through">{baseLine.color || "—"}</td>
-                                <td className="px-2 py-2 text-right line-through font-mono">₹{baseLine.rate}</td>
-                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.quantity}</td>
-                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.yield_per_unit || 1}</td>
-                                <td className="px-2 py-2 text-right line-through font-mono">{baseLine.waste_pct || 0}%</td>
-                                <td className="px-2 py-2 text-right line-through font-mono">—</td>
-                                <td className="px-2 py-2 text-center">
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
-                                    Removed for {selectedBomColor}
-                                  </span>
-                                </td>
-                                <td className="px-2 py-2 text-right">
-                                  <button
-                                    type="button"
-                                    onClick={() => resetLineToBase(selectedBomColor, baseLine.line_id)}
-                                    className="text-xs text-blue-600 hover:text-blue-800 font-bold inline-flex items-center gap-1"
-                                    data-testid={`restore-line-${baseLine.line_id}`}
-                                  >
-                                    <RotateCcw className="w-3 h-3" /> Restore to Base
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          }
-
-                          // Effective values
-                          const effectiveMatCode = ov?.material_code ?? baseLine.material_code;
-                          const effectiveMatName = ov?.material_name ?? baseLine.material_name;
-                          const effectiveUnit = ov?.unit ?? baseLine.unit;
-                          const effectiveRate = ov?.rate ?? baseLine.rate;
-                          const effectiveQty = ov?.quantity ?? baseLine.quantity;
-                          const effectiveYield = ov?.yield_per_unit ?? (baseLine.yield_per_unit ?? 1);
-                          const effectiveWaste = ov?.waste_pct ?? (baseLine.waste_pct ?? 0);
-                          const effectiveSection = ov?.section ?? baseLine.section;
-                          const effectiveColor = ov?.color ?? baseLine.color;
-
-                          const yld = Number(effectiveYield || 1) || 1;
-                          const cost = ((Number(effectiveRate) * Number(effectiveQty)) / yld) * (1 + Number(effectiveWaste || 0) / 100);
-
-                          return (
-                            <tr
-                              key={baseLine.line_id || bIdx}
-                              className={`hover:bg-slate-50 transition-colors ${
-                                isOverridden ? "bg-amber-50/40" : ""
-                              }`}
-                              data-testid={`color-override-row-${baseLine.line_id}`}
-                            >
-                              <td className="px-2 py-1.5">
-                                <div className="space-y-1">
-                                  <div>
-                                    <div className={`font-mono font-bold ${ov?.material_code && ov?.material_code !== baseLine.material_code ? "text-amber-900 font-semibold" : "text-slate-800"}`}>
-                                      {effectiveMatCode}
-                                    </div>
-                                    <div className="text-[10px] text-slate-500 line-clamp-1">{effectiveMatName}</div>
-                                  </div>
-                                  <select
-                                    className="text-[11px] font-mono border border-slate-200 bg-slate-50 rounded px-1 py-0.5 w-full max-w-[180px] text-slate-700 hover:border-purple-400 focus:outline-none"
-                                    value={ov?.material_id || baseLine.material_id || ""}
-                                    onChange={(e) => {
-                                      const selectedM = materials.find((m) => m.id === e.target.value);
-                                      if (selectedM) {
-                                        updateLineMaterial(selectedBomColor, baseLine.line_id, selectedM);
-                                      }
-                                    }}
-                                    title="Switch material for this color variant"
-                                  >
-                                    <option value="" disabled>Change material…</option>
-                                    {materials.map((m) => (
-                                      <option key={m.id} value={m.id}>
-                                        {m.code} — {m.name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </div>
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input
-                                  className={`border px-1 py-1 text-xs w-28 rounded font-mono ${
-                                    ov?.section !== undefined && ov?.section !== baseLine.section
-                                      ? "border-amber-400 bg-amber-50 font-semibold"
-                                      : "border-slate-300"
-                                  }`}
-                                  value={effectiveSection || ""}
-                                  onChange={(e) =>
-                                    updateLineOverride(selectedBomColor, baseLine.line_id, "section", e.target.value)
-                                  }
-                                />
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input
-                                  className={`border px-1 py-1 text-xs w-24 rounded ${
-                                    ov?.color !== undefined && ov?.color !== baseLine.color
-                                      ? "border-amber-400 bg-amber-50 font-semibold"
-                                      : "border-slate-300"
-                                  }`}
-                                  value={effectiveColor || ""}
-                                  onChange={(e) =>
-                                    updateLineOverride(selectedBomColor, baseLine.line_id, "color", e.target.value)
-                                  }
-                                  placeholder="e.g. Cream"
-                                />
-                              </td>
-                              <td className="px-2 py-1.5 text-right">
-                                <div className="flex items-center justify-end gap-1">
-                                  <span className="text-[10px] text-slate-400">₹</span>
-                                  <input
-                                    type="number"
-                                    step="0.5"
-                                    className={`w-16 text-right font-mono border px-1 py-1 text-xs rounded ${
-                                      ov?.rate !== undefined && ov?.rate !== baseLine.rate
-                                        ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
-                                        : "border-slate-300"
-                                    }`}
-                                    value={effectiveRate}
-                                    onChange={(e) =>
-                                      updateLineOverride(selectedBomColor, baseLine.line_id, "rate", e.target.value)
-                                    }
-                                  />
-                                  <span className="text-[10px] text-slate-400">/{effectiveUnit}</span>
-                                </div>
-                              </td>
-                              <td className="px-2 py-1.5 text-right">
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  className={`w-16 text-right font-mono border px-1 py-1 text-xs rounded ${
-                                    ov?.quantity !== undefined && ov?.quantity !== baseLine.quantity
-                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
-                                      : "border-slate-300"
-                                  }`}
-                                  value={effectiveQty}
-                                  onChange={(e) =>
-                                    updateLineOverride(selectedBomColor, baseLine.line_id, "quantity", e.target.value)
-                                  }
-                                />
-                              </td>
-                              <td className="px-2 py-1.5 text-right">
-                                <input
-                                  type="number"
-                                  step="0.5"
-                                  className={`w-14 text-right font-mono border px-1 py-1 text-xs rounded ${
-                                    ov?.yield_per_unit !== undefined && ov?.yield_per_unit !== baseLine.yield_per_unit
-                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
-                                      : "border-slate-300"
-                                  }`}
-                                  value={effectiveYield}
-                                  onChange={(e) =>
-                                    updateLineOverride(selectedBomColor, baseLine.line_id, "yield_per_unit", e.target.value)
-                                  }
-                                />
-                              </td>
-                              <td className="px-2 py-1.5 text-right">
-                                <input
-                                  type="number"
-                                  step="0.5"
-                                  className={`w-14 text-right font-mono border px-1 py-1 text-xs rounded ${
-                                    ov?.waste_pct !== undefined && ov?.waste_pct !== baseLine.waste_pct
-                                      ? "border-amber-400 bg-amber-50 font-bold text-amber-900"
-                                      : "border-slate-300"
-                                  }`}
-                                  value={effectiveWaste}
-                                  onChange={(e) =>
-                                    updateLineOverride(selectedBomColor, baseLine.line_id, "waste_pct", e.target.value)
-                                  }
-                                />
-                              </td>
-                              <td className="px-2 py-1.5 text-right font-mono font-bold text-slate-800">
-                                {inr(cost)}
-                              </td>
-                              <td className="px-2 py-1.5 text-center">
-                                {isOverridden ? (
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                                    Overridden
-                                  </span>
-                                ) : (
-                                  <span className="text-[10px] text-slate-400 italic">Inherited</span>
-                                )}
-                              </td>
-                              <td className="px-2 py-1.5 text-right">
-                                <div className="flex items-center justify-end gap-1.5">
-                                  {isOverridden && (
-                                    <button
-                                      type="button"
-                                      onClick={() => resetLineToBase(selectedBomColor, baseLine.line_id)}
-                                      className="text-slate-600 hover:text-blue-700 text-xs font-semibold p-1 hover:bg-slate-100 rounded"
-                                      title="Reset to base BOM values"
-                                      data-testid={`reset-line-${baseLine.line_id}`}
-                                    >
-                                      <RotateCcw className="w-3.5 h-3.5 inline mr-0.5" />
-                                      Reset
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => removeLineForColor(selectedBomColor, baseLine.line_id)}
-                                    className="text-slate-400 hover:text-red-600 p-1 hover:bg-red-50 rounded"
-                                    title="Remove this line for this color"
-                                    data-testid={`remove-line-${baseLine.line_id}`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5 inline" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-
-                        {/* 2. Color-specific added lines */}
-                        {((form.color_bom_overrides || {})[selectedBomColor] || [])
-                          .map((ov, ovIdx) => ({ ov, ovIdx }))
-                          .filter(({ ov }) => !ov.line_id || !form.bom.some((b) => b.line_id === ov.line_id))
-                          .map(({ ov, ovIdx }) => {
-                            const yld = Number(ov.yield_per_unit || 1) || 1;
-                            const cost = ((Number(ov.rate || 0) * Number(ov.quantity || 0)) / yld) * (1 + Number(ov.waste_pct || 0) / 100);
-                            return (
-                              <tr key={`added-${ovIdx}`} className="bg-emerald-50/40 hover:bg-emerald-50/60 transition-colors" data-testid={`added-color-line-${ovIdx}`}>
-                                <td className="px-2 py-1.5">
-                                  <div>
-                                    <div className="font-mono font-bold text-emerald-950">{ov.material_code}</div>
-                                    <div className="text-[10px] text-emerald-700">{ov.material_name}</div>
-                                  </div>
-                                </td>
-                                <td className="px-2 py-1.5">
-                                  <input
-                                    className="border border-emerald-300 bg-white px-1 py-1 text-xs w-28 rounded font-mono"
-                                    value={ov.section || ""}
-                                    onChange={(e) =>
-                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "section", e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-2 py-1.5">
-                                  <input
-                                    className="border border-emerald-300 bg-white px-1 py-1 text-xs w-24 rounded"
-                                    value={ov.color || ""}
-                                    onChange={(e) =>
-                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "color", e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-2 py-1.5 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <span className="text-[10px] text-slate-400">₹</span>
-                                    <input
-                                      type="number"
-                                      step="0.5"
-                                      className="w-16 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded font-bold text-emerald-900"
-                                      value={ov.rate ?? 0}
-                                      onChange={(e) =>
-                                        updateColorSpecificAddedLine(selectedBomColor, ovIdx, "rate", e.target.value)
-                                      }
-                                    />
-                                    <span className="text-[10px] text-slate-400">/{ov.unit}</span>
-                                  </div>
-                                </td>
-                                <td className="px-2 py-1.5 text-right">
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    className="w-16 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded font-bold text-emerald-900"
-                                    value={ov.quantity ?? 1}
-                                    onChange={(e) =>
-                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "quantity", e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-2 py-1.5 text-right">
-                                  <input
-                                    type="number"
-                                    step="0.5"
-                                    className="w-14 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded"
-                                    value={ov.yield_per_unit ?? 1}
-                                    onChange={(e) =>
-                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "yield_per_unit", e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-2 py-1.5 text-right">
-                                  <input
-                                    type="number"
-                                    step="0.5"
-                                    className="w-14 text-right font-mono border border-emerald-300 bg-white px-1 py-1 text-xs rounded"
-                                    value={ov.waste_pct ?? 0}
-                                    onChange={(e) =>
-                                      updateColorSpecificAddedLine(selectedBomColor, ovIdx, "waste_pct", e.target.value)
-                                    }
-                                  />
-                                </td>
-                                <td className="px-2 py-1.5 text-right font-mono font-bold text-emerald-900">
-                                  {inr(cost)}
-                                </td>
-                                <td className="px-2 py-1.5 text-center">
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
-                                    + Added Line
-                                  </span>
-                                </td>
-                                <td className="px-2 py-1.5 text-right">
-                                  <button
-                                    type="button"
-                                    onClick={() => removeColorSpecificAddedLine(selectedBomColor, ovIdx)}
-                                    className="text-red-500 hover:text-red-700 p-1 hover:bg-red-50 rounded"
-                                    title="Delete color-specific line"
-                                    data-testid={`delete-added-line-${ovIdx}`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5 inline" />
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-4 bg-white border border-slate-200 rounded text-center text-xs text-slate-500 italic">
-                  No color selected. Select or add a planned color variant above to customize its BOM overrides.
-                </div>
-              )}
             </div>
 
-              {/* Labor */}
+            {/* Active Color Variant Content */}
+            {selectedBomColor ? (
+              <div className="space-y-4">
+                {/* Header bar for active color */}
+                <div className="flex items-center justify-between bg-white border border-purple-200 rounded-lg p-3 flex-wrap gap-2 shadow-sm">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wide">
+                      Configuring Color:
+                    </span>
+                    <span className="font-bold text-sm text-purple-900 bg-purple-100 border border-purple-300 px-2.5 py-0.5 rounded font-mono">
+                      {selectedBomColor}
+                    </span>
+                    {hasCustomOverrides(selectedBomColor) ? (
+                      <Badge color="orange" data-testid={`custom-bom-indicator-${selectedBomColor}`}>
+                        Custom ({getCustomOverrideCount(selectedBomColor)} overridden)
+                      </Badge>
+                    ) : (
+                      <Badge color="slate" data-testid={`base-bom-indicator-${selectedBomColor}`}>
+                        Using base BOM
+                      </Badge>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {hasCustomOverrides(selectedBomColor) && (
+                      <button
+                        type="button"
+                        onClick={() => resetAllOverridesForColor(selectedBomColor)}
+                        className="text-xs text-slate-500 hover:text-red-600 font-semibold flex items-center gap-1 hover:underline"
+                        title="Reset all overrides for this color back to base BOM"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" /> Reset all to Base
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => deleteColorVariant(selectedBomColor)}
+                      className="text-xs text-red-500 hover:text-red-700 font-semibold ml-2 hover:underline"
+                      title="Remove this color option"
+                    >
+                      Remove color
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3 Simple Optional Fields: Upper, Insole, Cover */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {SIMPLE_OVERRIDE_SECTIONS.map((sec) => {
+                    const colOverrides = form.color_material_overrides?.[selectedBomColor] || {};
+                    const currentOv = colOverrides[sec.key];
+                    const isOverridden = !!currentOv;
+
+                    // Base line(s) matching this section
+                    const baseLines = (form.bom || []).filter((b) => sec.matchSection(b.section));
+                    const baseLineNames = baseLines.length > 0
+                      ? baseLines.map((b) => `${b.material_name} (₹${b.rate})`).join(", ")
+                      : "None defined in Base BOM";
+                    const baseAvgRate = baseLines.length > 0
+                      ? Number(baseLines[0].rate || 0)
+                      : 0;
+
+                    return (
+                      <div
+                        key={sec.key}
+                        className={`border-2 rounded-lg p-4 transition-all flex flex-col justify-between ${
+                          isOverridden
+                            ? "bg-amber-50/50 border-amber-300 shadow-sm"
+                            : "bg-white border-slate-200"
+                        }`}
+                        data-testid={`override-section-${sec.testId}`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-bold text-xs text-slate-900 tracking-wide">
+                              {sec.label}
+                            </span>
+                            {isOverridden ? (
+                              <Badge color="orange">Custom</Badge>
+                            ) : (
+                              <Badge color="slate">Using base</Badge>
+                            )}
+                          </div>
+
+                          <div className="text-[11px] text-slate-500 mb-3 bg-slate-50 border border-slate-200 rounded p-2">
+                            <div className="font-semibold text-slate-700 text-[10px] uppercase tracking-wider mb-0.5">
+                              Base BOM Reference:
+                            </div>
+                            <div className="truncate font-medium text-slate-800" title={baseLineNames}>
+                              {baseLineNames}
+                            </div>
+                          </div>
+
+                          {isOverridden ? (
+                            <div className="space-y-3">
+                              <div>
+                                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                                  Overridden Material
+                                </label>
+                                <SearchableSelect
+                                  options={materials}
+                                  value={currentOv.material_id}
+                                  onChange={(id) => {
+                                    const m = materials.find((x) => x.id === id);
+                                    if (m) setMaterialOverride(selectedBomColor, sec.key, m, currentOv.rate);
+                                  }}
+                                  getKey={(m) => m.id}
+                                  getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
+                                  placeholder="Change material…"
+                                  testId={`select-${sec.testId}-material`}
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                                  Rate (₹ / unit)
+                                </label>
+                                <div className="flex items-center gap-2">
+                                  <div className="relative flex-1">
+                                    <span className="absolute left-2.5 top-1.5 text-xs text-slate-400 font-mono">₹</span>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={currentOv.rate}
+                                      onChange={(e) => updateOverrideRate(selectedBomColor, sec.key, e.target.value)}
+                                      className="w-full pl-6 pr-2 py-1 text-xs border border-amber-400 rounded font-mono font-bold bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
+                                      data-testid={`rate-${sec.testId}-input`}
+                                    />
+                                  </div>
+                                  {baseAvgRate > 0 && currentOv.rate !== baseAvgRate && (
+                                    <span
+                                      className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                        currentOv.rate > baseAvgRate
+                                          ? "text-amber-800 bg-amber-200"
+                                          : "text-emerald-800 bg-emerald-200"
+                                      }`}
+                                    >
+                                      {currentOv.rate > baseAvgRate ? `+₹${(currentOv.rate - baseAvgRate).toFixed(1)}` : `-₹${(baseAvgRate - currentOv.rate).toFixed(1)}`}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <label className="block text-[11px] font-semibold text-slate-600">
+                                Override with Different Material:
+                              </label>
+                              <SearchableSelect
+                                options={materials}
+                                value=""
+                                onChange={(id) => {
+                                  const m = materials.find((x) => x.id === id);
+                                  if (m) setMaterialOverride(selectedBomColor, sec.key, m, m.rate);
+                                }}
+                                getKey={(m) => m.id}
+                                getLabel={(m) => `${m.code} — ${m.name} (₹${m.rate})`}
+                                placeholder={`+ Pick ${sec.label}…`}
+                                testId={`add-${sec.testId}-override`}
+                              />
+                              <p className="text-[10px] text-slate-400 italic">
+                                {sec.hint}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+
+                        {isOverridden && (
+                          <div className="pt-3 mt-3 border-t border-amber-200/80 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => clearMaterialOverride(selectedBomColor, sec.key)}
+                              className="text-xs text-blue-700 hover:text-blue-900 font-semibold flex items-center gap-1 hover:underline"
+                              data-testid={`reset-${sec.testId}-btn`}
+                            >
+                              <RotateCcw className="w-3 h-3" /> Reset to Base
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 text-center bg-white border border-slate-200 rounded-lg text-slate-500 text-xs">
+                No color variant selected. Pick or add a color above to configure material overrides.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Section 3: Labor Operations & Overheads, Margins, GST, Carton Capacity */}
+        {(drawerActiveTab === "all" || drawerActiveTab === "costing") && (
+          <div className="space-y-6">
+            {/* Labor */}
               <div>
                 <div className="flex items-baseline justify-between mt-4 mb-1">
                   <h3 className="text-sm font-bold uppercase tracking-wider">
@@ -2265,7 +2102,12 @@ export default function Styles() {
                   )}
                 </div>
               </div>
+            </div>
+          )}
 
+          {/* Section 4: Catalogue Codes & External Mappings */}
+          {(drawerActiveTab === "all" || drawerActiveTab === "mappings") && (
+            <div className="space-y-6">
               {/* Catalogue Codes — SSK-generated marketplace SKUs */}
               {editId && (
                 <div className="border-2 border-amber-200 p-4 mt-6 bg-amber-50/50" data-testid="catalogue-codes-panel">
@@ -2580,69 +2422,91 @@ export default function Styles() {
                 </div>
               )}
             </div>
+          )}
+        </div>
 
-            {/* Live cost preview */}
-            <div className="col-span-1">
-              <div className="sticky top-0 bg-[#0F172A] text-white p-5 border-2 border-[#0F172A]">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-2 flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5"><CalcIcon className="w-3.5 h-3.5" /> Live Cost Sheet</span>
-                  {selectedBomColor && (
-                    <span className="text-[9px] bg-purple-900 text-purple-200 border border-purple-500 px-1.5 py-0.5 rounded font-bold font-mono">
-                      {selectedBomColor}
-                    </span>
-                  )}
-                </div>
-                {costing.hasColorOverrides ? (
-                  <div className="text-[10px] text-amber-300 bg-amber-950/60 border border-amber-800 rounded px-2 py-1 mb-2 font-medium">
-                    ✦ Costing for variant: <span className="font-bold">{costing.colorName}</span> (Custom BOM)
-                  </div>
-                ) : selectedBomColor ? (
-                  <div className="text-[10px] text-slate-400 mb-2 italic">
-                    Costing for <span className="font-medium text-slate-300">{selectedBomColor}</span> (Base BOM)
-                  </div>
-                ) : null}
-                <CostRow label="Materials" value={inr(costing.matCost)} />
-                <CostRow
-                  label="Labor"
-                  value={
-                    form.labor.length === 0
-                      ? "Not set — will be determined at production"
-                      : inr(costing.labCost)
-                  }
-                  dim={form.labor.length === 0}
-                />
-                <CostRow label="Overhead" value={inr(costing.oh)} />
-                <CostRow label="Packing" value={inr(form.packing_cost)} />
-                <div className="border-t border-dashed border-slate-600 my-2" />
-                <CostRow label="Total cost" value={inr(costing.total)} bold />
-                <CostRow label="Margin" value={inr(costing.margin)} />
-                <CostRow
-                  label="Selling"
-                  value={inr(costing.sell)}
-                  bold
-                  accent
-                />
-                <CostRow
-                  label={`GST ${form.gst_pct}%`}
-                  value={inr(costing.gst)}
-                  small
-                />
-                <div className="border-t border-dashed border-slate-600 my-2" />
-                <CostRow label="Final / pair" value={inr(costing.final)} big />
-                <div className="mt-4 pt-3 border-t border-slate-700">
-                  <BtnPrimary
-                    onClick={save}
-                    className="w-full bg-[#C27842] border-[#C27842] hover:bg-[#A65D24]"
-                    data-testid="save-style-btn"
-                  >
-                    <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save
-                    Style
-                  </BtnPrimary>
-                </div>
+        {/* Live cost preview */}
+        <div className="col-span-1 xl:col-span-4 2xl:col-span-3">
+          <div className="sticky top-16 bg-[#0F172A] text-white p-5 border-2 border-[#0F172A] shadow-xl rounded-sm max-h-[calc(100vh-140px)] overflow-y-auto scrollbar-thin">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold mb-2 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5"><CalcIcon className="w-3.5 h-3.5" /> Live Cost Sheet</span>
+              {selectedBomColor && (
+                <span className="text-[9px] bg-purple-900 text-purple-200 border border-purple-500 px-1.5 py-0.5 rounded font-bold font-mono">
+                  {selectedBomColor}
+                </span>
+              )}
+            </div>
+            {costing.hasColorOverrides ? (
+              <div className="text-[10px] text-amber-300 bg-amber-950/60 border border-amber-800 rounded px-2 py-1 mb-2 font-medium">
+                ✦ Costing for variant: <span className="font-bold">{costing.colorName}</span> (Custom BOM)
               </div>
+            ) : selectedBomColor ? (
+              <div className="text-[10px] text-slate-400 mb-2 italic">
+                Costing for <span className="font-medium text-slate-300">{selectedBomColor}</span> (Base BOM)
+              </div>
+            ) : null}
+            <CostRow label="Materials" value={inr(costing.matCost)} />
+            <CostRow
+              label="Labor"
+              value={
+                form.labor.length === 0
+                  ? "Not set — will be determined at production"
+                  : inr(costing.labCost)
+              }
+              dim={form.labor.length === 0}
+            />
+            <CostRow label="Overhead" value={inr(costing.oh)} />
+            <CostRow label="Packing" value={inr(form.packing_cost)} />
+            <div className="border-t border-dashed border-slate-600 my-2" />
+            <CostRow label="Total cost" value={inr(costing.total)} bold />
+            <CostRow label="Margin" value={inr(costing.margin)} />
+            <CostRow
+              label="Selling"
+              value={inr(costing.sell)}
+              bold
+              accent
+            />
+            <CostRow
+              label={`GST ${form.gst_pct}%`}
+              value={inr(costing.gst)}
+              small
+            />
+            <div className="border-t border-dashed border-slate-600 my-2" />
+            <CostRow label="Final / pair" value={inr(costing.final)} big />
+            <div className="mt-4 pt-3 border-t border-slate-700">
+              <BtnPrimary
+                onClick={save}
+                className="w-full bg-[#C27842] border-[#C27842] hover:bg-[#A65D24]"
+                data-testid="save-style-btn"
+              >
+                <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save
+                Style
+              </BtnPrimary>
             </div>
           </div>
-        </Drawer>
+        </div>
+      </div>
+
+      {/* Mobile / Laptop compact sticky footer */}
+      <div className="xl:hidden sticky bottom-0 -mx-4 sm:-mx-6 px-4 sm:px-6 py-3 bg-[#0F172A] text-white flex items-center justify-between border-t-2 border-amber-500/50 shadow-2xl z-20 mt-6">
+        <div className="flex items-center gap-3 text-xs">
+          <div>
+            <span className="text-slate-400">Total: </span>
+            <span className="font-mono font-bold text-white">{inr(costing.total)}</span>
+          </div>
+          <div>
+            <span className="text-slate-400">Final / pr: </span>
+            <span className="font-mono font-bold text-[#C27842]">{inr(costing.final)}</span>
+          </div>
+        </div>
+        <BtnPrimary
+          onClick={save}
+          className="bg-[#C27842] border-[#C27842] hover:bg-[#A65D24] text-xs px-4 py-2"
+        >
+          <Save className="w-3.5 h-3.5 inline mr-1" /> Save Style
+        </BtnPrimary>
+      </div>
+    </Drawer>
       )}
 
       {exportOpen && (

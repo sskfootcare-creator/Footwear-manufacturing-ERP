@@ -51,6 +51,26 @@ class BomItem(BaseModel):
             return _gen_line_id()
         return str(v).strip()
 
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
+
+class ColorMaterialOverride(BaseModel):
+    material_id: str
+    material_name: str
+    material_code: str
+    rate: float
+    quantity: Optional[float] = None
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+    def get(self, item, default=None):
+        return getattr(self, item, default)
+
 
 class BomLineOverride(BaseModel):
     line_id: Optional[str] = None   # references a base BOM line's line_id to override; None = this is a brand-new line added only for this color

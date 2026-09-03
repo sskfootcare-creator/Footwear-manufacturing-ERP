@@ -30,7 +30,7 @@ from models.styles import (
     ONLINE_STATUS_SIDE_BRANCHES,
     PLANNED_COMPONENTS,
 )
-from models.materials import BomItem, BomLineOverride
+from models.materials import BomItem, BomLineOverride, ColorMaterialOverride
 from models.plm import DEFAULT_PLM_FOLDERS
 from rate_limiter import upload_rate_limiter
 
@@ -228,15 +228,37 @@ def _parse_bom_item(b: Any) -> BomItem:
     return b
 
 
+def _match_section_override(line_section: str, overrides_map: dict):
+    if not line_section or not overrides_map:
+        return None
+    sec_clean = line_section.strip().lower()
+    # 1. Exact match (case-insensitive)
+    for k, ov in overrides_map.items():
+        if k and k.strip().lower() == sec_clean:
+            return ov
+    # 2. Section category alias match
+    for k, ov in overrides_map.items():
+        k_clean = k.strip().lower()
+        if k_clean == "upper" and "upper" in sec_clean:
+            return ov
+        if k_clean == "cover" and ("cover" in sec_clean or "lining" in sec_clean or "sock" in sec_clean):
+            return ov
+        if k_clean == "insole" and "insole" in sec_clean and "cover" not in sec_clean:
+            return ov
+    return None
+
+
 def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]:
     """
     Return the effective BOM for a style given a specific color.
     - Starts with style['bom'] (the base list).
-    - If color is None or has no entry in color_bom_overrides, returns base list unchanged.
-    - Otherwise, applies that color's overrides in order:
-        * removed=True: drops the base line matching that line_id from the result
-        * line_id matches existing line: replaces ONLY non-None fields (keeps base values for unspecified fields)
-        * line_id is None / doesn't match existing line: appends as a new line
+    - If color is None, returns base list unchanged.
+    - Checks color_material_overrides (Simple Per-Color Material Overrides for Upper / Insole / Cover):
+      For each base BOM line: if its section matches a key in color_material_overrides[color],
+      replaces material_id, material_name, material_code, rate (and quantity if specified),
+      while preserving yield_per_unit, waste_pct, component, and other base fields.
+      Applies to all matching section lines.
+    - Fallback: checks legacy color_bom_overrides if present.
     - Returns computed merged List[BomItem] on the fly without duplicating storage.
     """
     base_raw = style.get("bom") or []
@@ -248,6 +270,45 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
     if not color:
         return base_bom
 
+    # 1. Check color_material_overrides (Stage 1 & 2 Simple Per-Color Overrides)
+    mat_overrides_dict = style.get("color_material_overrides") or {}
+    color_mat_overrides = mat_overrides_dict.get(color)
+    if color_mat_overrides is None and isinstance(color, str):
+        c_clean = color.strip().lower()
+        for k, v in mat_overrides_dict.items():
+            if k and str(k).strip().lower() == c_clean:
+                color_mat_overrides = v
+                break
+
+    if color_mat_overrides and isinstance(color_mat_overrides, dict):
+        result_lines: List[BomItem] = []
+        for b in base_bom:
+            ov = _match_section_override(b.section, color_mat_overrides)
+            if ov is not None:
+                if isinstance(ov, ColorMaterialOverride):
+                    ov_dict = ov.model_dump()
+                elif isinstance(ov, dict):
+                    ov_dict = dict(ov)
+                else:
+                    ov_dict = {}
+
+                curr_dict = b.model_dump()
+                if "material_id" in ov_dict:
+                    curr_dict["material_id"] = str(ov_dict.get("material_id") or "")
+                if "material_name" in ov_dict:
+                    curr_dict["material_name"] = str(ov_dict.get("material_name") or "")
+                if "material_code" in ov_dict:
+                    curr_dict["material_code"] = str(ov_dict.get("material_code") or "")
+                if ov_dict.get("rate") is not None:
+                    curr_dict["rate"] = float(ov_dict["rate"])
+                if ov_dict.get("quantity") is not None:
+                    curr_dict["quantity"] = float(ov_dict["quantity"])
+                result_lines.append(BomItem(**curr_dict))
+            else:
+                result_lines.append(b)
+        return result_lines
+
+    # 2. Fallback to legacy color_bom_overrides
     overrides_dict = style.get("color_bom_overrides") or {}
     color_overrides = overrides_dict.get(color)
     if color_overrides is None and isinstance(color, str):
@@ -1121,9 +1182,11 @@ async def list_styles_summary(
             "suggested_target_price": costing_full.get("suggested_target_price", 0.0),
             "is_assigned": costing_full.get("is_assigned", False),
         }
+        color_material_overrides = d.get("color_material_overrides") or {}
         color_bom_overrides = d.get("color_bom_overrides") or {}
+        all_override_colors = sorted(list(set(color_material_overrides.keys()) | set(color_bom_overrides.keys())))
         color_costing = {}
-        for c_color in color_bom_overrides.keys():
+        for c_color in all_override_colors:
             c_cost = compute_style_costing_from_jobs(d, matched_jobs, color=c_color)
             color_costing[c_color] = {
                 "materials_cost": c_cost.get("materials_cost", 0.0),
@@ -1150,6 +1213,7 @@ async def list_styles_summary(
             "in_online_pipeline": d.get("id") in pipeline_ids,
             "cost_summary": cost_summary,
             "costing": cost_summary,
+            "color_material_overrides": color_material_overrides,
             "color_bom_overrides": color_bom_overrides,
             "color_costing": color_costing,
         })
@@ -1234,7 +1298,7 @@ async def list_styles(
         d["costing"] = compute_style_costing_from_jobs(d, matched_jobs)
         d["color_costing"] = {
             c_color: compute_style_costing_from_jobs(d, matched_jobs, color=c_color)
-            for c_color in (d.get("color_bom_overrides") or {}).keys()
+            for c_color in (set((d.get("color_material_overrides") or {}).keys()) | set((d.get("color_bom_overrides") or {}).keys()))
         }
         d["in_online_pipeline"] = d["id"] in pipeline_ids
         out.append(d)
@@ -1573,7 +1637,7 @@ async def get_style(sid: str, request: Request, color: Optional[str] = None):
     d["costing"] = await compute_style_costing_async(d, db, color=color)
     d["color_costing"] = {
         c_color: await compute_style_costing_async(d, db, color=c_color)
-        for c_color in (d.get("color_bom_overrides") or {}).keys()
+        for c_color in (set((d.get("color_material_overrides") or {}).keys()) | set((d.get("color_bom_overrides") or {}).keys()))
     }
     return d
 

@@ -332,7 +332,7 @@ async def _attach_po_profitability(po_docs: list, db=None):
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
                 item_color = item.get("color")
-                if item_color and style_doc.get("color_bom_overrides"):
+                if item_color and (style_doc.get("color_material_overrides") or style_doc.get("color_bom_overrides")) :
                     style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
                     style_code_str = style_doc.get("code", "")
                     matched_jobs = []
@@ -1083,7 +1083,7 @@ async def get_b2b_profitability(
         qty = int(it.get("quantity") or it.get("qty") or it.get("pairs") or 1)
         if style_doc:
             item_color = it.get("color")
-            if item_color and style_doc.get("color_bom_overrides"):
+            if item_color and (style_doc.get("color_material_overrides") or style_doc.get("color_bom_overrides")):
                 style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
                 style_code_str = style_doc.get("code", "")
                 matched_jobs = []
@@ -1489,7 +1489,7 @@ async def update_po(pid: str, payload: POIn, request: Request):
 
 
 @pos_router.delete("/pos/{pid}")
-async def delete_po(pid: str, request: Request):
+async def delete_po(pid: str, request: Request, force: bool = False):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = get_db()
@@ -1498,16 +1498,53 @@ async def delete_po(pid: str, request: Request):
         raise HTTPException(404, "Purchase Order not found")
     po_num = po.get("po_number", "N/A")
 
-    if (
-        await db.dispatch_records.count_documents({"$or": [{"po_id": pid}, {"po_ids": pid}]}) > 0
-        or await db.invoices.count_documents({"$or": [{"po_id": pid}, {"po_ids": pid}]}) > 0
-    ):
+    disp_count = await db.dispatch_records.count_documents({"$or": [{"po_id": pid}, {"po_ids": pid}]})
+    inv_docs = await db.invoices.find({"$or": [{"po_id": pid}, {"po_ids": pid}]}).to_list(1000)
+    inv_count = len(inv_docs)
+
+    if (disp_count > 0 or inv_count > 0) and not force:
+        inv_nos = ", ".join([i.get("invoice_no", "") for i in inv_docs if i.get("invoice_no")][:3])
+        history_desc = []
+        if disp_count > 0:
+            history_desc.append(f"{disp_count} dispatch record(s)")
+        if inv_count > 0:
+            history_desc.append(f"{inv_count} invoice(s)" + (f" ({inv_nos})" if inv_nos else ""))
+
         raise HTTPException(
             409,
-            "Cannot delete PO — it has dispatch/invoice history. "
-            "Once goods are dispatched and invoiced, the PO "
-            "record must be retained for accounting/compliance.",
+            f"Cannot delete PO — it has dispatch/invoice history: {', '.join(history_desc)}. "
+            "To remove this PO and clean up its un-dispatched invoice(s), confirm Force Delete."
         )
+
+    # If force is true and invoices exist, clean up linked invoices, payments, and cartons
+    if inv_docs:
+        from routes.invoice_packing import _get_max_invoice_seq
+        for inv in inv_docs:
+            inv_id_str = str(inv["_id"])
+            await db.payments.delete_many({"invoice_id": inv_id_str})
+            await db.dispatch_records.delete_many({"$or": [{"invoice_id": inv_id_str}, {"invoice_no": inv.get("invoice_no")}]})
+            await db.packing_cartons.update_many(
+                {"invoice_id": inv_id_str},
+                {"$set": {"status": "packed", "invoice_id": None, "box_number": None}}
+            )
+            await db.invoices.delete_one({"_id": inv["_id"]})
+
+        try:
+            today = datetime.now(timezone.utc)
+            yr = today.year
+            fy_start = yr - 1 if today.month < 4 else yr
+            fy_end = fy_start + 1
+            fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
+            min_seq = 16 if fy_label == "26-27" else 1
+            max_existing = await _get_max_invoice_seq(fy_label, db=db)
+            target_seq = max(min_seq - 1, max_existing)
+            await db.counters.update_one(
+                {"_id": f"invoice_{fy_label}"},
+                {"$set": {"seq": target_seq}},
+                upsert=True,
+            )
+        except Exception as e:
+            log.warning(f"Failed to resync invoice counter after PO force deletion: {e}")
 
     from routes.materials import _compute_material_inventory_summary
 

@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
 import {
   PageHeader,
@@ -24,6 +25,9 @@ import {
   Truck,
   Package,
   Barcode,
+  Receipt,
+  ExternalLink,
+  ArrowRight,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
 import PackingListPreviewModal from "../components/PackingListPreviewModal";
@@ -73,6 +77,7 @@ export default function POs() {
   const [uploading, setUploading] = useState(false);
   const [view, setView] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const navigate = useNavigate();
   const [formError, setFormError] = useState("");
   const [statusFilter, setStatusFilter] = useState("active"); // "active" | "completed"
 
@@ -84,9 +89,11 @@ export default function POs() {
   const [selectedPoForEan, setSelectedPoForEan] = useState(null);
   const [poEanModalOpen, setPoEanModalOpen] = useState(false);
   const [poDocumentsData, setPoDocumentsData] = useState(null);
-  const [docActiveTab, setDocActiveTab] = useState("invoices");
+  const [docActiveTab, setDocActiveTab] = useState("all");
+  const [viewDocuments, setViewDocuments] = useState(null);
+  const [loadingViewDocs, setLoadingViewDocs] = useState(false);
 
-  const openPoDocuments = async (po, defaultTab = "invoices") => {
+  const openPoDocuments = async (po, defaultTab = "all") => {
     setSelectedPoForInvoices(po);
     setDocActiveTab(defaultTab);
     setLoadingInvoices(true);
@@ -110,7 +117,7 @@ export default function POs() {
     }
   };
 
-  const handleInvoiceClick = (po) => openPoDocuments(po, "invoices");
+  const handleInvoiceClick = (po) => openPoDocuments(po, "all");
 
   const load = async () => {
     try {
@@ -146,11 +153,20 @@ export default function POs() {
   }, [styles]);
 
   const openView = async (p) => {
+    setView(p);
+    setLoadingViewDocs(true);
+    setViewDocuments(null);
     try {
-      const res = await http.get(`/pos/${p.id}`);
-      setView(res.data);
+      const [res, docRes] = await Promise.all([
+        http.get(`/pos/${p.id}`).catch(() => ({ data: p })),
+        http.get(`/pos/${p.id}/documents`).catch(() => ({ data: null })),
+      ]);
+      setView(res.data || p);
+      setViewDocuments(docRes.data || null);
     } catch {
       setView(p);
+    } finally {
+      setLoadingViewDocs(false);
     }
   };
 
@@ -526,35 +542,17 @@ export default function POs() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          onClick={() => openPoDocuments(p, "invoices")}
+                          onClick={() => openPoDocuments(p, "all")}
                           className="text-slate-600 hover:text-[#C27842] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation"
-                          title="View Production Invoices"
+                          title="Invoices & Packing Lists"
                           data-testid={`invoice-${p.po_number}`}
                           disabled={loadingInvoices && selectedPoForInvoices?.id === p.id}
                         >
-                          {loadingInvoices && selectedPoForInvoices?.id === p.id && docActiveTab === "invoices" ? (
+                          {loadingInvoices && selectedPoForInvoices?.id === p.id ? (
                             <Loader2 className="w-4 h-4 animate-spin text-[#C27842]" />
                           ) : (
-                            <FileDown className="w-4 h-4" />
+                            <Receipt className="w-4 h-4" />
                           )}
-                        </button>
-                        <button
-                          onClick={() => openPoDocuments(p, "dispatches")}
-                          className="text-slate-600 hover:text-[#F97316] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
-                          title="View Dispatch Records & Challans"
-                          data-testid={`challan-${p.po_number}`}
-                          disabled={loadingInvoices && selectedPoForInvoices?.id === p.id}
-                        >
-                          <Truck className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => openPoDocuments(p, "dispatches")}
-                          className="text-slate-600 hover:text-[#16A34A] p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
-                          title="View Packing Lists & Cartons"
-                          data-testid={`packing-${p.po_number}`}
-                          disabled={loadingInvoices && selectedPoForInvoices?.id === p.id}
-                        >
-                          <Package className="w-4 h-4" />
                         </button>
                         <button
                           onClick={() => {
@@ -945,34 +943,20 @@ export default function POs() {
             {/* PO-level Document & Barcode Actions Toolbar */}
             <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg flex flex-wrap items-center justify-between gap-2.5">
               <div className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                PO Documents &amp; Operations
+                PO Operations &amp; Documents
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
-                  onClick={() => handleInvoiceClick(view)}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
-                  data-testid="detail-invoice-btn"
+                  onClick={() => openPoDocuments(view, "all")}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] border border-[#C27842] rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px] transition-colors"
+                  data-testid="detail-invoices-packing-btn"
+                  title="View list of invoices and packing lists produced for this PO"
                 >
-                  <FileDown className="w-3.5 h-3.5 text-[#C27842]" />
-                  <span>Tax Invoice</span>
-                </button>
-                <a
-                  href={`${API}/pos/${view.id}/challan.pdf`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
-                  data-testid="detail-challan-btn"
-                >
-                  <Truck className="w-3.5 h-3.5 text-[#F97316]" />
-                  <span>Dispatch Challan</span>
-                </a>
-                <button
-                  onClick={() => downloadPacking(view)}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded shadow-sm inline-flex items-center gap-1.5 min-h-[34px]"
-                  data-testid="detail-packing-btn"
-                >
-                  <Package className="w-3.5 h-3.5 text-[#16A34A]" />
-                  <span>Packing List</span>
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>
+                    Invoices &amp; Packing Lists
+                    {viewDocuments ? ` (${(viewDocuments.invoices?.length || 0) + (viewDocuments.dispatch_records?.length || 0)})` : ""}
+                  </span>
                 </button>
                 <button
                   onClick={() => {
@@ -1173,17 +1157,190 @@ export default function POs() {
                 </span>
               </div>
             </div>
+
+            {/* Invoices & Packing Lists Section in PO View */}
+            <div className="pt-3 border-t-2 border-slate-200" data-testid="po-view-invoices-and-packing">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Receipt className="w-4 h-4 text-[#C27842]" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Invoices &amp; Packing Lists Produced
+                  </h3>
+                </div>
+                {viewDocuments && (
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Dispatched: <b className="text-[#C27842]">{viewDocuments.total_dispatched_pairs ?? 0}</b> / {view.total_quantity} pairs
+                  </span>
+                )}
+              </div>
+
+              {loadingViewDocs ? (
+                <div className="py-6 text-center text-xs text-slate-500 bg-slate-50 rounded-lg border border-slate-200">
+                  <Loader2 className="w-4 h-4 animate-spin inline mr-1.5 text-[#C27842]" />
+                  Loading invoices &amp; packing lists...
+                </div>
+              ) : !viewDocuments?.invoices?.length && !viewDocuments?.dispatch_records?.length ? (
+                <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-lg text-center space-y-1.5">
+                  <div className="text-xs font-semibold text-slate-700">No Invoices or Packing Lists Produced Yet</div>
+                  <p className="text-[11px] text-slate-500 max-w-md mx-auto">
+                    Invoices and packing lists are generated when packed cartons are dispatched from the Kanban board.
+                  </p>
+                  <div className="pt-1 flex items-center justify-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => navigate("/production")}
+                      className="text-xs font-bold text-[#C27842] hover:underline inline-flex items-center gap-1"
+                    >
+                      Go to Kanban Production <ArrowRight className="w-3 h-3" />
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <a
+                      href={`${API}/pos/${view.id}/invoice.pdf`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-slate-500 hover:text-slate-700 underline"
+                    >
+                      Download PO draft invoice
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Invoices List */}
+                  {viewDocuments?.invoices && viewDocuments.invoices.length > 0 && (
+                    <div>
+                      <div className="text-[11px] uppercase font-bold text-slate-600 tracking-wider mb-1.5 flex items-center justify-between">
+                        <span>Invoices Produced ({viewDocuments.invoices.length})</span>
+                        <button
+                          type="button"
+                          onClick={() => navigate("/invoices")}
+                          className="text-[11px] text-slate-500 hover:text-[#C27842] inline-flex items-center gap-1"
+                        >
+                          View Invoices Ledger <ExternalLink className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                      <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                        {viewDocuments.invoices.map((inv) => (
+                          <div key={inv.id} className="p-3 hover:bg-slate-50 flex items-center justify-between gap-3">
+                            <div>
+                              <div className="font-mono font-bold text-slate-900 text-xs flex items-center gap-2">
+                                <span>{inv.invoice_no}</span>
+                                {inv.status && <Badge tone="success">{inv.status.toUpperCase()}</Badge>}
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-0.5">
+                                Date: {inv.invoice_date} | Pairs: <b>{inv.pairs_count || "—"}</b> | Total: <span className="font-mono font-bold text-slate-800">{inr(inv.grand_total)}</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <a
+                                href={`${API}/invoices/${inv.id}/file`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] rounded shadow-sm inline-flex items-center gap-1"
+                              >
+                                <FileDown className="w-3 h-3" /> Invoice PDF
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Packing Lists & Dispatches */}
+                  {viewDocuments?.dispatch_records && viewDocuments.dispatch_records.length > 0 && (
+                    <div>
+                      <div className="text-[11px] uppercase font-bold text-slate-600 tracking-wider mb-1.5">
+                        Packing Lists &amp; Dispatches ({viewDocuments.dispatch_records.length})
+                      </div>
+                      <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                        {viewDocuments.dispatch_records.map((dr) => (
+                          <div key={dr.id} className="p-3 hover:bg-slate-50 flex items-center justify-between gap-3">
+                            <div>
+                              <div className="font-mono font-bold text-slate-900 text-xs">
+                                Dispatch: {dr.invoice_no || dr.id}
+                              </div>
+                              <div className="text-[11px] text-slate-500 mt-0.5">
+                                Date: {dr.dispatched_at ? new Date(dr.dispatched_at).toLocaleDateString() : "—"} | Cartons: <b>{dr.carton_count || 0}</b> | Pairs: <b>{dr.pairs || dr.total_quantity || "—"}</b>
+                              </div>
+                              {(dr.transporter || dr.vehicle) && (
+                                <div className="text-[10px] text-slate-400">
+                                  Transport: {dr.transporter || "—"} {dr.vehicle ? `(${dr.vehicle})` : ""}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/packing-list`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2 py-1 text-[11px] font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
+                              >
+                                <Package className="w-3 h-3 text-[#16A34A]" /> Packing List (XLSX)
+                              </a>
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/carton-labels`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2 py-1 text-[11px] font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
+                              >
+                                <FileText className="w-3 h-3 text-[#F97316]" /> Carton Labels
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </Drawer>
       )}
       {invoiceModalOpen && (
         <Drawer
-          title={`Production Documents & Invoices — ${selectedPoForInvoices?.po_number || ""}`}
+          title={`Invoices & Packing Lists — ${selectedPoForInvoices?.po_number || ""}`}
           open={invoiceModalOpen}
           onClose={() => setInvoiceModalOpen(false)}
           width="max-w-3xl"
         >
           <div className="space-y-4 p-2">
+            {/* Direct 1-Click Action Card if single invoice */}
+            {poInvoicesList.length === 1 && (
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                    <Receipt className="w-3.5 h-3.5 text-[#C27842]" />
+                    <span>Production Invoice: {poInvoicesList[0].invoice_no}</span>
+                  </div>
+                  <div className="text-[11px] text-amber-800 mt-0.5">
+                    Date: {poInvoicesList[0].invoice_date} | Pairs: <b>{poInvoicesList[0].pairs_count || "—"}</b> | Total: <span className="font-mono font-bold">{inr(poInvoicesList[0].grand_total)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={`${API}/invoices/${poInvoicesList[0].id}/file`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] rounded shadow-sm inline-flex items-center gap-1.5"
+                  >
+                    <FileDown className="w-3.5 h-3.5" /> Download Invoice PDF
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInvoiceModalOpen(false);
+                      navigate("/invoices");
+                    }}
+                    className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded inline-flex items-center gap-1"
+                  >
+                    View in Invoices <ExternalLink className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Header info */}
             <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -1208,6 +1365,17 @@ export default function POs() {
             <div className="flex border-b border-slate-200 gap-4 text-xs font-semibold">
               <button
                 type="button"
+                onClick={() => setDocActiveTab("all")}
+                className={`pb-2 transition-colors border-b-2 ${
+                  docActiveTab === "all"
+                    ? "border-[#C27842] text-[#C27842]"
+                    : "border-transparent text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                All Documents ({poInvoicesList.length + (poDocumentsData?.dispatch_records || []).length})
+              </button>
+              <button
+                type="button"
                 onClick={() => setDocActiveTab("invoices")}
                 className={`pb-2 transition-colors border-b-2 ${
                   docActiveTab === "invoices"
@@ -1215,7 +1383,7 @@ export default function POs() {
                     : "border-transparent text-slate-500 hover:text-slate-700"
                 }`}
               >
-                Invoices Produced ({poInvoicesList.length})
+                Invoices ({poInvoicesList.length})
               </button>
               <button
                 type="button"
@@ -1226,7 +1394,7 @@ export default function POs() {
                     : "border-transparent text-slate-500 hover:text-slate-700"
                 }`}
               >
-                Dispatch Records & Packing Lists ({(poDocumentsData?.dispatch_records || []).length})
+                Packing Lists ({(poDocumentsData?.dispatch_records || []).length})
               </button>
             </div>
 
@@ -1235,124 +1403,155 @@ export default function POs() {
                 <Loader2 className="w-6 h-6 animate-spin text-[#C27842]" />
                 <span className="text-xs">Loading production documents...</span>
               </div>
-            ) : docActiveTab === "invoices" ? (
-              poInvoicesList.length === 0 ? (
-                <div className="py-8 px-4 text-center bg-slate-50 rounded-lg border border-dashed border-slate-200">
-                  <FileText className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                  <p className="text-sm font-medium text-slate-700">No Invoices Produced From Production Yet</p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                    Invoices are generated upon completing and dispatching production jobs in the Kanban board.
-                  </p>
-                  <div className="mt-4 pt-3 border-t border-slate-200">
-                    <button
-                      type="button"
-                      onClick={() => window.open(`${API}/pos/${selectedPoForInvoices?.id}/invoice.pdf`, "_blank")}
-                      className="text-xs text-slate-500 hover:text-[#C27842] underline"
-                    >
-                      Need a pre-production draft? Click here to generate draft PO invoice
-                    </button>
-                  </div>
+            ) : poInvoicesList.length === 0 && (poDocumentsData?.dispatch_records || []).length === 0 ? (
+              <div className="py-8 px-4 text-center bg-slate-50 rounded-lg border border-dashed border-slate-200">
+                <Receipt className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                <p className="text-sm font-medium text-slate-700">No Invoices or Packing Lists Produced Yet</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                  Invoices, packing lists, and carton labels are produced automatically upon completing and dispatching production jobs in the Kanban board.
+                </p>
+                <div className="mt-4 pt-3 border-t border-slate-200 flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInvoiceModalOpen(false);
+                      navigate("/production");
+                    }}
+                    className="text-xs font-bold text-[#C27842] hover:underline inline-flex items-center gap-1"
+                  >
+                    Go to Kanban Production <ArrowRight className="w-3 h-3" />
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <a
+                    href={`${API}/pos/${selectedPoForInvoices?.id}/invoice.pdf`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-slate-500 hover:text-[#C27842] underline"
+                  >
+                    Generate draft PO invoice
+                  </a>
                 </div>
-              ) : (
-                <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
-                  {poInvoicesList.map((inv) => (
-                    <div key={inv.id} className="p-3.5 bg-white hover:bg-slate-50 flex items-center justify-between gap-4">
-                      <div>
-                        <div className="font-mono font-bold text-slate-900 text-sm flex items-center gap-2">
-                          <span>{inv.invoice_no}</span>
-                          {inv.status && <Badge>{inv.status.toUpperCase()}</Badge>}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          Date: {inv.invoice_date} | Pairs: <span className="font-semibold text-slate-700">{inv.pairs_count || "—"}</span> | Amount: <span className="font-mono font-semibold text-slate-700">{inr(inv.grand_total)}</span>
-                        </div>
-                        {inv.job_ids && inv.job_ids.length > 0 && (
-                          <div className="text-[11px] text-slate-400 mt-0.5">
-                            Production Jobs Covered: {inv.job_ids.length} job(s)
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <a
-                          href={`${API}/invoices/${inv.id}/file`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-1.5 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded-md inline-flex items-center gap-1.5 shadow-sm"
-                        >
-                          <FileDown className="w-3.5 h-3.5" /> Invoice PDF
-                        </a>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )
+              </div>
             ) : (
-              (poDocumentsData?.dispatch_records || []).length === 0 ? (
-                <div className="py-8 px-4 text-center bg-slate-50 rounded-lg border border-dashed border-slate-200">
-                  <Truck className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                  <p className="text-sm font-medium text-slate-700">No Dispatch Records Produced Yet</p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                    Dispatch records and packing lists are generated when packed cartons are dispatched from the Kanban board.
-                  </p>
-                  <div className="mt-4 pt-3 border-t border-slate-200">
-                    <button
-                      type="button"
-                      onClick={() => setPreviewPo(selectedPoForInvoices)}
-                      className="text-xs text-slate-500 hover:text-[#C27842] underline"
-                    >
-                      Preview full PO packing template
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
-                  {(poDocumentsData?.dispatch_records || []).map((dr) => (
-                    <div key={dr.id} className="p-3.5 bg-white hover:bg-slate-50 flex items-center justify-between gap-4">
-                      <div>
-                        <div className="font-mono font-bold text-slate-900 text-sm">
-                          Dispatch: {dr.invoice_no || dr.id}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          Date: {dr.dispatched_at ? new Date(dr.dispatched_at).toLocaleDateString() : "—"} | Cartons: <span className="font-semibold text-slate-700">{dr.carton_count || 0}</span> | Pairs: <span className="font-semibold text-slate-700">{dr.pairs || dr.total_quantity || "—"}</span>
-                        </div>
-                        {(dr.transporter || dr.vehicle) && (
-                          <div className="text-[11px] text-slate-400 mt-0.5">
-                            Transport: {dr.transporter || "—"} {dr.vehicle ? `(${dr.vehicle})` : ""}
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <a
-                          href={`${API}/dispatch-records/${dr.id}/packing-list`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
-                          title="Download Packing List XLSX"
-                        >
-                          <Package className="w-3.5 h-3.5 text-[#16A34A]" /> Packing List
-                        </a>
-                        <a
-                          href={`${API}/dispatch-records/${dr.id}/carton-labels`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
-                          title="Download Carton Labels PDF"
-                        >
-                          <FileText className="w-3.5 h-3.5 text-[#F97316]" /> Labels
-                        </a>
-                        <a
-                          href={`${API}/dispatch-records/${dr.id}/invoice`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-2.5 py-1.5 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded inline-flex items-center gap-1 shadow-sm"
-                          title="Download Dispatch Invoice PDF"
-                        >
-                          <FileDown className="w-3.5 h-3.5" /> Invoice
-                        </a>
-                      </div>
+              <div className="space-y-4">
+                {/* Invoices */}
+                {(docActiveTab === "all" || docActiveTab === "invoices") && (
+                  <div>
+                    <div className="text-[11px] uppercase font-bold text-slate-600 tracking-wider mb-2 flex items-center justify-between">
+                      <span>Invoices Produced ({poInvoicesList.length})</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInvoiceModalOpen(false);
+                          navigate("/invoices");
+                        }}
+                        className="text-[11px] text-slate-500 hover:text-[#C27842] inline-flex items-center gap-1"
+                      >
+                        Invoices Ledger <ExternalLink className="w-2.5 h-2.5" />
+                      </button>
                     </div>
-                  ))}
-                </div>
-              )
+                    {poInvoicesList.length === 0 ? (
+                      <div className="py-4 text-center text-xs text-slate-400 bg-slate-50 rounded border border-dashed border-slate-200">
+                        No invoices produced yet.
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                        {poInvoicesList.map((inv) => (
+                          <div key={inv.id} className="p-3.5 hover:bg-slate-50 flex items-center justify-between gap-4">
+                            <div>
+                              <div className="font-mono font-bold text-slate-900 text-sm flex items-center gap-2">
+                                <span>{inv.invoice_no}</span>
+                                {inv.status && <Badge tone="success">{inv.status.toUpperCase()}</Badge>}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Date: {inv.invoice_date} | Pairs: <span className="font-semibold text-slate-700">{inv.pairs_count || "—"}</span> | Amount: <span className="font-mono font-semibold text-slate-700">{inr(inv.grand_total)}</span>
+                              </div>
+                              {inv.job_ids && inv.job_ids.length > 0 && (
+                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                  Production Jobs: {inv.job_ids.length} job(s)
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <a
+                                href={`${API}/invoices/${inv.id}/file`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-3 py-1.5 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded-md inline-flex items-center gap-1.5 shadow-sm"
+                              >
+                                <FileDown className="w-3.5 h-3.5" /> Invoice PDF
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Packing Lists & Dispatches */}
+                {(docActiveTab === "all" || docActiveTab === "dispatches") && (
+                  <div>
+                    <div className="text-[11px] uppercase font-bold text-slate-600 tracking-wider mb-2">
+                      Packing Lists &amp; Dispatches ({(poDocumentsData?.dispatch_records || []).length})
+                    </div>
+                    {(poDocumentsData?.dispatch_records || []).length === 0 ? (
+                      <div className="py-4 text-center text-xs text-slate-400 bg-slate-50 rounded border border-dashed border-slate-200">
+                        No dispatch packing lists produced yet.
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                        {(poDocumentsData?.dispatch_records || []).map((dr) => (
+                          <div key={dr.id} className="p-3.5 hover:bg-slate-50 flex items-center justify-between gap-4">
+                            <div>
+                              <div className="font-mono font-bold text-slate-900 text-sm">
+                                Dispatch: {dr.invoice_no || dr.id}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Date: {dr.dispatched_at ? new Date(dr.dispatched_at).toLocaleDateString() : "—"} | Cartons: <span className="font-semibold text-slate-700">{dr.carton_count || 0}</span> | Pairs: <span className="font-semibold text-slate-700">{dr.pairs || dr.total_quantity || "—"}</span>
+                              </div>
+                              {(dr.transporter || dr.vehicle) && (
+                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                  Transport: {dr.transporter || "—"} {dr.vehicle ? `(${dr.vehicle})` : ""}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/packing-list`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
+                                title="Download Packing List XLSX"
+                              >
+                                <Package className="w-3.5 h-3.5 text-[#16A34A]" /> Packing List (XLSX)
+                              </a>
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/carton-labels`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded inline-flex items-center gap-1"
+                                title="Download Carton Labels PDF"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-[#F97316]" /> Carton Labels
+                              </a>
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/invoice`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1.5 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded inline-flex items-center gap-1 shadow-sm"
+                                title="Download Dispatch Invoice PDF"
+                              >
+                                <FileDown className="w-3.5 h-3.5" /> Invoice PDF
+                              </a>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
 
             <div className="pt-4 border-t border-slate-200 flex justify-end items-center">
