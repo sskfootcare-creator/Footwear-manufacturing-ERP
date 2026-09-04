@@ -56,6 +56,12 @@ def test_color_bom_override_model():
     assert ov2.quantity == 2.5
     assert ov2.waste_pct == 4.0
     assert ov2.rate is None
+    assert ov2.color is None
+
+    # Override specifying color for that variant's material
+    ov3 = ColorBomOverride(line_id="line-abc", material_name="Tan Suede", color="Tan")
+    assert ov3.color == "Tan"
+    assert ov3.model_dump()["color"] == "Tan"
 
     # Dict-like access support
     assert ov1["rate"] == 125.5

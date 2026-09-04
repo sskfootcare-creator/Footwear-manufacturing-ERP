@@ -148,9 +148,12 @@ describe("Flexible Color BOM Overrides UI in Styles.jsx", () => {
     expect(screen.getByTestId("base-bom-indicator-Tan-line-up-1")).toHaveTextContent("Using base");
     expect(screen.getByTestId("base-bom-indicator-Tan-line-ins-1")).toHaveTextContent("Using base");
 
-    // 5. Override line 1 (upper): change rate from 100 to 175
+    // 5. Override line 1 (upper): change rate from 100 to 175 and color to Tan Suede
     const rateInput = screen.getByTestId("bom-rate-line-up-1");
     fireEvent.change(rateInput, { target: { value: "175" } });
+    const colorInput = screen.getByTestId("bom-color-line-up-1");
+    fireEvent.change(colorInput, { target: { value: "Tan Suede" } });
+    expect(colorInput).toHaveValue("Tan Suede");
 
     // 6. Override line 2 (insole): change qty from 1.0 to 2.5
     const qtyInput = screen.getByTestId("bom-qty-line-ins-1");

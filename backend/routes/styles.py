@@ -200,32 +200,42 @@ async def get_gst_config():
 def _parse_bom_item(b: Any) -> BomItem:
     if isinstance(b, BomItem):
         return b
-    if isinstance(b, dict):
+    if hasattr(b, "model_dump"):
+        d = b.model_dump()
+    elif isinstance(b, dict):
         d = dict(b)
-        raw_yld = d.get("yield_per_unit")
-        def_yld = d.get("default_yield_per_unit")
-        if raw_yld is not None and float(raw_yld) > 0:
-            yld = float(raw_yld)
-        elif def_yld is not None and float(def_yld) > 0:
-            yld = float(def_yld)
-        else:
-            yld = 1.0
-        return BomItem(
-            line_id=d.get("line_id"),
-            material_id=d.get("material_id") or "",
-            material_name=d.get("material_name") or "",
-            material_code=d.get("material_code") or "",
-            unit=d.get("unit") or "",
-            rate=float(d.get("rate") or 0.0),
-            quantity=float(d.get("quantity") or 0.0),
-            yield_per_unit=yld,
-            waste_pct=float(d.get("waste_pct") or 0.0),
-            section=d.get("section") or "Other",
-            component=d.get("component"),
-            with_eva=d.get("with_eva"),
-            color=d.get("color") or "",
-        )
-    return b
+    elif hasattr(b, "__dict__"):
+        d = dict(b.__dict__)
+    else:
+        return b
+
+    raw_yld = d.get("yield_per_unit")
+    def_yld = d.get("default_yield_per_unit")
+    if raw_yld is not None and float(raw_yld) > 0:
+        yld = float(raw_yld)
+    elif def_yld is not None and float(def_yld) > 0:
+        yld = float(def_yld)
+    else:
+        yld = 1.0
+
+    raw_color = d.get("color")
+    line_color = str(raw_color).strip() if raw_color is not None else ""
+
+    return BomItem(
+        line_id=d.get("line_id"),
+        material_id=d.get("material_id") or "",
+        material_name=d.get("material_name") or "",
+        material_code=d.get("material_code") or "",
+        unit=d.get("unit") or "",
+        rate=float(d.get("rate") or 0.0),
+        quantity=float(d.get("quantity") or 0.0),
+        yield_per_unit=yld,
+        waste_pct=float(d.get("waste_pct") or 0.0),
+        section=d.get("section") or "Other",
+        component=d.get("component"),
+        with_eva=d.get("with_eva"),
+        color=line_color,
+    )
 
 
 def _match_section_override(line_section: str, overrides_map: dict):
@@ -313,6 +323,8 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
         for ov in color_bom_ovs:
             if isinstance(ov, (ColorBomOverride, BomLineOverride)):
                 ov_dict = ov.model_dump()
+            elif hasattr(ov, "model_dump"):
+                ov_dict = ov.model_dump()
             elif isinstance(ov, dict):
                 ov_dict = dict(ov)
             else:
@@ -333,12 +345,23 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
 
             matched_idx = next((i for i, b in enumerate(result_lines) if b.line_id == line_id), None)
             if matched_idx is not None:
+                base_line_color = result_lines[matched_idx].color or ""
                 curr_dict = result_lines[matched_idx].model_dump()
                 for field_name, field_val in ov_dict.items():
-                    if field_name in ("line_id", "removed"):
+                    if field_name in ("line_id", "removed", "color"):
                         continue
                     if field_val is not None:
                         curr_dict[field_name] = field_val
+
+                # Color merge logic:
+                # color = override.color if an override exists for that line AND specifies a color,
+                # else the base line's own color, unchanged.
+                ov_color = ov_dict.get("color")
+                if ov_color is not None and str(ov_color).strip():
+                    curr_dict["color"] = str(ov_color).strip()
+                else:
+                    curr_dict["color"] = base_line_color
+
                 result_lines[matched_idx] = BomItem(**curr_dict)
             else:
                 log.warning(
@@ -385,6 +408,8 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
             if ov is not None:
                 if isinstance(ov, ColorMaterialOverride):
                     ov_dict = ov.model_dump()
+                elif hasattr(ov, "model_dump"):
+                    ov_dict = ov.model_dump()
                 elif isinstance(ov, dict):
                     ov_dict = dict(ov)
                 else:
@@ -401,6 +426,14 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
                     curr_dict["rate"] = float(ov_dict["rate"])
                 if ov_dict.get("quantity") is not None:
                     curr_dict["quantity"] = float(ov_dict["quantity"])
+
+                # Color merge logic for fallback path:
+                ov_color = ov_dict.get("color")
+                if ov_color is not None and str(ov_color).strip():
+                    curr_dict["color"] = str(ov_color).strip()
+                else:
+                    curr_dict["color"] = b.color or ""
+
                 result_lines.append(BomItem(**curr_dict))
             else:
                 result_lines.append(b)

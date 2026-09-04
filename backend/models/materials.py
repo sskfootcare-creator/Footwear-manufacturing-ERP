@@ -82,6 +82,7 @@ class ColorMaterialOverride(BaseModel):
     material_code: str
     rate: float
     quantity: Optional[float] = None
+    color: Optional[str] = None
 
     def __getitem__(self, item):
         return getattr(self, item)

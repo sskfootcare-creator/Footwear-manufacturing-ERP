@@ -506,6 +506,7 @@ export default function Styles() {
           yield_per_unit: Number(b.yield_per_unit || 1),
           waste_pct: Number(b.waste_pct || 0),
           rate: Number(b.rate),
+          color: (b.color || "").trim(),
         })),
         labor: form.labor.map((l) => ({ ...l, rate: Number(l.rate) })),
       };
@@ -626,6 +627,7 @@ export default function Styles() {
           yield_per_unit: material.default_yield_per_unit ?? 1,
           waste_pct: 5,
           section: material.category,
+          color: material.color || "",
         },
       ],
     }));
@@ -770,6 +772,9 @@ export default function Styles() {
       currentOv.material_id = materialObj.id;
       currentOv.material_name = materialObj.name;
       currentOv.material_code = materialObj.code;
+      if (materialObj.color) {
+        currentOv.color = materialObj.color;
+      }
       if (currentOv.rate == null) {
         currentOv.rate = materialObj.rate;
       }
@@ -1672,11 +1677,12 @@ export default function Styles() {
 
                     {/* BOM Table */}
                     <div className="overflow-x-auto border-2 border-slate-200 rounded shadow-sm overscroll-x-contain">
-                      <table className="w-full text-xs min-w-[820px]">
+                      <table className="w-full text-xs min-w-[860px]">
                         <thead className="bg-slate-50 border-b border-slate-200">
                           <tr className="text-left text-slate-700">
                             <th className="px-3 py-2 font-bold">Material</th>
                             <th className="px-3 py-2 font-bold">Section</th>
+                            <th className="px-3 py-2 font-bold">Color</th>
                             <th className="px-3 py-2 font-bold text-right">Rate</th>
                             <th className="px-3 py-2 font-bold text-right" title="Material consumption per pair">
                               Qty
@@ -1693,7 +1699,7 @@ export default function Styles() {
                         <tbody>
                           {form.bom.length === 0 && (
                             <tr>
-                              <td colSpan="9" className="px-2 py-6 text-center text-slate-400">
+                              <td colSpan="10" className="px-2 py-6 text-center text-slate-400">
                                 No items in BOM. Add from dropdown above.
                               </td>
                             </tr>
@@ -1781,6 +1787,40 @@ export default function Styles() {
                                       onChange={(e) => updateBom(i, "section", e.target.value)}
                                       data-testid={`bom-section-${i}`}
                                       placeholder="type or pick…"
+                                    />
+                                  )}
+                                </td>
+
+                                {/* Color */}
+                                <td className="px-2 py-2">
+                                  {isColorSelected ? (
+                                    <input
+                                      type="text"
+                                      className={`border px-1.5 py-0.5 text-xs w-28 rounded placeholder:text-slate-400 ${
+                                        ov?.color != null
+                                          ? "border-amber-400 bg-white font-bold text-amber-900"
+                                          : "border-slate-300 bg-slate-50 text-slate-600"
+                                      }`}
+                                      value={ov?.color !== undefined && ov?.color !== null ? ov.color : (b.color || "")}
+                                      onChange={(e) =>
+                                        updateLineOverride(
+                                          selectedBomColor,
+                                          b.line_id,
+                                          "color",
+                                          e.target.value === "" ? null : e.target.value
+                                        )
+                                      }
+                                      data-testid={`bom-color-${b.line_id || i}`}
+                                      placeholder={b.color || "e.g. Tan…"}
+                                    />
+                                  ) : (
+                                    <input
+                                      type="text"
+                                      className="border border-slate-300 px-1.5 py-0.5 text-xs w-28 rounded placeholder:text-slate-400"
+                                      value={b.color || ""}
+                                      onChange={(e) => updateBom(i, "color", e.target.value)}
+                                      data-testid={`bom-color-${b.line_id || i}`}
+                                      placeholder="e.g. Tan, Navy…"
                                     />
                                   )}
                                 </td>
