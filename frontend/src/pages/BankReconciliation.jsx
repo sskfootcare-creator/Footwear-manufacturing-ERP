@@ -26,6 +26,8 @@ import {
   Unlock,
   ChevronDown,
   ChevronRight,
+  ChevronLeft,
+  Calendar,
   Pencil,
   Scale,
   History,
@@ -37,6 +39,177 @@ const isCashWithdrawalCandidate = (line) => {
   return /(?:^|[\s\-_/.,:])(ATM|CASH|SELF|CWDR|NFS|EAW|CSH|SELF\s*CHQ|SELF\s*CHEQUE|CASH\s*WDL|CASH\s*WITHDRAWAL)(?:$|[\s\-_/.,:])/i.test(n);
 };
 
+const formatMonthLabel = (yearMonthStr) => {
+  if (!yearMonthStr || yearMonthStr === "all") return "All Months";
+  const parts = yearMonthStr.split("-");
+  if (parts.length < 2) return yearMonthStr;
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  if (isNaN(year) || isNaN(month)) return yearMonthStr;
+  const d = new Date(year, month - 1, 1);
+  return d.toLocaleString("en-US", { month: "long", year: "numeric" });
+};
+
+const getMonthDateBounds = (yearMonthStr) => {
+  if (!yearMonthStr || yearMonthStr === "all") {
+    return { fromDate: undefined, toDate: undefined };
+  }
+  const parts = yearMonthStr.split("-");
+  if (parts.length < 2) return { fromDate: undefined, toDate: undefined };
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  if (isNaN(year) || isNaN(month)) return { fromDate: undefined, toDate: undefined };
+  const lastDay = new Date(year, month, 0).getDate();
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    fromDate: `${year}-${pad(month)}-01`,
+    toDate: `${year}-${pad(month)}-${pad(lastDay)}`,
+  };
+};
+
+const getCurrentMonthKey = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const getAdjacentMonth = (yearMonthStr, offset) => {
+  let base = yearMonthStr;
+  if (!base || base === "all") base = getCurrentMonthKey();
+  const parts = base.split("-");
+  const year = parseInt(parts[0], 10) || new Date().getFullYear();
+  const month = parseInt(parts[1], 10) || (new Date().getMonth() + 1);
+  const d = new Date(year, month - 1 + offset, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+function PaginationControls({
+  currentPage,
+  totalItems,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+  testIdPrefix = "pagination",
+}) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  if (totalItems === 0) return null;
+
+  const startItem = Math.min((currentPage - 1) * pageSize + 1, totalItems);
+  const endItem = Math.min(currentPage * pageSize, totalItems);
+
+  const getPageNumbers = () => {
+    const pages = [];
+    const maxVisible = 5;
+    if (totalPages <= maxVisible) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      let start = Math.max(1, currentPage - 2);
+      let end = Math.min(totalPages, start + maxVisible - 1);
+      if (end - start < maxVisible - 1) {
+        start = Math.max(1, end - maxVisible + 1);
+      }
+      for (let i = start; i <= end; i++) pages.push(i);
+    }
+    return pages;
+  };
+
+  const pageNumbers = getPageNumbers();
+
+  return (
+    <div
+      className="flex items-center justify-between gap-4 flex-wrap pt-3 border-t border-slate-200 text-xs"
+      data-testid={`${testIdPrefix}-bar`}
+    >
+      <div className="flex items-center gap-3 text-slate-600">
+        <span className="font-medium">
+          Showing <span className="font-mono font-bold text-slate-900">{startItem}</span> to{" "}
+          <span className="font-mono font-bold text-slate-900">{endItem}</span> of{" "}
+          <span className="font-mono font-bold text-slate-900">{totalItems}</span> records
+        </span>
+
+        <div className="flex items-center gap-1.5 border-l border-slate-300 pl-3">
+          <span className="text-[10px] uppercase font-bold text-slate-500">Per page:</span>
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              onPageSizeChange(Number(e.target.value));
+              onPageChange(1);
+            }}
+            className="border border-slate-300 rounded bg-white px-2 py-1 text-xs font-bold text-slate-800 focus:outline-none focus:border-[#2563EB]"
+            data-testid={`${testIdPrefix}-size-select`}
+          >
+            <option value={10}>10</option>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onPageChange(1)}
+          disabled={currentPage <= 1}
+          className="px-2 py-1 border border-slate-300 rounded text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          data-testid={`${testIdPrefix}-first`}
+          title="First page"
+        >
+          «
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage <= 1}
+          className="px-2 py-1 border border-slate-300 rounded text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          data-testid={`${testIdPrefix}-prev`}
+          title="Previous page"
+        >
+          ‹
+        </button>
+
+        {pageNumbers.map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onPageChange(p)}
+            className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-colors ${
+              currentPage === p
+                ? "bg-[#1E3A8A] text-white border border-[#1E3A8A] shadow-sm"
+                : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"
+            }`}
+            data-testid={`${testIdPrefix}-page-${p}`}
+          >
+            {p}
+          </button>
+        ))}
+
+        <button
+          type="button"
+          onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
+          disabled={currentPage >= totalPages}
+          className="px-2 py-1 border border-slate-300 rounded text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          data-testid={`${testIdPrefix}-next`}
+          title="Next page"
+        >
+          ›
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onPageChange(totalPages)}
+          disabled={currentPage >= totalPages}
+          className="px-2 py-1 border border-slate-300 rounded text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          data-testid={`${testIdPrefix}-last`}
+          title="Last page"
+        >
+          »
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function BankReconciliation() {
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState("all");
@@ -44,6 +217,21 @@ export default function BankReconciliation() {
   const [activeTab, setActiveTab] = useState("unmatched_lines"); // unmatched_lines | transfers | erp_expected | ledger
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState(null);
+
+  // Reconciliation period / month navigation state
+  const [selectedMonth, setSelectedMonth] = useState("");
+  const [availableMonths, setAvailableMonths] = useState([]);
+  const hasAutoSelectedMonth = React.useRef(false);
+
+  // Pagination states (default 25 per page)
+  const [unmatchedPage, setUnmatchedPage] = useState(1);
+  const [unmatchedPageSize, setUnmatchedPageSize] = useState(25);
+
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [ledgerPageSize, setLedgerPageSize] = useState(25);
+
+  const [erpPage, setErpPage] = useState(1);
+  const [erpPageSize, setErpPageSize] = useState(25);
 
   // Statement lines
   const [statementLines, setStatementLines] = useState([]);
@@ -159,19 +347,39 @@ export default function BankReconciliation() {
       if (selectedAccountId && selectedAccountId !== "all") {
         params.bank_account_id = selectedAccountId;
       }
+      if (selectedMonth && selectedMonth !== "all") {
+        const bounds = getMonthDateBounds(selectedMonth);
+        if (bounds.fromDate) params.from_date = bounds.fromDate;
+        if (bounds.toDate) params.to_date = bounds.toDate;
+      }
       const { data } = await http.get("/banking/reconciliation/summary", { params });
       setSummary(data);
+      if (data?.available_months?.length > 0) {
+        setAvailableMonths((prev) => {
+          const combined = Array.from(new Set([...data.available_months, ...(prev || [])]));
+          return combined.sort().reverse();
+        });
+        if (!hasAutoSelectedMonth.current && (!selectedMonth || selectedMonth === "")) {
+          hasAutoSelectedMonth.current = true;
+          setSelectedMonth(data.available_months[0]);
+        }
+      }
     } catch (e) {
       console.error(e);
     }
-  }, [selectedAccountId]);
+  }, [selectedAccountId, selectedMonth]);
 
   const fetchStatementLines = useCallback(async () => {
     setLoading(true);
     try {
-      const params = { limit: 500 };
+      const params = { limit: 1000 };
       if (selectedAccountId && selectedAccountId !== "all") {
         params.bank_account_id = selectedAccountId;
+      }
+      if (selectedMonth && selectedMonth !== "all") {
+        const bounds = getMonthDateBounds(selectedMonth);
+        if (bounds.fromDate) params.from_date = bounds.fromDate;
+        if (bounds.toDate) params.to_date = bounds.toDate;
       }
       if (statementFilter.status !== "all") {
         params.match_status = statementFilter.status;
@@ -180,13 +388,27 @@ export default function BankReconciliation() {
         params.search = statementFilter.search;
       }
       const { data } = await http.get("/banking/statement-lines", { params });
-      setStatementLines(Array.isArray(data) ? data : data.items || []);
+      const items = Array.isArray(data) ? data : data.items || [];
+      setStatementLines(items);
+
+      // Collect months from statement lines to enrich available months
+      const discovered = new Set();
+      items.forEach((l) => {
+        const d = String(l.date || "");
+        if (d.length >= 7 && d[4] === "-") discovered.add(d.slice(0, 7));
+      });
+      if (discovered.size > 0) {
+        setAvailableMonths((prev) => {
+          const combined = Array.from(new Set([...Array.from(discovered), ...(prev || [])]));
+          return combined.sort().reverse();
+        });
+      }
     } catch (e) {
       notify(e.message || "Failed to load statement lines", "error");
     } finally {
       setLoading(false);
     }
-  }, [selectedAccountId, statementFilter]);
+  }, [selectedAccountId, selectedMonth, statementFilter]);
 
   const fetchSuggestedTransfers = useCallback(async () => {
     setTransferLoading(true);
@@ -207,6 +429,11 @@ export default function BankReconciliation() {
       if (selectedAccountId && selectedAccountId !== "all") {
         params.bank_account_id = selectedAccountId;
       }
+      if (selectedMonth && selectedMonth !== "all") {
+        const bounds = getMonthDateBounds(selectedMonth);
+        if (bounds.fromDate) params.from_date = bounds.fromDate;
+        if (bounds.toDate) params.to_date = bounds.toDate;
+      }
       const { data } = await http.get("/banking/cash-withdrawals/suggested", { params });
       setSuggestedCashWithdrawals(data.candidates || []);
     } catch (e) {
@@ -214,7 +441,7 @@ export default function BankReconciliation() {
     } finally {
       setCashLoading(false);
     }
-  }, [selectedAccountId]);
+  }, [selectedAccountId, selectedMonth]);
 
   const fetchErpCandidates = useCallback(async () => {
     setErpLoading(true);
@@ -259,7 +486,29 @@ export default function BankReconciliation() {
     fetchSuggestedCashWithdrawals();
     fetchErpCandidates();
     fetchPeriodLocks();
-  }, [selectedAccountId, fetchSummary, fetchStatementLines, fetchSuggestedTransfers, fetchSuggestedCashWithdrawals, fetchErpCandidates, fetchPeriodLocks]);
+  }, [
+    selectedAccountId,
+    selectedMonth,
+    fetchSummary,
+    fetchStatementLines,
+    fetchSuggestedTransfers,
+    fetchSuggestedCashWithdrawals,
+    fetchErpCandidates,
+    fetchPeriodLocks,
+  ]);
+
+  // Reset pagination on filter or period changes
+  useEffect(() => {
+    setUnmatchedPage(1);
+  }, [selectedMonth, selectedAccountId, statementFilter.search]);
+
+  useEffect(() => {
+    setLedgerPage(1);
+  }, [selectedMonth, selectedAccountId, statementFilter.search, statementFilter.status]);
+
+  useEffect(() => {
+    setErpPage(1);
+  }, [selectedMonth, selectedAccountId, erpSearch]);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Action Handlers
@@ -308,11 +557,17 @@ export default function BankReconciliation() {
       if (selectedAccountId && selectedAccountId !== "all") {
         params.append("bank_account_id", selectedAccountId);
       }
-      if (statementFilter.fromDate) {
-        params.append("from_date", statementFilter.fromDate);
-      }
-      if (statementFilter.toDate) {
-        params.append("to_date", statementFilter.toDate);
+      if (selectedMonth && selectedMonth !== "all") {
+        const bounds = getMonthDateBounds(selectedMonth);
+        if (bounds.fromDate) params.append("from_date", bounds.fromDate);
+        if (bounds.toDate) params.append("to_date", bounds.toDate);
+      } else {
+        if (statementFilter.fromDate) {
+          params.append("from_date", statementFilter.fromDate);
+        }
+        if (statementFilter.toDate) {
+          params.append("to_date", statementFilter.toDate);
+        }
       }
       const token = localStorage.getItem("token") || "";
       const url = `/api/banking/reconciliation/export?${params.toString()}`;
@@ -329,7 +584,8 @@ export default function BankReconciliation() {
       a.href = downloadUrl;
       const acc = accounts.find((a) => a.id === selectedAccountId);
       const accName = acc ? acc.name.replace(/\s+/g, "_") : "Consolidated";
-      a.download = `Bank_Reconciliation_Statement_${accName}.xlsx`;
+      const monthSuffix = selectedMonth && selectedMonth !== "all" ? `_${selectedMonth}` : "";
+      a.download = `Bank_Reconciliation_Statement_${accName}${monthSuffix}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -502,6 +758,46 @@ export default function BankReconciliation() {
   const { statementBal, erpBal, variance } = calculateAccountBalance();
 
   const unmatchedLines = statementLines.filter((l) => l.match_status === "unmatched");
+
+  const currentMonthKey = getCurrentMonthKey();
+  const prevMonthKey = getAdjacentMonth(currentMonthKey, -1);
+
+  const allKnownMonths = Array.from(
+    new Set([currentMonthKey, prevMonthKey, ...(availableMonths || [])])
+  )
+    .filter((m) => m && m.length === 7 && m[4] === "-")
+    .sort()
+    .reverse();
+
+  const handlePrevMonth = () => {
+    const base = selectedMonth && selectedMonth !== "all" ? selectedMonth : currentMonthKey;
+    const prev = getAdjacentMonth(base, -1);
+    setSelectedMonth(prev);
+    setAvailableMonths((list) => (list.includes(prev) ? list : [...list, prev].sort().reverse()));
+  };
+
+  const handleNextMonth = () => {
+    const base = selectedMonth && selectedMonth !== "all" ? selectedMonth : currentMonthKey;
+    const next = getAdjacentMonth(base, 1);
+    setSelectedMonth(next);
+    setAvailableMonths((list) => (list.includes(next) ? list : [...list, next].sort().reverse()));
+  };
+
+  // Tab Paginated slices
+  const paginatedUnmatched = unmatchedLines.slice(
+    (unmatchedPage - 1) * unmatchedPageSize,
+    unmatchedPage * unmatchedPageSize
+  );
+
+  const paginatedLedger = statementLines.slice(
+    (ledgerPage - 1) * ledgerPageSize,
+    ledgerPage * ledgerPageSize
+  );
+
+  const paginatedErp = erpCandidates.slice(
+    (erpPage - 1) * erpPageSize,
+    erpPage * erpPageSize
+  );
 
   return (
     <div>
@@ -759,6 +1055,79 @@ export default function BankReconciliation() {
           ))}
         </div>
 
+        {/* Month Navigator Control Bar */}
+        <div
+          className="bg-white border-2 border-slate-200 p-3 sm:p-4 flex items-center justify-between gap-4 flex-wrap shadow-sm rounded-sm"
+          data-testid="month-navigator-bar"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded bg-blue-50 border border-blue-200 text-[#1E3A8A] flex items-center justify-center shrink-0">
+              <Calendar className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                Reconciliation Period Window
+              </div>
+              <div className="text-base font-black text-slate-900 flex items-center gap-2 flex-wrap">
+                <span>{formatMonthLabel(selectedMonth)}</span>
+                {selectedMonth && selectedMonth !== "all" && (
+                  <span className="text-xs font-mono font-medium text-slate-500">
+                    ({getMonthDateBounds(selectedMonth).fromDate} to {getMonthDateBounds(selectedMonth).toDate})
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Quick-toggle Previous / Current / Next */}
+            <button
+              type="button"
+              onClick={handlePrevMonth}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-bold flex items-center gap-1 border border-slate-300 transition-colors"
+              data-testid="prev-month-btn"
+              title="Previous Month"
+            >
+              <ChevronLeft className="w-4 h-4" /> Prev Month
+            </button>
+
+            <select
+              value={selectedMonth || ""}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="text-xs font-bold py-1.5 px-3 bg-white border-2 border-slate-300 rounded text-slate-800 focus:outline-none focus:border-[#1E3A8A]"
+              data-testid="month-select"
+            >
+              <option value="all">All Available Records</option>
+              {allKnownMonths.map((m) => (
+                <option key={m} value={m}>
+                  {formatMonthLabel(m)} ({m})
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={handleNextMonth}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-bold flex items-center gap-1 border border-slate-300 transition-colors"
+              data-testid="next-month-btn"
+              title="Next Month"
+            >
+              Next Month <ChevronRight className="w-4 h-4" />
+            </button>
+
+            {selectedMonth !== currentMonthKey && (
+              <button
+                type="button"
+                onClick={() => setSelectedMonth(currentMonthKey)}
+                className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-[#1E3A8A] rounded text-xs font-bold border border-blue-200 transition-colors ml-1"
+                data-testid="current-month-btn"
+              >
+                Current Month
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Reconciliation Balance Overview Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4" data-testid="reconcile-overview-cards">
           {/* Statement Closing Balance */}
@@ -1004,7 +1373,8 @@ export default function BankReconciliation() {
                   <p className="text-xs text-slate-500">No unmatched bank transactions pending review.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto border-2 border-slate-200">
+                <>
+                  <div className="overflow-x-auto border-2 border-slate-200">
                   <table className="w-full text-left text-xs border-collapse">
                     <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-600 tracking-wider border-b-2 border-slate-200">
                       <tr>
@@ -1018,7 +1388,7 @@ export default function BankReconciliation() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                      {unmatchedLines.map((line) => {
+                      {paginatedUnmatched.map((line) => {
                         const acc = accounts.find((a) => a.id === line.bank_account_id);
                         const isExpanded = expandedUnmatchedRows.has(line.id);
                         return (
@@ -1049,7 +1419,7 @@ export default function BankReconciliation() {
                                     {isExpanded ? (
                                       <ChevronDown className="w-4 h-4 text-[#1E3A8A]" />
                                     ) : (
-                                      <ChevronRight className="w-4 h-4 text-slate-400" />
+                                      <ChevronRight className="w-4 h-4" />
                                     )}
                                   </button>
                                   <span>{line.date}</span>
@@ -1163,6 +1533,16 @@ export default function BankReconciliation() {
                     </tbody>
                   </table>
                 </div>
+
+                  <PaginationControls
+                    currentPage={unmatchedPage}
+                    totalItems={unmatchedLines.length}
+                    pageSize={unmatchedPageSize}
+                    onPageChange={setUnmatchedPage}
+                    onPageSizeChange={setUnmatchedPageSize}
+                    testIdPrefix="unmatched-pagination"
+                  />
+                </>
               )}
             </Card>
           )}
@@ -1433,54 +1813,65 @@ export default function BankReconciliation() {
                   <p className="font-bold text-slate-900 text-sm">No unreconciled ERP records found.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto border-2 border-slate-200">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-600 tracking-wider border-b-2 border-slate-200">
-                      <tr>
-                        <th className="px-4 py-3 w-36 sticky left-0 z-20 bg-slate-50 border-r border-slate-200 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)]">
-                          Date
-                        </th>
-                        <th className="px-4 py-3">Type</th>
-                        <th className="px-4 py-3">Party / Channel</th>
-                        <th className="px-4 py-3">Description</th>
-                        <th className="px-4 py-3">Reference</th>
-                        <th className="px-4 py-3 text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                      {erpCandidates.map((c) => (
-                        <tr key={`${c.type}-${c.id}`} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="px-4 py-3 font-mono text-slate-700 whitespace-nowrap sticky left-0 z-10 bg-white border-r border-slate-200 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)]">
-                            {c.date}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <Badge
-                              color={
-                                c.type === "settlement"
-                                  ? "purple"
-                                  : c.type === "payment"
-                                  ? "green"
-                                  : "red"
-                              }
-                            >
-                              {c.type}
-                            </Badge>
-                          </td>
-                          <td className="px-4 py-3 text-xs font-bold text-slate-900">{c.party}</td>
-                          <td className="px-4 py-3 text-xs text-slate-600 max-w-xs truncate">{c.description}</td>
-                          <td className="px-4 py-3 font-mono text-slate-500">{c.reference || "-"}</td>
-                          <td
-                            className={`px-4 py-3 text-right font-mono font-bold whitespace-nowrap ${
-                              c.side === "credit" ? "text-emerald-700" : "text-red-600"
-                            }`}
-                          >
-                            {c.side === "credit" ? `+${inr(c.amount)}` : `-${inr(c.amount)}`}
-                          </td>
+                <>
+                  <div className="overflow-x-auto border-2 border-slate-200">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-600 tracking-wider border-b-2 border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 w-36 sticky left-0 z-20 bg-slate-50 border-r border-slate-200 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)]">
+                            Date
+                          </th>
+                          <th className="px-4 py-3">Type</th>
+                          <th className="px-4 py-3">Party / Channel</th>
+                          <th className="px-4 py-3">Description</th>
+                          <th className="px-4 py-3">Reference</th>
+                          <th className="px-4 py-3 text-right">Amount</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200">
+                        {paginatedErp.map((c) => (
+                          <tr key={`${c.type}-${c.id}`} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="px-4 py-3 font-mono text-slate-700 whitespace-nowrap sticky left-0 z-10 bg-white border-r border-slate-200 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)]">
+                              {c.date}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <Badge
+                                color={
+                                  c.type === "settlement"
+                                    ? "purple"
+                                    : c.type === "payment"
+                                    ? "green"
+                                    : "red"
+                                }
+                              >
+                                {c.type}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3 text-xs font-bold text-slate-900">{c.party}</td>
+                            <td className="px-4 py-3 text-xs text-slate-600 max-w-xs truncate">{c.description}</td>
+                            <td className="px-4 py-3 font-mono text-slate-500">{c.reference || "-"}</td>
+                            <td
+                              className={`px-4 py-3 text-right font-mono font-bold whitespace-nowrap ${
+                                c.side === "credit" ? "text-emerald-700" : "text-red-600"
+                              }`}
+                            >
+                              {c.side === "credit" ? `+${inr(c.amount)}` : `-${inr(c.amount)}`}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <PaginationControls
+                    currentPage={erpPage}
+                    totalItems={erpCandidates.length}
+                    pageSize={erpPageSize}
+                    onPageChange={setErpPage}
+                    onPageSizeChange={setErpPageSize}
+                    testIdPrefix="erp-pagination"
+                  />
+                </>
               )}
             </Card>
           )}
@@ -1532,7 +1923,7 @@ export default function BankReconciliation() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {statementLines.map((line) => {
+                    {paginatedLedger.map((line) => {
                       const isExpanded = expandedLedgerRows.has(line.id);
                       return (
                         <React.Fragment key={line.id}>
@@ -1709,6 +2100,15 @@ export default function BankReconciliation() {
                   </tbody>
                 </table>
               </div>
+
+              <PaginationControls
+                currentPage={ledgerPage}
+                totalItems={statementLines.length}
+                pageSize={ledgerPageSize}
+                onPageChange={setLedgerPage}
+                onPageSizeChange={setLedgerPageSize}
+                testIdPrefix="ledger-pagination"
+              />
             </Card>
           )}
         </div>
@@ -2082,7 +2482,7 @@ function ImportStatementModal({ accounts, selectedAccountId, onClose, onSuccess 
             >
               {accounts.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.name} ({a.bank_name}) — {a.account_type === "online_channel" ? "Online Channel" : "B2B Client"}
+                  {`${a.name} (${a.bank_name}) — ${a.account_type === "online_channel" ? "Online Channel" : "B2B Client"}`}
                 </option>
               ))}
             </select>
@@ -2516,7 +2916,7 @@ function CorrectOpeningBalanceModal({ account, accounts, onClose, onSuccess }) {
             >
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} ({acc.bank_name} • Current: ₹{inr(acc.opening_balance || 0)})
+                  {`${acc.name} (${acc.bank_name} • Current: ₹${inr(acc.opening_balance || 0)})`}
                 </option>
               ))}
             </select>

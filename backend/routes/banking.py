@@ -2430,6 +2430,19 @@ async def get_reconciliation_summary(
 
     net_operating_cashflow = round(total_income - total_expenses, 2)
 
+    # Discover available distinct months from statement lines for period navigation
+    available_months: List[str] = []
+    try:
+        dist_dates = await db.bank_statement_lines.distinct("date")
+        month_set = set()
+        for d in dist_dates:
+            sd = str(d or "")
+            if len(sd) >= 7 and sd[:4].isdigit() and sd[4] == "-":
+                month_set.add(sd[:7])
+        available_months = sorted(list(month_set), reverse=True)
+    except Exception:
+        available_months = []
+
     return {
         "ok": True,
         "filter": {
@@ -2437,6 +2450,7 @@ async def get_reconciliation_summary(
             "from_date": from_date,
             "to_date": to_date,
         },
+        "available_months": available_months,
         "summary": {
             "total_income": round(total_income, 2),
             "matched_income": round(matched_income, 2),
