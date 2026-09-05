@@ -25,7 +25,31 @@
         
         <title>SSK FOOTCARE ERP</title>
         <script>
-          window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);
+          window.addEventListener("error", function(e) {
+            var isExt = (e.filename && e.filename.indexOf("chrome-extension://") !== -1) ||
+                        (e.message && (e.message.indexOf("chrome-extension://") !== -1 || e.message.indexOf("M_ID") !== -1)) ||
+                        (e.error && e.error.stack && (e.error.stack.indexOf("chrome-extension://") !== -1 || e.error.stack.indexOf("M_ID") !== -1));
+            if (isExt) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+              return true;
+            }
+            if (e.error instanceof DOMException && e.error.name === "DataCloneError" && e.message && e.message.includes("PerformanceServerTiming")) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+            }
+          }, true);
+
+          window.addEventListener("unhandledrejection", function(e) {
+            var reason = e.reason;
+            var isExt = (reason && reason.stack && (reason.stack.indexOf("chrome-extension://") !== -1 || reason.stack.indexOf("M_ID") !== -1)) ||
+                        (reason && String(reason).indexOf("chrome-extension://") !== -1) ||
+                        (reason && String(reason).indexOf("M_ID") !== -1);
+            if (isExt) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+            }
+          }, true);
           // Strictly disable pinch zoom & double-tap zoom on iOS Safari
           document.addEventListener('touchstart', function(e) {
             if (e.touches && e.touches.length > 1) { e.preventDefault(); }
