@@ -1854,13 +1854,21 @@ async def delete_cash_ledger_entry(cash_ledger_id: str, request: Request):
             expense_count = await db.expenses.count_documents({"cash_ledger_id": str(cash_ledger_id)})
         except Exception:
             expense_count = 0
+    advance_count = 0
+    if hasattr(db, "advances") and db.advances is not None:
+        try:
+            advance_count = await db.advances.count_documents({"cash_ledger_id": str(cash_ledger_id)})
+        except Exception:
+            advance_count = 0
 
-    if wage_count > 0 or expense_count > 0:
+    if wage_count > 0 or expense_count > 0 or advance_count > 0:
         details = []
         if wage_count > 0:
             details.append(f"{wage_count} wage payment(s)")
         if expense_count > 0:
             details.append(f"{expense_count} cash expense(s)")
+        if advance_count > 0:
+            details.append(f"{advance_count} karigar advance/payment(s)")
         raise HTTPException(
             400,
             f"Cannot delete cash ledger entry '{cash_ledger_id}': it has active dependent records ({' and '.join(details)}). "
@@ -1932,15 +1940,35 @@ async def list_cash_ledger(
             except Exception:
                 expenses_by_cl = {}
 
+        advances_by_cl = {}
+        if hasattr(db, "advances") and db.advances is not None:
+            try:
+                adv_cursor = db.advances.find({"cash_ledger_id": {"$in": cash_ids}})
+                if hasattr(adv_cursor, "to_list"):
+                    res = adv_cursor.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        adv_docs = await res
+                    elif isinstance(res, list):
+                        adv_docs = res
+                    else:
+                        adv_docs = []
+                    for a in adv_docs:
+                        clid = str(a.get("cash_ledger_id"))
+                        advances_by_cl.setdefault(clid, []).append(a)
+            except Exception:
+                advances_by_cl = {}
+
     items = []
     for d in docs:
         sd = stringify(d)
         cid = str(d["_id"])
         wps = wage_payments_by_cl.get(cid, [])
         exps = expenses_by_cl.get(cid, [])
+        advs = advances_by_cl.get(cid, []) if cash_ids else []
         allocated_wages = sum(float(wp.get("amount") or 0.0) for wp in wps)
         allocated_expenses = sum(float(e.get("amount") or 0.0) for e in exps)
-        allocated = round(allocated_wages + allocated_expenses, 2)
+        allocated_advances = sum(float(a.get("amount") or 0.0) for a in advs)
+        allocated = round(allocated_wages + allocated_expenses + allocated_advances, 2)
         withdrawn = float(d.get("amount") or 0.0)
         rem = float(d.get("remaining_balance") if d.get("remaining_balance") is not None else (withdrawn - allocated))
 
@@ -1957,6 +1985,17 @@ async def list_cash_ledger(
                 "period_to": wp.get("period_to"),
                 "notes": wp.get("notes") or "",
                 "override_reason": wp.get("override_reason"),
+            })
+        for a in advs:
+            t_label = "Karigar Advance" if a.get("txn_type") == "advance" else "Karigar Payment"
+            disbursements.append({
+                "id": str(a.get("_id") or a.get("id")),
+                "type": a.get("txn_type") or "advance",
+                "type_label": t_label,
+                "title": a.get("worker_name") or f"Karigar #{str(a.get('worker_id'))[-6:]}",
+                "amount": float(a.get("amount") or 0.0),
+                "date": a.get("date"),
+                "notes": a.get("notes") or "",
             })
         for e in exps:
             disbursements.append({
@@ -2435,8 +2474,8 @@ async def get_unmatched_erp_candidates(
     db = _get_db(request)
 
     account_type = "b2b_client"
-    account_filter = {"$in": [None, ""]}
-    if bank_account_id:
+    account_filter = None
+    if bank_account_id and bank_account_id != "all":
         acc = await db.bank_accounts.find_one({"_id": _oid(bank_account_id)})
         if acc:
             account_type = acc.get("account_type", "b2b_client")
@@ -2446,8 +2485,10 @@ async def get_unmatched_erp_candidates(
 
     # 1. Credits (Settlements / Client Payments)
     if side in ["credit", "all"]:
-        if account_type == "online_channel" or not bank_account_id:
-            s_q = {"bank_account_id": account_filter}
+        if account_type == "online_channel" or not bank_account_id or bank_account_id == "all":
+            s_q = {}
+            if account_filter:
+                s_q["bank_account_id"] = account_filter
             if search:
                 s_rx = {"$regex": re.escape(str(search)), "$options": "i"}
                 s_q["$or"] = [{"seller_order_id": s_rx}, {"order_release_id": s_rx}, {"platform": s_rx}]
@@ -2464,12 +2505,13 @@ async def get_unmatched_erp_candidates(
                     "reference": s.get("payment_id") or s.get("neft_ref") or "",
                 })
 
-        if account_type == "b2b_client" or not bank_account_id:
+        if account_type == "b2b_client" or not bank_account_id or bank_account_id == "all":
             p_q = {
                 "type": {"$ne": "vendor_payment"},
                 "vendor_id": {"$in": [None, ""]},
-                "bank_account_id": account_filter,
             }
+            if account_filter:
+                p_q["bank_account_id"] = account_filter
             if search:
                 p_rx = {"$regex": re.escape(str(search)), "$options": "i"}
                 p_q["$or"] = [{"client_name": p_rx}, {"reference": p_rx}, {"payment_no": p_rx}]
@@ -2490,8 +2532,9 @@ async def get_unmatched_erp_candidates(
     if side in ["debit", "all"]:
         vp_q = {
             "$or": [{"type": "vendor_payment"}, {"vendor_id": {"$nin": [None, ""]}}],
-            "bank_account_id": account_filter,
         }
+        if account_filter:
+            vp_q["bank_account_id"] = account_filter
         if search:
             vp_rx = {"$regex": re.escape(str(search)), "$options": "i"}
             vp_q["$or"] = [{"vendor_name": vp_rx}, {"reference": vp_rx}, {"payment_no": vp_rx}]
@@ -2508,7 +2551,12 @@ async def get_unmatched_erp_candidates(
                 "reference": vp.get("reference") or vp.get("payment_no") or "",
             })
 
-        e_q = {"bank_account_id": account_filter}
+        e_q = {
+            "statement_line_id": {"$in": [None, ""]},
+            "paid_via": {"$ne": "cash"},
+        }
+        if account_filter:
+            e_q["bank_account_id"] = account_filter
         if search:
             e_rx = {"$regex": re.escape(str(search)), "$options": "i"}
             e_q["$or"] = [{"payee": e_rx}, {"category": e_rx}, {"notes": e_rx}]

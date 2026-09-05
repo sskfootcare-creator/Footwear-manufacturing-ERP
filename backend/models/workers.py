@@ -35,6 +35,10 @@ class AdvanceIn(BaseModel):
     date: Optional[str] = ""
     notes: Optional[str] = ""
     txn_type: Literal["advance", "payment", "bonus", "adjustment"] = "advance"
+    paid_via: Optional[Literal["cash", "bank_transfer", "upi"]] = None
+    cash_ledger_id: Optional[str] = None
+    bank_account_id: Optional[str] = None
+    upi_reference: Optional[str] = None
 
 
 # ── Worker PIN & login ────────────────────────────────────────────────────────

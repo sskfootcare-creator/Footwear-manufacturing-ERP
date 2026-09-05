@@ -22,6 +22,9 @@ import {
   BookOpen,
   ArrowDownLeft,
   Sparkles,
+  Landmark,
+  Smartphone,
+  Banknote,
 } from "lucide-react";
 
 const ROLE_LABEL = {
@@ -50,6 +53,24 @@ export default function Payroll() {
   const [advForm, setAdvForm] = useState(null);
   const [ledgerFor, setLedgerFor] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [cashLedgers, setCashLedgers] = useState([]);
+
+  const loadBankingData = async () => {
+    try {
+      const [b, c] = await Promise.all([
+        http.get("/banking/accounts").catch(() => ({ data: [] })),
+        http.get("/banking/cash-ledger").catch(() => ({ data: [] })),
+      ]);
+      setBankAccounts(b.data || []);
+      const cItems = Array.isArray(c.data)
+        ? c.data
+        : c.data?.items || c.data?.cash_ledger || [];
+      setCashLedgers(cItems);
+    } catch (e) {
+      console.error("Failed to load banking data for payroll", e);
+    }
+  };
 
   const load = async () => {
     const params = new URLSearchParams();
@@ -61,10 +82,12 @@ export default function Payroll() {
     ]);
     setData(p.data);
     setWorkers(w.data);
+    loadBankingData();
   };
   const loadAdvances = async () => {
     const { data } = await http.get("/advances");
     setAdvances(data);
+    loadBankingData();
   };
   useEffect(() => {
     load();
@@ -85,18 +108,64 @@ export default function Payroll() {
     window.open(url, "_blank");
   };
 
+  const openNewTransactionModal = (initial = {}) => {
+    loadBankingData();
+    const defCash =
+      cashLedgers.find((c) => (c.remaining_balance || 0) > 0) || cashLedgers[0];
+    const defBank = bankAccounts[0];
+    setAdvForm({
+      worker_id: initial.worker_id || "",
+      amount: initial.amount !== undefined ? initial.amount : "",
+      date: initial.date || new Date().toISOString().slice(0, 10),
+      notes: initial.notes || "",
+      txn_type: initial.txn_type || "payment",
+      paid_via: initial.paid_via || "cash",
+      cash_ledger_id: initial.cash_ledger_id || defCash?.id || "",
+      bank_account_id: initial.bank_account_id || defBank?.id || "",
+      upi_reference: initial.upi_reference || "",
+    });
+  };
+
   const submitAdvance = async () => {
     try {
-      await http.post("/advances", {
+      const amt = Number(advForm.amount);
+      if (!amt || amt <= 0) {
+        alert("Please enter a valid amount greater than 0");
+        return;
+      }
+      const ttype = advForm.txn_type || "advance";
+      const payload = {
         worker_id: advForm.worker_id,
-        amount: Number(advForm.amount),
+        amount: amt,
         date: advForm.date,
-        notes: advForm.notes,
-        txn_type: advForm.txn_type || "advance",
-      });
+        notes: advForm.notes || "",
+        txn_type: ttype,
+      };
+
+      if (["advance", "payment"].includes(ttype)) {
+        const mode = advForm.paid_via || "cash";
+        payload.paid_via = mode;
+        if (mode === "cash") {
+          if (!advForm.cash_ledger_id) {
+            alert("Please select a Cash Pool withdrawal entry.");
+            return;
+          }
+          payload.cash_ledger_id = advForm.cash_ledger_id;
+        } else if (["bank_transfer", "upi"].includes(mode)) {
+          if (!advForm.bank_account_id) {
+            alert("Please select a Bank Account.");
+            return;
+          }
+          payload.bank_account_id = advForm.bank_account_id;
+          if (mode === "upi") {
+            payload.upi_reference = advForm.upi_reference || "";
+          }
+        }
+      }
+
+      await http.post("/advances", payload);
       setAdvForm(null);
-      await loadAdvances();
-      load();
+      await Promise.all([loadAdvances(), load()]);
       if (ledgerFor) openLedger(ledgerFor.row);
     } catch (e) {
       alert(e.response?.data?.detail || e.message);
@@ -273,12 +342,12 @@ export default function Payroll() {
                           }}
                           onPay={(e) => {
                             e.stopPropagation();
-                            setAdvForm({
+                            openNewTransactionModal({
                               worker_id: r.worker_id,
-                              amount: "",
-                              date: new Date().toISOString().slice(0, 10),
-                              notes: `Payment to ${r.name}`,
+                              amount: r.net_payable > 0 ? String(r.net_payable) : "",
+                              notes: `Wage payment to ${r.name}`,
                               txn_type: "payment",
+                              paid_via: "cash",
                             });
                           }}
                         />
@@ -333,15 +402,7 @@ export default function Payroll() {
                 from completed jobs.
               </p>
               <BtnPrimary
-                onClick={() =>
-                  setAdvForm({
-                    worker_id: "",
-                    amount: "",
-                    date: new Date().toISOString().slice(0, 10),
-                    notes: "",
-                    txn_type: "advance",
-                  })
-                }
+                onClick={() => openNewTransactionModal({ txn_type: "advance" })}
                 data-testid="new-advance-btn"
               >
                 <Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> New
@@ -353,6 +414,7 @@ export default function Payroll() {
                   <th className="px-3 py-2 font-bold">Date</th>
                   <th className="px-3 py-2 font-bold">Karigar</th>
                   <th className="px-3 py-2 font-bold">Type</th>
+                  <th className="px-3 py-2 font-bold">Payment Source</th>
                   <th className="px-3 py-2 font-bold text-right">Amount</th>
                   <th className="px-3 py-2 font-bold">Notes</th>
                   <th className="px-3 py-2 font-bold">Status</th>
@@ -363,7 +425,7 @@ export default function Payroll() {
                 {advances.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="7"
+                      colSpan="8"
                       className="px-3 py-8 text-center text-slate-400"
                     >
                       No transactions recorded.
@@ -388,6 +450,30 @@ export default function Payroll() {
                           <Badge color={colorMap[ttype]}>
                             {ttype.toUpperCase()}
                           </Badge>
+                        </td>
+                        <td className="px-3 py-2">
+                          {a.paid_via === "cash" && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded border border-emerald-200 font-medium">
+                              <Banknote className="w-3 h-3" />
+                              Cash Pool {a.cash_ledger_notes ? `· ${a.cash_ledger_notes}` : ""}
+                            </span>
+                          )}
+                          {a.paid_via === "bank_transfer" && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-medium">
+                              <Landmark className="w-3 h-3" />
+                              {a.bank_account_name || "Bank Transfer"}
+                            </span>
+                          )}
+                          {a.paid_via === "upi" && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 font-medium">
+                              <Smartphone className="w-3 h-3" />
+                              UPI · {a.bank_account_name || "Bank"}
+                              {a.upi_reference ? ` (${a.upi_reference})` : ""}
+                            </span>
+                          )}
+                          {!a.paid_via && (
+                            <span className="text-slate-400 text-xs">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-right font-mono font-bold">
                           {inr(a.amount)}
@@ -473,12 +559,16 @@ export default function Payroll() {
             <div className="flex justify-end">
               <BtnPrimary
                 onClick={() =>
-                  setAdvForm({
+                  openNewTransactionModal({
                     worker_id: ledgerFor.row.worker_id,
-                    amount: "",
+                    amount:
+                      ledgerFor.ledger.balance > 0
+                        ? String(ledgerFor.ledger.balance)
+                        : "",
                     date: new Date().toISOString().slice(0, 10),
                     notes: `Payment to ${ledgerFor.row.name}`,
                     txn_type: "payment",
+                    paid_via: "cash",
                   })
                 }
                 data-testid="ledger-pay-btn"
@@ -553,92 +643,379 @@ export default function Payroll() {
       )}
 
       {advForm && (
-        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4">
-          <div className="bg-white border-2 border-slate-200 shadow-2xl w-full max-w-md">
-            <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
-              <div className="font-bold">New Transaction</div>
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="bg-white border-2 border-slate-300 shadow-2xl w-full max-w-lg my-8">
+            <div className="px-6 py-4 bg-slate-50 border-b-2 border-slate-200 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-slate-800 text-base">
+                  {advForm.txn_type === "payment"
+                    ? "Record Wage Payment"
+                    : advForm.txn_type === "advance"
+                      ? "Issue Karigar Advance"
+                      : "New Karigar Transaction"}
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Record payout, advance or adjustment with ERP accounting source
+                </div>
+              </div>
               <button
                 onClick={() => setAdvForm(null)}
-                className="p-1 hover:bg-slate-100"
+                className="p-1.5 rounded hover:bg-slate-200 text-slate-500"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-5 space-y-3">
-              <div>
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
-                  Type
-                </label>
-                <select
-                  value={advForm.txn_type || "advance"}
-                  onChange={(e) =>
-                    setAdvForm({ ...advForm, txn_type: e.target.value })
-                  }
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-sm"
-                  data-testid="adv-type"
-                >
-                  <option value="advance">
-                    Advance (loan taken, will be deducted)
-                  </option>
-                  <option value="payment">Payment (wages paid out)</option>
-                  <option value="bonus">Bonus (manual credit)</option>
-                  <option value="adjustment">Adjustment</option>
-                </select>
+            <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">
+                    Transaction Type
+                  </label>
+                  <select
+                    value={advForm.txn_type || "payment"}
+                    onChange={(e) =>
+                      setAdvForm({ ...advForm, txn_type: e.target.value })
+                    }
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-sm bg-white"
+                    data-testid="adv-type"
+                  >
+                    <option value="payment">Payment (wages paid out)</option>
+                    <option value="advance">
+                      Advance (loan taken, will be deducted)
+                    </option>
+                    <option value="bonus">Bonus (manual credit)</option>
+                    <option value="adjustment">Adjustment</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    value={advForm.date}
+                    onChange={(e) =>
+                      setAdvForm({ ...advForm, date: e.target.value })
+                    }
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-sm bg-white"
+                    data-testid="adv-date"
+                  />
+                </div>
               </div>
+
               <div>
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">
                   Karigar
                 </label>
                 <select
                   value={advForm.worker_id}
-                  onChange={(e) =>
-                    setAdvForm({ ...advForm, worker_id: e.target.value })
-                  }
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-sm"
+                  onChange={(e) => {
+                    const wid = e.target.value;
+                    const wRow = data?.rows?.find((r) => r.worker_id === wid);
+                    setAdvForm({
+                      ...advForm,
+                      worker_id: wid,
+                      amount:
+                        advForm.txn_type === "payment" && wRow?.net_payable > 0
+                          ? String(wRow.net_payable)
+                          : advForm.amount,
+                      notes:
+                        advForm.txn_type === "payment" && wRow?.name
+                          ? `Wage payment to ${wRow.name}`
+                          : advForm.notes,
+                    });
+                  }}
+                  className="w-full border-2 border-slate-300 px-3 py-2 text-sm bg-white"
                   data-testid="adv-worker"
                 >
                   <option value="">— Select karigar —</option>
-                  {workers.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name} ({w.skill})
-                    </option>
-                  ))}
+                  {workers.map((w) => {
+                    const row = data?.rows?.find((r) => r.worker_id === w.id);
+                    const bal = row ? ` · Due: ₹${row.net_payable}` : "";
+                    return (
+                      <option key={w.id} value={w.id}>
+                        {`${w.name} (${w.skill})${bal}`}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
-              <Input
-                label="Amount (₹)"
-                type="number"
-                step="0.01"
-                value={advForm.amount}
-                onChange={(e) =>
-                  setAdvForm({ ...advForm, amount: e.target.value })
-                }
-                testId="adv-amount"
-              />
-              <Input
-                label="Date"
-                type="date"
-                value={advForm.date}
-                onChange={(e) =>
-                  setAdvForm({ ...advForm, date: e.target.value })
-                }
-              />
-              <Input
-                label="Notes"
-                value={advForm.notes}
-                onChange={(e) =>
-                  setAdvForm({ ...advForm, notes: e.target.value })
-                }
-              />
-              <div className="flex gap-2 pt-3 border-t border-slate-200">
+
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                    Amount (₹)
+                  </label>
+                  {(() => {
+                    const row = data?.rows?.find(
+                      (r) => r.worker_id === advForm.worker_id,
+                    );
+                    if (row && row.net_payable > 0) {
+                      return (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAdvForm({
+                              ...advForm,
+                              amount: String(row.net_payable),
+                            })
+                          }
+                          className="text-[11px] font-bold text-blue-600 hover:text-blue-800 underline flex items-center gap-1"
+                        >
+                          Net due: {inr(row.net_payable)} (Click to fill)
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+                </div>
+                <Input
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={advForm.amount}
+                  onChange={(e) =>
+                    setAdvForm({ ...advForm, amount: e.target.value })
+                  }
+                  testId="adv-amount"
+                  className="w-full font-mono text-base"
+                />
+              </div>
+
+              {["advance", "payment"].includes(advForm.txn_type || "payment") && (
+                <div className="space-y-3 pt-3 border-t border-slate-200">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1.5">
+                      Mode of Payment
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const defCash =
+                            cashLedgers.find(
+                              (c) => (c.remaining_balance || 0) > 0,
+                            ) || cashLedgers[0];
+                          setAdvForm({
+                            ...advForm,
+                            paid_via: "cash",
+                            cash_ledger_id: defCash?.id || "",
+                          });
+                        }}
+                        className={`flex items-center justify-center gap-1.5 py-2 px-2 text-xs font-bold border-2 rounded transition-all ${
+                          (advForm.paid_via || "cash") === "cash"
+                            ? "border-[#16A34A] bg-green-50 text-[#16A34A] shadow-sm"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                        data-testid="mode-cash"
+                      >
+                        <Banknote className="w-4 h-4" />
+                        <span>Cash Pool</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdvForm({
+                            ...advForm,
+                            paid_via: "bank_transfer",
+                            bank_account_id:
+                              advForm.bank_account_id ||
+                              bankAccounts[0]?.id ||
+                              "",
+                          });
+                        }}
+                        className={`flex items-center justify-center gap-1.5 py-2 px-2 text-xs font-bold border-2 rounded transition-all ${
+                          advForm.paid_via === "bank_transfer"
+                            ? "border-[#2563EB] bg-blue-50 text-[#2563EB] shadow-sm"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                        data-testid="mode-bank"
+                      >
+                        <Landmark className="w-4 h-4" />
+                        <span>Bank Transfer</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdvForm({
+                            ...advForm,
+                            paid_via: "upi",
+                            bank_account_id:
+                              advForm.bank_account_id ||
+                              bankAccounts[0]?.id ||
+                              "",
+                          });
+                        }}
+                        className={`flex items-center justify-center gap-1.5 py-2 px-2 text-xs font-bold border-2 rounded transition-all ${
+                          advForm.paid_via === "upi"
+                            ? "border-[#7C3AED] bg-purple-50 text-[#7C3AED] shadow-sm"
+                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                        data-testid="mode-upi"
+                      >
+                        <Smartphone className="w-4 h-4" />
+                        <span>UPI</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {(advForm.paid_via || "cash") === "cash" && (
+                    <div className="bg-slate-50 p-3.5 border border-slate-200 rounded space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                          Cash Withdrawal / Pool Entry
+                        </label>
+                        <span className="text-[10px] text-slate-500">
+                          Debited from cash pool
+                        </span>
+                      </div>
+                      {cashLedgers.length === 0 ? (
+                        <div className="text-xs text-amber-800 bg-amber-50 p-2.5 border border-amber-200 rounded">
+                          ⚠️ No cash withdrawal entries found. Please record a
+                          cash withdrawal under Banking first, or pay via
+                          Bank/UPI.
+                        </div>
+                      ) : (
+                        <>
+                          <select
+                            value={advForm.cash_ledger_id || ""}
+                            onChange={(e) =>
+                              setAdvForm({
+                                ...advForm,
+                                cash_ledger_id: e.target.value,
+                              })
+                            }
+                            className="w-full border-2 border-slate-300 px-3 py-2 text-xs bg-white font-medium"
+                            data-testid="adv-cash-ledger"
+                          >
+                            <option value="">
+                              — Select Cash Withdrawal Pool —
+                            </option>
+                            {cashLedgers.map((cl) => (
+                              <option key={cl.id} value={cl.id}>
+                                {`${cl.notes || "Cash Withdrawal"} · Avail: ₹${(cl.remaining_balance || 0).toLocaleString("en-IN")} (${cl.date})`}
+                              </option>
+                            ))}
+                          </select>
+                          {(() => {
+                            const sel = cashLedgers.find(
+                              (c) => c.id === advForm.cash_ledger_id,
+                            );
+                            if (!sel) return null;
+                            const isOver =
+                              Number(advForm.amount || 0) >
+                              (sel.remaining_balance || 0);
+                            return (
+                              <div
+                                className={`text-xs p-2 rounded flex justify-between items-center ${
+                                  isOver
+                                    ? "bg-red-50 text-red-700 border border-red-200"
+                                    : "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                }`}
+                              >
+                                <span>
+                                  Available in Pool:{" "}
+                                  <b>{inr(sel.remaining_balance || 0)}</b>
+                                </span>
+                                {isOver ? (
+                                  <span className="font-bold text-red-600 text-[11px]">
+                                    ⚠️ Exceeds pool balance
+                                  </span>
+                                ) : (
+                                  <span className="text-emerald-700 text-[11px]">
+                                    ✓ Sufficient funds
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {["bank_transfer", "upi"].includes(advForm.paid_via) && (
+                    <div className="bg-slate-50 p-3.5 border border-slate-200 rounded space-y-3">
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">
+                          Source Bank Account
+                        </label>
+                        <select
+                          value={advForm.bank_account_id || ""}
+                          onChange={(e) =>
+                            setAdvForm({
+                              ...advForm,
+                              bank_account_id: e.target.value,
+                            })
+                          }
+                          className="w-full border-2 border-slate-300 px-3 py-2 text-xs bg-white font-medium"
+                          data-testid="adv-bank-account"
+                        >
+                          <option value="">— Select Bank Account —</option>
+                          {bankAccounts.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {`${b.name} (${b.bank_name || "Bank"} ····${b.account_number_last4 || ""})`}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          ✓ Automatically recorded in this bank account's ERP
+                          statement as a confirmed wage expense for
+                          reconciliation.
+                        </p>
+                      </div>
+
+                      {advForm.paid_via === "upi" && (
+                        <div>
+                          <Input
+                            label="UPI Reference / UTR Number"
+                            placeholder="e.g. UPI/429182390192 or UTR"
+                            value={advForm.upi_reference || ""}
+                            onChange={(e) =>
+                              setAdvForm({
+                                ...advForm,
+                                upi_reference: e.target.value,
+                              })
+                            }
+                            testId="adv-upi-ref"
+                            className="text-xs"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <Input
+                  label="Notes / Remarks"
+                  placeholder="Optional notes or remarks"
+                  value={advForm.notes}
+                  onChange={(e) =>
+                    setAdvForm({ ...advForm, notes: e.target.value })
+                  }
+                />
+              </div>
+
+              <div className="flex gap-2 pt-4 border-t border-slate-200">
                 <BtnPrimary
                   onClick={submitAdvance}
                   disabled={!advForm.worker_id || !advForm.amount}
                   data-testid="adv-save"
+                  className="w-full justify-center py-2.5 text-sm"
                 >
-                  <Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save
+                  <Check className="w-4 h-4 inline -mt-0.5 mr-1" />
+                  {advForm.txn_type === "payment"
+                    ? "Record Payment"
+                    : "Save Transaction"}
                 </BtnPrimary>
-                <BtnSecondary onClick={() => setAdvForm(null)}>
+                <BtnSecondary
+                  onClick={() => setAdvForm(null)}
+                  className="px-5 py-2.5 text-sm"
+                >
                   Cancel
                 </BtnSecondary>
               </div>

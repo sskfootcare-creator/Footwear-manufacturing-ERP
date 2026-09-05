@@ -683,7 +683,49 @@ async def list_advances(request: Request, worker_id: Optional[str] = None):
     if worker_id:
         q["worker_id"] = str(worker_id)
     docs = await db.advances.find(q).sort("date", -1).to_list(2000)
-    return [stringify(d) for d in docs]
+
+    # Enrich with bank account and cash ledger information
+    bank_ids = list({d.get("bank_account_id") for d in docs if d.get("bank_account_id")})
+    cash_ids = list({d.get("cash_ledger_id") for d in docs if d.get("cash_ledger_id")})
+
+    bank_map = {}
+    if bank_ids:
+        b_oids = []
+        for bid in bank_ids:
+            try:
+                b_oids.append(oid(bid))
+            except Exception:
+                pass
+        if b_oids:
+            b_docs = await db.bank_accounts.find({"_id": {"$in": b_oids}}).to_list(1000)
+            bank_map = {str(b["_id"]): b for b in b_docs}
+
+    cash_map = {}
+    if cash_ids:
+        c_oids = []
+        for cid in cash_ids:
+            try:
+                c_oids.append(oid(cid))
+            except Exception:
+                pass
+        if c_oids:
+            c_docs = await db.cash_ledger.find({"_id": {"$in": c_oids}}).to_list(1000)
+            cash_map = {str(c["_id"]): c for c in c_docs}
+
+    res = []
+    for d in docs:
+        sd = stringify(d)
+        bid = sd.get("bank_account_id")
+        cid = sd.get("cash_ledger_id")
+        if bid and bid in bank_map:
+            b = bank_map[bid]
+            sd["bank_account_name"] = f"{b.get('name', 'Bank')} ({b.get('bank_name', '')})"
+            sd["bank_last4"] = b.get("account_number_last4") or ""
+        if cid and cid in cash_map:
+            c = cash_map[cid]
+            sd["cash_ledger_notes"] = c.get("notes") or f"Cash Pool ({c.get('date', '')})"
+        res.append(sd)
+    return res
 
 
 @workers_router.post("/advances")
@@ -694,13 +736,103 @@ async def create_advance(payload: AdvanceIn, request: Request):
     worker = await db.workers.find_one({"_id": oid(payload.worker_id)})
     if not worker:
         raise HTTPException(404, "Worker not found")
+
+    amount = float(payload.amount or 0.0)
+    if amount <= 0:
+        raise HTTPException(400, "Transaction amount must be greater than 0")
+
     doc = payload.model_dump()
-    doc["worker_name"] = worker.get("name", "")
+    worker_name = worker.get("name", "")
+    doc["worker_name"] = worker_name
     doc["date"] = doc.get("date") or datetime.now(timezone.utc).date().isoformat()
     doc["settled"] = False
     doc["by"] = u.get("email") or u.get("name", "")
     doc["created_at"] = now_iso()
-    res = await db.advances.insert_one(doc)
+
+    advance_oid = ObjectId()
+    advance_id = str(advance_oid)
+    doc["_id"] = advance_oid
+
+    paid_via = payload.paid_via
+    linked_expense_id = None
+
+    # Handle payment source for advances and payments
+    if payload.txn_type in ("advance", "payment") and paid_via:
+        if paid_via == "cash":
+            if not payload.cash_ledger_id:
+                raise HTTPException(400, "cash_ledger_id is required when payment mode is 'cash'")
+            result = await db.cash_ledger.update_one(
+                {"_id": oid(payload.cash_ledger_id), "remaining_balance": {"$gte": round(amount, 2)}},
+                {"$inc": {"remaining_balance": -round(amount, 2)}},
+            )
+            if result.modified_count == 0:
+                cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+                if not cash_entry:
+                    raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
+                remaining_balance = float(cash_entry.get("remaining_balance") or 0.0)
+                raise HTTPException(
+                    400,
+                    f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining_balance:.2f}, Requested payment: ₹{amount:.2f}",
+                )
+            doc["cash_ledger_id"] = str(payload.cash_ledger_id)
+            doc["bank_account_id"] = None
+            doc["upi_reference"] = None
+        elif paid_via in ("bank_transfer", "upi"):
+            if not payload.bank_account_id:
+                raise HTTPException(400, f"bank_account_id is required when payment mode is '{paid_via}'")
+            bank_acc = await db.bank_accounts.find_one({"_id": oid(payload.bank_account_id)})
+            if not bank_acc:
+                raise HTTPException(404, f"Bank account '{payload.bank_account_id}' not found")
+
+            from models.expenses import ExpenseIn
+            from routes.expenses import create_expense
+
+            type_label = "Advance" if payload.txn_type == "advance" else "Wage Payment"
+            expense_notes = f"Karigar {type_label} to {worker_name}"
+            if paid_via == "upi" and payload.upi_reference:
+                expense_notes += f" (UPI Ref: {payload.upi_reference.strip()})"
+            if payload.notes:
+                expense_notes += f" - {payload.notes.strip()}"
+
+            expense_payload = ExpenseIn(
+                category="wages",
+                amount=round(amount, 2),
+                date=doc["date"],
+                payee=worker_name or "Worker",
+                notes=expense_notes,
+                bank_account_id=str(payload.bank_account_id),
+                paid_via="bank",
+                status="confirmed",
+                linked_wage_payment_id=advance_id,
+            )
+            exp_res = await create_expense(expense_payload, request)
+            linked_expense_id = str(exp_res.get("id") or exp_res.get("_id"))
+            doc["linked_expense_id"] = linked_expense_id
+            doc["bank_account_id"] = str(payload.bank_account_id)
+            doc["cash_ledger_id"] = None
+            doc["upi_reference"] = (payload.upi_reference or "").strip() if paid_via == "upi" else None
+        else:
+            raise HTTPException(400, f"Unsupported payment mode '{paid_via}'")
+
+    try:
+        res = await db.advances.insert_one(doc)
+    except Exception as e:
+        # Rollback side-effects if advance insert fails
+        if paid_via == "cash" and payload.cash_ledger_id:
+            try:
+                await db.cash_ledger.update_one(
+                    {"_id": oid(payload.cash_ledger_id)},
+                    {"$inc": {"remaining_balance": round(amount, 2)}}
+                )
+            except Exception:
+                pass
+        if linked_expense_id and hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                await db.expenses.delete_one({"_id": oid(linked_expense_id)})
+            except Exception:
+                pass
+        raise e
+
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
     return doc
@@ -793,6 +925,32 @@ async def worker_ledger(wid: str, request: Request,
         adv_q.setdefault("date", {})
         adv_q["date"]["$lte"] = to_date
     advs = await db.advances.find(adv_q).to_list(5000)
+
+    bank_ids = list({a.get("bank_account_id") for a in advs if a.get("bank_account_id")})
+    cash_ids = list({a.get("cash_ledger_id") for a in advs if a.get("cash_ledger_id")})
+    bank_map = {}
+    cash_map = {}
+    if bank_ids:
+        b_oids = []
+        for bid in bank_ids:
+            try:
+                b_oids.append(oid(bid))
+            except Exception:
+                pass
+        if b_oids:
+            b_docs = await db.bank_accounts.find({"_id": {"$in": b_oids}}).to_list(1000)
+            bank_map = {str(b["_id"]): b for b in b_docs}
+    if cash_ids:
+        c_oids = []
+        for cid in cash_ids:
+            try:
+                c_oids.append(oid(cid))
+            except Exception:
+                pass
+        if c_oids:
+            c_docs = await db.cash_ledger.find({"_id": {"$in": c_oids}}).to_list(1000)
+            cash_map = {str(c["_id"]): c for c in c_docs}
+
     for a in advs:
         a_str = stringify(a)
         amt = float(a_str.get("amount", 0) or 0)
@@ -803,17 +961,79 @@ async def worker_ledger(wid: str, request: Request,
             signed = amt
         else:
             signed = amt
+
+        paid_via = a_str.get("paid_via")
+        source_label = ""
+        bank_name = None
+        cash_notes = None
+        if paid_via == "cash":
+            cl_info = cash_map.get(a_str.get("cash_ledger_id") or "")
+            cash_notes = cl_info.get("notes") if cl_info else "Cash Pool"
+            source_label = f" [Cash: {cash_notes}]"
+        elif paid_via in ("bank_transfer", "upi"):
+            b_info = bank_map.get(a_str.get("bank_account_id") or "")
+            bank_name = b_info.get("name") if b_info else "Bank"
+            if paid_via == "upi":
+                upi_ref = a_str.get("upi_reference")
+                source_label = f" [UPI · {bank_name}{' · Ref: ' + upi_ref if upi_ref else ''}]"
+            else:
+                source_label = f" [Bank: {bank_name}]"
+
+        base_desc = a_str.get("notes") or {
+            "advance": "Advance taken", "payment": "Payment paid out",
+            "bonus": "Manual bonus", "adjustment": "Adjustment"
+        }.get(ttype, ttype)
+        full_desc = f"{base_desc}{source_label}" if source_label else base_desc
+
         entries.append({
             "id": a_str.get("id"),
             "date": (a_str.get("date") or a_str.get("created_at", ""))[:10],
             "txn_type": ttype,
             "amount": signed,
-            "description": a_str.get("notes") or {
-                "advance": "Advance taken", "payment": "Payment paid out",
-                "bonus": "Manual bonus", "adjustment": "Adjustment"
-            }.get(ttype, ttype),
+            "description": full_desc,
+            "paid_via": paid_via,
+            "bank_account_id": a_str.get("bank_account_id"),
+            "bank_account_name": bank_name,
+            "cash_ledger_id": a_str.get("cash_ledger_id"),
+            "cash_ledger_notes": cash_notes,
+            "upi_reference": a_str.get("upi_reference"),
             "settled": a_str.get("settled", False),
         })
+
+    # Include standalone db.wage_payments records if any
+    if hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_q = {"worker_id": wid}
+            if from_date or to_date:
+                dq = {}
+                if from_date:
+                    dq["$gte"] = from_date
+                if to_date:
+                    dq["$lte"] = to_date
+                wp_q["date"] = dq
+            wps = await db.wage_payments.find(wp_q).to_list(2000)
+            existing_adv_exp_ids = {a.get("linked_expense_id") for a in advs if a.get("linked_expense_id")}
+            for wp in wps:
+                wp_str = stringify(wp)
+                if wp_str.get("linked_expense_id") and wp_str["linked_expense_id"] in existing_adv_exp_ids:
+                    continue
+                w_amt = float(wp_str.get("amount", 0) or 0)
+                pv = wp_str.get("paid_via")
+                s_lbl = f" [{pv.upper() if pv else 'PAYMENT'}]"
+                entries.append({
+                    "id": wp_str.get("id"),
+                    "date": (wp_str.get("date") or wp_str.get("created_at", ""))[:10],
+                    "txn_type": "payment",
+                    "amount": -w_amt,
+                    "description": f"{wp_str.get('notes') or 'Wage payout'}{s_lbl}",
+                    "paid_via": pv,
+                    "bank_account_id": wp_str.get("bank_account_id"),
+                    "cash_ledger_id": wp_str.get("cash_ledger_id"),
+                    "upi_reference": wp_str.get("upi_reference"),
+                    "settled": True,
+                })
+        except Exception:
+            pass
 
     entries.sort(key=lambda e: (e["date"] or "", 0 if e["txn_type"] in ("earning", "bonus") else 1))
 
@@ -860,6 +1080,26 @@ async def delete_advance(aid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    adv = await db.advances.find_one({"_id": oid(aid)})
+    if not adv:
+        raise HTTPException(404, "Advance transaction not found")
+
+    amt = float(adv.get("amount") or 0.0)
+    # Reversal side effects
+    if adv.get("paid_via") == "cash" and adv.get("cash_ledger_id"):
+        try:
+            await db.cash_ledger.update_one(
+                {"_id": oid(adv["cash_ledger_id"])},
+                {"$inc": {"remaining_balance": round(amt, 2)}}
+            )
+        except Exception:
+            pass
+    if adv.get("linked_expense_id") and hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            await db.expenses.delete_one({"_id": oid(adv["linked_expense_id"])})
+        except Exception:
+            pass
+
     await db.advances.delete_one({"_id": oid(aid)})
     return {"ok": True}
 
