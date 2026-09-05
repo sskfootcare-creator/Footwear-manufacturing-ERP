@@ -3985,11 +3985,703 @@ async def test_opening_balance_correction_audit_and_period_lock_safety(monkeypat
     assert corrections_store[0]["new_value"] == 125000.0
 
     # ── Test 4: List balance corrections history endpoint
+    # ── Test 4: List balance corrections history endpoint
     hist_res = await list_account_balance_corrections(str(acc_id), req)
     assert hist_res["ok"] is True
     assert len(hist_res["corrections"]) == 1
     assert hist_res["corrections"][0]["new_value"] == 125000.0
     assert hist_res["corrections"][0]["reason"] == "Data entry error, verified against passbook"
+
+
+@pytest.mark.anyio
+async def test_reconciliation_auto_match_upi_wage_payment_statement_line(monkeypatch):
+    """
+    Verify full flow:
+    1. Disburse worker wage payment via UPI.
+    2. Confirm Stage 2 creates a real Expense under category="wages" with paid_via="bank" and bank_account_id.
+    3. Import bank statement with a matching UPI debit line containing the UPI UTR in the narration.
+    4. Run auto-reconciliation and confirm the existing expense-matching logic automatically matches the
+       statement debit line to the wage payment expense with >= 95% confidence.
+    5. Verify the statement line is marked matched to the expense without requiring any special-casing.
+    """
+    import io
+    from fastapi import UploadFile
+    import server
+    from routes.banking import (
+        create_bank_account,
+        import_bank_statement,
+        reconcile_bank_account,
+    )
+    from routes.workers import create_wage_payment
+    from models.workers import WagePaymentIn
+    from models.banking import BankAccountIn
+
+    accounts_store = {}
+    lines_store = {}
+    wage_payments_store = {}
+    expenses_store = {}
+    workers_store = {}
+
+    mock_db = MagicMock()
+
+    class MockCursor:
+        def __init__(self, docs):
+            self.docs = list(docs) if docs else []
+
+        def sort(self, *args, **kwargs):
+            return self
+
+        async def to_list(self, length=None):
+            return list(self.docs)
+
+    def _mock_find_accounts(query=None):
+        return MockCursor(list(accounts_store.values()))
+
+    def _mock_find_lines(query=None):
+        docs = list(lines_store.values())
+        if query:
+            if "bank_account_id" in query:
+                docs = [d for d in docs if str(d.get("bank_account_id")) == str(query["bank_account_id"])]
+            if "match_status" in query:
+                docs = [d for d in docs if d.get("match_status") == query["match_status"]]
+        return MockCursor(docs)
+
+    def _mock_find_expenses(query=None):
+        docs = list(expenses_store.values())
+        if query:
+            if "bank_account_id" in query:
+                b_q = query["bank_account_id"]
+                if isinstance(b_q, dict) and "$in" in b_q:
+                    allowed = set(str(x) for x in b_q["$in"] if x is not None)
+                    docs = [d for d in docs if str(d.get("bank_account_id")) in allowed or d.get("bank_account_id") in b_q["$in"]]
+                elif b_q is not None:
+                    docs = [d for d in docs if str(d.get("bank_account_id")) == str(b_q)]
+            if "paid_via" in query and isinstance(query["paid_via"], dict) and "$ne" in query["paid_via"]:
+                docs = [d for d in docs if d.get("paid_via") != query["paid_via"]["$ne"]]
+        return MockCursor(docs)
+
+    def _mock_find_wage_payments(query=None):
+        return MockCursor(list(wage_payments_store.values()))
+
+    mock_db.bank_accounts.find = MagicMock(side_effect=_mock_find_accounts)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.expenses.find = MagicMock(side_effect=_mock_find_expenses)
+    mock_db.wage_payments.find = MagicMock(side_effect=_mock_find_wage_payments)
+    mock_db.payments.find = MagicMock(return_value=MockCursor([]))
+    mock_db.online_settlements.find = MagicMock(return_value=MockCursor([]))
+    mock_db.jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.pos.find = MagicMock(return_value=MockCursor([]))
+    mock_db.production_jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.styles.find = MagicMock(return_value=MockCursor([]))
+    mock_db.workers.find = MagicMock(side_effect=lambda q=None: MockCursor(list(workers_store.values())))
+    mock_db.advances.find = MagicMock(return_value=MockCursor([]))
+
+    async def _mock_find_one_account(query):
+        return accounts_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_line(query):
+        return lines_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_worker(query):
+        return workers_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_wage_payment(query):
+        return wage_payments_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_expense(query):
+        return expenses_store.get(str(query.get("_id")))
+
+    async def _mock_insert_account(doc):
+        aid = ObjectId()
+        doc["_id"] = aid
+        accounts_store[str(aid)] = doc
+        return MagicMock(inserted_id=aid)
+
+    async def _mock_insert_lines(docs):
+        inserted_ids = []
+        for d in docs:
+            lid = ObjectId()
+            d["_id"] = lid
+            lines_store[str(lid)] = d
+            inserted_ids.append(lid)
+        return MagicMock(inserted_ids=inserted_ids)
+
+    async def _mock_insert_wage_payment(doc):
+        wpid = doc.get("_id") or ObjectId()
+        doc["_id"] = wpid
+        wage_payments_store[str(wpid)] = doc
+        return MagicMock(inserted_id=wpid)
+
+    async def _mock_insert_expense(doc):
+        eid = doc.get("_id") or ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+
+    async def _mock_update_line(query, update):
+        lid_str = str(query.get("_id"))
+        if lid_str in lines_store:
+            if "$set" in update:
+                lines_store[lid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_update_expense(query, update):
+        eid_str = str(query.get("_id"))
+        if eid_str in expenses_store:
+            if "$set" in update:
+                expenses_store[eid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_account)
+    mock_db.bank_accounts.insert_one = AsyncMock(side_effect=_mock_insert_account)
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=_mock_find_one_line)
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=_mock_insert_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.workers.find_one = AsyncMock(side_effect=_mock_find_one_worker)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=_mock_find_one_wage_payment)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=_mock_insert_wage_payment)
+    mock_db.expenses.find_one = AsyncMock(side_effect=_mock_find_one_expense)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=_mock_insert_expense)
+    mock_db.expenses.update_one = AsyncMock(side_effect=_mock_update_expense)
+    mock_db.audit_logs = MagicMock(insert_one=AsyncMock())
+
+    import routes.banking
+    import routes.workers
+    import routes.expenses
+
+    admin_user = {"id": "admin_1", "role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(routes.workers, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.expenses, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    # 1. Create bank account
+    acc_res = await create_bank_account(
+        BankAccountIn(
+            name="ICICI Operating A/C",
+            bank_name="ICICI Bank",
+            account_number_last4="8822",
+            account_number="002105008822",
+            ifsc="ICIC0000021",
+            branch="Agra Civil Lines",
+            account_type="b2b_client",
+            opening_balance=100000.0,
+        ),
+        req,
+    )
+    acc_id = acc_res["id"]
+
+    # 2. Setup Karigar
+    wid = str(ObjectId())
+    workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Ram Karigar",
+        "skill": "lasting",
+        "rate_per_pair": 25.0,
+        "active": True,
+    }
+
+    # 3. Record wage disbursement via UPI
+    upi_ref = "UPI/612345678901/PAYOUT"
+    wage_res = await create_wage_payment(
+        wid=wid,
+        payload=WagePaymentIn(
+            worker_id=wid,
+            worker_name="Ram Karigar",
+            amount=12500.0,
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="upi",
+            bank_account_id=acc_id,
+            upi_reference=upi_ref,
+            date="2026-08-16",
+            notes="Fortnight payout for lasting operations",
+            override_reason="Settled in full via UPI",
+        ),
+        request=req,
+    )
+
+    assert wage_res["amount"] == 12500.0
+    assert wage_res["paid_via"] == "upi"
+    assert wage_res["upi_reference"] == upi_ref
+    assert wage_res.get("linked_expense_id") is not None
+
+    linked_exp_id = wage_res["linked_expense_id"]
+    exp_doc = expenses_store.get(str(linked_exp_id))
+    assert exp_doc is not None
+    assert exp_doc["category"] == "wages"
+    assert exp_doc["amount"] == 12500.0
+    assert exp_doc["paid_via"] == "bank"
+    assert exp_doc["bank_account_id"] == acc_id
+    assert exp_doc["linked_wage_payment_id"] == wage_res["id"]
+    assert upi_ref in exp_doc["notes"]
+
+    # 4. Import a bank statement with matching UPI debit line
+    csv_content = (
+        "Date,Narration,Chq/Ref Number,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        f"2026-08-16,UPI/{upi_ref}/Ram Karigar,UPI6123,12500.00,,87500.00\n"
+    ).encode("utf-8")
+    stmt_file = UploadFile(filename="icici_stmt.csv", file=io.BytesIO(csv_content))
+    import_res = await import_bank_statement(id=acc_id, file=stmt_file, dry_run=False, confirm_account_update=False, request=req)
+    assert import_res["inserted_count"] == 1
+    assert len(lines_store) == 1
+
+    stmt_line_id = list(lines_store.keys())[0]
+    assert lines_store[stmt_line_id]["match_status"] == "unmatched"
+    assert lines_store[stmt_line_id]["debit_amount"] == 12500.0
+
+    # 5. Run auto-reconciliation on bank account
+    recon_res = await reconcile_bank_account(
+        id=acc_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res["ok"] is True
+    assert recon_res["total_unmatched_evaluated"] == 1
+    assert recon_res["auto_matched_count"] == 1
+    assert recon_res["pending_review_count"] == 0
+
+    matched_item = recon_res["matched_details"][0]
+    assert matched_item["matched_type"] == "expense"
+    assert matched_item["ref_id"] == linked_exp_id
+    assert matched_item["amount"] == 12500.0
+    assert matched_item["confidence_score"] >= 0.95
+
+    # 6. Confirm statement line status is now matched to the expense
+    assert lines_store[stmt_line_id]["match_status"] == "matched"
+    assert lines_store[stmt_line_id]["matched_to"] == {"type": "expense", "ref_id": linked_exp_id}
+
+
+@pytest.mark.anyio
+async def test_tri_channel_wage_payments_cash_bank_upi_reporting_and_reconciliation(monkeypatch):
+    """
+    Full realistic workflow verifying tri-channel wage payments:
+    1. Cash payment: completely unaffected by bank/UPI changes, draws down cash_ledger remaining_balance,
+       does NOT create an Expense record (no double-counting with cash withdrawals).
+    2. Bank transfer: verifies bank account, creates linked Expense record (category="wages", paid_via="bank").
+    3. UPI payment: verifies bank account, saves upi_reference, creates linked Expense record with upi_reference in notes.
+    4. Reporting:
+       - compute_payroll shows all three workers distinctly with their specific disbursement methods and amounts.
+       - list_expenses shows only bank_transfer and upi wage expenses (cash remains in cash ledger).
+    5. Bank statement import & auto-reconciliation:
+       - Imports bank statement with matching debit lines for both bank transfer and UPI.
+       - Reconciles both lines with high confidence against their corresponding wage expenses.
+    """
+    from routes.banking import (
+        create_bank_account,
+        import_bank_statement,
+        reconcile_bank_account,
+    )
+    from routes.workers import create_wage_payment
+    from routes.expenses import list_expenses
+    from routes.pos import compute_payroll
+    from models.banking import BankAccountIn
+    from models.workers import WagePaymentIn
+    from fastapi import UploadFile
+    import io
+    import server
+
+    accounts_store = {}
+    lines_store = {}
+    cash_ledger_store = {}
+    workers_store = {}
+    wage_payments_store = {}
+    expenses_store = {}
+
+    mock_db = MagicMock()
+
+    class MockCursor:
+        def __init__(self, docs):
+            self.docs = list(docs) if docs else []
+
+        def sort(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        async def to_list(self, length=None):
+            return list(self.docs)
+
+    def _mock_find_accounts(query=None):
+        return MockCursor(list(accounts_store.values()))
+
+    def _mock_find_lines(query=None):
+        docs = list(lines_store.values())
+        if query:
+            if "bank_account_id" in query:
+                docs = [d for d in docs if str(d.get("bank_account_id")) == str(query["bank_account_id"])]
+            if "match_status" in query:
+                docs = [d for d in docs if d.get("match_status") == query["match_status"]]
+        return MockCursor(docs)
+
+    def _mock_find_expenses(query=None):
+        docs = list(expenses_store.values())
+        if query:
+            if "bank_account_id" in query:
+                b_q = query["bank_account_id"]
+                if isinstance(b_q, dict) and "$in" in b_q:
+                    allowed = set(str(x) for x in b_q["$in"] if x is not None)
+                    docs = [d for d in docs if str(d.get("bank_account_id")) in allowed or d.get("bank_account_id") in b_q["$in"]]
+                elif b_q is not None:
+                    docs = [d for d in docs if str(d.get("bank_account_id")) == str(b_q)]
+            if "paid_via" in query and isinstance(query["paid_via"], dict) and "$ne" in query["paid_via"]:
+                docs = [d for d in docs if d.get("paid_via") != query["paid_via"]["$ne"]]
+            if "category" in query:
+                docs = [d for d in docs if d.get("category") == query["category"]]
+        return MockCursor(docs)
+
+    def _mock_find_wage_payments(query=None):
+        return MockCursor(list(wage_payments_store.values()))
+
+    def _mock_find_workers(query=None):
+        return MockCursor(list(workers_store.values()))
+
+    mock_db.bank_accounts.find = MagicMock(side_effect=_mock_find_accounts)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.expenses.find = MagicMock(side_effect=_mock_find_expenses)
+    mock_db.wage_payments.find = MagicMock(side_effect=_mock_find_wage_payments)
+    mock_db.workers.find = MagicMock(side_effect=_mock_find_workers)
+    mock_db.cash_ledger.find = MagicMock(side_effect=lambda q=None: MockCursor(list(cash_ledger_store.values())))
+    mock_db.advances.find = MagicMock(return_value=MockCursor([]))
+    mock_db.payments.find = MagicMock(return_value=MockCursor([]))
+    mock_db.online_settlements.find = MagicMock(return_value=MockCursor([]))
+    mock_db.jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.pos.find = MagicMock(return_value=MockCursor([]))
+    mock_db.production_jobs.find = MagicMock(return_value=MockCursor([]))
+    mock_db.styles.find = MagicMock(return_value=MockCursor([]))
+
+    async def _mock_find_one_account(query):
+        return accounts_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_line(query):
+        return lines_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_cash(query):
+        return cash_ledger_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_worker(query):
+        return workers_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_wage_payment(query):
+        return wage_payments_store.get(str(query.get("_id")))
+
+    async def _mock_find_one_expense(query):
+        return expenses_store.get(str(query.get("_id")))
+
+    async def _mock_insert_account(doc):
+        aid = ObjectId()
+        doc["_id"] = aid
+        accounts_store[str(aid)] = doc
+        return MagicMock(inserted_id=aid)
+
+    async def _mock_insert_lines(docs):
+        inserted_ids = []
+        for d in docs:
+            lid = ObjectId()
+            d["_id"] = lid
+            lines_store[str(lid)] = d
+            inserted_ids.append(lid)
+        return MagicMock(inserted_ids=inserted_ids)
+
+    async def _mock_insert_wage_payment(doc):
+        wpid = doc.get("_id") or ObjectId()
+        doc["_id"] = wpid
+        wage_payments_store[str(wpid)] = doc
+        return MagicMock(inserted_id=wpid)
+
+    async def _mock_insert_expense(doc):
+        eid = doc.get("_id") or ObjectId()
+        doc["_id"] = eid
+        expenses_store[str(eid)] = doc
+        return MagicMock(inserted_id=eid)
+
+    async def _mock_update_line(query, update):
+        lid_str = str(query.get("_id"))
+        if lid_str in lines_store:
+            if "$set" in update:
+                lines_store[lid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_update_expense(query, update):
+        eid_str = str(query.get("_id"))
+        if eid_str in expenses_store:
+            if "$set" in update:
+                expenses_store[eid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _mock_update_cash(query, update):
+        cid_str = str(query.get("_id"))
+        if cid_str in cash_ledger_store:
+            entry = cash_ledger_store[cid_str]
+            if "$gte" in query.get("remaining_balance", {}):
+                req_bal = query["remaining_balance"]["$gte"]
+                if entry.get("remaining_balance", 0.0) < req_bal:
+                    return MagicMock(matched_count=0, modified_count=0)
+            if "$inc" in update:
+                inc_val = update["$inc"].get("remaining_balance", 0.0)
+                entry["remaining_balance"] = round(entry.get("remaining_balance", 0.0) + inc_val, 2)
+            if "$set" in update:
+                entry.update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_account)
+    mock_db.bank_accounts.insert_one = AsyncMock(side_effect=_mock_insert_account)
+    mock_db.bank_statement_lines.find_one = AsyncMock(side_effect=_mock_find_one_line)
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=_mock_insert_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.cash_ledger.find_one = AsyncMock(side_effect=_mock_find_one_cash)
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=_mock_update_cash)
+    mock_db.workers.find_one = AsyncMock(side_effect=_mock_find_one_worker)
+    mock_db.wage_payments.find_one = AsyncMock(side_effect=_mock_find_one_wage_payment)
+    mock_db.wage_payments.insert_one = AsyncMock(side_effect=_mock_insert_wage_payment)
+    mock_db.expenses.find_one = AsyncMock(side_effect=_mock_find_one_expense)
+    mock_db.expenses.insert_one = AsyncMock(side_effect=_mock_insert_expense)
+    mock_db.expenses.update_one = AsyncMock(side_effect=_mock_update_expense)
+    mock_db.audit_logs = MagicMock(insert_one=AsyncMock())
+
+    import routes.banking
+    import routes.workers
+    import routes.expenses
+
+    admin_user = {"id": "admin_1", "role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(routes.workers, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.expenses, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    # Step 1: Create bank account
+    acc_res = await create_bank_account(
+        BankAccountIn(
+            name="HDFC Current A/C",
+            bank_name="HDFC Bank",
+            account_number_last4="4455",
+            account_number="50200012344455",
+            ifsc="HDFC0000123",
+            account_type="b2b_client",
+            opening_balance=250000.0,
+        ),
+        req,
+    )
+    acc_id = acc_res["id"]
+
+    # Step 2: Create cash ledger entry with initial cash balance
+    cl_id = str(ObjectId())
+    cash_ledger_store[cl_id] = {
+        "_id": ObjectId(cl_id),
+        "entry_type": "withdrawal",
+        "amount": 25000.0,
+        "remaining_balance": 25000.0,
+        "date": "2026-08-01",
+        "description": "ATM cash withdrawal for factory wages",
+    }
+
+    # Step 3: Setup 3 workers
+    w1_id = str(ObjectId())
+    w2_id = str(ObjectId())
+    w3_id = str(ObjectId())
+
+    workers_store[w1_id] = {
+        "_id": ObjectId(w1_id),
+        "name": "Suresh Cash-Karigar",
+        "skill": "lasting",
+        "rate_per_pair": 30.0,
+        "active": True,
+    }
+    workers_store[w2_id] = {
+        "_id": ObjectId(w2_id),
+        "name": "Ramesh Bank-Karigar",
+        "skill": "stitching",
+        "rate_per_pair": 22.0,
+        "active": True,
+    }
+    workers_store[w3_id] = {
+        "_id": ObjectId(w3_id),
+        "name": "Dinesh UPI-Karigar",
+        "skill": "cutting",
+        "rate_per_pair": 18.0,
+        "active": True,
+    }
+
+    # Step 4: Pay Worker 1 via CASH
+    wage_cash = await create_wage_payment(
+        wid=w1_id,
+        payload=WagePaymentIn(
+            worker_id=w1_id,
+            worker_name="Suresh Cash-Karigar",
+            amount=7000.0,
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="cash",
+            cash_ledger_id=cl_id,
+            date="2026-08-16",
+            notes="Factory floor cash payout",
+            override_reason="Settled cash wages",
+        ),
+        request=req,
+    )
+    assert wage_cash["paid_via"] == "cash"
+    assert wage_cash["amount"] == 7000.0
+    assert wage_cash.get("linked_expense_id") is None
+    # Confirms cash_ledger drew down atomically from 25000 to 18000
+    assert cash_ledger_store[cl_id]["remaining_balance"] == 18000.0
+    # Confirms NO expense was created in expenses_store for cash wage payment
+    assert len(expenses_store) == 0
+
+    # Step 5: Pay Worker 2 via BANK TRANSFER
+    wage_bank = await create_wage_payment(
+        wid=w2_id,
+        payload=WagePaymentIn(
+            worker_id=w2_id,
+            worker_name="Ramesh Bank-Karigar",
+            amount=11000.0,
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="bank_transfer",
+            bank_account_id=acc_id,
+            date="2026-08-16",
+            notes="NEFT direct transfer",
+            override_reason="NEFT fortnight wage settlement",
+        ),
+        request=req,
+    )
+    assert wage_bank["paid_via"] == "bank_transfer"
+    assert wage_bank["amount"] == 11000.0
+    assert wage_bank.get("linked_expense_id") is not None
+    exp_bank_id = wage_bank["linked_expense_id"]
+    assert exp_bank_id in expenses_store
+    exp_bank = expenses_store[exp_bank_id]
+    assert exp_bank["category"] == "wages"
+    assert exp_bank["amount"] == 11000.0
+    assert exp_bank["paid_via"] == "bank"
+    assert exp_bank["bank_account_id"] == acc_id
+    assert exp_bank["payee"] == "Ramesh Bank-Karigar"
+
+    # Step 6: Pay Worker 3 via UPI
+    upi_ref_3 = "UPI/998877665544/DINESH"
+    wage_upi = await create_wage_payment(
+        wid=w3_id,
+        payload=WagePaymentIn(
+            worker_id=w3_id,
+            worker_name="Dinesh UPI-Karigar",
+            amount=9500.0,
+            period_from="2026-08-01",
+            period_to="2026-08-15",
+            paid_via="upi",
+            bank_account_id=acc_id,
+            upi_reference=upi_ref_3,
+            date="2026-08-16",
+            notes="Instant UPI payout",
+            override_reason="UPI instant settlement",
+        ),
+        request=req,
+    )
+    assert wage_upi["paid_via"] == "upi"
+    assert wage_upi["amount"] == 9500.0
+    assert wage_upi["upi_reference"] == upi_ref_3
+    assert wage_upi.get("linked_expense_id") is not None
+    exp_upi_id = wage_upi["linked_expense_id"]
+    assert exp_upi_id in expenses_store
+    exp_upi = expenses_store[exp_upi_id]
+    assert exp_upi["category"] == "wages"
+    assert exp_upi["amount"] == 9500.0
+    assert exp_upi["paid_via"] == "bank"
+    assert exp_upi["bank_account_id"] == acc_id
+    assert upi_ref_3 in exp_upi["notes"]
+    assert exp_upi["payee"] == "Dinesh UPI-Karigar"
+
+    # Step 7: Verify Reporting
+    # A. compute_payroll shows all 3 workers distinctly with full disbursement data
+    payroll_report = await compute_payroll(db=mock_db, from_date="2026-08-01", to_date="2026-08-15")
+    rows = payroll_report["rows"]
+    assert len(rows) == 3
+
+    rows_by_id = {str(r["worker_id"]): r for r in rows}
+    # Suresh (Cash)
+    assert rows_by_id[w1_id]["disbursed_amount"] == 7000.0
+    assert rows_by_id[w1_id]["wage_payments"][0]["paid_via"] == "cash"
+    assert rows_by_id[w1_id]["wage_payments"][0]["cash_ledger_id"] == cl_id
+    # Ramesh (Bank Transfer)
+    assert rows_by_id[w2_id]["disbursed_amount"] == 11000.0
+    assert rows_by_id[w2_id]["wage_payments"][0]["paid_via"] == "bank_transfer"
+    assert rows_by_id[w2_id]["wage_payments"][0]["linked_expense_id"] == exp_bank_id
+    # Dinesh (UPI)
+    assert rows_by_id[w3_id]["disbursed_amount"] == 9500.0
+    assert rows_by_id[w3_id]["wage_payments"][0]["paid_via"] == "upi"
+    assert rows_by_id[w3_id]["wage_payments"][0]["upi_reference"] == upi_ref_3
+    assert rows_by_id[w3_id]["wage_payments"][0]["linked_expense_id"] == exp_upi_id
+
+    # Total wages disbursed across all 3 channels
+    assert payroll_report["grand_disbursed"] == 27500.0
+
+    # B. list_expenses: Only the 2 bank/UPI expenses appear, cash does not double-count
+    all_expenses = await list_expenses(request=req, category="wages")
+    assert len(all_expenses) == 2
+    exp_ids = {e["id"] for e in all_expenses}
+    assert exp_ids == {exp_bank_id, exp_upi_id}
+
+    # Step 8: Import bank statement with matching debit lines for both Ramesh (NEFT) & Dinesh (UPI)
+    csv_content = (
+        "Date,Narration,Chq/Ref Number,Withdrawal Amt.,Deposit Amt.,Closing Balance\n"
+        "2026-08-16,NEFT/RAMESH/WAGE_AUG,NEFT001,11000.00,,239000.00\n"
+        f"2026-08-16,UPI/{upi_ref_3}/Dinesh,UPI002,9500.00,,229500.00\n"
+    ).encode("utf-8")
+    stmt_file = UploadFile(filename="hdfc_stmt.csv", file=io.BytesIO(csv_content))
+    import_res = await import_bank_statement(id=acc_id, file=stmt_file, dry_run=False, confirm_account_update=False, request=req)
+    assert import_res["inserted_count"] == 2
+    assert len(lines_store) == 2
+
+    # Step 9: Run bank reconciliation
+    recon_res = await reconcile_bank_account(
+        id=acc_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res["ok"] is True
+    assert recon_res["total_unmatched_evaluated"] == 2
+    assert recon_res["auto_matched_count"] == 2
+    assert recon_res["pending_review_count"] == 0
+
+    matched_by_ref = {m["ref_id"]: m for m in recon_res["matched_details"]}
+    # Verify Bank Transfer expense matched
+    assert exp_bank_id in matched_by_ref
+    assert matched_by_ref[exp_bank_id]["matched_type"] == "expense"
+    assert matched_by_ref[exp_bank_id]["amount"] == 11000.0
+    assert matched_by_ref[exp_bank_id]["confidence_score"] >= 0.95
+
+    # Verify UPI expense matched
+    assert exp_upi_id in matched_by_ref
+    assert matched_by_ref[exp_upi_id]["matched_type"] == "expense"
+    assert matched_by_ref[exp_upi_id]["amount"] == 9500.0
+    assert matched_by_ref[exp_upi_id]["confidence_score"] >= 0.95
+
+    # Confirm statement lines are now matched
+    for lid, line in lines_store.items():
+        assert line["match_status"] == "matched"
+        assert line["matched_to"]["type"] == "expense"
+        assert line["matched_to"]["ref_id"] in (exp_bank_id, exp_upi_id)
+
 
 
 

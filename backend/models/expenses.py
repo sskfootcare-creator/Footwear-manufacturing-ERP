@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 
 EXPENSE_CATEGORIES = [
+    "wages",
     "Rent & Utilities",
     "Raw Materials",
     "Machinery & Maintenance",
@@ -31,6 +32,7 @@ class ExpenseIn(BaseModel):
     is_recurring: bool = False
     recurring_expense_id: Optional[str] = None
     status: str = "confirmed"  # confirmed, due, overdue
+    linked_wage_payment_id: Optional[str] = None
 
 
 class ExpenseUpdate(BaseModel):
@@ -46,6 +48,7 @@ class ExpenseUpdate(BaseModel):
     is_recurring: Optional[bool] = None
     recurring_expense_id: Optional[str] = None
     status: Optional[str] = None
+    linked_wage_payment_id: Optional[str] = None
 
 
 class RecurringExpenseIn(BaseModel):

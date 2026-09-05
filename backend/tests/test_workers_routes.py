@@ -70,6 +70,17 @@ class MockWorkersDB:
         self.bank_accounts = MagicMock()
         self.bank_accounts.find_one = AsyncMock(side_effect=self._find_one_bank_account)
 
+        self.expenses_store = {}
+        self.expenses = MagicMock()
+        self.expenses.find = MagicMock(side_effect=self._find_expenses)
+        self.expenses.find_one = AsyncMock(side_effect=self._find_one_expense)
+        self.expenses.insert_one = AsyncMock(side_effect=self._insert_expense)
+        self.expenses.update_one = AsyncMock(side_effect=self._update_expense)
+        self.expenses.delete_one = AsyncMock(side_effect=self._delete_expense)
+
+        self.audit_logs = MagicMock()
+        self.audit_logs.insert_one = AsyncMock()
+
     def _find_workers(self, query=None):
         return MockCursor(list(self.workers_store.values()))
 
@@ -183,7 +194,7 @@ class MockWorkersDB:
         return MockCursor(docs)
 
     async def _insert_wage_payment(self, doc):
-        oid = ObjectId()
+        oid = doc.get("_id") or ObjectId()
         doc["_id"] = oid
         self.wage_payments_store[str(oid)] = doc
         return MagicMock(inserted_id=oid)
@@ -191,6 +202,39 @@ class MockWorkersDB:
     async def _find_one_bank_account(self, query):
         oid_str = str(query.get("_id"))
         return self.bank_accounts_store.get(oid_str)
+
+    def _find_expenses(self, query=None):
+        docs = list(self.expenses_store.values())
+        if query:
+            if "category" in query:
+                docs = [d for d in docs if d.get("category") == query["category"]]
+            if "bank_account_id" in query:
+                docs = [d for d in docs if d.get("bank_account_id") == query["bank_account_id"]]
+        return MockCursor(docs)
+
+    async def _find_one_expense(self, query):
+        oid_str = str(query.get("_id"))
+        return self.expenses_store.get(oid_str)
+
+    async def _insert_expense(self, doc):
+        oid = doc.get("_id") or ObjectId()
+        doc["_id"] = oid
+        self.expenses_store[str(oid)] = doc
+        return MagicMock(inserted_id=oid)
+
+    async def _update_expense(self, query, update):
+        oid_str = str(query.get("_id"))
+        if oid_str in self.expenses_store:
+            doc = self.expenses_store[oid_str]
+            if "$set" in update:
+                doc.update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    async def _delete_expense(self, query):
+        oid_str = str(query.get("_id"))
+        self.expenses_store.pop(oid_str, None)
+        return MagicMock(deleted_count=1)
 
 
 @pytest.fixture
@@ -335,6 +379,23 @@ def test_wage_payment_in_model():
     assert wp.paid_via == "cash"
     assert wp.cash_ledger_id == "cash_1"
 
+    wp_upi = WagePaymentIn(
+        worker_id="w123",
+        worker_name="Ramesh",
+        amount=2500.0,
+        period_from="2026-08-01",
+        period_to="2026-08-15",
+        paid_via="upi",
+        bank_account_id="bank_acc_1",
+        upi_reference="UPI/623456789012/CR",
+        linked_expense_id="exp_999",
+        date="2026-08-16",
+    )
+    assert wp_upi.paid_via == "upi"
+    assert wp_upi.upi_reference == "UPI/623456789012/CR"
+    assert wp_upi.bank_account_id == "bank_acc_1"
+    assert wp_upi.linked_expense_id == "exp_999"
+
 
 @pytest.mark.anyio
 async def test_wage_payment_exact_match_success_and_cash_ledger_drawdown(client, mock_workers_env):
@@ -399,6 +460,8 @@ async def test_wage_payment_exact_match_success_and_cash_ledger_drawdown(client,
     wp_data = res.json()
     assert wp_data["amount"] == 2000.0
     assert wp_data["paid_via"] == "cash"
+    assert wp_data.get("linked_expense_id") is None
+    assert len(mock_workers_env.expenses_store) == 0
 
     # 3. Confirm cash_ledger entry remaining_balance decreased from 5000 to 3000
     assert mock_workers_env.cash_ledger_store[cash_id]["remaining_balance"] == 3000.0
@@ -578,11 +641,116 @@ def test_wage_payment_bank_transfer_success(client, mock_workers_env):
     data = res.json()
     assert data["paid_via"] == "bank_transfer"
     assert data["bank_account_id"] == bank_acc_id
+    assert data.get("linked_expense_id") is not None
+
+    exp_id = data["linked_expense_id"]
+    exp_doc = mock_workers_env.expenses_store.get(str(exp_id))
+    assert exp_doc is not None
+    assert exp_doc["category"] == "wages"
+    assert exp_doc["amount"] == 1000.0
+    assert exp_doc["paid_via"] == "bank"
+    assert exp_doc["bank_account_id"] == bank_acc_id
+    assert exp_doc["payee"] == "Kailash"
+    assert exp_doc["linked_wage_payment_id"] == data["id"]
+    assert "Wage payment to Kailash" in exp_doc["notes"]
 
     # List payments for worker
     res = client.get(f"/api/workers/{wid}/wage-payments")
     assert res.status_code == 200
-    assert len(res.json()) == 1
+    payments = res.json()
+    assert len(payments) == 1
+    assert payments[0]["linked_expense_id"] == exp_id
+
+
+def test_wage_payment_upi_success(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Rakesh",
+        "rate_per_pair": 12.0,
+        "skill": "finishing",
+        "active": True,
+    }
+
+    bank_acc_id = str(ObjectId())
+    mock_workers_env.bank_accounts_store[bank_acc_id] = {
+        "_id": ObjectId(bank_acc_id),
+        "name": "ICICI Operations A/C",
+    }
+
+    # Record wage disbursement via UPI
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "worker_name": "Rakesh",
+        "amount": 1850.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "upi",
+        "bank_account_id": bank_acc_id,
+        "upi_reference": "UPI/123456789012/PAYMENT",
+        "date": "2026-08-16",
+        "notes": "UPI wage payout to karigar",
+        "override_reason": "Advance settled, paying remainder via UPI",
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["paid_via"] == "upi"
+    assert data["bank_account_id"] == bank_acc_id
+    assert data["upi_reference"] == "UPI/123456789012/PAYMENT"
+    assert data["amount"] == 1850.0
+    assert data.get("linked_expense_id") is not None
+
+    # Confirm it saves in MongoDB store with upi_reference, paid_via="upi", and linked_expense_id
+    payment_id = data["id"]
+    saved_doc = mock_workers_env.wage_payments_store.get(str(payment_id))
+    assert saved_doc is not None
+    assert saved_doc["paid_via"] == "upi"
+    assert saved_doc["upi_reference"] == "UPI/123456789012/PAYMENT"
+    assert saved_doc["bank_account_id"] == bank_acc_id
+    assert saved_doc["linked_expense_id"] == data["linked_expense_id"]
+
+    # Confirm linked expense in expenses_store
+    exp_id = saved_doc["linked_expense_id"]
+    exp_doc = mock_workers_env.expenses_store.get(str(exp_id))
+    assert exp_doc is not None
+    assert exp_doc["category"] == "wages"
+    assert exp_doc["amount"] == 1850.0
+    assert exp_doc["paid_via"] == "bank"
+    assert exp_doc["bank_account_id"] == bank_acc_id
+    assert exp_doc["payee"] == "Rakesh"
+    assert exp_doc["linked_wage_payment_id"] == payment_id
+    assert "UPI/123456789012/PAYMENT" in exp_doc["notes"]
+
+    # List payments for worker and verify upi fields and linked_expense_id returned
+    res = client.get(f"/api/workers/{wid}/wage-payments")
+    assert res.status_code == 200
+    payments = res.json()
+    assert len(payments) == 1
+    assert payments[0]["paid_via"] == "upi"
+    assert payments[0]["upi_reference"] == "UPI/123456789012/PAYMENT"
+    assert payments[0]["linked_expense_id"] == exp_id
+
+
+def test_wage_payment_upi_missing_bank_account(client, mock_workers_env):
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Rakesh",
+        "active": True,
+    }
+
+    res = client.post(f"/api/workers/{wid}/wage-payments", json={
+        "worker_id": wid,
+        "amount": 1000.0,
+        "period_from": "2026-08-01",
+        "period_to": "2026-08-15",
+        "paid_via": "upi",
+        "upi_reference": "UPI/123456789012/PAYMENT",
+        "date": "2026-08-16",
+        "override_reason": "Override",
+    })
+    assert res.status_code == 400
+    assert "bank_account_id is required when paid_via is 'upi'" in res.json()["detail"]
 
 
 @pytest.mark.anyio

@@ -286,10 +286,14 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
     mat_map = {str(m["_id"]): stringify(m) for m in materials}
 
     requirements = {}
+    color_requirements = defaultdict(dict)
+    color_pairs = defaultdict(int)
     jobs_summary = []
     for j in jobs:
         st = style_map.get(j.get("style_code"))
         pairs = j.get("quantity", 0)
+        job_color = (j.get("color") or "").strip() or "Standard"
+        color_pairs[job_color] += pairs
         jobs_summary.append({
             "po_number": j.get("po_number"),
             "style_code": j.get("style_code"),
@@ -323,7 +327,6 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
 
             cat = (mat_map.get(str(mid), {}).get("category") or mat_info.get("category") or b.get("section") or "other")
             is_swatch = _is_swatch_item(cat, "")
-            job_color = (j.get("color") or "").strip()
 
             raw_col = (b.get("color") or "").strip()
             if raw_col:
@@ -356,6 +359,27 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
                 sz_key = job_size if job_size else "Standard"
                 requirements[key]["size_breakdown"][sz_key] = requirements[key]["size_breakdown"].get(sz_key, 0.0) + total_qty
 
+            # Track per-color breakdown
+            c_dict = color_requirements[job_color]
+            if key not in c_dict:
+                c_dict[key] = {
+                    "code": code, "name": name, "category": cat, "unit": unit, "color": color,
+                    "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
+                }
+                if is_sole:
+                    c_dict[key]["size_breakdown"] = {}
+            elif not c_dict[key]["rate"] and rate > 0:
+                c_dict[key]["rate"] = rate
+
+            c_dict[key]["total_qty_required"] += total_qty
+            c_dict[key]["total_cost"] += total_qty * rate
+
+            if is_sole:
+                if "size_breakdown" not in c_dict[key] or c_dict[key]["size_breakdown"] is None:
+                    c_dict[key]["size_breakdown"] = {}
+                sz_key = job_size if job_size else "Standard"
+                c_dict[key]["size_breakdown"][sz_key] = c_dict[key]["size_breakdown"].get(sz_key, 0.0) + total_qty
+
     material_lines = []
     for v in requirements.values():
         v["total_qty_required"] = round(v["total_qty_required"], 2)
@@ -368,6 +392,27 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             v["size_breakdown"] = sorted_breakdown
         material_lines.append(v)
     material_lines.sort(key=lambda m: (m["category"], m["code"], m.get("color", "")))
+
+    by_color = {}
+    for col, c_reqs in color_requirements.items():
+        c_mat_lines = []
+        for v in c_reqs.values():
+            v_copy = dict(v)
+            v_copy["total_qty_required"] = round(v_copy["total_qty_required"], 2)
+            v_copy["total_cost"] = round(v_copy["total_cost"], 2)
+            if "size_breakdown" in v_copy and v_copy["size_breakdown"] is not None:
+                sorted_bd = {}
+                for sz in sorted(v_copy["size_breakdown"].keys(), key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999, str(x))):
+                    val = round(v_copy["size_breakdown"][sz], 2)
+                    sorted_bd[sz] = int(val) if val == int(val) else val
+                v_copy["size_breakdown"] = sorted_bd
+            c_mat_lines.append(v_copy)
+        c_mat_lines.sort(key=lambda m: (m["category"], m["code"], m.get("color", "")))
+        by_color[col] = {
+            "color": col,
+            "total_pairs": color_pairs[col],
+            "materials": c_mat_lines,
+        }
 
     summary_agg = {}
     for js in jobs_summary:
@@ -386,7 +431,7 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             "total_pairs": v["total_pairs"],
             "sizes_text": ", ".join(sorted(v["_sizes"], key=lambda x: (float(x) if x.replace('.', '', 1).isdigit() else 999))),
         })
-    return {"jobs": summary_out, "materials": material_lines}
+    return {"jobs": summary_out, "materials": material_lines, "by_color": by_color}
 
 
 async def _auto_consume_inventory(job: dict, by_email: str, db=None) -> bool:
@@ -852,8 +897,16 @@ async def procurement_requirement_pdf(payload: dict, request: Request):
         raise HTTPException(400, "job_ids required")
     scope_label = payload.get("scope_label") or f"{len(job_ids)} production card(s)"
     notes = payload.get("notes", "")
+    split_by_color = bool(payload.get("split_by_color", False))
     data = await _compute_material_requirement(job_ids, db=db)
-    pdf_bytes = build_material_requirement(scope_label, data["jobs"], data["materials"], notes)
+    pdf_bytes = build_material_requirement(
+        scope_label,
+        data["jobs"],
+        data["materials"],
+        notes,
+        split_by_color=split_by_color,
+        by_color=data.get("by_color")
+    )
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="material-requirement-{datetime.now().strftime("%Y%m%d-%H%M")}.pdf"'},

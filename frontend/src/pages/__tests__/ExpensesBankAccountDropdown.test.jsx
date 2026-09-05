@@ -379,6 +379,73 @@ describe("Expenses Bank Account Selection", () => {
     expect(cashDropdown).toBeInTheDocument();
     expect(await screen.findByText(/₹50,000 remaining/i)).toBeInTheDocument();
   });
+
+  test("renders bank-paid wage expense with Wage Payout badge and bank attribution", async () => {
+    const mockWageExpense = {
+      id: "exp_wage_1",
+      category: "wages",
+      amount: 4500,
+      date: "2026-08-16",
+      payee: "Ramesh Kumar",
+      notes: "Wage payment to Ramesh Kumar for 2026-08-01-2026-08-15 (UPI Ref: UPI/987654/PAY)",
+      paid_via: "bank",
+      bank_account_id: "bank_acc_101",
+      linked_wage_payment_id: "wp_12345",
+      status: "confirmed",
+    };
+
+    http.get.mockImplementation((url) => {
+      if (url === "/expenses") {
+        return Promise.resolve({ data: [mockWageExpense] });
+      }
+      if (url === "/expenses/due-queue") {
+        return Promise.resolve({ data: [] });
+      }
+      if (url === "/expenses/recurring-templates") {
+        return Promise.resolve({ data: [] });
+      }
+      if (url === "/expenses/pnl-summary") {
+        return Promise.resolve({
+          data: { revenue: 0, cogs: 0, total_expenses: 4500, net_profit: -4500, category_totals: { wages: 4500 } },
+        });
+      }
+      if (url === "/banking/accounts") {
+        return Promise.resolve({
+          data: [
+            { id: "bank_acc_101", name: "HDFC Primary Current A/C", bank_name: "HDFC", is_active: true },
+          ],
+        });
+      }
+      if (url === "/banking/cash-ledger") {
+        return Promise.resolve({ data: [] });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    render(<Expenses />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("expense-row-exp_wage_1")).toBeInTheDocument();
+    });
+
+    const row = screen.getByTestId("expense-row-exp_wage_1");
+    expect(row).toHaveTextContent("wages");
+
+    // Check Wage Payout badge is rendered and links to payroll
+    const badge = screen.getByTestId("linked-wage-badge-exp_wage_1");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent("Wage Payout");
+    expect(badge).toHaveAttribute("href", "/payroll");
+
+    // Check payee has Karigar Wage indicator
+    expect(screen.getByText("Ramesh Kumar")).toBeInTheDocument();
+    expect(screen.getByText("Karigar Wage")).toBeInTheDocument();
+
+    // Check Bank Account attribution
+    const bankAttr = screen.getByTestId("expense-bank-attr-exp_wage_1");
+    expect(bankAttr).toBeInTheDocument();
+    expect(bankAttr).toHaveTextContent("HDFC Primary Current A/C");
+  });
 });
 
 

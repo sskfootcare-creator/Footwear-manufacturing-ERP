@@ -73,7 +73,7 @@ class ProductionJobDoc(BaseModel):
     quantity: int
     completed_qty: Optional[int] = 0
     rejected_qty: Optional[int] = 0
-    stage: str = "procurement"
+    stage: str = "planning"
     delivery_date: Optional[str] = ""
     stage_entered_at: Optional[str] = None
     stage_deadline: Optional[str] = None

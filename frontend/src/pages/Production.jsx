@@ -4,7 +4,7 @@ import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Map, Zap, RefreshCw, ChevronRight, Palette, Calendar } from "lucide-react";
+import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
@@ -561,12 +561,12 @@ export default function Production() {
   const toggleProcSelect = (group) => setProcSelected(s => {
     const next = { ...s }; if (next[group.key]) delete next[group.key]; else next[group.key] = group; return next;
   });
-  const downloadMaterialRequirement = async (groups, label) => {
+  const downloadMaterialRequirement = async (groups, label, splitByColor = true) => {
     const job_ids = [];
     groups.forEach(g => g.rows.forEach(r => job_ids.push(r.id)));
     try {
       const res = await http.post("/procurement/requirement.pdf",
-        { job_ids, scope_label: label || `${groups.length} card(s)` }, { responseType: "blob" });
+        { job_ids, scope_label: label || `${groups.length} card(s)`, split_by_color: splitByColor }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
     } catch (e) { alert("Material requirement failed: " + friendlyAxiosError(e)); }
   };
@@ -771,7 +771,7 @@ export default function Production() {
                         isPlanning={isPlanning}
                         isProc={isProc}
                         isDispatched={isDisp}
-                        onMatReq={() => downloadMaterialRequirement([g], `${g.style_code} · ${g.color}`)}
+                        onMatReq={(split = true) => downloadMaterialRequirement([g], `${g.style_code} · ${g.color}`, split)}
                         procSelected={!!procSelected[g.key]}
                         onToggleProcSelect={toggleProcSelect}
                         onDownloadInvoice={downloadGroupInvoice}
@@ -1046,26 +1046,129 @@ function ColorGroupCard(props) {
         />
       )}
       {isPlanning && (
-        <div className="bg-indigo-600 text-white px-3 py-2 flex items-center justify-between gap-2" data-testid={`planning-banner-${group.key}`}>
-          <div className="flex items-center gap-2">
-            <Layers className="w-3.5 h-3.5 flex-shrink-0" />
-            <div>
-              <div className="text-[9px] uppercase tracking-widest font-bold opacity-80">Planning Stage</div>
-              <div className="text-[11px] font-bold">
-                {group.color}
-                <span className="opacity-70 ml-1 font-normal">· {group.totalQty} pairs</span>
+        <div className="border-b-2 border-violet-200 bg-gradient-to-br from-violet-50 to-indigo-50" data-testid={`planning-panel-${group.key}`}>
+          {/* Planning header */}
+          <div className="flex items-center justify-between px-3 py-2 bg-violet-700 text-white">
+            <div className="flex items-center gap-2">
+              <Layers className="w-3.5 h-3.5" />
+              <div>
+                <div className="text-[9px] uppercase tracking-[0.2em] font-bold opacity-80">Planning Stage</div>
+                <div className="text-[11px] font-bold">{group.style_code} · <span className="text-violet-200">{group.color}</span></div>
               </div>
             </div>
+            {canEdit && (
+              <button
+                onClick={() => onMove(group, "procurement")}
+                className="text-[9px] uppercase tracking-wider font-bold bg-white text-violet-700 hover:bg-violet-50 px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all shadow-sm hover:shadow whitespace-nowrap"
+                data-testid={`release-to-procurement-${group.key}`}
+              >
+                <CheckCircle className="w-3 h-3" /> Confirm Plan → Procurement
+              </button>
+            )}
           </div>
-          {canEdit && (
-            <button
-              onClick={() => onMove(group, "procurement")}
-              className="text-[9px] uppercase tracking-wider font-bold bg-white text-indigo-700 hover:bg-indigo-50 px-2 py-1 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
-              data-testid={`release-to-procurement-${group.key}`}
-            >
-              <CheckCircle className="w-3 h-3" /> Release →
-            </button>
+
+          {/* Color BOM warning */}
+          {!hasColorBom && (
+            <div className="flex items-start gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 text-amber-800">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 text-amber-500 flex-shrink-0" />
+              <div className="text-[10px]">
+                <span className="font-bold">No color-specific BOM configured</span> for <span className="font-bold">{group.color}</span>.
+                Material requirement will use the base BOM.{" "}
+                <a href={`/styles?edit=${encodeURIComponent(group.style_code)}`} className="underline text-amber-700 hover:text-amber-900 font-bold">
+                  Configure Color BOM →
+                </a>
+              </div>
+            </div>
           )}
+          {hasColorBom && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-[10px]">
+              <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+              <span className="font-bold">Color-specific BOM active</span> — Material requirement will use <span className="font-bold text-emerald-700">{group.color}</span> overrides.
+            </div>
+          )}
+
+          {/* Material Preview */}
+          <div className="px-3 py-2">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-violet-700">Material Preview</div>
+              <div className="flex items-center gap-1.5">
+                {planMatReq && (
+                  <button
+                    onClick={() => onMatReq?.(true)}
+                    className="text-[9px] uppercase tracking-wider font-bold text-violet-700 hover:text-white hover:bg-violet-600 border border-violet-300 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+                    title="Download color-split requirement PDF"
+                    data-testid={`print-plan-pdf-${group.key}`}
+                  >
+                    <Printer className="w-3 h-3" /> PDF
+                  </button>
+                )}
+                <button
+                  onClick={loadPlanMatReq}
+                  disabled={planMatLoading}
+                  className="text-[9px] uppercase tracking-wider font-bold text-violet-600 hover:text-violet-900 border border-violet-300 px-2 py-0.5 rounded hover:bg-violet-100 flex items-center gap-1 transition-colors"
+                  data-testid={`preview-mat-req-${group.key}`}
+                >
+                  {planMatLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                  {planMatReq ? "Refresh" : "Load"}
+                </button>
+              </div>
+            </div>
+
+            {!planMatReq && !planMatLoading && (
+              <div className="text-[10px] text-slate-400 italic text-center py-2 border border-dashed border-violet-200 rounded">
+                Click "Load" to preview color-specific material requirements
+              </div>
+            )}
+            {planMatLoading && (
+              <div className="flex items-center justify-center gap-2 py-4 text-violet-500">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-[10px]">Calculating color-aware BOM…</span>
+              </div>
+            )}
+            {planMatReq && !planMatLoading && (
+              <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                {planMatReq.materials.slice(0, 12).map((m, i) => (
+                  <div key={i} className="flex items-center justify-between text-[10px] py-0.5 border-b border-violet-100 last:border-0">
+                    <div className="flex-1 min-w-0">
+                      <span className="font-mono font-bold text-slate-800 truncate block">{m.code}</span>
+                      <span className="text-slate-500 truncate block">{m.name}{m.color ? <span className="ml-1 text-violet-600 font-semibold">({m.color})</span> : ""}</span>
+                    </div>
+                    <div className="flex items-center gap-2 ml-2 flex-shrink-0 text-right">
+                      <span className="font-mono font-bold text-violet-700">{m.total_qty_required} <span className="text-slate-400 font-normal">{m.unit}</span></span>
+                    </div>
+                  </div>
+                ))}
+                {planMatReq.materials.length > 12 && (
+                  <div className="text-[9px] text-slate-400 text-center pt-1">+{planMatReq.materials.length - 12} more materials</div>
+                )}
+                {planMatReq.materials.length === 0 && (
+                  <div className="text-[10px] text-slate-400 italic text-center py-2">No materials in BOM</div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Planner Notes */}
+          <div className="px-3 pb-2">
+            <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-violet-700 mb-1">Planner Notes</div>
+            <div className="flex gap-1">
+              <textarea
+                value={planNotes}
+                onChange={e => setPlanNotes(e.target.value)}
+                placeholder="Add planning notes, material concerns, special client requirements…"
+                className="flex-1 text-[10px] border border-violet-200 rounded px-2 py-1.5 placeholder:text-slate-400 focus:outline-none focus:border-violet-400 resize-none bg-white"
+                rows={2}
+                data-testid={`planning-notes-${group.key}`}
+              />
+              <button
+                onClick={savePlanNotes}
+                disabled={planNotesSaving}
+                className="text-[9px] px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-bold flex-shrink-0 self-end transition-colors"
+              >
+                {planNotesSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <div className="p-3 pb-2 border-b border-slate-100">
@@ -1200,9 +1303,24 @@ function ColorGroupCard(props) {
             </button>
           )}
           {isProc && (
-            <button onClick={onMatReq} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-3 py-1 flex items-center gap-1" data-testid={`mat-req-${group.key}`}>
-              <ClipboardList className="w-3 h-3" /> Material Req.
-            </button>
+            <div className="inline-flex rounded shadow-sm">
+              <button
+                onClick={() => onMatReq?.(false)}
+                className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2.5 py-1 flex items-center gap-1 rounded-l"
+                data-testid={`mat-req-${group.key}`}
+                title="Download consolidated Material Requirement sheet"
+              >
+                <ClipboardList className="w-3 h-3" /> Mat. Req
+              </button>
+              <button
+                onClick={() => onMatReq?.(true)}
+                className="text-[10px] uppercase tracking-wider font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 flex items-center gap-1 border-l border-indigo-500 rounded-r"
+                data-testid={`mat-req-color-${group.key}`}
+                title="Download Color-Split Material Requirement sheet"
+              >
+                <Palette className="w-3 h-3" /> By Color
+              </button>
+            </div>
           )}
           {isDispatched && (
             <button onClick={() => onOpenDispatchDetails?.(group)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-3 py-1 flex items-center gap-1 transition-colors" data-testid={`dispatch-details-btn-${group.key}`}>

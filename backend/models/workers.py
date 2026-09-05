@@ -71,9 +71,11 @@ class WagePaymentIn(BaseModel):
     amount: float
     period_from: str
     period_to: str
-    paid_via: Literal["cash", "bank_transfer"]
+    paid_via: Literal["cash", "bank_transfer", "upi"]
     cash_ledger_id: Optional[str] = None
     bank_account_id: Optional[str] = None
+    upi_reference: Optional[str] = None
+    linked_expense_id: Optional[str] = None
     date: str
     paid_by: Optional[str] = ""
     notes: Optional[str] = ""

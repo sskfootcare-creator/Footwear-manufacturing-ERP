@@ -39,6 +39,7 @@ import {
 } from "recharts";
 
 const EXPENSE_CATEGORIES = [
+  "wages",
   "Rent",
   "Electricity",
   "Salary",
@@ -707,7 +708,16 @@ export default function Expenses() {
                                 <ImageThumb image={item.receipt} size={36} alt="Receipt" clickable testId={`receipt-thumb-${item.id}`} />
                               </td>
                               <td className="p-3 whitespace-nowrap">
-                                {item.is_recurring || item.recurring_expense_id ? (
+                                {item.linked_wage_payment_id ? (
+                                  <a
+                                    href="/payroll"
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-900 border border-blue-200 text-[10px] font-bold rounded-full transition-colors cursor-pointer"
+                                    title={`Linked to Wage Payment ${item.linked_wage_payment_id} - Click to view in Payroll`}
+                                    data-testid={`linked-wage-badge-${item.id}`}
+                                  >
+                                    <Coins className="w-3 h-3" /> Wage Payout
+                                  </a>
+                                ) : item.is_recurring || item.recurring_expense_id ? (
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 text-[10px] font-bold rounded-full">
                                     <RefreshCw className="w-3 h-3" /> Recurring
                                   </span>
@@ -718,11 +728,27 @@ export default function Expenses() {
                                 )}
                               </td>
                               <td className="p-3 font-semibold text-slate-800 whitespace-nowrap">{item.date}</td>
-                              <td className="p-3 font-bold text-slate-900">{item.payee}</td>
+                              <td className="p-3 font-bold text-slate-900">
+                                {item.payee}
+                                {item.linked_wage_payment_id && (
+                                  <span className="block text-[10px] font-normal text-blue-600">
+                                    Karigar Wage
+                                  </span>
+                                )}
+                              </td>
                               <td className="p-3 whitespace-nowrap">
                                 <span className="inline-block px-2 py-0.5 bg-slate-100 border border-slate-300 font-semibold text-[11px] text-slate-700 rounded-sm">
                                   {item.category}
                                 </span>
+                                {item.bank_account_id && bankAccounts.length > 0 && (
+                                  <span
+                                    className="block text-[10px] text-slate-500 truncate max-w-[140px]"
+                                    title={bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
+                                    data-testid={`expense-bank-attr-${item.id}`}
+                                  >
+                                    🏛️ {bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
+                                  </span>
+                                )}
                               </td>
                               <td className="p-3 text-slate-500 max-w-[180px] truncate" title={item.notes}>
                                 {item.notes || "—"}

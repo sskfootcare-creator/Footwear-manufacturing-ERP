@@ -179,6 +179,7 @@ async def create_expense(payload: ExpenseIn, request: Request):
         "is_recurring": bool(payload.is_recurring),
         "recurring_expense_id": payload.recurring_expense_id or "",
         "status": payload.status or "confirmed",
+        "linked_wage_payment_id": payload.linked_wage_payment_id or None,
         "created_at": now_iso(),
         "created_by": u.get("email") or u.get("name", ""),
     }

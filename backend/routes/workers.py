@@ -39,7 +39,7 @@ async def _get_worker_wage_lock(worker_id: str, period_from: str, period_to: str
 
 
 PRODUCTION_STAGES = [
-    "procurement", "cutting", "folding", "attachment",
+    "planning", "procurement", "cutting", "folding", "attachment",
     "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched",
 ]
 
@@ -871,7 +871,7 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
     """
     Record an actual wage disbursement to a worker.
     - If paid_via == 'cash': draws down linked cash_ledger entry's remaining_balance (fails if insufficient funds).
-    - If paid_via == 'bank_transfer': verifies bank_account_id exists.
+    - If paid_via in ('bank_transfer', 'upi'): verifies bank_account_id exists. If paid_via == 'upi', optional upi_reference is saved.
     - Checks compute_payroll owed amount for worker and period. Rejects overpayment unless non-empty override_reason is provided.
     """
     u = await _get_user(request)
@@ -889,9 +889,9 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
     if payload.paid_via == "cash":
         if not payload.cash_ledger_id:
             raise HTTPException(400, "cash_ledger_id is required when paid_via is 'cash'")
-    elif payload.paid_via == "bank_transfer":
+    elif payload.paid_via in ("bank_transfer", "upi"):
         if not payload.bank_account_id:
-            raise HTTPException(400, "bank_account_id is required when paid_via is 'bank_transfer'")
+            raise HTTPException(400, f"bank_account_id is required when paid_via is '{payload.paid_via}'")
         bank_acc = await db.bank_accounts.find_one({"_id": oid(payload.bank_account_id)})
         if not bank_acc:
             raise HTTPException(404, f"Bank account '{payload.bank_account_id}' not found")
@@ -936,7 +936,12 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                     f"A non-empty override_reason is required to record an overpayment.",
                 )
 
-        # 3. Draw down cash_ledger atomically if paid_via is cash
+        # 3. Draw down cash_ledger atomically if paid_via is cash, or create linked expense if bank_transfer / upi
+        linked_expense_id = None
+        wage_payment_oid = ObjectId()
+        wage_payment_id = str(wage_payment_oid)
+        worker_name = payload.worker_name or worker.get("name", "")
+
         if payload.paid_via == "cash":
             result = await db.cash_ledger.update_one(
                 {"_id": oid(payload.cash_ledger_id), "remaining_balance": {"$gte": round(payload.amount, 2)}},
@@ -951,19 +956,45 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                     400,
                     f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining_balance:.2f}, Requested payment: ₹{payload.amount:.2f}",
                 )
+        elif payload.paid_via in ("bank_transfer", "upi"):
+            from models.expenses import ExpenseIn
+            from routes.expenses import create_expense
+
+            expense_notes = f"Wage payment to {worker_name} for {payload.period_from}-{payload.period_to}"
+            if payload.paid_via == "upi" and payload.upi_reference:
+                expense_notes += f" (UPI Ref: {payload.upi_reference.strip()})"
+            if payload.notes:
+                expense_notes += f" - {payload.notes.strip()}"
+
+            expense_payload = ExpenseIn(
+                category="wages",
+                amount=round(payload.amount, 2),
+                date=payload.date,
+                payee=worker_name or "Worker",
+                notes=expense_notes,
+                bank_account_id=str(payload.bank_account_id),
+                paid_via="bank",
+                status="confirmed",
+                linked_wage_payment_id=wage_payment_id,
+            )
+            exp_res = await create_expense(expense_payload, request)
+            linked_expense_id = str(exp_res.get("id") or exp_res.get("_id"))
 
         # 4. Insert wage payment record
         now = now_iso()
         user_email = u.get("email") or u.get("name", "")
         wage_payment_doc = {
+            "_id": wage_payment_oid,
             "worker_id": str(wid),
-            "worker_name": payload.worker_name or worker.get("name", ""),
+            "worker_name": worker_name,
             "amount": round(payload.amount, 2),
             "period_from": payload.period_from,
             "period_to": payload.period_to,
             "paid_via": payload.paid_via,
             "cash_ledger_id": payload.cash_ledger_id,
             "bank_account_id": payload.bank_account_id,
+            "upi_reference": payload.upi_reference.strip() if payload.upi_reference else None,
+            "linked_expense_id": linked_expense_id,
             "date": payload.date,
             "paid_by": payload.paid_by or user_email,
             "notes": payload.notes or "",
@@ -973,6 +1004,14 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
         }
         try:
             res = await db.wage_payments.insert_one(wage_payment_doc)
+            if linked_expense_id and hasattr(db, "expenses") and db.expenses is not None:
+                try:
+                    await db.expenses.update_one(
+                        {"_id": oid(linked_expense_id)},
+                        {"$set": {"linked_wage_payment_id": wage_payment_id}}
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             if payload.paid_via == "cash" and payload.cash_ledger_id:
                 try:
@@ -980,6 +1019,11 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                         {"_id": oid(payload.cash_ledger_id)},
                         {"$inc": {"remaining_balance": round(payload.amount, 2)}}
                     )
+                except Exception:
+                    pass
+            if linked_expense_id and hasattr(db, "expenses") and db.expenses is not None:
+                try:
+                    await db.expenses.delete_one({"_id": oid(linked_expense_id)})
                 except Exception:
                     pass
             raise e

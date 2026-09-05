@@ -136,6 +136,82 @@ def generate_material_requirement_sheet(
     return build_material_requirement(label, jobs_summary, material_lines, notes)
 
 
+def _build_materials_table_flowable(material_lines_sorted, header_bg=HEAD_BG, total_title="TOTAL"):
+    mat_rows = [["#", "Code", "Material", "Category", "Unit", "Qty Required", "Rate", "Total Cost", "Swatch"]]
+    row_heights = [None]
+    total_cost = 0.0
+    for i, m in enumerate(material_lines_sorted, 1):
+        cat = (m.get("category") or "").strip().lower()
+        color_val = (m.get("color") or "").strip()
+        if _is_swatch_item(cat, color_val):
+            swatch_cell = _make_swatch_box(color_val)
+            row_heights.append(15 * mm if color_val else 13 * mm)
+        else:
+            swatch_cell = "—"
+            row_heights.append(None)
+
+        mat_name = m.get("name", "")
+        size_bd = m.get("size_breakdown")
+        if cat == "sole" and size_bd:
+            bd_parts = [f"{sz}:{_fmt(qty)}" for sz, qty in size_bd.items()]
+            bd_text = "  ".join(bd_parts)
+            mat_cell = [
+                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
+                Paragraph(f"<font color='#C27842'><b>Sizes:</b></font> <font color='#334155'>{bd_text}</font>",
+                          ParagraphStyle("mat_s", fontName="Helvetica", fontSize=7, leading=8.5))
+            ]
+        elif color_val:
+            mat_cell = [
+                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
+                Paragraph(f"<font color='#64748B'>Variant Color: </font><font color='#0F172A'><b>{color_val}</b></font>",
+                          ParagraphStyle("mat_col", fontName="Helvetica", fontSize=7, leading=8.5))
+            ]
+        else:
+            mat_cell = Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica", fontSize=8, leading=9.5, textColor=BLACK))
+
+        mat_rows.append([
+            str(i),
+            m.get("code", ""),
+            mat_cell,
+            m.get("category", ""),
+            m.get("unit", ""),
+            _fmt(m.get("total_qty_required", 0), 2),
+            f"Rs.{_fmt(m.get('rate', 0), 2)}",
+            f"Rs.{_fmt(m.get('total_cost', 0), 2)}",
+            swatch_cell,
+        ])
+        total_cost += m.get("total_cost", 0)
+
+    row_heights.append(None)
+    mat_rows.append([
+        "", "", "", "", "", Paragraph(f"<b>{total_title}</b>", ParagraphStyle("b", fontName="Helvetica-Bold", fontSize=9, alignment=2)),
+        "", Paragraph(f"<b>Rs.{_fmt(total_cost, 2)}</b>", ParagraphStyle("b2", fontName="Helvetica-Bold", fontSize=10, alignment=2)),
+        ""
+    ])
+
+    mat_t = Table(mat_rows, colWidths=[8 * mm, 20 * mm, 50 * mm, 18 * mm, 10 * mm, 18 * mm, 16 * mm, 20 * mm, 20 * mm], rowHeights=row_heights)
+    mat_t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+        ("GRID", (0, 0), (-1, -2), 0.4, LINE),
+        ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
+        ("FONT", (0, 1), (-1, -2), "Helvetica", 8),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (4, 0), (-2, -1), "RIGHT"),
+        ("ALIGN", (4, 1), (4, -2), "CENTER"),
+        ("ALIGN", (8, 0), (8, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("BACKGROUND", (0, -1), (-1, -1), LIGHT),
+        ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
+    ]))
+    return mat_t
+
+
 def build_material_requirement(
     scope_label: Any,
     jobs_summary: Any = None,
@@ -145,10 +221,14 @@ def build_material_requirement(
     style: Optional[dict] = None,
     color: Optional[str] = None,
     pairs: int = 1,
+    split_by_color: bool = False,
+    by_color: Optional[dict] = None,
 ) -> bytes:
     """
     jobs_summary: [{po_number, style_code, color, total_pairs, sizes_text}]
     material_lines: [{code, name, category, unit, rate, total_qty_required, total_cost, color}]
+    split_by_color: whether to render distinct per-color tables
+    by_color: {color_name: {color, total_pairs, materials}}
     """
     # If style is passed directly (first arg or kwarg), delegate to generate_material_requirement_sheet
     if style is not None or (isinstance(scope_label, dict) and ("bom" in scope_label or "color_bom_overrides" in scope_label or "code" in scope_label)):
@@ -256,78 +336,6 @@ def build_material_requirement(
             str(m.get("color") or "").strip()
         )
     )
-    mat_rows = [["#", "Code", "Material", "Category", "Unit", "Qty Required", "Rate", "Total Cost", "Swatch"]]
-    row_heights = [None]
-    total_cost = 0.0
-    for i, m in enumerate(material_lines_sorted, 1):
-        cat = (m.get("category") or "").strip().lower()
-        color_val = (m.get("color") or "").strip()
-        if _is_swatch_item(cat, color_val):
-            swatch_cell = _make_swatch_box(color_val)
-            row_heights.append(15 * mm if color_val else 13 * mm)
-        else:
-            swatch_cell = "—"
-            row_heights.append(None)
-
-        mat_name = m.get("name", "")
-        size_bd = m.get("size_breakdown")
-        if cat == "sole" and size_bd:
-            bd_parts = [f"{sz}:{_fmt(qty)}" for sz, qty in size_bd.items()]
-            bd_text = "  ".join(bd_parts)
-            mat_cell = [
-                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
-                Paragraph(f"<font color='#C27842'><b>Sizes:</b></font> <font color='#334155'>{bd_text}</font>",
-                          ParagraphStyle("mat_s", fontName="Helvetica", fontSize=7, leading=8.5))
-            ]
-        elif color_val:
-            mat_cell = [
-                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
-                Paragraph(f"<font color='#64748B'>Variant Color: </font><font color='#0F172A'><b>{color_val}</b></font>",
-                          ParagraphStyle("mat_col", fontName="Helvetica", fontSize=7, leading=8.5))
-            ]
-        else:
-            mat_cell = Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica", fontSize=8, leading=9.5, textColor=BLACK))
-
-        mat_rows.append([
-            str(i),
-            m.get("code", ""),
-            mat_cell,
-            m.get("category", ""),
-            m.get("unit", ""),
-            _fmt(m.get("total_qty_required", 0), 2),
-            f"Rs.{_fmt(m.get('rate', 0), 2)}",
-            f"Rs.{_fmt(m.get('total_cost', 0), 2)}",
-            swatch_cell,
-        ])
-        total_cost += m.get("total_cost", 0)
-
-    row_heights.append(None)
-    mat_rows.append([
-        "", "", "", "", "", Paragraph("<b>TOTAL</b>", ParagraphStyle("b", fontName="Helvetica-Bold", fontSize=9, alignment=2)),
-        "", Paragraph(f"<b>Rs.{_fmt(total_cost, 2)}</b>", ParagraphStyle("b2", fontName="Helvetica-Bold", fontSize=10, alignment=2)),
-        ""
-    ])
-
-    mat_t = Table(mat_rows, colWidths=[8 * mm, 20 * mm, 50 * mm, 18 * mm, 10 * mm, 18 * mm, 16 * mm, 20 * mm, 20 * mm], rowHeights=row_heights)
-    mat_t.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
-        ("GRID", (0, 0), (-1, -2), 0.4, LINE),
-        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
-        ("FONT", (0, 1), (-1, -2), "Helvetica", 8),
-        ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("ALIGN", (4, 0), (-2, -1), "RIGHT"),
-        ("ALIGN", (4, 1), (4, -2), "CENTER"),
-        ("ALIGN", (8, 0), (8, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("BACKGROUND", (0, -1), (-1, -1), LIGHT),
-        ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
-    ]))
 
     elements = [
         header_t,
@@ -338,17 +346,69 @@ def build_material_requirement(
         Paragraph("<b>Jobs included</b>", label),
         Spacer(1, 4),
         jobs_t,
-        Spacer(1, 12),
-        Paragraph("<b>Materials required</b>", label),
-        Spacer(1, 4),
-        mat_t,
+    ]
+
+    has_multi_colors = by_color and len(by_color) > 1
+    if split_by_color and has_multi_colors:
+        # Render each color variant section
+        for col_name, col_data in by_color.items():
+            col_pairs = col_data.get("total_pairs", 0)
+            col_materials = sorted(
+                col_data.get("materials", []),
+                key=lambda m: (
+                    str(m.get("category") or "").strip().lower(),
+                    str(m.get("code") or "").strip(),
+                    str(m.get("color") or "").strip()
+                )
+            )
+            col_banner = Table(
+                [[Paragraph(f"<b>COLOR VARIANT: {col_name.upper()} &nbsp;·&nbsp; {col_pairs} PAIRS</b>",
+                            ParagraphStyle("col_h", fontName="Helvetica-Bold", fontSize=9.5, textColor=colors.white))]],
+                colWidths=[180 * mm]
+            )
+            col_banner.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#7C3AED")),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            elements.append(Spacer(1, 10))
+            elements.append(col_banner)
+            elements.append(Spacer(1, 3))
+            elements.append(_build_materials_table_flowable(
+                col_materials,
+                header_bg=colors.HexColor("#5B21B6"),
+                total_title=f"SUBTOTAL ({col_name.upper()})"
+            ))
+
+        # Followed by consolidated all-colors table
+        elements.append(Spacer(1, 12))
+        elements.append(Paragraph("<b>CONSOLIDATED TOTAL REQUIREMENT (ALL COLORS)</b>", label))
+        elements.append(Spacer(1, 4))
+        elements.append(_build_materials_table_flowable(
+            material_lines_sorted,
+            header_bg=HEAD_BG,
+            total_title="GRAND TOTAL"
+        ))
+    else:
+        # Standard consolidated table
+        elements.append(Spacer(1, 12))
+        elements.append(Paragraph("<b>Materials required</b>", label))
+        elements.append(Spacer(1, 4))
+        elements.append(_build_materials_table_flowable(
+            material_lines_sorted,
+            header_bg=HEAD_BG,
+            total_title="TOTAL"
+        ))
+
+    elements.extend([
         Spacer(1, 14),
         Paragraph("Notes:", label),
         Paragraph(notes or "Quantities include waste % as defined in the style BOM. Yield-per-unit factored in. "
-                          "Verify with supplier before placing order.", small),
-        Spacer(1, 30),
+                           "Verify with supplier before placing order.", small),
+        Spacer(1, 26),
         Paragraph("_______________________________<br/>Procurement Officer",
                   ParagraphStyle("sig", fontName="Helvetica", fontSize=9, alignment=2, leading=11)),
-    ]
+    ])
     doc.build(elements)
     return buf.getvalue()
