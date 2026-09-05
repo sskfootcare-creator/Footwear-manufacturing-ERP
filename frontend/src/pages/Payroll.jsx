@@ -8,6 +8,8 @@ import {
   Input,
   Badge,
   ConfirmDialog,
+  PaginationControls,
+  usePagination,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import {
@@ -55,6 +57,16 @@ export default function Payroll() {
   const [confirm, setConfirm] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [cashLedgers, setCashLedgers] = useState([]);
+
+  const payrollRows = data?.rows || [];
+  const {
+    paginatedItems: paginatedPayrollRows,
+    paginationProps: payrollPaginationProps,
+  } = usePagination(payrollRows, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "payroll-pagination",
+  });
 
   const loadBankingData = async () => {
     try {
@@ -325,7 +337,7 @@ export default function Payroll() {
                         </td>
                       </tr>
                     ) : (
-                      data.rows.map((r) => (
+                      paginatedPayrollRows.map((r) => (
                         <ExpandableRow
                           key={r.worker_id}
                           r={r}
@@ -383,6 +395,9 @@ export default function Payroll() {
                     </tfoot>
                   )}
                 </table>
+              </div>
+              <div className="px-5 py-3 bg-white border-t border-slate-200">
+                <PaginationControls {...payrollPaginationProps} />
               </div>
             </Card>
           </>

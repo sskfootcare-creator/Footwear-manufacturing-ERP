@@ -10,6 +10,8 @@ import {
   Select,
   Badge,
   ConfirmDialog,
+  PaginationControls,
+  usePagination,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import {
@@ -147,6 +149,15 @@ export default function POs() {
     if (statusFilter === "completed") return completedPos;
     return activePos;
   }, [statusFilter, activePos, completedPos]);
+
+  const {
+    paginatedItems: paginatedPos,
+    paginationProps: poPaginationProps,
+  } = usePagination(displayedPos, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "pos-pagination",
+  });
 
   const validStyleCodes = useMemo(() => {
     return new Set(styles.map((s) => s.code.trim().toUpperCase()));
@@ -507,7 +518,7 @@ export default function POs() {
                     </td>
                   </tr>
                 ) : (
-                  displayedPos.map((p) => (
+                  paginatedPos.map((p) => (
                     <tr
                       key={p.id}
                       className="border-b border-slate-100 hover:bg-slate-50"
@@ -584,6 +595,9 @@ export default function POs() {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="px-5 py-3 bg-white border-t border-slate-200">
+            <PaginationControls {...poPaginationProps} />
           </div>
         </Card>
       </div>

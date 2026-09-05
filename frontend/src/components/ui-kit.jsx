@@ -120,3 +120,8 @@ export function ConfirmDialog({ open, title = "Confirm Action", message, onConfi
     </div>
   );
 }
+
+export { default as PaginationControls } from "./PaginationControls";
+export { default as DataTablePagination } from "./PaginationControls";
+export { usePagination } from "../hooks/usePagination";
+

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { http } from "../lib/api";
 import {
   PageHeader, Card, BtnPrimary, BtnSecondary,
-  Input, Select, Badge,
+  Input, Select, Badge, PaginationControls,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import {
@@ -461,52 +461,22 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-500 text-[11px]">Rows/page:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
-              data-testid="preview-page-size"
-            >
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={250}>250</option>
-              <option value={500}>500</option>
-              <option value={0}>{`All (${filteredRows.length})`}</option>
-
-            </select>
-          </div>
-
-          <div className="text-slate-600 font-mono text-[11px]">
-            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              disabled={currentPage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-              data-testid="preview-prev-page"
-            >
-              ‹
-            </button>
-            <span className="px-1.5 font-mono font-bold text-slate-700">
-              {currentPage}/{totalPages}
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-              data-testid="preview-next-page"
-            >
-              ›
-            </button>
-          </div>
-        </div>
+        <PaginationControls
+          currentPage={currentPage}
+          totalItems={filteredRows.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+          pageSizeOptions={[50, 100, 250, 500]}
+          allowAll
+          rangeTextFormat="compact"
+          testIdPrefix="preview"
+          prevTestId="preview-prev-page"
+          nextTestId="preview-next-page"
+          pageSizeTestId="preview-page-size"
+          showFirstLast={false}
+          className="pt-0 border-t-0"
+        />
       </div>
 
       {/* Row preview table */}
@@ -908,49 +878,19 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-500 text-[11px]">Rows/page:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
-            >
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={250}>250</option>
-              <option value={500}>500</option>
-              <option value={0}>{`All (${filteredRows.length})`}</option>
-
-            </select>
-          </div>
-
-          <div className="text-slate-600 font-mono text-[11px]">
-            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              disabled={currentPage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-            >
-              ‹
-            </button>
-            <span className="px-1.5 font-mono font-bold text-slate-700">
-              {currentPage}/{totalPages}
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-            >
-              ›
-            </button>
-          </div>
-        </div>
+        <PaginationControls
+          currentPage={currentPage}
+          totalItems={filteredRows.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+          pageSizeOptions={[50, 100, 250, 500]}
+          allowAll
+          rangeTextFormat="compact"
+          testIdPrefix="picklist-preview"
+          showFirstLast={false}
+          className="pt-0 border-t-0"
+        />
       </div>
 
       <div className="border-2 border-slate-200 rounded overflow-hidden">
@@ -1332,48 +1272,19 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-500 text-[11px]">Rows/page:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-              className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
-            >
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={250}>250</option>
-              <option value={500}>500</option>
-              <option value={0}>{`All (${filteredRows.length})`}</option>
-            </select>
-          </div>
-
-          <div className="text-slate-600 font-mono text-[11px]">
-            {filteredRows.length === 0 ? "0 rows" : `${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, filteredRows.length)} of ${filteredRows.length}`}
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              disabled={currentPage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-            >
-              ‹
-            </button>
-            <span className="px-1.5 font-mono font-bold text-slate-700">
-              {currentPage}/{totalPages}
-            </span>
-            <button
-              type="button"
-              disabled={currentPage >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-            >
-              ›
-            </button>
-          </div>
-        </div>
+        <PaginationControls
+          currentPage={currentPage}
+          totalItems={filteredRows.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+          pageSizeOptions={[50, 100, 250, 500]}
+          allowAll
+          rangeTextFormat="compact"
+          testIdPrefix="return-preview"
+          showFirstLast={false}
+          className="pt-0 border-t-0"
+        />
       </div>
 
       {/* Rows table — status columns instead of dispatch fields */}
@@ -1728,48 +1639,20 @@ export function SettlementImportDrawer({ onClose, onDone }) {
                   </div>
                 </div>
 
-                {/* Pagination header */}
-                <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-200 p-2.5 rounded text-xs">
-                  <div className="text-slate-600 font-mono text-[11px]">
-                    {previewRows.length === 0 ? "0 rows" : `Showing rows ${startIdx + 1}–${Math.min(startIdx + paginatedRows.length, previewRows.length)} of ${previewRows.length}`}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-500 text-[11px]">Rows/page:</span>
-                      <select
-                        value={pageSize}
-                        onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
-                        className="bg-white border border-slate-300 rounded px-2 py-0.5 font-mono text-xs"
-                      >
-                        <option value={50}>50</option>
-                        <option value={100}>100</option>
-                        <option value={250}>250</option>
-                        <option value={0}>{`All (${previewRows.length})`}</option>
-
-                      </select>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        disabled={currentPage <= 1}
-                        onClick={() => setPage((p) => Math.max(1, p - 1))}
-                        className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-                      >
-                        ‹
-                      </button>
-                      <span className="px-1.5 font-mono font-bold text-slate-700">
-                        {currentPage}/{totalPages}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={currentPage >= totalPages}
-                        onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                        className="px-2 py-0.5 bg-white border border-slate-300 disabled:opacity-40 rounded hover:bg-slate-100 font-semibold"
-                      >
-                        ›
-                      </button>
-                    </div>
-                  </div>
+                <div className="bg-slate-50 border border-slate-200 p-2.5 rounded">
+                  <PaginationControls
+                    currentPage={currentPage}
+                    totalItems={previewRows.length}
+                    pageSize={pageSize}
+                    onPageChange={setPage}
+                    onPageSizeChange={setPageSize}
+                    pageSizeOptions={[50, 100, 250]}
+                    allowAll
+                    rangeTextFormat="compact"
+                    testIdPrefix="settlement-preview"
+                    showFirstLast={false}
+                    className="pt-0 border-t-0"
+                  />
                 </div>
 
                 <div className="border border-slate-200 rounded overflow-hidden max-h-80 overflow-y-auto">

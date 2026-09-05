@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { http, inr } from "../lib/api";
-import { PageHeader, Card, Badge, BtnPrimary, BtnSecondary } from "../components/ui-kit";
+import { PageHeader, Card, Badge, BtnPrimary, BtnSecondary, PaginationControls, usePagination } from "../components/ui-kit";
 import ImageUploader, { ImageThumb } from "../components/ImageUploader";
 import {
   Plus,
@@ -64,6 +64,15 @@ export default function Expenses() {
 
   // Main data state
   const [expenses, setExpenses] = useState([]);
+
+  const {
+    paginatedItems: paginatedExpenses,
+    paginationProps: expensePaginationProps,
+  } = usePagination(expenses, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "expenses-pagination",
+  });
   const [dueQueue, setDueQueue] = useState([]);
   const [recurringTemplates, setRecurringTemplates] = useState([]);
   const [bankAccounts, setBankAccounts] = useState([]);
@@ -687,98 +696,103 @@ export default function Expenses() {
                       <p className="text-xs text-slate-400">Click "Add Expense" to record a new business expense.</p>
                     </div>
                   ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left text-xs border-collapse" data-testid="expenses-table">
-                        <thead>
-                          <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                            <th className="p-3">Receipt</th>
-                            <th className="p-3">Type</th>
-                            <th className="p-3">Date</th>
-                            <th className="p-3">Payee</th>
-                            <th className="p-3">Category</th>
-                            <th className="p-3">Notes</th>
-                            <th className="p-3 text-right">Amount</th>
-                            <th className="p-3 text-center">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200">
-                          {expenses.map((item) => (
-                            <tr key={item.id} className="hover:bg-slate-50 transition-colors" data-testid={`expense-row-${item.id}`}>
-                              <td className="p-3">
-                                <ImageThumb image={item.receipt} size={36} alt="Receipt" clickable testId={`receipt-thumb-${item.id}`} />
-                              </td>
-                              <td className="p-3 whitespace-nowrap">
-                                {item.linked_wage_payment_id ? (
-                                  <a
-                                    href="/payroll"
-                                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-900 border border-blue-200 text-[10px] font-bold rounded-full transition-colors cursor-pointer"
-                                    title={`Linked to Wage Payment ${item.linked_wage_payment_id} - Click to view in Payroll`}
-                                    data-testid={`linked-wage-badge-${item.id}`}
-                                  >
-                                    <Coins className="w-3 h-3" /> Wage Payout
-                                  </a>
-                                ) : item.is_recurring || item.recurring_expense_id ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 text-[10px] font-bold rounded-full">
-                                    <RefreshCw className="w-3 h-3" /> Recurring
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-medium rounded-full">
-                                    One-Time
-                                  </span>
-                                )}
-                              </td>
-                              <td className="p-3 font-semibold text-slate-800 whitespace-nowrap">{item.date}</td>
-                              <td className="p-3 font-bold text-slate-900">
-                                {item.payee}
-                                {item.linked_wage_payment_id && (
-                                  <span className="block text-[10px] font-normal text-blue-600">
-                                    Karigar Wage
-                                  </span>
-                                )}
-                              </td>
-                              <td className="p-3 whitespace-nowrap">
-                                <span className="inline-block px-2 py-0.5 bg-slate-100 border border-slate-300 font-semibold text-[11px] text-slate-700 rounded-sm">
-                                  {item.category}
-                                </span>
-                                {item.bank_account_id && bankAccounts.length > 0 && (
-                                  <span
-                                    className="block text-[10px] text-slate-500 truncate max-w-[140px]"
-                                    title={bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
-                                    data-testid={`expense-bank-attr-${item.id}`}
-                                  >
-                                    🏛️ {bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="p-3 text-slate-500 max-w-[180px] truncate" title={item.notes}>
-                                {item.notes || "—"}
-                              </td>
-                              <td className="p-3 text-right font-black text-slate-900 whitespace-nowrap">{inr(item.amount)}</td>
-                              <td className="p-3 text-center whitespace-nowrap">
-                                <div className="flex items-center justify-center gap-1">
-                                  <button
-                                    onClick={() => openEditModal(item)}
-                                    className="p-1.5 text-slate-500 hover:text-slate-900 transition-colors"
-                                    title="Edit Expense"
-                                    data-testid={`edit-expense-${item.id}`}
-                                  >
-                                    <Edit3 className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => setDeleteConfirm(item)}
-                                    className="p-1.5 text-slate-400 hover:text-red-600 transition-colors"
-                                    title="Delete Expense"
-                                    data-testid={`delete-expense-${item.id}`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </td>
+                    <>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs border-collapse" data-testid="expenses-table">
+                          <thead>
+                            <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
+                              <th className="p-3">Receipt</th>
+                              <th className="p-3">Type</th>
+                              <th className="p-3">Date</th>
+                              <th className="p-3">Payee</th>
+                              <th className="p-3">Category</th>
+                              <th className="p-3">Notes</th>
+                              <th className="p-3 text-right">Amount</th>
+                              <th className="p-3 text-center">Actions</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200">
+                            {paginatedExpenses.map((item) => (
+                              <tr key={item.id} className="hover:bg-slate-50 transition-colors" data-testid={`expense-row-${item.id}`}>
+                                <td className="p-3">
+                                  <ImageThumb image={item.receipt} size={36} alt="Receipt" clickable testId={`receipt-thumb-${item.id}`} />
+                                </td>
+                                <td className="p-3 whitespace-nowrap">
+                                  {item.linked_wage_payment_id ? (
+                                    <a
+                                      href="/payroll"
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-900 border border-blue-200 text-[10px] font-bold rounded-full transition-colors cursor-pointer"
+                                      title={`Linked to Wage Payment ${item.linked_wage_payment_id} - Click to view in Payroll`}
+                                      data-testid={`linked-wage-badge-${item.id}`}
+                                    >
+                                      <Coins className="w-3 h-3" /> Wage Payout
+                                    </a>
+                                  ) : item.is_recurring || item.recurring_expense_id ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 text-[10px] font-bold rounded-full">
+                                      <RefreshCw className="w-3 h-3" /> Recurring
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-medium rounded-full">
+                                      One-Time
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 font-semibold text-slate-800 whitespace-nowrap">{item.date}</td>
+                                <td className="p-3 font-bold text-slate-900">
+                                  {item.payee}
+                                  {item.linked_wage_payment_id && (
+                                    <span className="block text-[10px] font-normal text-blue-600">
+                                      Karigar Wage
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 whitespace-nowrap">
+                                  <span className="inline-block px-2 py-0.5 bg-slate-100 border border-slate-300 font-semibold text-[11px] text-slate-700 rounded-sm">
+                                    {item.category}
+                                  </span>
+                                  {item.bank_account_id && bankAccounts.length > 0 && (
+                                    <span
+                                      className="block text-[10px] text-slate-500 truncate max-w-[140px]"
+                                      title={bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
+                                      data-testid={`expense-bank-attr-${item.id}`}
+                                    >
+                                      🏛️ {bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-slate-500 max-w-[180px] truncate" title={item.notes}>
+                                  {item.notes || "—"}
+                                </td>
+                                <td className="p-3 text-right font-black text-slate-900 whitespace-nowrap">{inr(item.amount)}</td>
+                                <td className="p-3 text-center whitespace-nowrap">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      onClick={() => openEditModal(item)}
+                                      className="p-1.5 text-slate-500 hover:text-slate-900 transition-colors"
+                                      title="Edit Expense"
+                                      data-testid={`edit-expense-${item.id}`}
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => setDeleteConfirm(item)}
+                                      className="p-1.5 text-slate-400 hover:text-red-600 transition-colors"
+                                      title="Delete Expense"
+                                      data-testid={`delete-expense-${item.id}`}
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="px-5 py-3 bg-white border-t border-slate-200">
+                        <PaginationControls {...expensePaginationProps} />
+                      </div>
+                    </>
                   )}
                 </Card>
               </div>

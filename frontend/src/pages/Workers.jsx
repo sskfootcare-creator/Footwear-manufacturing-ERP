@@ -9,6 +9,8 @@ import {
   Select,
   Badge,
   ConfirmDialog,
+  PaginationControls,
+  usePagination,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { Plus, Trash2, Pencil, Save, Phone, KeyRound, Check } from "lucide-react";
@@ -146,6 +148,15 @@ export default function Workers() {
 
   const filtered = items.filter((w) => !filterSkill || w.skill === filterSkill);
 
+  const {
+    paginatedItems: paginatedWorkers,
+    paginationProps: workerPaginationProps,
+  } = usePagination(filtered, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "workers-pagination",
+  });
+
   return (
     <div>
       <PageHeader
@@ -214,7 +225,7 @@ export default function Workers() {
                     </td>
                   </tr>
                 ) : (
-                  filtered.map((w) => (
+                  paginatedWorkers.map((w) => (
                     <tr
                       key={w.id}
                       className={`border-b border-slate-100 hover:bg-slate-50 ${w.active === false ? "opacity-50 line-through bg-slate-50 text-slate-400" : ""}`}
@@ -278,6 +289,9 @@ export default function Workers() {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="px-5 py-3 bg-white border-t border-slate-200">
+            <PaginationControls {...workerPaginationProps} />
           </div>
         </Card>
       </div>

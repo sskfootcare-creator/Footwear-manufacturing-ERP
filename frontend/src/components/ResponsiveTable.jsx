@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import PaginationControls from "./PaginationControls";
 
 /**
  * ResponsiveTable — single source of truth for tabular data across the ERP.
@@ -25,6 +26,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
  * stickyHeader {bool}     Adds sticky top-0 to thead (desktop only). Default true.
  * maxHeight    {string}   Scroll container max-height. Default "75vh".
  * virtualize   {bool}     Enable windowing/virtualization. Default true.
+ * pagination   {Object}   Optional pagination config object for PaginationControls.
  * className    {string}   Extra class on the root wrapper.
  * testId       {string}   data-testid on the root wrapper.
  *
@@ -54,6 +56,7 @@ export default function ResponsiveTable({
   stickyHeader = true,
   maxHeight = "75vh",
   virtualize = true,
+  pagination = null,
   className = "",
   testId,
 }) {
@@ -337,7 +340,15 @@ export default function ResponsiveTable({
           <div style={{ height: `${mobilePaddingBottom}px` }} />
         )}
       </div>
+
+      {/* Standard ERP Pagination Footer */}
+      {pagination && (
+        <div className="px-4 py-3 bg-white border-t border-slate-200">
+          <PaginationControls {...pagination} />
+        </div>
+      )}
     </div>
   );
 }
+
 

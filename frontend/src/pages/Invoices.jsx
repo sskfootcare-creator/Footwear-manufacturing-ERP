@@ -7,6 +7,8 @@ import {
   Badge,
   BtnPrimary,
   BtnSecondary,
+  PaginationControls,
+  usePagination,
 } from "../components/ui-kit";
 import {
   FileText,
@@ -100,6 +102,15 @@ export default function Invoices() {
   const grnRecorded = rows.filter((r) => r.grn_recorded || r.grn_date);
   const awaitingGrn = rows.filter((r) => !r.grn_recorded && !r.grn_date);
   const totalOutstanding = rows.reduce((s, r) => s + (r.outstanding || 0), 0);
+
+  const {
+    paginatedItems: paginatedInvoices,
+    paginationProps: invoicePaginationProps,
+  } = usePagination(filtered, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "invoices-pagination",
+  });
 
   const openInvoice = async (id) => {
     const { data } = await http.get(`/invoices/${id}`);
@@ -305,7 +316,7 @@ export default function Invoices() {
                     </td>
                   </tr>
                 ) : (
-                  filtered.map((r) => (
+                  paginatedInvoices.map((r) => (
                     <tr
                       key={r.id}
                       className="border-b border-slate-100 hover:bg-slate-50"
@@ -481,6 +492,9 @@ export default function Invoices() {
                 </tfoot>
               )}
             </table>
+          </div>
+          <div className="px-5 py-3 bg-white border-t border-slate-200">
+            <PaginationControls {...invoicePaginationProps} />
           </div>
         </Card>
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
-import { PageHeader, Card, Badge, BtnSecondary } from "../components/ui-kit";
+import { PageHeader, Card, Badge, BtnSecondary, PaginationControls, usePagination } from "../components/ui-kit";
 import { Users, BookOpen, X, AlertCircle, Download } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -19,6 +19,15 @@ export default function Clients() {
   const [clients, setClients] = useState([]);
   const [open, setOpen] = useState(null); // {client_name, ...ledger}
   const [loadingLedger, setLoadingLedger] = useState(false);
+
+  const {
+    paginatedItems: paginatedClients,
+    paginationProps: clientPaginationProps,
+  } = usePagination(clients, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "clients-pagination",
+  });
 
   const load = async () => {
     const { data } = await http.get("/clients");
@@ -93,92 +102,97 @@ export default function Clients() {
               Production board to see your client ledger here.
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm" data-testid="clients-table">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                    <th className="px-4 py-2 font-bold">Client</th>
-                    <th className="px-4 py-2 font-bold text-right">Invoices</th>
-                    <th className="px-4 py-2 font-bold text-right">
-                      Total Invoiced
-                    </th>
-                    <th className="px-4 py-2 font-bold text-right">Received</th>
-                    <th className="px-4 py-2 font-bold text-right">
-                      Outstanding
-                    </th>
-                    <th className="px-4 py-2 font-bold text-right">Overdue</th>
-                    <th className="px-4 py-2 font-bold text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {clients.map((c) => (
-                    <tr
-                      key={c.client_name}
-                      className="border-b border-slate-100 hover:bg-slate-50"
-                      data-testid={`client-row-${c.client_name}`}
-                    >
-                      <td className="px-4 py-3 font-bold">{c.client_name}</td>
-                      <td className="px-4 py-3 text-right font-mono">
-                        {c.invoice_count}
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" data-testid="clients-table">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                      <th className="px-4 py-2 font-bold">Client</th>
+                      <th className="px-4 py-2 font-bold text-right">Invoices</th>
+                      <th className="px-4 py-2 font-bold text-right">
+                        Total Invoiced
+                      </th>
+                      <th className="px-4 py-2 font-bold text-right">Received</th>
+                      <th className="px-4 py-2 font-bold text-right">
+                        Outstanding
+                      </th>
+                      <th className="px-4 py-2 font-bold text-right">Overdue</th>
+                      <th className="px-4 py-2 font-bold text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginatedClients.map((c) => (
+                      <tr
+                        key={c.client_name}
+                        className="border-b border-slate-100 hover:bg-slate-50"
+                        data-testid={`client-row-${c.client_name}`}
+                      >
+                        <td className="px-4 py-3 font-bold">{c.client_name}</td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          {c.invoice_count}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          {inr(c.total_invoiced)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-[#16A34A] font-bold">
+                          {inr(c.total_received)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono font-bold">
+                          {inr(c.outstanding)}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {c.overdue_count > 0 ? (
+                            <div>
+                              <Badge color="red">{c.overdue_count} overdue</Badge>
+                              <div className="text-xs font-mono text-red-600 mt-1">
+                                {inr(c.overdue_amount)}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => openLedger(c)}
+                            className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:bg-[#2563EB] hover:text-white border border-[#2563EB] px-3 py-1.5 flex items-center gap-1 ml-auto"
+                            data-testid={`open-ledger-${c.client_name}`}
+                          >
+                            <BookOpen className="w-3 h-3" /> Ledger
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-slate-900 text-white">
+                    <tr>
+                      <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
+                        Grand Total
                       </td>
                       <td className="px-4 py-3 text-right font-mono">
-                        {inr(c.total_invoiced)}
+                        {clients.reduce((s, c) => s + c.invoice_count, 0)}
                       </td>
-                      <td className="px-4 py-3 text-right font-mono text-[#16A34A]">
-                        {inr(c.total_received)}
+                      <td className="px-4 py-3 text-right font-mono">
+                        {inr(clients.reduce((s, c) => s + c.total_invoiced, 0))}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-[#86EFAC]">
+                        {inr(clients.reduce((s, c) => s + c.total_received, 0))}
                       </td>
                       <td className="px-4 py-3 text-right font-mono font-bold">
-                        {inr(c.outstanding)}
+                        {inr(totalOutstanding)}
                       </td>
-                      <td className="px-4 py-3 text-right">
-                        {c.overdue_count > 0 ? (
-                          <div>
-                            <Badge color="red">{c.overdue_count} overdue</Badge>
-                            <div className="text-xs font-mono text-red-600 mt-1">
-                              {inr(c.overdue_amount)}
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
+                      <td className="px-4 py-3 text-right font-mono font-bold text-red-300">
+                        {inr(totalOverdue)}
                       </td>
-                      <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={() => openLedger(c)}
-                          className="text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:bg-[#2563EB] hover:text-white border border-[#2563EB] px-3 py-1.5 flex items-center gap-1 ml-auto"
-                          data-testid={`open-ledger-${c.client_name}`}
-                        >
-                          <BookOpen className="w-3 h-3" /> Ledger
-                        </button>
-                      </td>
+                      <td></td>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-slate-900 text-white">
-                  <tr>
-                    <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
-                      Grand Total
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono">
-                      {clients.reduce((s, c) => s + c.invoice_count, 0)}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono">
-                      {inr(clients.reduce((s, c) => s + c.total_invoiced, 0))}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono text-[#86EFAC]">
-                      {inr(clients.reduce((s, c) => s + c.total_received, 0))}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono font-bold">
-                      {inr(totalOutstanding)}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono font-bold text-red-300">
-                      {inr(totalOverdue)}
-                    </td>
-                    <td></td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                  </tfoot>
+                </table>
+              </div>
+              <div className="px-5 py-3 bg-white border-t border-slate-200">
+                <PaginationControls {...clientPaginationProps} />
+              </div>
+            </>
           )}
         </Card>
 

@@ -6,6 +6,8 @@ import {
   Badge,
   BtnPrimary,
   BtnSecondary,
+  PaginationControls,
+  usePagination,
 } from "../components/ui-kit";
 import { Truck, Plus, Pencil, PowerOff, X, AlertCircle } from "lucide-react";
 import { useAuth } from "../lib/auth";
@@ -62,10 +64,19 @@ export default function Vendors() {
   const shortTerms = active.filter((v) => (v.payment_terms_days || 30) <= 30);
   const avgTerms = active.length
     ? Math.round(
-        active.reduce((s, v) => s + (v.payment_terms_days || 30), 0) /
+        active.reduce((s, v) => s + (v.payment_terms_days ?? 30), 0) /
           active.length,
       )
     : 0;
+
+  const {
+    paginatedItems: paginatedVendors,
+    paginationProps: vendorPaginationProps,
+  } = usePagination(filtered, {
+    initialPageSize: 25,
+    pageSizeOptions: [10, 25, 50, 100],
+    testIdPrefix: "vendors-pagination",
+  });
 
   const openAdd = () => {
     setForm(EMPTY_FORM);
@@ -205,99 +216,104 @@ export default function Vendors() {
                 : "No vendors match your search."}
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm" data-testid="vendors-table">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                    <th className="px-4 py-2 font-bold">Vendor Name</th>
-                    <th className="px-4 py-2 font-bold">GSTIN</th>
-                    <th className="px-4 py-2 font-bold">Contact Person</th>
-                    <th className="px-4 py-2 font-bold">Phone</th>
-                    <th className="px-4 py-2 font-bold text-right">
-                      Payment Terms
-                    </th>
-                    <th className="px-4 py-2 font-bold text-center">Status</th>
-                    <th className="px-4 py-2 font-bold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((v) => (
-                    <tr
-                      key={v.id}
-                      data-testid={`vendor-row-${v.id}`}
-                      className={`border-b border-slate-100 hover:bg-slate-50 transition-colors ${v.active === false ? "opacity-60" : ""}`}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="font-bold">{v.name}</div>
-                        {v.address && (
-                          <div className="text-[11px] text-slate-400 mt-0.5 truncate max-w-[200px]">
-                            {v.address}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-slate-600">
-                        {v.gstin || "—"}
-                      </td>
-                      <td className="px-4 py-3 text-slate-700">
-                        {v.contact_person || "—"}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-slate-600">
-                        {v.phone || "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span
-                          className={`font-mono font-bold text-sm ${(v.payment_terms_days || 30) <= 30 ? "text-[#C27842]" : "text-slate-700"}`}
-                        >
-                          Net {v.payment_terms_days ?? 30}d
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        {v.active !== false ? (
-                          <Badge color="green">Active</Badge>
-                        ) : (
-                          <Badge color="red">Inactive</Badge>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2 justify-end">
-                          {canWrite && v.active !== false && (
-                            <button
-                              onClick={() => openEdit(v)}
-                              data-testid={`edit-vendor-${v.id}`}
-                              title="Edit vendor"
-                              className="text-[#2563EB] border border-[#2563EB] px-2.5 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#2563EB] hover:text-white transition-colors flex items-center gap-1"
-                            >
-                              <Pencil className="w-3 h-3" /> Edit
-                            </button>
-                          )}
-                          {isAdmin && v.active !== false && (
-                            <button
-                              onClick={() => setDeactivateFor(v)}
-                              data-testid={`deactivate-vendor-${v.id}`}
-                              title="Deactivate vendor"
-                              className="text-red-600 border border-red-300 px-2.5 py-1 text-xs font-bold uppercase tracking-wider hover:bg-red-600 hover:text-white hover:border-red-600 transition-colors flex items-center gap-1"
-                            >
-                              <PowerOff className="w-3 h-3" />
-                            </button>
-                          )}
-                        </div>
-                      </td>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" data-testid="vendors-table">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                      <th className="px-4 py-2 font-bold">Vendor Name</th>
+                      <th className="px-4 py-2 font-bold">GSTIN</th>
+                      <th className="px-4 py-2 font-bold">Contact Person</th>
+                      <th className="px-4 py-2 font-bold">Phone</th>
+                      <th className="px-4 py-2 font-bold text-right">
+                        Payment Terms
+                      </th>
+                      <th className="px-4 py-2 font-bold text-center">Status</th>
+                      <th className="px-4 py-2 font-bold text-right">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-slate-900 text-white">
-                  <tr>
-                    <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
-                      Total
-                    </td>
-                    <td colSpan={4} className="px-4 py-3 font-mono text-sm">
-                      {filtered.length} vendor{filtered.length !== 1 ? "s" : ""}
-                    </td>
-                    <td colSpan={2} />
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {paginatedVendors.map((v) => (
+                      <tr
+                        key={v.id}
+                        data-testid={`vendor-row-${v.id}`}
+                        className={`border-b border-slate-100 hover:bg-slate-50 transition-colors ${v.active === false ? "opacity-60" : ""}`}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="font-bold">{v.name}</div>
+                          {v.address && (
+                            <div className="text-[11px] text-slate-400 mt-0.5 truncate max-w-[200px]">
+                              {v.address}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-600">
+                          {v.gstin || "—"}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {v.contact_person || "—"}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-slate-600">
+                          {v.phone || "—"}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <span
+                            className={`font-mono font-bold text-sm ${(v.payment_terms_days || 30) <= 30 ? "text-[#C27842]" : "text-slate-700"}`}
+                          >
+                            Net {v.payment_terms_days ?? 30}d
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {v.active !== false ? (
+                            <Badge color="green">Active</Badge>
+                          ) : (
+                            <Badge color="red">Inactive</Badge>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2 justify-end">
+                            {canWrite && v.active !== false && (
+                              <button
+                                onClick={() => openEdit(v)}
+                                data-testid={`edit-vendor-${v.id}`}
+                                title="Edit vendor"
+                                className="text-[#2563EB] border border-[#2563EB] px-2.5 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#2563EB] hover:text-white transition-colors flex items-center gap-1"
+                              >
+                                <Pencil className="w-3 h-3" /> Edit
+                              </button>
+                            )}
+                            {isAdmin && v.active !== false && (
+                              <button
+                                onClick={() => setDeactivateFor(v)}
+                                data-testid={`deactivate-vendor-${v.id}`}
+                                title="Deactivate vendor"
+                                className="text-red-600 border border-red-300 px-2.5 py-1 text-xs font-bold uppercase tracking-wider hover:bg-red-600 hover:text-white hover:border-red-600 transition-colors flex items-center gap-1"
+                              >
+                                <PowerOff className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-slate-900 text-white">
+                    <tr>
+                      <td className="px-4 py-3 font-bold uppercase text-[10px] tracking-wider text-[#C27842]">
+                        Total
+                      </td>
+                      <td colSpan={4} className="px-4 py-3 font-mono text-sm">
+                        {filtered.length} vendor{filtered.length !== 1 ? "s" : ""}
+                      </td>
+                      <td colSpan={2} />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              <div className="px-5 py-3 bg-white border-t border-slate-200">
+                <PaginationControls {...vendorPaginationProps} />
+              </div>
+            </>
           )}
         </Card>
       </div>
