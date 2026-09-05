@@ -1453,7 +1453,7 @@ async def create_po(payload: POIn, request: Request):
             "size": li.get("size", ""),
             "quantity": li["quantity"],
             "completed_qty": 0,
-            "stage": "procurement",
+            "stage": "planning",
             "rejected_qty": 0,
             "delivery_date": doc.get("delivery_date", ""),
             "stage_entered_at": entered,
@@ -1462,7 +1462,7 @@ async def create_po(payload: POIn, request: Request):
             "split_history": None,
             "created_at": now_iso(),
             "updated_at": now_iso(),
-            "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"], "notes": "Job created"}],
+            "history": [{"stage": "planning", "at": now_iso(), "by": u["email"], "notes": "Job created in planning"}],
         })
     if jobs:
         await db.production_jobs.insert_many(jobs)

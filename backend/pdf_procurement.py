@@ -248,10 +248,18 @@ def build_material_requirement(
     ]))
 
     # Material requirement table
+    material_lines_sorted = sorted(
+        material_lines,
+        key=lambda m: (
+            str(m.get("category") or "").strip().lower(),
+            str(m.get("code") or "").strip(),
+            str(m.get("color") or "").strip()
+        )
+    )
     mat_rows = [["#", "Code", "Material", "Category", "Unit", "Qty Required", "Rate", "Total Cost", "Swatch"]]
     row_heights = [None]
     total_cost = 0.0
-    for i, m in enumerate(material_lines, 1):
+    for i, m in enumerate(material_lines_sorted, 1):
         cat = (m.get("category") or "").strip().lower()
         color_val = (m.get("color") or "").strip()
         if _is_swatch_item(cat, color_val):
@@ -267,12 +275,18 @@ def build_material_requirement(
             bd_parts = [f"{sz}:{_fmt(qty)}" for sz, qty in size_bd.items()]
             bd_text = "  ".join(bd_parts)
             mat_cell = [
-                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica", fontSize=8, leading=9.5, textColor=BLACK)),
+                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
                 Paragraph(f"<font color='#C27842'><b>Sizes:</b></font> <font color='#334155'>{bd_text}</font>",
                           ParagraphStyle("mat_s", fontName="Helvetica", fontSize=7, leading=8.5))
             ]
+        elif color_val:
+            mat_cell = [
+                Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica-Bold", fontSize=8, leading=9.5, textColor=BLACK)),
+                Paragraph(f"<font color='#64748B'>Variant Color: </font><font color='#0F172A'><b>{color_val}</b></font>",
+                          ParagraphStyle("mat_col", fontName="Helvetica", fontSize=7, leading=8.5))
+            ]
         else:
-            mat_cell = mat_name
+            mat_cell = Paragraph(mat_name, ParagraphStyle("mat_n", fontName="Helvetica", fontSize=8, leading=9.5, textColor=BLACK))
 
         mat_rows.append([
             str(i),

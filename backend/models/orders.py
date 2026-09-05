@@ -4,7 +4,7 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel
 
 PRODUCTION_STAGES = [
-    "procurement", "cutting", "folding", "attachment",
+    "planning", "procurement", "cutting", "folding", "attachment",
     "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched",
 ]
 
@@ -48,7 +48,7 @@ class POIn(BaseModel):
 
 
 class ProductionStageUpdate(BaseModel):
-    stage: Literal["procurement", "cutting", "folding", "attachment",
+    stage: Literal["planning", "procurement", "cutting", "folding", "attachment",
                    "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched"]
     completed_qty: Optional[int] = None
     rejected_qty: Optional[int] = None

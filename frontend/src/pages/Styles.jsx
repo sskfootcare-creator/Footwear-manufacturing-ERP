@@ -1814,14 +1814,43 @@ export default function Styles() {
                                       placeholder={b.color || "e.g. Tan…"}
                                     />
                                   ) : (
-                                    <input
-                                      type="text"
-                                      className="border border-slate-300 px-1.5 py-0.5 text-xs w-28 rounded placeholder:text-slate-400"
-                                      value={b.color || ""}
-                                      onChange={(e) => updateBom(i, "color", e.target.value)}
-                                      data-testid={`bom-color-${b.line_id || i}`}
-                                      placeholder="e.g. Tan, Navy…"
-                                    />
+                                    <div className="flex flex-col gap-1">
+                                      <input
+                                        type="text"
+                                        className="border border-slate-300 px-1.5 py-0.5 text-xs w-28 rounded placeholder:text-slate-400"
+                                        value={b.color || ""}
+                                        onChange={(e) => updateBom(i, "color", e.target.value)}
+                                        data-testid={`bom-color-${b.line_id || i}`}
+                                        placeholder="e.g. Tan, Navy…"
+                                      />
+                                      {/* At-a-glance color variant chips — only for color-dependent BOM lines */}
+                                      {availableBomColors.length > 0 && isColorDependentLine(b) && (
+                                        <div className="flex flex-wrap gap-0.5 mt-0.5" data-testid={`color-chips-${b.line_id || i}`}>
+                                          {availableBomColors.map((col) => {
+                                            const colOv = getLineOverride(col, b);
+                                            const hasCustomColor = colOv?.color != null;
+                                            const effectiveColor = hasCustomColor ? colOv.color : (b.color || col);
+                                            return (
+                                              <button
+                                                key={col}
+                                                type="button"
+                                                title={`${col}: ${hasCustomColor ? `Custom color "${effectiveColor}"` : `Inherits base color "${effectiveColor}"`}`}
+                                                onClick={() => setSelectedBomColor(col)}
+                                                className={`inline-flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full font-bold leading-none border transition-all hover:scale-105 ${
+                                                  hasCustomColor
+                                                    ? "bg-amber-100 text-amber-900 border-amber-300"
+                                                    : "bg-slate-100 text-slate-600 border-slate-200"
+                                                }`}
+                                                data-testid={`color-chip-${b.line_id || i}-${col}`}
+                                              >
+                                                {col}
+                                                {hasCustomColor && <span className="text-[8px] opacity-70">✦</span>}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+                                    </div>
                                   )}
                                 </td>
 

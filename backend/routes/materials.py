@@ -19,7 +19,7 @@ from models.materials import (
     InventoryMovement,
 )
 from auth import require_roles
-from pdf_procurement import build_material_requirement
+from pdf_procurement import build_material_requirement, _is_swatch_item
 from routes.styles import get_effective_bom
 
 log = logging.getLogger(__name__)
@@ -307,7 +307,6 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             name = b.get("material_name") or ""
             unit = b.get("unit") or ""
             mat_info = mat_map.get(str(mid)) or mat_map.get(code) or {}
-            color = (b.get("color") or mat_info.get("color") or "").strip()
             raw_yld = b.get("yield_per_unit")
             def_yld = b.get("default_yield_per_unit") or mat_info.get("default_yield_per_unit")
             if raw_yld is not None and float(raw_yld) > 0:
@@ -321,8 +320,20 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             rate = float(b.get("rate") or mat_info.get("cost_per_unit") or mat_info.get("rate") or mat_info.get("purchase_rate") or 0)
             per_pair = (qty / yld) * (1 + waste / 100)
             total_qty = per_pair * pairs
-            key = (code or mid, color)
+
             cat = (mat_map.get(str(mid), {}).get("category") or mat_info.get("category") or b.get("section") or "other")
+            is_swatch = _is_swatch_item(cat, "")
+            job_color = (j.get("color") or "").strip()
+
+            raw_col = (b.get("color") or "").strip()
+            if raw_col:
+                color = raw_col
+            elif is_swatch and job_color:
+                color = job_color
+            else:
+                color = (mat_info.get("color") or "").strip() if is_swatch else ""
+
+            key = (code or mid, color)
             is_sole = (cat or "").strip().lower() == "sole"
             job_size = str(j.get("size", "") or "").strip()
 
