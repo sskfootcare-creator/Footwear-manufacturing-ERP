@@ -306,9 +306,9 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             code = b.get("material_code") or ""
             name = b.get("material_name") or ""
             unit = b.get("unit") or ""
-            color = (b.get("color") or "").strip()
-            raw_yld = b.get("yield_per_unit")
             mat_info = mat_map.get(str(mid)) or mat_map.get(code) or {}
+            color = (b.get("color") or mat_info.get("color") or "").strip()
+            raw_yld = b.get("yield_per_unit")
             def_yld = b.get("default_yield_per_unit") or mat_info.get("default_yield_per_unit")
             if raw_yld is not None and float(raw_yld) > 0:
                 yld = float(raw_yld)

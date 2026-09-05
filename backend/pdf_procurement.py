@@ -1,6 +1,7 @@
 """PDF: Material Requirement Sheet (procurement)."""
 from io import BytesIO
 from datetime import datetime
+from typing import Optional, Any
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -25,7 +26,21 @@ def _fmt(n, d=2):
     return f"{v:,.{d}f}"
 
 
-SWATCH_CATEGORIES = {"upper", "lining", "sole", "insole", "bottom"}
+SWATCH_CATEGORIES = {
+    "upper", "lining", "sole", "insole", "bottom",
+    "upper top", "upper lining", "insole cover", "insole board", "bottom layer", "sockliner"
+}
+
+
+def _is_swatch_item(category: str = "", color: str = "") -> bool:
+    if (color or "").strip():
+        return True
+    c = (category or "").strip().lower()
+    if not c:
+        return False
+    if c in SWATCH_CATEGORIES:
+        return True
+    return any(kw in c for kw in ("upper", "lining", "sole", "insole", "bottom", "cover", "sock"))
 
 
 def _make_swatch_box(color_text: str = ""):
@@ -66,12 +81,92 @@ def _make_swatch_box(color_text: str = ""):
     return box
 
 
-def build_material_requirement(scope_label: str, jobs_summary: list[dict],
-                               material_lines: list[dict], notes: str = "") -> bytes:
+def generate_material_requirement_sheet(
+    style: dict,
+    color: Optional[str] = None,
+    pairs: int = 1,
+    po_number: str = "",
+    scope_label: Optional[str] = None,
+    notes: str = "",
+) -> bytes:
+    """Generate a Material Requirement Sheet PDF for a given style and color (e.g. the PO's actual color).
+
+    Sources each line's printed color from get_effective_bom(style, color)'s result, ensuring
+    both base colors (when no override exists) and variant-specific overridden colors are correctly printed.
+    """
+    from routes.styles import get_effective_bom
+
+    effective_bom = get_effective_bom(style, color)
+    material_lines = []
+    for b_item in effective_bom:
+        b = b_item.model_dump() if hasattr(b_item, "model_dump") else (b_item if isinstance(b_item, dict) else dict(b_item))
+        code = b.get("material_code") or ""
+        name = b.get("material_name") or ""
+        cat = b.get("section") or "other"
+        unit = b.get("unit") or ""
+        rate = float(b.get("rate") or 0.0)
+        color_val = (b.get("color") or "").strip()
+        qty = float(b.get("quantity") or 1.0)
+        yld = float(b.get("yield_per_unit") or 1.0)
+        if yld <= 0:
+            yld = 1.0
+        waste = float(b.get("waste_pct") or 0.0)
+        per_pair = (qty / yld) * (1 + waste / 100)
+        tot_qty = round(per_pair * pairs, 2)
+        material_lines.append({
+            "code": code,
+            "name": name,
+            "category": cat,
+            "unit": unit,
+            "rate": rate,
+            "total_qty_required": tot_qty,
+            "total_cost": round(tot_qty * rate, 2),
+            "color": color_val,
+        })
+
+    po_num = po_number or f"PO-{style.get('code', 'STYLE')}"
+    jobs_summary = [{
+        "po_number": po_num,
+        "style_code": style.get("code", ""),
+        "color": color or "",
+        "total_pairs": pairs,
+        "sizes_text": str(style.get("base_size", "")),
+    }]
+    label = scope_label or f"{style.get('code', 'Style')} ({color or 'Base'})"
+    return build_material_requirement(label, jobs_summary, material_lines, notes)
+
+
+def build_material_requirement(
+    scope_label: Any,
+    jobs_summary: Any = None,
+    material_lines: Any = None,
+    notes: str = "",
+    *,
+    style: Optional[dict] = None,
+    color: Optional[str] = None,
+    pairs: int = 1,
+) -> bytes:
     """
     jobs_summary: [{po_number, style_code, color, total_pairs, sizes_text}]
     material_lines: [{code, name, category, unit, rate, total_qty_required, total_cost, color}]
     """
+    # If style is passed directly (first arg or kwarg), delegate to generate_material_requirement_sheet
+    if style is not None or (isinstance(scope_label, dict) and ("bom" in scope_label or "color_bom_overrides" in scope_label or "code" in scope_label)):
+        actual_style = style if style is not None else scope_label
+        actual_color = color if color is not None else (jobs_summary if isinstance(jobs_summary, str) else None)
+        actual_pairs = pairs if pairs != 1 else (material_lines if isinstance(material_lines, (int, float)) else 1)
+        actual_notes = notes if notes else (material_lines if isinstance(material_lines, str) else "")
+        return generate_material_requirement_sheet(
+            style=actual_style,
+            color=actual_color,
+            pairs=int(actual_pairs),
+            notes=str(actual_notes),
+        )
+
+    if jobs_summary is None:
+        jobs_summary = []
+    if material_lines is None:
+        material_lines = []
     S = getSampleStyleSheet()
     title_style = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=16, textColor=BLACK, leading=18)
     sub_style = ParagraphStyle("s", fontName="Helvetica", fontSize=9, textColor=BLACK, leading=11)
@@ -159,7 +254,7 @@ def build_material_requirement(scope_label: str, jobs_summary: list[dict],
     for i, m in enumerate(material_lines, 1):
         cat = (m.get("category") or "").strip().lower()
         color_val = (m.get("color") or "").strip()
-        if cat in SWATCH_CATEGORIES:
+        if _is_swatch_item(cat, color_val):
             swatch_cell = _make_swatch_box(color_val)
             row_heights.append(15 * mm if color_val else 13 * mm)
         else:
