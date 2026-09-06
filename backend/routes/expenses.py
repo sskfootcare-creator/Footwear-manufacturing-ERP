@@ -222,21 +222,21 @@ async def create_expense(payload: ExpenseIn, request: Request):
             cash_ledger_id = primary_cl_id or str(target_cash_id)
             cash_account_id = ca_id
         else:
-            # Atomic conditional decrement on single cash_ledger entry (backward compatibility)
+            cash_entry = await db.cash_ledger.find_one({"_id": oid(target_cash_id)})
+            if not cash_entry:
+                raise HTTPException(404, f"Cash ledger entry '{target_cash_id}' not found")
+            remaining = float(cash_entry.get("remaining_balance") or 0.0)
+            if round(remaining, 2) < round(amount, 2):
+                raise HTTPException(
+                    400,
+                    f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
+                )
             result = await db.cash_ledger.update_one(
                 {"_id": oid(target_cash_id), "remaining_balance": {"$gte": round(amount, 2)}},
                 {"$inc": {"remaining_balance": -round(amount, 2)}},
             )
             if result.modified_count == 0:
-                # Check why it failed for a clear user error message
-                cash_entry = await db.cash_ledger.find_one({"_id": oid(target_cash_id)})
-                if not cash_entry:
-                    raise HTTPException(404, f"Cash ledger entry '{target_cash_id}' not found")
-                remaining = float(cash_entry.get("remaining_balance") or 0.0)
-                raise HTTPException(
-                    400,
-                    f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
-                )
+                raise HTTPException(400, "Insufficient cash or concurrent update conflict. Please retry.")
             bank_account_id = str(cash_entry.get("bank_account_id") or "") or None
             cash_ledger_id = str(target_cash_id)
             if bank_account_id and hasattr(db, "cash_accounts") and db.cash_accounts is not None:

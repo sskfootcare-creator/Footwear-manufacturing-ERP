@@ -7,7 +7,7 @@ import {
 import { Drawer } from "./Materials";
 import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
-  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, DollarSign,
+  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, DollarSign, Calendar,
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -1713,6 +1713,216 @@ export function SettlementImportDrawer({ onClose, onDone }) {
 }
 
 
+export function DailyPaymentImportDrawer({ onClose, onDone }) {
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [progLoading, setProgLoading] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const fileInputRef = useRef(null);
+
+  const loadProgress = useCallback(async (m) => {
+    setProgLoading(true);
+    try {
+      const res = await http.get(`/online-reconciliation/daily-payments/progress?month=${m || selectedMonth}`);
+      setProgress(res.data);
+    } catch {
+      // ignore
+    } finally {
+      setProgLoading(false);
+    }
+  }, [selectedMonth]);
+
+  useEffect(() => {
+    loadProgress(selectedMonth);
+  }, [loadProgress, selectedMonth]);
+
+  const handleUpload = async () => {
+    if (!file) {
+      setError("Please select a daily payment file (.csv, .xlsx, .xls)");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await http.post("/online-reconciliation/import-daily-payments", fd);
+      setResult(res.data);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setFile(null);
+      loadProgress(selectedMonth);
+      if (onDone) onDone();
+    } catch (e) {
+      setError(e?.response?.data?.detail || e?.message || "Failed to import daily payment file");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Drawer onClose={onClose} title="Upload Daily Marketplace Payments" width="max-w-2xl">
+      <div className="space-y-6">
+        {/* Cadence Progress Card */}
+        <div className="bg-slate-50 border border-slate-200 rounded-md p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+            <div>
+              <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                Monthly Upload Cadence
+              </div>
+              <div className="text-sm font-bold text-slate-800 mt-0.5">
+                {progress ? `${progress.uploaded_business_days_count} of ${progress.expected_business_days_mtd} business days uploaded MTD` : "Loading cadence..."}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="text-xs font-mono border border-slate-300 rounded px-2 py-1 bg-white text-slate-700"
+              />
+              <button
+                type="button"
+                onClick={() => loadProgress(selectedMonth)}
+                disabled={progLoading}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                title="Refresh Cadence"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${progLoading ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          </div>
+
+          {/* Progress Bar */}
+          {progress && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-[11px] font-mono text-slate-600">
+                <span>Business Days Progress</span>
+                <span className="font-bold">{progress.progress_pct}%</span>
+              </div>
+              <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-500 rounded-full ${
+                    progress.progress_pct >= 100
+                      ? "bg-emerald-500"
+                      : progress.progress_pct >= 60
+                      ? "bg-blue-600"
+                      : "bg-amber-500"
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(0, progress.progress_pct))}%` }}
+                />
+              </div>
+              <div className="text-[11px] text-slate-500 flex justify-between">
+                <span>{progress.total_rows_this_month} total rows uploaded</span>
+                <span>{progress.distinct_payment_dates?.length || 0} payment date(s) active</span>
+              </div>
+            </div>
+          )}
+
+          {/* Missing days warning */}
+          {progress?.missing_business_days_mtd?.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800 space-y-1">
+              <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                Missing Uploads ({progress.missing_business_days_mtd.length} business day{progress.missing_business_days_mtd.length > 1 ? "s" : ""})
+              </div>
+              <div className="font-mono text-[11px] text-amber-800 max-h-16 overflow-y-auto">
+                {progress.missing_business_days_mtd.join(", ")}
+              </div>
+              <p className="text-[10px] text-amber-700">
+                Daily payments have a ~4-day settlement lag. Upload all business day files to prevent false overdue alerts.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Upload Form Box */}
+        <div className="bg-white border-2 border-dashed border-slate-300 rounded-lg p-5 space-y-4">
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
+              Daily Payment File (.csv, .xlsx, .xls)
+            </label>
+            <p className="text-[11px] text-slate-500 mb-3">
+              Upload Myntra daily prepaid or postpaid settlement report. Natural key 
+              <span className="font-mono font-semibold text-slate-700"> (NEFT + Order Line ID + Date + Type)</span> automatically skips duplicate rows.
+            </p>
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept=".csv,.xlsx,.xls"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#0F172A] file:text-white hover:file:bg-slate-700 cursor-pointer"
+            />
+          </div>
+
+          {error && (
+            <div className="p-3 text-xs bg-red-50 border border-red-200 text-red-700 font-bold rounded">
+              {error}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+            <BtnPrimary onClick={handleUpload} disabled={loading || !file}>
+              {loading ? (
+                <span className="flex items-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Uploading...
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <Upload className="w-3.5 h-3.5" /> Upload & Process
+                </span>
+              )}
+            </BtnPrimary>
+          </div>
+        </div>
+
+        {/* Import Results Summary */}
+        {result && (
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 space-y-3">
+            <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+              <span>Import processed for {result.filename}</span>
+            </div>
+            {result.message && (
+              <div className={`p-2.5 text-xs font-semibold rounded border text-center ${result.inserted === 0 && result.skipped_duplicates > 0 ? "bg-amber-50 border-amber-300 text-amber-900" : "bg-white border-slate-200 text-slate-800"}`}>
+                {result.message}
+              </div>
+            )}
+            <div className="grid grid-cols-3 gap-3 pt-2">
+              <div className="bg-white p-3 border border-slate-200 rounded text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-500">Total in File</div>
+                <div className="text-xl font-bold font-mono text-slate-900 mt-1">{result.total_in_file}</div>
+              </div>
+              <div className="bg-white p-3 border border-emerald-200 rounded text-center">
+                <div className="text-[10px] uppercase font-bold text-emerald-600">New Inserted</div>
+                <div className="text-xl font-bold font-mono text-emerald-700 mt-1">{result.inserted}</div>
+              </div>
+              <div className="bg-white p-3 border border-amber-200 rounded text-center">
+                <div className="text-[10px] uppercase font-bold text-amber-600">Duplicates Skipped</div>
+                <div className="text-xl font-bold font-mono text-amber-700 mt-1">{result.skipped_duplicates}</div>
+              </div>
+            </div>
+            {result.skipped_duplicates > 0 && (
+              <p className="text-[11px] text-amber-700 bg-amber-50 p-2 rounded border border-amber-200">
+                {result.skipped_duplicates} row(s) were already present in the database and skipped to avoid duplicate payouts.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </Drawer>
+  );
+}
+
+
 function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
   const [summary, setSummary] = useState(null);
   const [settlements, setSettlements] = useState([]);
@@ -1953,6 +2163,8 @@ export default function OnlineOrders() {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
+  const [dailyPaymentOpen, setDailyPaymentOpen] = useState(false);
+  const [dailyProgress, setDailyProgress] = useState(null);
   const [dispatchOpen, setDispatchOpen] = useState(false);
   const [monthlyOpen, setMonthlyOpen] = useState(false);
   const [settlementOpen, setSettlementOpen] = useState(false);
@@ -1964,6 +2176,20 @@ export default function OnlineOrders() {
   const [filterStatus, setFilterStatus] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
+
+  // load daily payment upload cadence progress
+  const loadDailyProgress = useCallback(async () => {
+    try {
+      const res = await http.get("/online-reconciliation/daily-payments/progress");
+      setDailyProgress(res.data);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDailyProgress();
+  }, [loadDailyProgress]);
 
   // channel filter is now derived from active configs so it stays in sync
   const [channelOptions, setChannelOptions] = useState(["myntra", "flipkart", "nykaa", "website"]);
@@ -2019,7 +2245,7 @@ export default function OnlineOrders() {
             : "Settlement advice payout import → order matching & variance reporting"}
         testId="online-orders-header"
         action={
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
             <Link to="/order-import-formats">
               <BtnSecondary id="btn-import-formats">
                 <span className="flex items-center gap-1.5">
@@ -2027,6 +2253,25 @@ export default function OnlineOrders() {
                 </span>
               </BtnSecondary>
             </Link>
+            <BtnSecondary
+              id="btn-daily-payment-upload"
+              onClick={() => setDailyPaymentOpen(true)}
+              title="Upload daily payment CSV/XLSX"
+            >
+              <span className="flex items-center gap-1.5">
+                <DollarSign className="w-4 h-4 text-emerald-600" />
+                <span>Upload Daily Payment</span>
+                {dailyProgress && (
+                  <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+                    dailyProgress.uploaded_business_days_count >= (dailyProgress.expected_business_days_mtd || 1)
+                      ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                      : "bg-amber-100 text-amber-800 border border-amber-300"
+                  }`}>
+                    {dailyProgress.uploaded_business_days_count}/{dailyProgress.expected_business_days_mtd}d
+                  </span>
+                )}
+              </span>
+            </BtnSecondary>
             {tab === "orders" && (
               <>
                 <BtnSecondary id="btn-refresh-orders" onClick={load}>
@@ -2228,6 +2473,16 @@ export default function OnlineOrders() {
 
       {settlementOpen && (
         <SettlementImportDrawer onClose={() => setSettlementOpen(false)} onDone={load} />
+      )}
+
+      {dailyPaymentOpen && (
+        <DailyPaymentImportDrawer
+          onClose={() => setDailyPaymentOpen(false)}
+          onDone={() => {
+            loadDailyProgress();
+            load();
+          }}
+        />
       )}
     </div>
   );

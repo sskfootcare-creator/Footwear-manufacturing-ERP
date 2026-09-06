@@ -3,6 +3,7 @@
 import re
 import io
 import csv
+import calendar
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, date as _date, timedelta as _td
@@ -20,6 +21,7 @@ from models.online_reconciliation import (
     MonthlyOrderRow,
     StyleCostSnapshotIn,
     ReconciliationRunIn,
+    ReconciliationSettingsIn,
 )
 from auth import require_roles
 
@@ -88,7 +90,10 @@ def _get_float_val(row: dict, keys: list[str]) -> float:
             if _clean_key(rk) == clean_k or clean_k in _clean_key(rk):
                 if rv is not None and rv != "":
                     try:
-                        return float(str(rv).replace(",", "").replace("₹", "").strip())
+                        val_str = str(rv).replace(",", "").replace("₹", "").strip()
+                        if val_str.lower() in ("nan", "none", "null"):
+                            continue
+                        return float(val_str)
                     except Exception:
                         pass
     return 0.0
@@ -99,7 +104,7 @@ def _get_str_val(row: dict, keys: list[str]) -> str:
         clean_k = _clean_key(k)
         for rk, rv in row.items():
             if _clean_key(rk) == clean_k or clean_k in _clean_key(rk):
-                if rv is not None:
+                if rv is not None and str(rv).strip() and str(rv).strip().lower() not in ("nan", "none", "null"):
                     return str(rv).strip()
     return ""
 
@@ -964,35 +969,223 @@ async def clear_reconciliation_test_data(request: Request):
     return {"ok": True}
 
 
+@online_reconciliation_router.get("/online-reconciliation/settings")
+async def get_reconciliation_settings(request: Request):
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    settings_coll = getattr(db, "system_settings", None)
+    if settings_coll is not None:
+        try:
+            doc = await settings_coll.find_one({"key": "online_reconciliation_settings"})
+            if doc:
+                return {
+                    "daily_payment_lag_days": int(doc.get("daily_payment_lag_days", 4)),
+                    "aged_pending_days": int(doc.get("aged_pending_days", 30)),
+                }
+        except Exception:
+            pass
+    return {
+        "daily_payment_lag_days": 4,
+        "aged_pending_days": 30,
+    }
+
+
+@online_reconciliation_router.post("/online-reconciliation/settings")
+async def save_reconciliation_settings(request: Request, payload: ReconciliationSettingsIn):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    settings_coll = getattr(db, "system_settings", None)
+    if settings_coll is not None:
+        try:
+            await settings_coll.update_one(
+                {"key": "online_reconciliation_settings"},
+                {"$set": {
+                    "key": "online_reconciliation_settings",
+                    "daily_payment_lag_days": payload.daily_payment_lag_days,
+                    "aged_pending_days": payload.aged_pending_days,
+                    "updated_at": now_iso(),
+                    "updated_by": u.get("email") or u.get("name", ""),
+                }},
+                upsert=True
+            )
+        except Exception:
+            pass
+    await log_activity_db(
+        db,
+        "UPDATE",
+        "system_settings",
+        f"Updated reconciliation settings: lag={payload.daily_payment_lag_days}d, aged={payload.aged_pending_days}d",
+        u.get("email") or u.get("name", "")
+    )
+    return {
+        "ok": True,
+        "daily_payment_lag_days": payload.daily_payment_lag_days,
+        "aged_pending_days": payload.aged_pending_days,
+    }
+
+
+@online_reconciliation_router.get("/online-reconciliation/daily-payments/progress")
+async def get_daily_payments_progress(request: Request, month: Optional[str] = None):
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    now_dt = datetime.now(timezone.utc)
+    target_month = month.strip() if month else now_dt.strftime("%Y-%m")
+
+    try:
+        parts = target_month.split("-")
+        yr, mo = int(parts[0]), int(parts[1])
+    except Exception:
+        yr, mo = now_dt.year, now_dt.month
+        target_month = f"{yr:04d}-{mo:02d}"
+
+    num_days = calendar.monthrange(yr, mo)[1]
+    all_month_days = [_date(yr, mo, d) for d in range(1, num_days + 1)]
+    all_business_days = [d.isoformat() for d in all_month_days if d.weekday() < 5]
+    total_business_days_in_month = len(all_business_days)
+
+    today = now_dt.date()
+    if yr == today.year and mo == today.month:
+        expected_mtd_business_days = [d.isoformat() for d in all_month_days if d.weekday() < 5 and d <= today]
+    elif _date(yr, mo, 1) < _date(today.year, today.month, 1):
+        expected_mtd_business_days = all_business_days
+    else:
+        expected_mtd_business_days = []
+
+    expected_mtd_count = len(expected_mtd_business_days)
+
+    try:
+        pipeline = [
+            {"$match": {"payment_date": {"$regex": f"^{target_month}"}}},
+            {"$group": {"_id": {"$substr": ["$payment_date", 0, 10]}, "count": {"$sum": 1}}},
+            {"$sort": {"_id": 1}},
+        ]
+        agg_res = await db.online_daily_payments.aggregate(pipeline).to_list(100)
+    except Exception:
+        docs = await db.online_daily_payments.find({}).to_list(100000)
+        date_counts = defaultdict(int)
+        for d in docs:
+            p_date = str(d.get("payment_date") or "")[:10]
+            if p_date.startswith(target_month):
+                date_counts[p_date] += 1
+        agg_res = [{"_id": k, "count": v} for k, v in sorted(date_counts.items())]
+
+    uploaded_dates_set = {r["_id"] for r in agg_res if r.get("_id")}
+    total_rows_this_month = sum(r.get("count", 0) for r in agg_res)
+
+    uploaded_business_days = [d for d in all_business_days if d in uploaded_dates_set]
+    missing_business_days_mtd = [d for d in expected_mtd_business_days if d not in uploaded_dates_set]
+
+    progress_pct = round((len(uploaded_business_days) / expected_mtd_count * 100), 1) if expected_mtd_count > 0 else 100.0
+
+    return {
+        "month": target_month,
+        "uploaded_business_days_count": len(uploaded_business_days),
+        "expected_business_days_mtd": expected_mtd_count,
+        "total_business_days_in_month": total_business_days_in_month,
+        "progress_pct": progress_pct,
+        "distinct_payment_dates": sorted(list(uploaded_dates_set)),
+        "uploaded_business_days": uploaded_business_days,
+        "missing_business_days_mtd": missing_business_days_mtd,
+        "total_rows_this_month": total_rows_this_month,
+    }
+
+
 @online_reconciliation_router.post("/online-reconciliation/import-daily-payments")
 async def import_daily_payments(request: Request, file: UploadFile = File(...)):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     content = await file.read()
-    text = content.decode("utf-8-sig", errors="ignore")
-    reader = csv.DictReader(io.StringIO(text))
 
+    filename_lower = (file.filename or "").lower()
+    if filename_lower.endswith((".xlsx", ".xls")):
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+        sheet = wb.active
+        rows_data = list(sheet.iter_rows(values_only=True))
+        rows_iter = []
+        if rows_data and len(rows_data) >= 2:
+            header_row = [str(c or "").strip() for c in rows_data[0]]
+            for r_vals in rows_data[1:]:
+                if not r_vals or all(c is None or str(c).strip() == "" for c in r_vals):
+                    continue
+                rows_iter.append({header_row[i]: r_vals[i] for i in range(min(len(header_row), len(r_vals)))})
+    else:
+        text = content.decode("utf-8-sig", errors="ignore")
+        rows_iter = list(csv.DictReader(io.StringIO(text)))
+
+    existing_docs = await db.online_daily_payments.find(
+        {},
+        {"neft_ref": 1, "order_line_id": 1, "order_release_id": 1, "seller_order_id": 1, "return_id": 1, "payment_date": 1, "order_type": 1}
+    ).to_list(100000)
+
+    existing_keys = set()
+    for d in existing_docs:
+        neft = str(d.get("neft_ref") or "").strip()
+        dt = str(d.get("payment_date") or "")[:10].strip()
+        ot = str(d.get("order_type") or "").strip().lower()
+        for field in ("order_line_id", "seller_order_id", "order_release_id", "return_id"):
+            val = str(d.get(field) or "").strip()
+            if val:
+                existing_keys.add((neft, val, dt, ot))
+                existing_keys.add((neft, val, dt))
+
+    seen_in_batch = set()
     rows_to_insert = []
-    for row in reader:
+    skipped_duplicates = 0
+    total_in_file = len(rows_iter)
+
+    for row in rows_iter:
         pay_type_raw = _get_str_val(row, ["payment_type", "type", "pay_type"]).lower()
         pay_type = "prepaid" if "prepaid" in pay_type_raw else "postpaid"
         ord_type_raw = _get_str_val(row, ["order_type", "order_type_forward_reverse"]).lower()
         ord_type = "Reverse" if "reverse" in ord_type_raw else "Forward"
 
+        neft_ref = _get_str_val(row, ["neft_ref", "neft ref", "utr", "payment_ref"]).strip()
+        line_id = _get_str_val(row, ["order_line_id", "line id"]).strip()
+        rel_id = _get_str_val(row, ["order_release_id", "release id"]).strip()
+        soid = _get_str_val(row, ["seller_order_id", "order id", "seller order id"]).strip()
+        ret_id = _get_str_val(row, ["return_id"]).strip()
+        p_date = _get_str_val(row, ["payment_date", "date"])[:10].strip()
+
+        key_id = line_id or soid or rel_id or ret_id
+        ot_lower = ord_type.strip().lower()
+
+        # Primary natural key: (neft_ref, line_id, payment_date, order_type)
+        candidate_keys = [
+            (neft_ref, key_id, p_date, ot_lower),
+        ]
+        if line_id:
+            candidate_keys.append((neft_ref, line_id, p_date, ot_lower))
+        if soid:
+            candidate_keys.append((neft_ref, soid, p_date, ot_lower))
+        if rel_id:
+            candidate_keys.append((neft_ref, rel_id, p_date, ot_lower))
+
+        is_duplicate = any(ck in existing_keys or ck in seen_in_batch for ck in candidate_keys)
+        if is_duplicate:
+            skipped_duplicates += 1
+            continue
+
+        for ck in candidate_keys:
+            seen_in_batch.add(ck)
+            seen_in_batch.add((ck[0], ck[1], ck[2]))  # also guard date without type
+
         r_doc = {
-            "neft_ref": _get_str_val(row, ["neft_ref", "neft ref", "utr", "payment_ref"]),
+            "neft_ref": neft_ref,
             "settled_amount": _get_float_val(row, ["settled_amount", "settled amount", "amount", "net_amount"]),
             "commission": _get_float_val(row, ["commission", "commission_amount"]),
             "shipping_fee": _get_float_val(row, ["shipping_fee", "shipping fee", "logistics_fee"]),
             "tds": _get_float_val(row, ["tds", "tds_amount"]),
             "payment_type": pay_type,
             "order_type": ord_type,
-            "order_release_id": _get_str_val(row, ["order_release_id", "release id"]),
-            "seller_order_id": _get_str_val(row, ["seller_order_id", "order id", "seller order id"]),
-            "order_line_id": _get_str_val(row, ["order_line_id", "line id"]),
-            "return_id": _get_str_val(row, ["return_id"]),
-            "payment_date": _get_str_val(row, ["payment_date", "date"]),
+            "order_release_id": rel_id,
+            "seller_order_id": soid,
+            "order_line_id": line_id,
+            "return_id": ret_id,
+            "payment_date": p_date,
             "filename": file.filename,
             "imported_at": now_iso(),
             "imported_by": u.get("email") or u.get("name", ""),
@@ -1001,8 +1194,28 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
 
     if rows_to_insert:
         await db.online_daily_payments.insert_many(rows_to_insert)
-    await log_activity_db(db, "IMPORT", "online_daily_payments", f"Imported {len(rows_to_insert)} daily payment rows from '{file.filename}'", u.get("email") or u.get("name", ""))
-    return {"ok": True, "count": len(rows_to_insert), "filename": file.filename}
+
+    inserted_count = len(rows_to_insert)
+    summary_msg = f"{inserted_count} new, {skipped_duplicates} skipped as duplicates."
+
+    await log_activity_db(
+        db,
+        "IMPORT",
+        "online_daily_payments",
+        f"Imported {summary_msg} from '{file.filename}'",
+        u.get("email") or u.get("name", "")
+    )
+
+    return {
+        "ok": True,
+        "count": inserted_count,
+        "inserted": inserted_count,
+        "new": inserted_count,
+        "skipped_duplicates": skipped_duplicates,
+        "total_in_file": total_in_file,
+        "filename": file.filename,
+        "message": summary_msg,
+    }
 
 
 @online_reconciliation_router.post("/online-reconciliation/import-settlements")
@@ -1044,7 +1257,7 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
                     "seller_id": _get_str_val(row_dict, ["seller_id", "seller id"]),
                     "settlement_amount": _get_float_val(row_dict, ["settlement_amount", "amount"]),
                     "settlement_type": _get_str_val(row_dict, ["settlement_type", "type"]),
-                    "utr": _get_str_val(row_dict, ["utr", "neft_ref", "reference"]),
+                    "utr": _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "utr", "neft_ref", "reference"]),
                     "invoice_ref": _get_str_val(row_dict, ["invoice_ref", "invoice"]),
                     "settlement_date": _get_str_val(row_dict, ["settlement_date", "date"]),
                     "settlement_description": _get_str_val(row_dict, ["settlement_description", "description", "remarks"]),
@@ -1080,7 +1293,7 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
                     "gst": _get_float_val(row_dict, ["gst"]),
                     "return_date": _get_str_val(row_dict, ["return_date", "return date"]),
                     "return_type": _get_str_val(row_dict, ["return_type", "return type"]),
-                    "neft_ref": _get_str_val(row_dict, ["neft_ref", "utr", "payment_ref"]),
+                    "neft_ref": _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "neft_ref", "utr", "payment_ref"]),
                     "filename": file.filename,
                     "imported_at": now_iso(),
                     "imported_by": u.get("email") or u.get("name", ""),
@@ -1142,7 +1355,8 @@ async def import_monthly_reconciliation_report(request: Request, file: UploadFil
 @online_reconciliation_router.get("/online-reconciliation/summary")
 async def run_online_reconciliation(
     request: Request,
-    aged_pending_days: int = Query(30, description="Days threshold for aged pending classification"),
+    aged_pending_days: Optional[int] = Query(None, description="Days threshold for aged pending classification"),
+    daily_payment_lag_days: Optional[int] = Query(None, description="Settlement lag days threshold"),
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ):
@@ -1150,10 +1364,33 @@ async def run_online_reconciliation(
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     from server import compute_style_costing
 
+    default_lag = 4
+    default_aged = 30
+    settings_coll = getattr(db, "system_settings", None)
+    if settings_coll is not None:
+        try:
+            s_doc = await settings_coll.find_one({"key": "online_reconciliation_settings"})
+            if s_doc:
+                default_lag = int(s_doc.get("daily_payment_lag_days", 4))
+                default_aged = int(s_doc.get("aged_pending_days", 30))
+        except Exception:
+            pass
+
     try:
-        aged_days_val = int(aged_pending_days) if not hasattr(aged_pending_days, 'default') else int(aged_pending_days.default)
+        if aged_pending_days is not None:
+            aged_days_val = int(aged_pending_days) if not hasattr(aged_pending_days, 'default') else int(aged_pending_days.default)
+        else:
+            aged_days_val = default_aged
     except Exception:
-        aged_days_val = 30
+        aged_days_val = default_aged
+
+    try:
+        if daily_payment_lag_days is not None:
+            lag_days_val = int(daily_payment_lag_days) if not hasattr(daily_payment_lag_days, 'default') else int(daily_payment_lag_days.default)
+        else:
+            lag_days_val = default_lag
+    except Exception:
+        lag_days_val = default_lag
 
     m_query = {}
     if from_date or to_date:
@@ -1167,6 +1404,7 @@ async def run_online_reconciliation(
 
     settle_by_order_id = defaultdict(list)
     settle_by_rel_sku = defaultdict(list)
+    settle_by_rel_id = defaultdict(list)
     for st in settlements:
         soid = st.get("seller_order_id")
         if soid:
@@ -1175,6 +1413,8 @@ async def run_online_reconciliation(
         sku_id = st.get("sku_id") or st.get("style_id")
         if rel_id and sku_id:
             settle_by_rel_sku[f"{rel_id}_{sku_id}"].append(st)
+        if rel_id:
+            settle_by_rel_id[rel_id].append(st)
 
     daily_payments = await db.online_daily_payments.find({}).to_list(10000)
 
@@ -1207,6 +1447,7 @@ async def run_online_reconciliation(
 
     settled_count = 0
     pending_count = 0
+    pending_lag_count = 0
     aged_pending_count = 0
     unmatched_count = 0
     total_matched = 0
@@ -1232,34 +1473,72 @@ async def run_online_reconciliation(
         sku_id = mo.get("sku_id") or mo.get("style_id")
 
         matches = settle_by_order_id.get(soid) or settle_by_rel_sku.get(f"{rel_id}_{sku_id}") or []
+        if not matches and rel_id and rel_id in settle_by_rel_id:
+            rel_candidates = settle_by_rel_id[rel_id]
+            if len(rel_candidates) == 1:
+                matches = rel_candidates
+            else:
+                # Disambiguate multiple candidates via amount and date alignment
+                mo_amt = float(mo.get("final_amount", 0) or mo.get("seller_price", 0) or 0)
+                mo_date = str(mo.get("delivered_on") or mo.get("shipped_on") or mo.get("packed_on") or "")[:10]
 
-        if not matches:
-            reasons = []
-            if not soid:
-                reasons.append("Missing seller_order_id")
-            reasons.append("Absent from settlement files")
+                def _score_candidate(c):
+                    score = 0
+                    c_amt = (
+                        float(c.get("amount_pending_settlement_postpaid", 0) or 0)
+                        + float(c.get("amount_pending_settlement_prepaid", 0) or 0)
+                        + float(c.get("settled_amount_postpaid", 0) or 0)
+                        + float(c.get("settled_amount_prepaid", 0) or 0)
+                    )
+                    if mo_amt > 0 and abs(c_amt - mo_amt) < 1.0:
+                        score += 2
+                    c_date = str(c.get("order_date") or c.get("return_date") or "")[:10]
+                    if mo_date and c_date and mo_date == c_date:
+                        score += 1
+                    return score
 
-            unmatched_count += 1
-            unreconciled_orders.append({
-                "seller_order_id": soid or "—",
-                "order_release_id": rel_id or "—",
-                "seller_sku_code": mo.get("seller_sku_code") or "—",
-                "order_status": mo.get("order_status") or "Unknown",
-                "reasons": reasons,
-                "packed_on": mo.get("packed_on") or "—",
-            })
-            continue
+                matches = sorted(rel_candidates, key=_score_candidate, reverse=True)
 
-        total_matched += 1
-        has_settled = any(st.get("settlement_status") == "settled" for st in matches)
-        has_unsettled = any(st.get("settlement_status") == "unsettled" for st in matches)
-
-        order_date_str = mo.get("packed_on") or mo.get("shipped_on") or mo.get("delivered_on") or str(mo.get("imported_at", ""))[:10]
+        order_date_str = mo.get("delivered_on") or mo.get("shipped_on") or mo.get("packed_on") or str(mo.get("imported_at", ""))[:10]
         try:
             o_date = datetime.strptime(order_date_str[:10], "%Y-%m-%d").date()
             age_days = (today_dt - o_date).days
         except Exception:
             age_days = 0
+
+        if not matches:
+            if age_days <= lag_days_val:
+                pending_lag_count += 1
+                unreconciled_orders.append({
+                    "seller_order_id": soid or "—",
+                    "order_release_id": rel_id or "—",
+                    "seller_sku_code": mo.get("seller_sku_code") or "—",
+                    "order_status": mo.get("order_status") or "Unknown",
+                    "reasons": [f"Within settlement lag window ({age_days}d <= {lag_days_val}d)"],
+                    "status": "pending_lag",
+                    "packed_on": mo.get("packed_on") or "—",
+                })
+            else:
+                reasons = []
+                if not soid:
+                    reasons.append("Missing seller_order_id")
+                reasons.append("Absent from settlement files")
+                reasons.append(f"Overdue ({age_days}d > {lag_days_val}d settlement lag)")
+                unmatched_count += 1
+                unreconciled_orders.append({
+                    "seller_order_id": soid or "—",
+                    "order_release_id": rel_id or "—",
+                    "seller_sku_code": mo.get("seller_sku_code") or "—",
+                    "order_status": mo.get("order_status") or "Unknown",
+                    "reasons": reasons,
+                    "status": "unmatched",
+                    "packed_on": mo.get("packed_on") or "—",
+                })
+            continue
+
+        total_matched += 1
+        has_settled = any(st.get("settlement_status") == "settled" for st in matches)
+        has_unsettled = any(st.get("settlement_status") == "unsettled" for st in matches)
 
         if has_settled:
             rec_status = "settled"
@@ -1268,12 +1547,19 @@ async def run_online_reconciliation(
             if age_days > aged_days_val:
                 rec_status = "aged_pending"
                 aged_pending_count += 1
+            elif age_days <= lag_days_val:
+                rec_status = "pending_lag"
+                pending_lag_count += 1
             else:
                 rec_status = "pending"
                 pending_count += 1
         else:
-            rec_status = "unmatched"
-            unmatched_count += 1
+            if age_days <= lag_days_val:
+                rec_status = "pending_lag"
+                pending_lag_count += 1
+            else:
+                rec_status = "unmatched"
+                unmatched_count += 1
 
         settled_postpaid = sum(st.get("settled_amount_postpaid", 0) for st in matches)
         settled_prepaid = sum(st.get("settled_amount_prepaid", 0) for st in matches)
@@ -1416,8 +1702,11 @@ async def run_online_reconciliation(
         "total_monthly_report_units": total_monthly_lines,
         "settled_count": settled_count,
         "pending_count": pending_count,
+        "pending_lag_count": pending_lag_count,
         "aged_pending_count": aged_pending_count,
         "unmatched_count": unmatched_count,
+        "daily_payment_lag_days": lag_days_val,
+        "aged_pending_days": aged_days_val,
         "return_charges_by_style": {k: round(v, 2) for k, v in return_charges_by_style.items()},
         "total_non_order_deductions": round(total_non_order_deductions, 2),
         "non_order_deductions_ledger": [stringify(d) for d in non_order_docs[:100]],

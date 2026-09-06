@@ -94,6 +94,12 @@ class StyleCostSnapshotIn(BaseModel):
 class ReconciliationRunIn(BaseModel):
     platform: str = "myntra"
     aged_pending_days: int = 30
+    daily_payment_lag_days: int = 4
     from_date: Optional[str] = None
     to_date: Optional[str] = None
+
+
+class ReconciliationSettingsIn(BaseModel):
+    daily_payment_lag_days: int = 4
+    aged_pending_days: int = 30
 

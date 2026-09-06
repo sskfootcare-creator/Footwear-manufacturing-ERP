@@ -174,7 +174,8 @@ export default function OnlineProfitability() {
       const formData = new FormData();
       formData.append("file", file);
       const res = await http.post(`/online-reconciliation/${endpoint}`, formData);
-      setUploadMessage(`Successfully imported ${res.data.filename || file.name}`);
+      const msg = res.data?.message || `Successfully imported ${res.data?.filename || file.name}`;
+      setUploadMessage(msg);
       loadReconciliation();
       loadProfitability();
     } catch (err) {
@@ -558,49 +559,60 @@ export default function OnlineProfitability() {
             </div>
 
             {/* Reconciliation KPI Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="reconciliation-kpi-grid">
-              <Card className="p-5 border-l-4 border-l-emerald-600">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3" data-testid="reconciliation-kpi-grid">
+              <Card className="p-4 border-l-4 border-l-emerald-600">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Settled Orders</span>
+                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Settled Orders</span>
                   <Badge variant="green">Settled</Badge>
                 </div>
                 <div className="text-2xl font-black text-slate-900" data-testid="settled-count-value">
                   {recSummary.settled_count}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-1">Order lines reconciled to settled.xlsx</div>
+                <div className="text-[10px] text-slate-500 mt-1">Reconciled to settled.xlsx</div>
               </Card>
 
-              <Card className="p-5 border-l-4 border-l-blue-600">
+              <Card className="p-4 border-l-4 border-l-indigo-500">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Pending Settlement</span>
-                  <Badge variant="blue">≤ 30 Days</Badge>
+                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Within Lag</span>
+                  <Badge variant="blue">≤ {recSummary.daily_payment_lag_days || 4}d Lag</Badge>
+                </div>
+                <div className="text-2xl font-black text-indigo-700" data-testid="pending-lag-count-value">
+                  {recSummary.pending_lag_count || 0}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1">Recent shipments within normal lag</div>
+              </Card>
+
+              <Card className="p-4 border-l-4 border-l-blue-600">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Pending</span>
+                  <Badge variant="blue">≤ {recSummary.aged_pending_days || 30} Days</Badge>
                 </div>
                 <div className="text-2xl font-black text-slate-900" data-testid="pending-count-value">
                   {recSummary.pending_count}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-1">Matched to unsettled.xlsx</div>
+                <div className="text-[10px] text-slate-500 mt-1">Matched to unsettled.xlsx</div>
               </Card>
 
-              <Card className="p-5 border-l-4 border-l-amber-500">
+              <Card className="p-4 border-l-4 border-l-amber-500">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Aged Pending</span>
-                  <Badge variant="yellow">&gt; 30 Days</Badge>
+                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Aged Pending</span>
+                  <Badge variant="yellow">&gt; {recSummary.aged_pending_days || 30} Days</Badge>
                 </div>
                 <div className="text-2xl font-black text-amber-700" data-testid="aged-pending-count-value">
                   {recSummary.aged_pending_count}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-1">Unsettled over 30 days old</div>
+                <div className="text-[10px] text-slate-500 mt-1">Unsettled past aging threshold</div>
               </Card>
 
-              <Card className="p-5 border-l-4 border-l-red-600">
+              <Card className="p-4 border-l-4 border-l-red-600">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Unmatched / Absent</span>
+                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Overdue Absent</span>
                   <Badge variant="red">FLAGGED</Badge>
                 </div>
                 <div className="text-2xl font-black text-red-600" data-testid="unmatched-count-value">
                   {recSummary.unmatched_count}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-1">Delivered/active but absent from settlements</div>
+                <div className="text-[10px] text-slate-500 mt-1">Absent &gt; {recSummary.daily_payment_lag_days || 4}d payment lag</div>
               </Card>
             </div>
 
