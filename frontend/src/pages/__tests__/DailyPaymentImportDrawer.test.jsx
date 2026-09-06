@@ -161,4 +161,78 @@ describe("DailyPaymentImportDrawer & Daily Habit Trigger", () => {
     expect(screen.getByTestId("stat-duplicates-skipped")).toHaveTextContent("39");
     expect(screen.getByText(/skipped to avoid duplicate payouts/i)).toBeInTheDocument();
   });
+
+  test("allows selecting payment type (Prepaid/Postpaid) and passes it in FormData", async () => {
+    const handleDone = jest.fn();
+    const handleClose = jest.fn();
+
+    http.get.mockResolvedValueOnce({
+      data: {
+        month: "2026-09",
+        uploaded_business_days_count: 1,
+        expected_business_days_mtd: 4,
+        missing_business_days_count: 3,
+        total_business_days_in_month: 22,
+        progress_pct: 25.0,
+        uploaded_business_days: ["2026-09-02"],
+        missing_business_days_mtd: ["2026-09-01", "2026-09-03", "2026-09-04"],
+        daily_breakdown: [
+          { date: "2026-09-02", prepaid_count: 39, postpaid_count: 25, total_count: 64, is_business_day: true, status: "complete" },
+        ],
+        total_rows_this_month: 64,
+      },
+    });
+
+    http.post.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        filename: "part-00753-prepaid.csv",
+        total_in_file: 39,
+        inserted: 39,
+        skipped_duplicates: 0,
+        payment_type: "prepaid",
+        message: "39 new (prepaid), 0 skipped as duplicates.",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <DailyPaymentImportDrawer onClose={handleClose} onDone={handleDone} />
+      </MemoryRouter>
+    );
+
+    // Coverage badge should display 2026-09-02 with complete status
+    await waitFor(() => {
+      expect(screen.getByTestId("coverage-badge-2026-09-02")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("coverage-badge-2026-09-02")).toHaveTextContent("2026-09-02");
+
+    // Click 'Prepaid File' button
+    const prepaidBtn = screen.getByTestId("payment-type-prepaid");
+    fireEvent.click(prepaidBtn);
+
+    const fileInput = document.getElementById("daily-payment-file-input");
+    const dummyFile = new File(["col1,col2"], "part-00753-prepaid.csv", { type: "text/csv" });
+    fireEvent.change(fileInput, { target: { files: [dummyFile] } });
+
+    const uploadBtn = screen.getByRole("button", { name: /Upload & Process/i });
+    fireEvent.click(uploadBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith(
+        "/online-reconciliation/import-daily-payments",
+        expect.any(FormData)
+      );
+    });
+
+    // Check FormData had payment_type = prepaid
+    const postedFormData = http.post.mock.calls[0][1];
+    expect(postedFormData.get("payment_type")).toBe("prepaid");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("daily-payment-result-card")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("result-payment-type-badge")).toHaveTextContent("prepaid");
+  });
 });
+

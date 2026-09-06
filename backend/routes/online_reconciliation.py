@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, date as _date, timedelta as _td
 from typing import Optional, List, Dict, Any, Literal
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query, Form
 from fastapi.responses import Response
 
 from models.online_reconciliation import (
@@ -1097,27 +1097,76 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
     try:
         pipeline = [
             {"$match": {"payment_date": {"$regex": f"^{target_month}"}}},
-            {"$group": {"_id": {"$substr": ["$payment_date", 0, 10]}, "count": {"$sum": 1}}},
-            {"$sort": {"_id": 1}},
+            {"$group": {
+                "_id": {
+                    "date": {"$substr": ["$payment_date", 0, 10]},
+                    "payment_type": {"$toLower": {"$ifNull": ["$payment_type", "prepaid"]}}
+                },
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"_id.date": 1}},
         ]
-        agg_res = await db.online_daily_payments.aggregate(pipeline).to_list(100)
+        agg_res = await db.online_daily_payments.aggregate(pipeline).to_list(500)
     except Exception:
         docs = await db.online_daily_payments.find({}).to_list(100000)
-        date_counts = defaultdict(int)
+        group_counts = defaultdict(int)
         for d in docs:
             p_date = str(d.get("payment_date") or "")[:10]
+            pt = str(d.get("payment_type") or "").strip().lower() or "prepaid"
             if p_date.startswith(target_month):
-                date_counts[p_date] += 1
-        agg_res = [{"_id": k, "count": v} for k, v in sorted(date_counts.items())]
+                group_counts[(p_date, pt)] += 1
+        agg_res = [{"_id": {"date": k[0], "payment_type": k[1]}, "count": v} for k, v in sorted(group_counts.items())]
 
-    uploaded_dates_set = {r["_id"] for r in agg_res if r.get("_id")}
-    total_rows_this_month = sum(r.get("count", 0) for r in agg_res)
+    daily_stats = defaultdict(lambda: {"prepaid": 0, "postpaid": 0, "total": 0})
+    for r in agg_res:
+        group_id = r.get("_id")
+        cnt = r.get("count", 0)
+        if isinstance(group_id, dict):
+            dt = group_id.get("date")
+            pt = (group_id.get("payment_type") or "").lower()
+        else:
+            dt = str(group_id or "")[:10]
+            pt = "prepaid"
+        if not dt:
+            continue
+        if "postpaid" in pt:
+            daily_stats[dt]["postpaid"] += cnt
+        else:
+            daily_stats[dt]["prepaid"] += cnt
+        daily_stats[dt]["total"] += cnt
 
+    uploaded_dates_set = set(daily_stats.keys())
+    total_rows_this_month = sum(s["total"] for s in daily_stats.values())
+
+    uploaded_prepaid_days = [d for d in all_business_days if daily_stats.get(d, {}).get("prepaid", 0) > 0]
+    uploaded_postpaid_days = [d for d in all_business_days if daily_stats.get(d, {}).get("postpaid", 0) > 0]
+    fully_uploaded_business_days = [
+        d for d in all_business_days
+        if daily_stats.get(d, {}).get("prepaid", 0) > 0 and daily_stats.get(d, {}).get("postpaid", 0) > 0
+    ]
+    partially_uploaded_business_days = [
+        d for d in all_business_days
+        if d in uploaded_dates_set and d not in fully_uploaded_business_days
+    ]
     uploaded_business_days = [d for d in all_business_days if d in uploaded_dates_set]
     missing_business_days_mtd = [d for d in expected_mtd_business_days if d not in uploaded_dates_set]
 
     progress_pct = round((len(uploaded_business_days) / expected_mtd_count * 100), 1) if expected_mtd_count > 0 else 100.0
     indicator_text = f"{len(uploaded_business_days)} of {expected_mtd_count} expected business days uploaded"
+
+    daily_breakdown = [
+        {
+            "date": d,
+            "prepaid_count": daily_stats.get(d, {}).get("prepaid", 0),
+            "postpaid_count": daily_stats.get(d, {}).get("postpaid", 0),
+            "total_count": daily_stats.get(d, {}).get("total", 0),
+            "is_business_day": d in all_business_days,
+            "status": "complete" if (daily_stats.get(d, {}).get("prepaid", 0) > 0 and daily_stats.get(d, {}).get("postpaid", 0) > 0)
+                      else "partial" if (daily_stats.get(d, {}).get("total", 0) > 0)
+                      else "missing",
+        }
+        for d in sorted(uploaded_dates_set)
+    ]
 
     return {
         "month": target_month,
@@ -1129,6 +1178,11 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
         "progress_pct": progress_pct,
         "distinct_payment_dates": sorted(list(uploaded_dates_set)),
         "uploaded_business_days": uploaded_business_days,
+        "uploaded_prepaid_days": uploaded_prepaid_days,
+        "uploaded_postpaid_days": uploaded_postpaid_days,
+        "fully_uploaded_business_days": fully_uploaded_business_days,
+        "partially_uploaded_business_days": partially_uploaded_business_days,
+        "daily_breakdown": daily_breakdown,
         "missing_business_days_mtd": missing_business_days_mtd,
         "bank_holidays_in_month": [d.isoformat() for d in all_month_days if d.isoformat() in bank_holidays],
         "total_rows_this_month": total_rows_this_month,
@@ -1136,11 +1190,19 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
 
 
 @online_reconciliation_router.post("/online-reconciliation/import-daily-payments")
-async def import_daily_payments(request: Request, file: UploadFile = File(...)):
+async def import_daily_payments(
+    request: Request,
+    file: UploadFile = File(...),
+    payment_type: Optional[str] = Form(None),
+):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     content = await file.read()
+
+    forced_pay_type = (payment_type or "").strip().lower()
+    if forced_pay_type not in ("prepaid", "postpaid"):
+        forced_pay_type = None
 
     filename_lower = (file.filename or "").lower()
     if filename_lower.endswith((".xlsx", ".xls")):
@@ -1161,7 +1223,7 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
 
     existing_docs = await db.online_daily_payments.find(
         {},
-        {"neft_ref": 1, "order_line_id": 1, "order_release_id": 1, "seller_order_id": 1, "return_id": 1, "payment_date": 1, "order_type": 1}
+        {"neft_ref": 1, "order_line_id": 1, "order_release_id": 1, "seller_order_id": 1, "return_id": 1, "payment_date": 1, "order_type": 1, "payment_type": 1}
     ).to_list(100000)
 
     existing_keys = set()
@@ -1169,9 +1231,11 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
         neft = str(d.get("neft_ref") or "").strip()
         dt = str(d.get("payment_date") or "")[:10].strip()
         ot = str(d.get("order_type") or "").strip().lower()
+        pt = str(d.get("payment_type") or "").strip().lower()
         for field in ("order_line_id", "seller_order_id", "order_release_id", "return_id"):
             val = str(d.get(field) or "").strip()
             if val:
+                existing_keys.add((neft, val, dt, ot, pt))
                 existing_keys.add((neft, val, dt, ot))
                 existing_keys.add((neft, val, dt))
 
@@ -1181,8 +1245,21 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
     total_in_file = len(rows_iter)
 
     for row in rows_iter:
-        pay_type_raw = _get_str_val(row, ["payment_type", "type", "pay_type"]).lower()
-        pay_type = "prepaid" if "prepaid" in pay_type_raw else "postpaid"
+        if forced_pay_type:
+            pay_type = forced_pay_type
+        else:
+            pay_type_raw = _get_str_val(row, ["payment_type", "type", "pay_type"]).lower()
+            if "prepaid" in pay_type_raw:
+                pay_type = "prepaid"
+            elif "postpaid" in pay_type_raw:
+                pay_type = "postpaid"
+            elif "prepaid" in filename_lower:
+                pay_type = "prepaid"
+            elif "postpaid" in filename_lower:
+                pay_type = "postpaid"
+            else:
+                pay_type = "prepaid"
+
         ord_type_raw = _get_str_val(row, ["order_type", "order_type_forward_reverse"]).lower()
         ord_type = "Reverse" if "reverse" in ord_type_raw else "Forward"
 
@@ -1196,15 +1273,19 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
         key_id = line_id or soid or rel_id or ret_id
         ot_lower = ord_type.strip().lower()
 
-        # Primary natural key: (neft_ref, line_id, payment_date, order_type)
+        # Primary natural key: (neft_ref, line_id, payment_date, order_type, payment_type)
         candidate_keys = [
+            (neft_ref, key_id, p_date, ot_lower, pay_type),
             (neft_ref, key_id, p_date, ot_lower),
         ]
         if line_id:
+            candidate_keys.append((neft_ref, line_id, p_date, ot_lower, pay_type))
             candidate_keys.append((neft_ref, line_id, p_date, ot_lower))
         if soid:
+            candidate_keys.append((neft_ref, soid, p_date, ot_lower, pay_type))
             candidate_keys.append((neft_ref, soid, p_date, ot_lower))
         if rel_id:
+            candidate_keys.append((neft_ref, rel_id, p_date, ot_lower, pay_type))
             candidate_keys.append((neft_ref, rel_id, p_date, ot_lower))
 
         is_duplicate = any(ck in existing_keys or ck in seen_in_batch for ck in candidate_keys)
@@ -1214,7 +1295,6 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
 
         for ck in candidate_keys:
             seen_in_batch.add(ck)
-            seen_in_batch.add((ck[0], ck[1], ck[2]))  # also guard date without type
 
         r_doc = {
             "neft_ref": neft_ref,
@@ -1239,7 +1319,15 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
         await db.online_daily_payments.insert_many(rows_to_insert)
 
     inserted_count = len(rows_to_insert)
-    summary_msg = f"{inserted_count} new, {skipped_duplicates} skipped as duplicates."
+    detected_type = (
+        forced_pay_type
+        if forced_pay_type
+        else ("prepaid" if all(r.get("payment_type") == "prepaid" for r in rows_to_insert) and rows_to_insert
+              else ("postpaid" if all(r.get("payment_type") == "postpaid" for r in rows_to_insert) and rows_to_insert
+                    else "mixed"))
+    ) if rows_to_insert else (forced_pay_type or "auto")
+
+    summary_msg = f"{inserted_count} new ({detected_type}), {skipped_duplicates} skipped as duplicates."
 
     await log_activity_db(
         db,
@@ -1256,6 +1344,7 @@ async def import_daily_payments(request: Request, file: UploadFile = File(...)):
         "new": inserted_count,
         "skipped_duplicates": skipped_duplicates,
         "total_in_file": total_in_file,
+        "payment_type": detected_type,
         "filename": file.filename,
         "message": summary_msg,
     }

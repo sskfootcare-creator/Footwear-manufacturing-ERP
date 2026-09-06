@@ -1715,6 +1715,7 @@ export function SettlementImportDrawer({ onClose, onDone }) {
 
 export function DailyPaymentImportDrawer({ onClose, onDone }) {
   const [file, setFile] = useState(null);
+  const [paymentType, setPaymentType] = useState("auto"); // auto | prepaid | postpaid
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -1753,6 +1754,9 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      if (paymentType && paymentType !== "auto") {
+        fd.append("payment_type", paymentType);
+      }
       const res = await http.post("/online-reconciliation/import-daily-payments", fd);
       setResult(res.data);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1778,10 +1782,27 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
         {result ? (
           /* Stage 1: New / Skipped Duplicate Summary — Done */
           <div className="p-6 bg-emerald-50 border-2 border-emerald-300 rounded-lg space-y-4" data-testid="daily-payment-result-card">
-            <div className="flex items-center gap-2.5 text-emerald-900 font-bold text-lg">
-              <CheckCircle2 className="w-6 h-6 text-emerald-600 flex-shrink-0" />
-              <span>Daily Payment File Processed</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5 text-emerald-900 font-bold text-lg">
+                <CheckCircle2 className="w-6 h-6 text-emerald-600 flex-shrink-0" />
+                <span>Daily Payment File Processed</span>
+              </div>
+              {result.payment_type && (
+                <span
+                  data-testid="result-payment-type-badge"
+                  className={`px-2.5 py-1 rounded text-xs font-mono font-bold uppercase tracking-wider ${
+                    result.payment_type === "prepaid"
+                      ? "bg-blue-100 text-blue-800 border border-blue-300"
+                      : result.payment_type === "postpaid"
+                      ? "bg-purple-100 text-purple-800 border border-purple-300"
+                      : "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                  }`}
+                >
+                  {result.payment_type}
+                </span>
+              )}
             </div>
+
             <div className="text-xs font-mono text-emerald-800 bg-white/80 px-3 py-1.5 rounded border border-emerald-200 inline-block">
               {result.filename}
             </div>
@@ -1932,10 +1953,32 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
                 </div>
               )}
 
-              {/* Uploaded vs Missing Summary Badges */}
+              {/* Uploaded vs Missing Summary Badges & Daily Coverage */}
               {progress && (
                 <div className="space-y-2 pt-1 border-t border-slate-200">
-                  {progress.uploaded_business_days?.length > 0 && (
+                  {progress.daily_breakdown?.length > 0 ? (
+                    <div className="text-xs space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-600">Daily Upload Coverage:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {progress.daily_breakdown.map((b) => (
+                          <span
+                            key={b.date}
+                            className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-medium border flex items-center gap-1 ${
+                              b.status === "complete"
+                                ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                                : "bg-amber-50 text-amber-800 border-amber-300"
+                            }`}
+                            data-testid={`coverage-badge-${b.date}`}
+                          >
+                            {b.status === "complete" ? "✓" : "⏳"} {b.date}
+                            <span className="text-[9px] opacity-75 font-normal">
+                              ({b.prepaid_count > 0 ? `Prep:${b.prepaid_count}` : ""}{b.prepaid_count > 0 && b.postpaid_count > 0 ? ", " : ""}{b.postpaid_count > 0 ? `Post:${b.postpaid_count}` : ""})
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : progress.uploaded_business_days?.length > 0 ? (
                     <div className="text-xs space-y-1">
                       <span className="text-[10px] uppercase font-bold text-emerald-700">Uploaded Business Dates:</span>
                       <div className="flex flex-wrap gap-1">
@@ -1946,7 +1989,7 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
                         ))}
                       </div>
                     </div>
-                  )}
+                  ) : null}
 
                   {progress.missing_business_days_mtd?.length > 0 ? (
                     <div className="bg-amber-50 border border-amber-200 rounded p-2.5 text-xs text-amber-800 space-y-1">
@@ -1977,13 +2020,60 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
 
             {/* Upload Form Box */}
             <div className="bg-white border-2 border-dashed border-slate-300 rounded-lg p-5 space-y-4">
+              {/* Payment Type Selection */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                  Payment Type
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentType("auto")}
+                    className={`py-1.5 px-3 rounded text-xs font-semibold border text-center transition-all ${
+                      paymentType === "auto"
+                        ? "bg-[#0F172A] text-white border-slate-900 shadow-sm"
+                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                    }`}
+                    data-testid="payment-type-auto"
+                  >
+                    ⚡ Auto-detect
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentType("prepaid")}
+                    className={`py-1.5 px-3 rounded text-xs font-semibold border text-center transition-all ${
+                      paymentType === "prepaid"
+                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                    }`}
+                    data-testid="payment-type-prepaid"
+                  >
+                    Prepaid File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentType("postpaid")}
+                    className={`py-1.5 px-3 rounded text-xs font-semibold border text-center transition-all ${
+                      paymentType === "postpaid"
+                        ? "bg-purple-600 text-white border-purple-600 shadow-sm"
+                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                    }`}
+                    data-testid="payment-type-postpaid"
+                  >
+                    Postpaid File
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Myntra delivers 2 daily reports (Prepaid & Postpaid). Upload both for complete daily coverage.
+                </p>
+              </div>
+
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
                   Daily Payment File (.csv, .xlsx, .xls)
                 </label>
                 <p className="text-[11px] text-slate-500 mb-3">
-                  Upload Myntra daily prepaid or postpaid settlement report. Natural key{" "}
-                  <span className="font-mono font-semibold text-slate-700">(NEFT + Order Line ID + Date + Type)</span> automatically skips duplicate rows.
+                  Natural key <span className="font-mono font-semibold text-slate-700">(NEFT + Order Line ID + Date + Type)</span> automatically skips duplicate rows.
                 </p>
                 <input
                   type="file"
