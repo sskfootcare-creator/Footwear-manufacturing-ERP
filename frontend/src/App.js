@@ -50,6 +50,9 @@ function Protected({ children }) {
   if (user === null) return <div className="min-h-screen grid place-items-center text-slate-500"><Loader2 className="w-6 h-6 animate-spin" /></div>;
   if (user === false) return <Navigate to="/login" replace />;
 
+  // Workers (karigars) must never access the main ERP console — redirect to karigar dashboard
+  if (user.role === "worker") return <Navigate to="/karigar" replace />;
+
   const workspace = localStorage.getItem("workspace");
   const isSelectPage = window.location.pathname === "/select-workspace";
   if (!workspace && !isSelectPage) {
@@ -61,7 +64,11 @@ function Protected({ children }) {
 function PublicOnly({ children }) {
   const { user } = useAuth();
   if (user === null) return <div className="min-h-screen grid place-items-center text-slate-500"><Loader2 className="w-6 h-6 animate-spin" /></div>;
-  if (user && user !== false) return <Navigate to="/" replace />;
+  // Workers should not be redirected to the ERP — send them to the karigar app instead
+  if (user && user !== false) {
+    if (user.role === "worker") return <Navigate to="/karigar" replace />;
+    return <Navigate to="/" replace />;
+  }
   return children;
 }
 
