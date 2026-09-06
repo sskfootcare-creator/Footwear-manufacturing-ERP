@@ -4683,6 +4683,1164 @@ async def test_tri_channel_wage_payments_cash_bank_upi_reporting_and_reconciliat
         assert line["matched_to"]["ref_id"] in (exp_bank_id, exp_upi_id)
 
 
+@pytest.mark.anyio
+async def test_end_to_end_invoice_payment_reconciliation_credit_matching(monkeypatch):
+    """
+    Verify end-to-end credit matching:
+    1. An invoice payment is recorded against Account A.
+    2. Bank statement CSV containing a matching credit is imported for Account A.
+    3. The payment is suggested in unmatched ERP candidates and auto-matched in reconciliation.
+    4. Statement line and payment document are updated with reconciled status and link IDs.
+    """
+    import io
+    from fastapi import UploadFile
+    from routes.banking import (
+        create_bank_account,
+        import_bank_statement,
+        reconcile_bank_account,
+        get_unmatched_erp_candidates,
+    )
+    from models.banking import BankAccountIn
+
+    mock_db = MagicMock()
+    admin_user = {"id": "admin_1", "role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+
+    import routes.banking
+    import server
+
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    accounts_store = {}
+    lines_store = {}
+    payments_store = {}
+
+    async def _mock_find_one_acc(q):
+        aid = str(q.get("_id"))
+        return accounts_store.get(aid)
+
+    async def _mock_insert_acc(doc):
+        aid = str(ObjectId())
+        doc["_id"] = ObjectId(aid)
+        accounts_store[aid] = doc
+        return MagicMock(inserted_id=ObjectId(aid))
+
+    async def _mock_insert_lines(docs):
+        inserted_ids = []
+        for d in docs:
+            lid = str(ObjectId())
+            d["_id"] = ObjectId(lid)
+            lines_store[lid] = d
+            inserted_ids.append(ObjectId(lid))
+        return MagicMock(inserted_ids=inserted_ids)
+
+    def _mock_find_lines(q):
+        acc_filter = q.get("bank_account_id")
+        status_filter = q.get("match_status")
+        matched = []
+        for l in lines_store.values():
+            if acc_filter and l.get("bank_account_id") != acc_filter:
+                continue
+            if status_filter and l.get("match_status") != status_filter:
+                continue
+            matched.append(l)
+        matched.sort(key=lambda x: x.get("date", ""))
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    async def _mock_update_line(query, update):
+        lid_str = str(query.get("_id"))
+        if lid_str in lines_store:
+            if "$set" in update:
+                lines_store[lid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    def _mock_find_payments(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        is_not_vendor = q.get("type") == {"$ne": "vendor_payment"}
+
+        matched = []
+        for p in payments_store.values():
+            if is_not_vendor and p.get("type") == "vendor_payment":
+                continue
+            if allowed:
+                p_acc = p.get("bank_account_id")
+                # Check string and ObjectId representations
+                p_acc_str = str(p_acc) if p_acc else None
+                allowed_strs = [str(a) for a in allowed if a is not None]
+                if p_acc is None:
+                    if None not in allowed and "" not in allowed:
+                        continue
+                elif p_acc_str not in allowed_strs and p_acc not in allowed:
+                    continue
+            matched.append(p)
+
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    async def _mock_update_payment(query, update):
+        qid = query.get("_id")
+        if isinstance(qid, dict) and "$in" in qid:
+            ids = [str(x) for x in qid["$in"]]
+        else:
+            ids = [str(qid)]
+
+        for pid_str in ids:
+            if pid_str in payments_store:
+                if "$set" in update:
+                    payments_store[pid_str].update(update["$set"])
+                return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_acc)
+    mock_db.bank_accounts.insert_one = AsyncMock(side_effect=_mock_insert_acc)
+    mock_db.bank_statement_lines.insert_many = AsyncMock(side_effect=_mock_insert_lines)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.payments.find = MagicMock(side_effect=_mock_find_payments)
+    mock_db.payments.update_one = AsyncMock(side_effect=_mock_update_payment)
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[]), sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))))))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[]), sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))))))
+
+    # Step 1: Create Account A
+    acc_res = await create_bank_account(
+        BankAccountIn(
+            name="HDFC Current A/C",
+            bank_name="HDFC Bank",
+            account_number_last4="8821",
+            account_number="50200099888821",
+            ifsc="HDFC0000882",
+            account_type="b2b_client",
+            opening_balance=500000.0,
+        ),
+        req,
+    )
+    acc_a_id = acc_res["id"]
+
+    # Step 2: Record an invoice payment against Account A
+    payment_id = str(ObjectId())
+    payments_store[payment_id] = {
+        "_id": ObjectId(payment_id),
+        "payment_no": "PAY-2026-08-001",
+        "payment_date": "2026-08-20",
+        "amount": 85000.0,
+        "mode": "NEFT",
+        "reference": "NEFT990011",
+        "bank": "HDFC Current A/C",
+        "bank_account_id": acc_a_id,
+        "client_name": "Metro Footwear Pvt Ltd",
+        "invoice_ids": ["inv_101"],
+        "type": "client_payment",
+    }
+
+    # Step 3: Check unmatched ERP candidates for Account A includes this payment
+    cand_res = await get_unmatched_erp_candidates(
+        request=req,
+        bank_account_id=acc_a_id,
+        side="credit",
+    )
+    assert cand_res["ok"] is True
+    cand_ids = [c["id"] for c in cand_res["candidates"]]
+    assert payment_id in cand_ids
+    metro_cand = next(c for c in cand_res["candidates"] if c["id"] == payment_id)
+    assert metro_cand["party"] == "Metro Footwear Pvt Ltd"
+    assert metro_cand["amount"] == 85000.0
+
+    # Step 4: Import bank statement for Account A with matching credit line
+    csv_content = (
+        "Date,Narration,Reference,Debit,Credit,Balance\n"
+        "2026-08-20,NEFT CR - METRO FOOTWEAR PVT LTD - INV440,NEFT990011,,85000.00,585000.00\n"
+    ).encode("utf-8")
+    stmt_file = UploadFile(filename="hdfc_stmt.csv", file=io.BytesIO(csv_content))
+    import_res = await import_bank_statement(
+        id=acc_a_id,
+        file=stmt_file,
+        dry_run=False,
+        confirm_account_update=False,
+        request=req,
+    )
+    assert import_res["inserted_count"] == 1
+    imported_line_id = list(lines_store.keys())[0]
+
+    # Step 5: Run auto-reconciliation on Account A
+    recon_res = await reconcile_bank_account(
+        id=acc_a_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res["ok"] is True
+    assert recon_res["auto_matched_count"] == 1
+    assert recon_res["no_match_count"] == 0
+    matched_item = recon_res["matched_details"][0]
+    assert matched_item["matched_type"] == "payment"
+    assert matched_item["ref_id"] == payment_id
+    assert matched_item["amount"] == 85000.0
+    assert matched_item["confidence_score"] >= 0.95
+
+    # Step 6: Verify DB updates on statement line and payment document
+    assert lines_store[imported_line_id]["match_status"] == "matched"
+    assert lines_store[imported_line_id]["matched_to"]["type"] == "payment"
+    assert lines_store[imported_line_id]["matched_to"]["ref_id"] == payment_id
+
+    assert payments_store[payment_id]["bank_account_id"] == acc_a_id
+    assert payments_store[payment_id]["statement_line_id"] == imported_line_id
+    assert payments_store[payment_id]["reconciled"] is True
+
+
+@pytest.mark.anyio
+async def test_credit_matching_account_scoping_strict_isolation(monkeypatch):
+    """
+    Verify cross-account isolation:
+    A payment recorded against Account A must NEVER match bank statement credits
+    imported for Account B, even if the amount and date happen to coincide exactly.
+    """
+    from routes.banking import (
+        reconcile_bank_account,
+        get_unmatched_erp_candidates,
+    )
+
+    mock_db = MagicMock()
+    admin_user = {"id": "admin_1", "role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+
+    import routes.banking
+    import server
+
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    acc_a_id = str(ObjectId())
+    acc_b_id = str(ObjectId())
+
+    accounts_store = {
+        acc_a_id: {
+            "_id": ObjectId(acc_a_id),
+            "name": "Account A - UCO Bank",
+            "account_type": "b2b_client",
+        },
+        acc_b_id: {
+            "_id": ObjectId(acc_b_id),
+            "name": "Account B - ICICI Bank",
+            "account_type": "b2b_client",
+        },
+    }
+
+    # Payment recorded against Account A: 64,500 on 2026-09-02
+    payment_a_id = str(ObjectId())
+    payments_store = {
+        payment_a_id: {
+            "_id": ObjectId(payment_a_id),
+            "payment_no": "PAY-ACC-A-001",
+            "payment_date": "2026-09-02",
+            "amount": 64500.0,
+            "bank_account_id": acc_a_id,  # STRICTLY Account A
+            "client_name": "Apex Footwear Distributors",
+            "type": "client_payment",
+        }
+    }
+
+    # Statement line on Account B: identical credit of 64,500 on 2026-09-02
+    stmt_b_line_id = str(ObjectId())
+    # Statement line on Account A: identical credit of 64,500 on 2026-09-02
+    stmt_a_line_id = str(ObjectId())
+
+    lines_store = {
+        stmt_b_line_id: {
+            "_id": ObjectId(stmt_b_line_id),
+            "bank_account_id": acc_b_id,
+            "date": "2026-09-02",
+            "credit_amount": 64500.0,
+            "debit_amount": 0.0,
+            "match_status": "unmatched",
+            "narration": "RTGS CR - APEX DISTRIBUTORS",
+        },
+        stmt_a_line_id: {
+            "_id": ObjectId(stmt_a_line_id),
+            "bank_account_id": acc_a_id,
+            "date": "2026-09-02",
+            "credit_amount": 64500.0,
+            "debit_amount": 0.0,
+            "match_status": "unmatched",
+            "narration": "RTGS CR - APEX DISTRIBUTORS",
+        },
+    }
+
+    async def _mock_find_one_acc(q):
+        aid = str(q.get("_id"))
+        return accounts_store.get(aid)
+
+    def _mock_find_lines(q):
+        acc_filter = q.get("bank_account_id")
+        status_filter = q.get("match_status")
+        matched = []
+        for l in lines_store.values():
+            if acc_filter and l.get("bank_account_id") != acc_filter:
+                continue
+            if status_filter and l.get("match_status") != status_filter:
+                continue
+            matched.append(l)
+        matched.sort(key=lambda x: x.get("date", ""))
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    async def _mock_update_line(query, update):
+        lid_str = str(query.get("_id"))
+        if lid_str in lines_store:
+            if "$set" in update:
+                lines_store[lid_str].update(update["$set"])
+            return MagicMock(matched_count=1, modified_count=1)
+        return MagicMock(matched_count=0, modified_count=0)
+
+    def _mock_find_payments(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        allowed_strs = [str(a) for a in allowed if a is not None]
+
+        matched = []
+        for p in payments_store.values():
+            p_acc = p.get("bank_account_id")
+            p_acc_str = str(p_acc) if p_acc else None
+            if p_acc is None:
+                if None not in allowed and "" not in allowed:
+                    continue
+            elif p_acc_str not in allowed_strs and p_acc not in allowed:
+                continue
+            matched.append(p)
+
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_acc)
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.payments.find = MagicMock(side_effect=_mock_find_payments)
+    mock_db.payments.update_one = AsyncMock(side_effect=lambda q, u: MagicMock(matched_count=1))
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[]), sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))))))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[]), sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))))))
+
+    # Step 1: Query unmatched ERP candidates for Account B
+    cand_b = await get_unmatched_erp_candidates(
+        request=req,
+        bank_account_id=acc_b_id,
+        side="credit",
+    )
+    assert cand_b["ok"] is True
+    # Crucial: Account A payment must NOT be suggested for Account B
+    assert len(cand_b["candidates"]) == 0
+
+    # Step 2: Auto-reconcile on Account B
+    recon_b = await reconcile_bank_account(
+        id=acc_b_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_b["ok"] is True
+    assert recon_b["total_unmatched_evaluated"] == 1
+    # Crucial: Account B must have 0 matches and 1 no_match
+    assert recon_b["auto_matched_count"] == 0
+    assert recon_b["no_match_count"] == 1
+    # Account B line remains unmatched
+    assert lines_store[stmt_b_line_id]["match_status"] == "unmatched"
+
+    # Step 3: Query unmatched ERP candidates for Account A
+    cand_a = await get_unmatched_erp_candidates(
+        request=req,
+        bank_account_id=acc_a_id,
+        side="credit",
+    )
+    assert cand_a["ok"] is True
+    assert len(cand_a["candidates"]) == 1
+    assert cand_a["candidates"][0]["id"] == payment_a_id
+
+    # Step 4: Auto-reconcile on Account A
+    recon_a = await reconcile_bank_account(
+        id=acc_a_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_a["ok"] is True
+    assert recon_a["total_unmatched_evaluated"] == 1
+    assert recon_a["auto_matched_count"] == 1
+    assert recon_a["matched_details"][0]["ref_id"] == payment_a_id
+    assert lines_store[stmt_a_line_id]["match_status"] == "matched"
+    assert lines_store[stmt_a_line_id]["matched_to"]["ref_id"] == payment_a_id
+
+    # Confirm Account B's line was STILL NEVER matched
+    assert lines_store[stmt_b_line_id]["match_status"] == "unmatched"
+
+
+@pytest.mark.anyio
+async def test_credit_matching_with_objectid_bank_account_id(monkeypatch):
+    """Verify that a payment stored with bank_account_id as an ObjectId matches Account A properly."""
+    from routes.banking import reconcile_bank_account
+
+    mock_db = MagicMock()
+    admin_user = {"id": "admin_1", "role": "admin", "email": "admin@sskfootcare.com", "name": "Admin User"}
+
+    import routes.banking
+    import server
+
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=admin_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+    monkeypatch.setattr(server, "db", mock_db)
+
+    req = MagicMock()
+    req.app.mongodb = mock_db
+    req.state.user = admin_user
+
+    acc_a_id = str(ObjectId())
+    acc_b_id = str(ObjectId())
+
+    accounts_store = {
+        acc_a_id: {"_id": ObjectId(acc_a_id), "name": "Account A", "account_type": "b2b_client"},
+        acc_b_id: {"_id": ObjectId(acc_b_id), "name": "Account B", "account_type": "b2b_client"},
+    }
+
+    # Stored with bank_account_id as ObjectId, not string
+    payment_oid_id = str(ObjectId())
+    payment_doc = {
+        "_id": ObjectId(payment_oid_id),
+        "payment_no": "PAY-OID-001",
+        "payment_date": "2026-09-05",
+        "amount": 32000.0,
+        "bank_account_id": ObjectId(acc_a_id),  # BSON ObjectId
+        "client_name": "Royal Shoes Co",
+        "type": "client_payment",
+    }
+
+    stmt_line_id = str(ObjectId())
+    line_doc = {
+        "_id": ObjectId(stmt_line_id),
+        "bank_account_id": acc_a_id,
+        "date": "2026-09-05",
+        "credit_amount": 32000.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "narration": "NEFT CR ROYAL SHOES CO",
+    }
+
+    async def _mock_find_one_acc(q):
+        aid = str(q.get("_id"))
+        return accounts_store.get(aid)
+
+    def _mock_payments_find(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        matching = []
+        p_acc = payment_doc.get("bank_account_id")
+        if p_acc in allowed or str(p_acc) in [str(x) for x in allowed if x is not None]:
+            matching.append(payment_doc)
+        return MagicMock(to_list=AsyncMock(return_value=matching))
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_acc)
+    mock_cursor = MagicMock()
+    mock_cursor.sort = MagicMock(return_value=mock_cursor)
+    mock_cursor.to_list = AsyncMock(return_value=[line_doc])
+    mock_db.bank_statement_lines.find = MagicMock(return_value=mock_cursor)
+    mock_db.bank_statement_lines.update_one = AsyncMock()
+    mock_db.payments.find = MagicMock(side_effect=_mock_payments_find)
+    mock_db.payments.update_one = AsyncMock()
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    recon_res = await reconcile_bank_account(
+        id=acc_a_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res["ok"] is True
+    assert recon_res["auto_matched_count"] == 1
+    assert recon_res["matched_details"][0]["ref_id"] == payment_oid_id
+
+
+@pytest.mark.anyio
+async def test_record_deposit_endpoint_validation_and_persistence(monkeypatch):
+    """Test creating a direct generic deposit entry via POST /banking/deposits."""
+    from models.banking import DepositCreateIn
+    from routes.banking import create_deposit_entry
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "finance@sskfootcare.com", "name": "Finance Head"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_id = str(ObjectId())
+    acc_doc = {
+        "_id": ObjectId(acc_id),
+        "name": "HDFC Primary",
+        "bank_name": "HDFC",
+        "account_type": "b2b_client",
+    }
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+    mock_db.period_locks.find_one = AsyncMock(return_value=None)
+    mock_db.counters.find_one_and_update = AsyncMock(return_value={"seq": 105})
+
+    inserted_doc = {}
+    async def _mock_insert_payment(doc):
+        nonlocal inserted_doc
+        inserted_doc = dict(doc)
+        inserted_doc["_id"] = ObjectId()
+        return MagicMock(inserted_id=inserted_doc["_id"])
+
+    mock_db.payments.insert_one = AsyncMock(side_effect=_mock_insert_payment)
+
+    req = MagicMock()
+
+    # 1. Validation: invalid account
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=None)
+    with pytest.raises(HTTPException) as exc1:
+        await create_deposit_entry(
+            payload=DepositCreateIn(
+                bank_account_id=str(ObjectId()),
+                amount=5000.0,
+                date="2026-09-03",
+                category="refund",
+                description="Test Refund",
+            ),
+            request=req,
+        )
+    assert exc1.value.status_code == 404
+
+    # Restore valid account
+    mock_db.bank_accounts.find_one = AsyncMock(return_value=acc_doc)
+
+    # 2. Validation: zero or negative amount
+    with pytest.raises(Exception):
+        DepositCreateIn(
+            bank_account_id=acc_id,
+            amount=0.0,
+            date="2026-09-03",
+            category="refund",
+        )
+
+    # 3. Successful deposit creation
+    res = await create_deposit_entry(
+        payload=DepositCreateIn(
+            bank_account_id=acc_id,
+            amount=15000.0,
+            date="2026-09-03",
+            category="refund",
+            description="Sole Corp material refund",
+            remarks="NEFT REF 881234",
+        ),
+        request=req,
+    )
+
+    assert res["ok"] is True
+    assert res["amount"] == 15000.0
+    assert res["id"] == str(inserted_doc["_id"])
+    assert inserted_doc["type"] == "deposit"
+    assert inserted_doc["bank_account_id"] == acc_id
+    assert inserted_doc["category"] == "refund"
+    assert inserted_doc["amount"] == 15000.0
+    assert inserted_doc["payment_date"] == "2026-09-03"
+    assert inserted_doc["reconciled"] is False
+    assert inserted_doc["payment_no"] == "DEP-00105"
+
+
+@pytest.mark.anyio
+async def test_generic_deposit_reconciliation_credit_matching_end_to_end(monkeypatch):
+    """
+    End-to-end verification that a generic deposit (e.g. vendor refund or interest):
+    1. Appears in get_unmatched_erp_candidates for Account A
+    2. Auto-matches against imported statement credit line on Account A
+    3. Strictly isolates: NEVER matches statement credit line on Account B
+    """
+    from routes.banking import (
+        get_unmatched_erp_candidates,
+        reconcile_bank_account,
+    )
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    acc_a_id = str(ObjectId())
+    acc_b_id = str(ObjectId())
+
+    accounts_store = {
+        acc_a_id: {
+            "_id": ObjectId(acc_a_id),
+            "name": "HDFC Primary (Acc A)",
+            "account_type": "b2b_client",
+        },
+        acc_b_id: {
+            "_id": ObjectId(acc_b_id),
+            "name": "ICICI Operations (Acc B)",
+            "account_type": "b2b_client",
+        },
+    }
+
+    deposit_id = str(ObjectId())
+    deposit_doc = {
+        "_id": ObjectId(deposit_id),
+        "payment_no": "DEP-00042",
+        "payment_date": "2026-09-03",
+        "amount": 25000.0,
+        "mode": "bank_deposit",
+        "type": "deposit",
+        "category": "refund",
+        "description": "Sole Corp Leather Refund",
+        "client_name": "Sole Corp Leather Refund",
+        "party": "Sole Corp Leather Refund",
+        "reference": "NEFT-REF-25000",
+        "bank_account_id": acc_a_id,
+        "bank": "HDFC Primary (Acc A)",
+        "reconciled": False,
+        "statement_line_id": None,
+    }
+
+    # Statement line on Account A (matches deposit)
+    stmt_line_a = {
+        "_id": ObjectId(),
+        "bank_account_id": acc_a_id,
+        "date": "2026-09-03",
+        "narration": "NEFT CR - SOLE CORP REFUND - UTR9988",
+        "reference_no": "UTR9988",
+        "credit_amount": 25000.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+
+    # Statement line on Account B (same amount, same date, but Account B!)
+    stmt_line_b = {
+        "_id": ObjectId(),
+        "bank_account_id": acc_b_id,
+        "date": "2026-09-03",
+        "narration": "NEFT CR - SOME OTHER VENDOR",
+        "reference_no": "UTR1122",
+        "credit_amount": 25000.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+
+    async def _mock_find_one_acc(q):
+        aid = str(q.get("_id"))
+        return accounts_store.get(aid)
+
+    def _mock_payments_find(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        matching = []
+        p_acc = deposit_doc.get("bank_account_id")
+        if p_acc in allowed or str(p_acc) in [str(x) for x in allowed if x is not None]:
+            matching.append(deposit_doc)
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matching)
+        return cur
+
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_acc)
+    mock_db.period_locks.find_one = AsyncMock(return_value=None)
+    mock_db.payments.find = MagicMock(side_effect=_mock_payments_find)
+    mock_db.payments.update_one = AsyncMock()
+    mock_db.bank_statement_lines.update_one = AsyncMock()
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.expenses.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+
+    req = MagicMock()
+
+    # 1. Candidate query for Account A: deposit MUST appear with type="deposit"
+    cand_a = await get_unmatched_erp_candidates(
+        request=req,
+        bank_account_id=acc_a_id,
+        side="credit",
+    )
+    assert cand_a["ok"] is True
+    assert cand_a["total"] == 1
+    dep_cand = cand_a["candidates"][0]
+    assert dep_cand["type"] == "deposit"
+    assert dep_cand["id"] == deposit_id
+    assert dep_cand["amount"] == 25000.0
+    assert dep_cand["party"] == "Sole Corp Leather Refund"
+
+    # 2. Strict candidate isolation: deposit from Account A MUST NOT appear for Account B
+    cand_b = await get_unmatched_erp_candidates(
+        request=req,
+        bank_account_id=acc_b_id,
+        side="credit",
+    )
+    assert cand_b["ok"] is True
+    assert cand_b["total"] == 0
+
+    # 3. Auto-reconciliation on Account A: matches credit line to deposit
+    cur_a = MagicMock()
+    cur_a.sort = MagicMock(return_value=cur_a)
+    cur_a.to_list = AsyncMock(return_value=[stmt_line_a])
+    mock_db.bank_statement_lines.find = MagicMock(return_value=cur_a)
+
+    recon_res_a = await reconcile_bank_account(
+        id=acc_a_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res_a["ok"] is True
+    assert recon_res_a["auto_matched_count"] == 1
+    matched_item = recon_res_a["matched_details"][0]
+    assert matched_item["ref_id"] == deposit_id
+    assert matched_item["matched_type"] == "deposit"
+
+    # Verify statement line was marked matched with type="deposit"
+    call_stmt = mock_db.bank_statement_lines.update_one.call_args[0]
+    assert call_stmt[0] == {"_id": stmt_line_a["_id"]}
+    assert call_stmt[1]["$set"]["match_status"] == "matched"
+    assert call_stmt[1]["$set"]["matched_to"] == {"type": "deposit", "ref_id": deposit_id}
+
+    # Verify payments collection was updated with statement_line_id and reconciled=True
+    call_payment = mock_db.payments.update_one.call_args[0]
+    assert call_payment[0] == {"_id": deposit_doc["_id"]}
+    assert call_payment[1]["$set"]["bank_account_id"] == acc_a_id
+    assert call_payment[1]["$set"]["statement_line_id"] == str(stmt_line_a["_id"])
+    assert call_payment[1]["$set"]["reconciled"] is True
+
+    # 4. Strict isolation on Account B: even with exact same amount & date, deposit on Account A NEVER matches Account B
+    cur_b = MagicMock()
+    cur_b.sort = MagicMock(return_value=cur_b)
+    cur_b.to_list = AsyncMock(return_value=[stmt_line_b])
+    mock_db.bank_statement_lines.find = MagicMock(return_value=cur_b)
+
+    recon_res_b = await reconcile_bank_account(
+        id=acc_b_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.95,
+        dry_run=False,
+    )
+    assert recon_res_b["ok"] is True
+    assert recon_res_b["auto_matched_count"] == 0
+    assert recon_res_b["no_match_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_manual_match_statement_line_to_deposit(monkeypatch):
+    """Test manual match & unmatch of statement line to a deposit entry."""
+    from models.banking import BankStatementLineUpdate, MatchedTo
+    from routes.banking import match_statement_line
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "admin@sskfootcare.com", "name": "Admin"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    line_id = str(ObjectId())
+    deposit_id = str(ObjectId())
+    acc_id = str(ObjectId())
+
+    line_doc = {
+        "_id": ObjectId(line_id),
+        "bank_account_id": acc_id,
+        "date": "2026-09-04",
+        "narration": "INTEREST CREDIT - Q2",
+        "credit_amount": 1250.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+
+    mock_db.bank_statement_lines.find_one = AsyncMock(return_value=line_doc)
+    mock_db.bank_statement_lines.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+    mock_db.period_locks.find_one = AsyncMock(return_value=None)
+    mock_db.payments.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+
+    req = MagicMock()
+
+    # 1. Manual Match to deposit
+    res = await match_statement_line(
+        id=line_id,
+        payload=BankStatementLineUpdate(
+            match_status="matched",
+            matched_to=MatchedTo(type="deposit", ref_id=deposit_id),
+        ),
+        request=req,
+    )
+
+    # Check safe update was called on payments
+    mock_db.payments.update_one.assert_called()
+    call_args = mock_db.payments.update_one.call_args[0]
+    assert call_args[1]["$set"]["reconciled"] is True
+    assert call_args[1]["$set"]["statement_line_id"] == line_id
+    assert call_args[1]["$set"]["bank_account_id"] == acc_id
+
+    # 2. Unmatch
+    line_doc["match_status"] = "matched"
+    line_doc["matched_to"] = {"type": "deposit", "ref_id": deposit_id}
+    mock_db.bank_statement_lines.find_one = AsyncMock(return_value=line_doc)
+    mock_db.payments.update_one.reset_mock()
+
+    res_unmatch = await match_statement_line(
+        id=line_id,
+        payload=BankStatementLineUpdate(
+            match_status="unmatched",
+        ),
+        request=req,
+    )
+    mock_db.payments.update_one.assert_called()
+    unmatch_args = mock_db.payments.update_one.call_args[0]
+    assert "$unset" in unmatch_args[1]
+    assert "statement_line_id" in unmatch_args[1]["$unset"]
+    assert "reconciled" in unmatch_args[1]["$unset"]
+
+
+@pytest.mark.anyio
+async def test_full_realistic_workflow_payments_deposits_reconciliation_summary(monkeypatch):
+    """
+    Full realistic workflow:
+    1. Record an invoice payment with a bank account specified (e.g. ₹45,000 from Metro Shoes).
+    2. Record a generic deposit (e.g. ₹15,000 vendor refund from Sole Corp).
+    3. Record an internal expense (e.g. ₹8,000 factory utility expense).
+    4. Import a bank statement containing matching credit lines for both plus the debit line.
+    5. Run auto-reconciliation: confirm both credits (payment + deposit) and the expense are matched.
+    6. Confirm reconciliation summary's Reconciled Payouts & Expenses / income-side totals:
+       - matched_income includes real payment data (₹45,000 + ₹15,000 = ₹60,000)
+       - matched_expenses includes expenses (₹8,000)
+       - net operating cashflow is ₹52,000
+       - ERP Reconciled Balance accurately includes both opening balance + receipts - payouts!
+    This directly verifies the fix for 'it only calculates expenses but not the payment received'.
+    """
+    from models.banking import BankAccountIn, DepositCreateIn
+    from routes.banking import (
+        create_bank_account,
+        create_deposit_entry,
+        reconcile_bank_account,
+        get_reconciliation_summary,
+    )
+
+    mock_db = MagicMock()
+    mock_user = {"role": "admin", "email": "finance@sskfootcare.com", "name": "Finance Head"}
+
+    import routes.banking
+    monkeypatch.setattr(routes.banking, "_get_user", AsyncMock(return_value=mock_user))
+    monkeypatch.setattr(routes.banking, "_get_db", lambda r: mock_db)
+
+    accounts_store = {}
+    lines_store = {}
+    payments_store = {}
+    expenses_store = {}
+
+    async def _mock_insert_acc(doc):
+        aid = str(ObjectId())
+        doc["_id"] = ObjectId(aid)
+        accounts_store[aid] = doc
+        return MagicMock(inserted_id=doc["_id"])
+
+    async def _mock_find_one_acc(q):
+        aid = str(q.get("_id"))
+        return accounts_store.get(aid)
+
+    async def _mock_find_accs(q):
+        return list(accounts_store.values())
+
+    async def _mock_insert_payment(doc):
+        pid = str(ObjectId())
+        doc["_id"] = ObjectId(pid)
+        payments_store[pid] = doc
+        return MagicMock(inserted_id=doc["_id"])
+
+    def _mock_find_payments(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        allowed_strs = [str(x) for x in allowed if x is not None]
+        matched = []
+        for p in payments_store.values():
+            p_acc = p.get("bank_account_id")
+            if p_acc is not None and str(p_acc) not in allowed_strs and p_acc not in allowed:
+                continue
+            matched.append(p)
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    async def _mock_update_payment(q, upd):
+        qid = q.get("_id")
+        pid = str(qid)
+        if pid in payments_store and "$set" in upd:
+            payments_store[pid].update(upd["$set"])
+            return MagicMock(matched_count=1)
+        return MagicMock(matched_count=0)
+
+    def _mock_find_expenses(q):
+        acc_filter = q.get("bank_account_id", {})
+        allowed = acc_filter.get("$in", []) if isinstance(acc_filter, dict) else [acc_filter]
+        allowed_strs = [str(x) for x in allowed if x is not None]
+        matched = []
+        for e in expenses_store.values():
+            e_acc = e.get("bank_account_id")
+            if e_acc is not None and str(e_acc) not in allowed_strs and e_acc not in allowed:
+                continue
+            matched.append(e)
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    def _mock_find_lines(q):
+        acc_id = q.get("bank_account_id")
+        m_status = q.get("match_status")
+        matched = []
+        for l in lines_store.values():
+            if acc_id and str(l.get("bank_account_id")) != str(acc_id):
+                continue
+            if m_status and l.get("match_status") != m_status:
+                continue
+            matched.append(l)
+        cur = MagicMock()
+        cur.sort = MagicMock(return_value=cur)
+        cur.limit = MagicMock(return_value=cur)
+        cur.to_list = AsyncMock(return_value=matched)
+        return cur
+
+    async def _mock_update_line(q, upd):
+        qid = q.get("_id")
+        lid = str(qid)
+        if lid in lines_store and "$set" in upd:
+            lines_store[lid].update(upd["$set"])
+            return MagicMock(matched_count=1)
+        return MagicMock(matched_count=0)
+
+    mock_db.bank_accounts.insert_one = AsyncMock(side_effect=_mock_insert_acc)
+    mock_db.bank_accounts.find_one = AsyncMock(side_effect=_mock_find_one_acc)
+    mock_db.bank_accounts.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(side_effect=_mock_find_accs)))
+    mock_db.payments.insert_one = AsyncMock(side_effect=_mock_insert_payment)
+    mock_db.payments.find = MagicMock(side_effect=_mock_find_payments)
+    mock_db.payments.update_one = AsyncMock(side_effect=_mock_update_payment)
+    mock_db.expenses.find = MagicMock(side_effect=_mock_find_expenses)
+    mock_db.expenses.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
+    mock_db.bank_statement_lines.find = MagicMock(side_effect=_mock_find_lines)
+    mock_db.bank_statement_lines.update_one = AsyncMock(side_effect=_mock_update_line)
+    mock_db.period_locks.find_one = AsyncMock(return_value=None)
+    mock_db.online_settlements.find = MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=[])))
+    mock_db.counters.find_one_and_update = AsyncMock(return_value={"seq": 88})
+
+    req = MagicMock()
+
+    # Step 1: Create bank account with opening balance ₹100,000
+    acc_res = await create_bank_account(
+        payload=BankAccountIn(
+            name="HDFC Primary Current",
+            bank_name="HDFC Bank",
+            account_number_last4="4401",
+            account_number="50200044011002",
+            account_type="b2b_client",
+            opening_balance=100000.0,
+            opening_balance_date="2026-09-01",
+        ),
+        request=req,
+    )
+    acc_id = acc_res["id"]
+
+    # Step 2: Record an invoice payment (₹45,000 received from Metro Shoes)
+    inv_pay_id = str(ObjectId())
+    payments_store[inv_pay_id] = {
+        "_id": ObjectId(inv_pay_id),
+        "payment_no": "PAY-2026-09-001",
+        "payment_date": "2026-09-02",
+        "amount": 45000.0,
+        "mode": "NEFT",
+        "reference": "NEFT-METRO-45K",
+        "bank_account_id": acc_id,
+        "bank": "HDFC Primary Current",
+        "client_name": "Metro Shoes",
+        "party": "Metro Shoes",
+        "reconciled": False,
+        "statement_line_id": None,
+    }
+
+    # Step 3: Record a generic deposit (₹15,000 vendor refund from Sole Corp)
+    dep_res = await create_deposit_entry(
+        payload=DepositCreateIn(
+            bank_account_id=acc_id,
+            amount=15000.0,
+            date="2026-09-02",
+            category="refund",
+            description="Sole Corp material refund",
+            remarks="NEFT REF 881234",
+        ),
+        request=req,
+    )
+    deposit_id = dep_res["id"]
+
+    # Step 4: Record an operating expense (₹8,000 electricity bill)
+    exp_id = str(ObjectId())
+    expenses_store[exp_id] = {
+        "_id": ObjectId(exp_id),
+        "payee": "Torrent Power",
+        "category": "Electricity / Utilities",
+        "amount": 8000.0,
+        "date": "2026-09-02",
+        "bank_account_id": acc_id,
+        "paid_via": "bank",
+        "reconciled": False,
+        "statement_line_id": None,
+    }
+
+    # Step 5: Import bank statement with 3 lines:
+    # 2 credit lines (the invoice payment + the deposit) and 1 debit line (the expense)
+    stmt_line_1_id = str(ObjectId())
+    stmt_line_2_id = str(ObjectId())
+    stmt_line_3_id = str(ObjectId())
+
+    lines_store[stmt_line_1_id] = {
+        "_id": ObjectId(stmt_line_1_id),
+        "bank_account_id": acc_id,
+        "date": "2026-09-02",
+        "narration": "NEFT CR - METRO SHOES INV PAY",
+        "reference_no": "NEFT-METRO-45K",
+        "credit_amount": 45000.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+    lines_store[stmt_line_2_id] = {
+        "_id": ObjectId(stmt_line_2_id),
+        "bank_account_id": acc_id,
+        "date": "2026-09-02",
+        "narration": "NEFT CR - SOLE CORP MATERIAL REFUND",
+        "reference_no": "NEFT-REF-881234",
+        "credit_amount": 15000.0,
+        "debit_amount": 0.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+    lines_store[stmt_line_3_id] = {
+        "_id": ObjectId(stmt_line_3_id),
+        "bank_account_id": acc_id,
+        "date": "2026-09-02",
+        "narration": "DEBIT ACH - TORRENT POWER ELECTRICITY",
+        "reference_no": "ACH998811",
+        "credit_amount": 0.0,
+        "debit_amount": 8000.0,
+        "match_status": "unmatched",
+        "matched_to": None,
+    }
+
+    # Step 6: Run auto-reconciliation on the bank account
+    recon_res = await reconcile_bank_account(
+        id=acc_id,
+        request=req,
+        date_window_days=3,
+        amount_tolerance=1.0,
+        min_confidence=0.90,
+        dry_run=False,
+    )
+
+    assert recon_res["ok"] is True
+    assert recon_res["auto_matched_count"] == 3
+    assert recon_res["no_match_count"] == 0
+
+    # Confirm both credits are matched to their respective records
+    matched_types = {d["statement_line_id"]: d["matched_type"] for d in recon_res["matched_details"]}
+    assert matched_types[stmt_line_1_id] == "payment"
+    assert matched_types[stmt_line_2_id] == "deposit"
+    assert matched_types[stmt_line_3_id] == "expense"
+
+    # Confirm statement lines are updated to matched in store
+    assert lines_store[stmt_line_1_id]["match_status"] == "matched"
+    assert lines_store[stmt_line_1_id]["matched_to"]["type"] == "payment"
+    assert lines_store[stmt_line_1_id]["matched_to"]["ref_id"] == inv_pay_id
+
+    assert lines_store[stmt_line_2_id]["match_status"] == "matched"
+    assert lines_store[stmt_line_2_id]["matched_to"]["type"] == "deposit"
+    assert lines_store[stmt_line_2_id]["matched_to"]["ref_id"] == deposit_id
+
+    assert lines_store[stmt_line_3_id]["match_status"] == "matched"
+    assert lines_store[stmt_line_3_id]["matched_to"]["type"] == "expense"
+
+    # Confirm payments store docs are marked reconciled=True
+    assert payments_store[inv_pay_id]["reconciled"] is True
+    assert payments_store[inv_pay_id]["statement_line_id"] == stmt_line_1_id
+
+    assert payments_store[deposit_id]["reconciled"] is True
+    assert payments_store[deposit_id]["statement_line_id"] == stmt_line_2_id
+
+    # Step 7: Call reconciliation summary and confirm income-side totals include real payment data!
+    summary_res = await get_reconciliation_summary(
+        request=req,
+        bank_account_id=acc_id,
+    )
+
+    assert summary_res["ok"] is True
+    s = summary_res["summary"]
+
+    # Income-side totals: ₹45,000 (payment) + ₹15,000 (deposit) = ₹60,000
+    assert s["total_income"] == 60000.0
+    assert s["matched_income"] == 60000.0
+    assert s["unmatched_income"] == 0.0
+
+    # Expense-side totals: ₹8,000 (expense)
+    assert s["total_expenses"] == 8000.0
+    assert s["matched_expenses"] == 8000.0
+    assert s["unmatched_expenses"] == 0.0
+
+    # Net operating cashflow: ₹60,000 - ₹8,000 = ₹52,000
+    assert s["net_operating_cashflow"] == 52000.0
+
+    # Account-level breakdown
+    acc_stats = summary_res["accounts"][0]
+    assert acc_stats["total_reconciled_credits"] == 60000.0
+    assert acc_stats["total_reconciled_debits"] == 8000.0
+    assert acc_stats["net_statement_flow"] == 52000.0
+
+    # Financial balance verification:
+    # Opening (100,000) + Reconciled In (60,000) - Reconciled Out (8,000) = 152,000
+    erp_balance = acc_stats["opening_balance"] + acc_stats["total_reconciled_credits"] - acc_stats["total_reconciled_debits"]
+    statement_closing = acc_stats["opening_balance"] + acc_stats["net_statement_flow"]
+    assert erp_balance == 152000.0
+    assert statement_closing == 152000.0
+    assert erp_balance == statement_closing  # Zero variance!
+
+
+
+
 
 
 

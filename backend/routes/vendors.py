@@ -367,6 +367,7 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
         "mode": payload.mode,
         "reference": payload.reference,
         "bank": payload.bank,
+        "bank_account_id": payload.bank_account_id,
         "notes": payload.notes,
         "type": "vendor_payment",
         "vendor_id": str(vendor["_id"]),

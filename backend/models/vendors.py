@@ -37,7 +37,9 @@ class PaymentIn(BaseModel):
     mode: Literal["Bank Transfer", "RTGS", "NEFT", "Cheque", "UPI", "Cash", "Adjustment"]
     reference: Optional[str] = ""
     bank: Optional[str] = ""
+    account_type: Optional[Literal["bank", "cash"]] = "bank"
     bank_account_id: Optional[str] = None
+    cash_account_id: Optional[str] = None
     notes: Optional[str] = ""
 
 

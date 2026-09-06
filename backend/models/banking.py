@@ -77,7 +77,7 @@ class BalanceCorrectionIn(BaseModel):
 
 
 class MatchedTo(BaseModel):
-    type: Literal["payment", "settlement", "expense", "vendor_payment", "transfer", "cash_withdrawal"]
+    type: Literal["payment", "settlement", "expense", "vendor_payment", "transfer", "cash_withdrawal", "deposit", "contra_transfer", "client_advance", "capital", "loan_borrowing"]
     ref_id: str
 
 
@@ -110,6 +110,17 @@ class TransferConfirmIn(BaseModel):
     notes: Optional[str] = ""
 
 
+class InterAccountTransferIn(BaseModel):
+    from_account_type: Literal["bank", "cash"] = Field("bank", description="bank | cash")
+    from_account_id: Optional[str] = Field(None, description="Source bank account ID (if from_account_type is bank)")
+    to_account_type: Literal["bank", "cash"] = Field("bank", description="bank | cash")
+    to_account_id: Optional[str] = Field(None, description="Destination bank account ID (if to_account_type is bank)")
+    amount: float = Field(..., gt=0, description="Transfer amount (must be > 0)")
+    date: str = Field(..., description="Transfer date (YYYY-MM-DD)")
+    reference_no: Optional[str] = Field("", description="Transaction / UTR reference number")
+    notes: Optional[str] = Field("", description="Notes or description of transfer")
+
+
 class CashWithdrawalConfirmIn(BaseModel):
     statement_line_id: str = Field(..., description="ID of the debit statement line (withdrawn from bank)")
     existing_cash_ledger_id: Optional[str] = Field(None, description="Optional ID of existing manual cash ledger entry to link to")
@@ -121,6 +132,31 @@ class CashLedgerCreateIn(BaseModel):
     amount: float = Field(..., gt=0, description="Cash withdrawal amount (must be > 0)")
     date: str = Field(..., description="Date of cash withdrawal (YYYY-MM-DD)")
     notes: Optional[str] = Field("", description="Optional notes or reference for the cash ledger entry")
+
+
+class DepositCreateIn(BaseModel):
+    bank_account_id: str = Field(..., description="ID of the bank account where deposit was received")
+    amount: float = Field(..., gt=0, description="Deposit amount (must be > 0)")
+    date: str = Field(..., description="Date of deposit (YYYY-MM-DD)")
+    category: Optional[str] = Field("other", description="Category: client_advance | capital | loan_borrowing | refund | interest | internal_transfer | other")
+    client_id: Optional[str] = Field(None, description="Optional Client ID if category is client_advance")
+    client_name: Optional[str] = Field(None, description="Optional Client Name if category is client_advance")
+    source_party_name: Optional[str] = Field(None, description="Name of individual / institution (e.g. Director Ajay Sharma, SBI Term Loan)")
+    from_bank_account_id: Optional[str] = Field(None, description="Source bank account ID if internal_transfer")
+    from_cash_account: Optional[bool] = Field(False, description="True if transferred from Cash in Hand")
+    description: Optional[str] = Field("", description="Description or source of funds")
+    remarks: Optional[str] = Field("", description="Additional notes or remarks")
+
+
+class StatementLineMatchInflowIn(BaseModel):
+    statement_line_id: str = Field(..., description="ID of the statement line to reconcile")
+    inflow_type: Literal["client_advance", "capital", "loan_borrowing", "internal_transfer", "refund", "interest", "other"] = Field(..., description="Type of inflow")
+    client_id: Optional[str] = Field(None, description="Client ID if client_advance")
+    client_name: Optional[str] = Field(None, description="Client Name if client_advance")
+    source_party_name: Optional[str] = Field(None, description="Name of contributor, director, or lending institution")
+    from_bank_account_id: Optional[str] = Field(None, description="Sending bank account ID if internal_transfer")
+    from_cash_account: Optional[bool] = Field(False, description="Whether transferred from Cash in Hand")
+    notes: Optional[str] = Field("", description="Optional remarks or notes")
 
 
 class PeriodLockIn(BaseModel):
@@ -135,6 +171,21 @@ class PeriodUnlockIn(BaseModel):
     period_from: str = Field(..., description="Start date of the locked period to unlock (YYYY-MM-DD)")
     period_to: str = Field(..., description="End date of the locked period to unlock (YYYY-MM-DD)")
     reason: str = Field("Admin correction", description="Reason for unlocking period (audit logged)")
+
+
+class CashAccountOut(BaseModel):
+    id: str
+    name: str
+    source_bank_account_id: str
+    bank_name: Optional[str] = None
+    created_at: Optional[str] = None
+    current_balance: float = 0.0
+    balance: float = 0.0
+    total_withdrawn: float = 0.0
+    total_spent: float = 0.0
+    account_type: str = "cash"
+    is_cash_account: bool = True
+
 
 
 

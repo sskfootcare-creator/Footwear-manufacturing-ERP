@@ -64,6 +64,7 @@ from models.banking import (
     BankStatementLineIn, BankStatementLineUpdate,
     StatementImportConfigIn, StatementImportConfigUpdate, STATEMENT_CANONICAL_FIELDS,
     TransferConfirmIn, CashWithdrawalConfirmIn,
+    DepositCreateIn, InterAccountTransferIn, StatementLineMatchInflowIn,
 )
 from models.po_ean import (
     PoEanCodeIn, PoEanCodeDoc, PoEanImportFormatConfigIn, PoEanImportFormatConfigUpdate,

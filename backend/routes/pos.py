@@ -1900,6 +1900,7 @@ async def create_payment(payload: PaymentIn, request: Request):
             "mode": payload.mode,
             "reference": payload.reference,
             "bank": payload.bank,
+            "bank_account_id": payload.bank_account_id,
             "notes": payload.notes,
             "type": "vendor_payment",
             "vendor_id": str(vendor["_id"]),
@@ -1944,17 +1945,71 @@ async def create_payment(payload: PaymentIn, request: Request):
     if not allocations:
         raise HTTPException(400, "Selected invoices are already fully paid")
     payment_no = await next_payment_no(db=db)
+    account_type = payload.account_type or ("cash" if (payload.mode == "Cash" and not payload.bank_account_id) else "bank")
+    cash_account_id = str(payload.cash_account_id) if payload.cash_account_id else None
+    bank_account_id = str(payload.bank_account_id) if payload.bank_account_id else None
+    account_name = payload.bank or ""
+
+    if account_type == "cash" or cash_account_id:
+        account_type = "cash"
+        ca_doc = None
+        if cash_account_id and hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+            try:
+                ca_doc = await db.cash_accounts.find_one({"_id": oid(cash_account_id)})
+            except Exception:
+                pass
+            if not ca_doc:
+                try:
+                    ca_doc = await db.cash_accounts.find_one({"_id": str(cash_account_id)})
+                except Exception:
+                    pass
+        elif bank_account_id and hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+            try:
+                ca_doc = await db.cash_accounts.find_one({"_id": oid(bank_account_id)})
+            except Exception:
+                pass
+            if not ca_doc:
+                try:
+                    ca_doc = await db.cash_accounts.find_one({"source_bank_account_id": str(bank_account_id)})
+                except Exception:
+                    pass
+
+        if ca_doc:
+            cash_account_id = str(ca_doc.get("_id") or ca_doc.get("id"))
+            if not bank_account_id:
+                bank_account_id = str(ca_doc.get("source_bank_account_id") or "")
+            if not account_name:
+                account_name = ca_doc.get("name") or "Cash Account"
+        elif not account_name:
+            account_name = "Cash in Hand"
+    else:
+        account_type = "bank"
+        if bank_account_id and not account_name:
+            try:
+                ba = await db.bank_accounts.find_one({"_id": oid(bank_account_id)})
+                if ba:
+                    account_name = ba.get("name") or ba.get("bank_name") or ""
+            except Exception:
+                pass
+
     doc = {
         "payment_no": payment_no,
         "payment_date": payload.payment_date,
         "amount": round(float(payload.amount), 2),
         "advance_amount": round(remaining, 2) if remaining > 0 else 0,
-        "mode": payload.mode, "reference": payload.reference, "bank": payload.bank,
+        "mode": payload.mode,
+        "reference": payload.reference,
+        "bank": account_name,
+        "account_name": account_name,
+        "account_type": account_type,
+        "bank_account_id": bank_account_id,
+        "cash_account_id": cash_account_id,
         "notes": payload.notes,
         "invoice_ids": list(allocations.keys()),
         "allocations": allocations,
         "client_name": invoices[0].get("client_name"),
-        "by": u["email"], "created_at": now_iso(),
+        "by": u["email"],
+        "created_at": now_iso(),
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
@@ -1963,7 +2018,9 @@ async def create_payment(payload: PaymentIn, request: Request):
 
 @pos_router.get("/payments")
 async def list_payments(request: Request, invoice_id: Optional[str] = None,
-                        client: Optional[str] = None, limit: int = 500):
+                        client: Optional[str] = None, bank_account_id: Optional[str] = None,
+                        cash_account_id: Optional[str] = None, account_type: Optional[str] = None,
+                        limit: int = 500):
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
     db = get_db()
@@ -1972,6 +2029,12 @@ async def list_payments(request: Request, invoice_id: Optional[str] = None,
         q["invoice_ids"] = str(invoice_id)
     if client:
         q["client_name"] = {"$regex": re.escape(str(client)), "$options": "i"}
+    if bank_account_id:
+        q["bank_account_id"] = str(bank_account_id)
+    if cash_account_id:
+        q["cash_account_id"] = str(cash_account_id)
+    if account_type:
+        q["account_type"] = str(account_type)
     docs = await db.payments.find(q).sort("payment_date", -1).to_list(limit)
     return [stringify(d) for d in docs]
 

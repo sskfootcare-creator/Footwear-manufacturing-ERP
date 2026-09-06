@@ -31,6 +31,7 @@ import {
   Pencil,
   Scale,
   History,
+  ArrowDownCircle,
 } from "lucide-react";
 
 const isCashWithdrawalCandidate = (line) => {
@@ -122,12 +123,30 @@ export default function BankReconciliation() {
   const [cashLoading, setCashLoading] = useState(false);
   const [showCashModal, setShowCashModal] = useState(false);
   const [showRecordCashModal, setShowRecordCashModal] = useState(false);
+  const [showRecordDepositModal, setShowRecordDepositModal] = useState(false);
   const [activeCashLine, setActiveCashLine] = useState(null);
 
   // Cash Breakdown Modal state
   const [showCashBreakdownModal, setShowCashBreakdownModal] = useState(false);
   const [selectedCashBreakdownId, setSelectedCashBreakdownId] = useState(null);
   const [selectedCashLine, setSelectedCashLine] = useState(null);
+
+  // Cash Accounts State (Per-Source Cash Ledgers)
+  const [cashAccounts, setCashAccounts] = useState([]);
+  const [cashAccountTransactions, setCashAccountTransactions] = useState([]);
+  const [cashTransactionsLoading, setCashTransactionsLoading] = useState(false);
+  const [cashTxnTypeFilter, setCashTxnTypeFilter] = useState("all");
+  const [cashDateFilter, setCashDateFilter] = useState({ from: "", to: "" });
+  const [cashSearch, setCashSearch] = useState("");
+
+  const isCashAccountSelected = Boolean(
+    selectedAccountId &&
+    (selectedAccountId.startsWith("cash_") || cashAccounts.some((ca) => ca.id === selectedAccountId))
+  );
+
+  const selectedCashAccount = cashAccounts.find(
+    (ca) => ca.id === selectedAccountId || `cash_${ca.id}` === selectedAccountId
+  );
 
   // ERP Unmatched candidates
   const [erpCandidates, setErpCandidates] = useState([]);
@@ -213,10 +232,42 @@ export default function BankReconciliation() {
     }
   }, []);
 
+  const fetchCashAccounts = useCallback(async () => {
+    try {
+      const { data } = await http.get("/banking/cash-accounts");
+      setCashAccounts(data.cash_accounts || data.items || []);
+    } catch (e) {
+      console.error("Failed to load cash accounts", e);
+    }
+  }, []);
+
+  const fetchCashAccountTransactions = useCallback(async (cashAccId) => {
+    if (!cashAccId) return;
+    setCashTransactionsLoading(true);
+    try {
+      const params = {};
+      if (cashTxnTypeFilter && cashTxnTypeFilter !== "all") {
+        params.txn_type = cashTxnTypeFilter;
+      }
+      if (cashDateFilter.from) {
+        params.from_date = cashDateFilter.from;
+      }
+      if (cashDateFilter.to) {
+        params.to_date = cashDateFilter.to;
+      }
+      const { data } = await http.get(`/banking/cash-accounts/${cashAccId}/transactions`, { params });
+      setCashAccountTransactions(data.transactions || data.items || []);
+    } catch (e) {
+      console.error("Failed to load cash account transactions", e);
+    } finally {
+      setCashTransactionsLoading(false);
+    }
+  }, [cashTxnTypeFilter, cashDateFilter]);
+
   const fetchSummary = useCallback(async () => {
     try {
       const params = {};
-      if (selectedAccountId && selectedAccountId !== "all") {
+      if (selectedAccountId && selectedAccountId !== "all" && !isCashAccountSelected) {
         params.bank_account_id = selectedAccountId;
       }
       if (selectedMonth && selectedMonth !== "all") {
@@ -239,13 +290,13 @@ export default function BankReconciliation() {
     } catch (e) {
       console.error(e);
     }
-  }, [selectedAccountId, selectedMonth]);
+  }, [selectedAccountId, selectedMonth, isCashAccountSelected]);
 
   const fetchStatementLines = useCallback(async () => {
     setLoading(true);
     try {
       const params = { limit: 1000 };
-      if (selectedAccountId && selectedAccountId !== "all") {
+      if (selectedAccountId && selectedAccountId !== "all" && !isCashAccountSelected) {
         params.bank_account_id = selectedAccountId;
       }
       if (selectedMonth && selectedMonth !== "all") {
@@ -280,7 +331,7 @@ export default function BankReconciliation() {
     } finally {
       setLoading(false);
     }
-  }, [selectedAccountId, selectedMonth, statementFilter]);
+  }, [selectedAccountId, selectedMonth, statementFilter, isCashAccountSelected]);
 
   const fetchSuggestedTransfers = useCallback(async () => {
     setTransferLoading(true);
@@ -298,7 +349,7 @@ export default function BankReconciliation() {
     setCashLoading(true);
     try {
       const params = {};
-      if (selectedAccountId && selectedAccountId !== "all") {
+      if (selectedAccountId && selectedAccountId !== "all" && !isCashAccountSelected) {
         params.bank_account_id = selectedAccountId;
       }
       if (selectedMonth && selectedMonth !== "all") {
@@ -313,13 +364,13 @@ export default function BankReconciliation() {
     } finally {
       setCashLoading(false);
     }
-  }, [selectedAccountId, selectedMonth]);
+  }, [selectedAccountId, selectedMonth, isCashAccountSelected]);
 
   const fetchErpCandidates = useCallback(async () => {
     setErpLoading(true);
     try {
       const params = { limit: 100 };
-      if (selectedAccountId && selectedAccountId !== "all") {
+      if (selectedAccountId && selectedAccountId !== "all" && !isCashAccountSelected) {
         params.bank_account_id = selectedAccountId;
       }
       if (erpSearch) {
@@ -332,12 +383,12 @@ export default function BankReconciliation() {
     } finally {
       setErpLoading(false);
     }
-  }, [selectedAccountId, erpSearch]);
+  }, [selectedAccountId, erpSearch, isCashAccountSelected]);
 
   const fetchPeriodLocks = useCallback(async () => {
     try {
       const params = {};
-      if (selectedAccountId && selectedAccountId !== "all") {
+      if (selectedAccountId && selectedAccountId !== "all" && !isCashAccountSelected) {
         params.bank_account_id = selectedAccountId;
       }
       const { data } = await http.get("/banking/periods/locks", { params });
@@ -345,22 +396,32 @@ export default function BankReconciliation() {
     } catch (e) {
       console.error(e);
     }
-  }, [selectedAccountId]);
+  }, [selectedAccountId, isCashAccountSelected]);
 
   useEffect(() => {
     fetchAccounts();
-  }, [fetchAccounts]);
+    fetchCashAccounts();
+  }, [fetchAccounts, fetchCashAccounts]);
 
   useEffect(() => {
-    fetchSummary();
-    fetchStatementLines();
-    fetchSuggestedTransfers();
-    fetchSuggestedCashWithdrawals();
-    fetchErpCandidates();
-    fetchPeriodLocks();
+    if (isCashAccountSelected && selectedCashAccount) {
+      fetchCashAccountTransactions(selectedCashAccount.id);
+    }
+  }, [isCashAccountSelected, selectedCashAccount, fetchCashAccountTransactions]);
+
+  useEffect(() => {
+    if (!isCashAccountSelected) {
+      fetchSummary();
+      fetchStatementLines();
+      fetchSuggestedTransfers();
+      fetchSuggestedCashWithdrawals();
+      fetchErpCandidates();
+      fetchPeriodLocks();
+    }
   }, [
     selectedAccountId,
     selectedMonth,
+    isCashAccountSelected,
     fetchSummary,
     fetchStatementLines,
     fetchSuggestedTransfers,
@@ -368,6 +429,20 @@ export default function BankReconciliation() {
     fetchErpCandidates,
     fetchPeriodLocks,
   ]);
+
+  // Filtered cash transactions by search query
+  const filteredCashTransactions = React.useMemo(() => {
+    if (!cashSearch.trim()) return cashAccountTransactions;
+    const q = cashSearch.toLowerCase();
+    return cashAccountTransactions.filter((t) =>
+      (t.title && t.title.toLowerCase().includes(q)) ||
+      (t.payee && t.payee.toLowerCase().includes(q)) ||
+      (t.client_name && t.client_name.toLowerCase().includes(q)) ||
+      (t.description && t.description.toLowerCase().includes(q)) ||
+      (t.notes && t.notes.toLowerCase().includes(q)) ||
+      (t.ref_text && t.ref_text.toLowerCase().includes(q))
+    );
+  }, [cashAccountTransactions, cashSearch]);
 
   // Reset pagination on filter or period changes
   useEffect(() => {
@@ -532,6 +607,10 @@ export default function BankReconciliation() {
       fetchSummary();
       fetchStatementLines();
       fetchSuggestedCashWithdrawals();
+      fetchCashAccounts();
+      if (isCashAccountSelected && selectedCashAccount) {
+        fetchCashAccountTransactions(selectedCashAccount.id);
+      }
     } catch (e) {
       notify(e.message || "Failed to confirm cash withdrawal", "error");
     }
@@ -753,6 +832,14 @@ export default function BankReconciliation() {
               <Coins className="w-3.5 h-3.5" /> + Record Cash Withdrawal
             </button>
 
+            <button
+              onClick={() => setShowRecordDepositModal(true)}
+              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-emerald-600 shadow-sm transition-colors"
+              data-testid="record-deposit-btn"
+            >
+              <ArrowDownCircle className="w-3.5 h-3.5" /> + Record Deposit
+            </button>
+
             <BtnSecondary
               onClick={() => {
                 const target = accounts.find((a) => a.id === selectedAccountId) || accounts[0];
@@ -869,6 +956,43 @@ export default function BankReconciliation() {
           );
         })()}
 
+        {/* Auto Reconcile Result Banner */}
+        {reconcileResult && (
+          <div
+            className="p-3.5 bg-blue-50/90 border-2 border-[#1E3A8A] flex items-center justify-between gap-4 flex-wrap text-xs text-blue-950 shadow-sm"
+            data-testid="auto-reconcile-result-banner"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="p-1.5 bg-blue-200 border border-[#1E3A8A] rounded text-[#1E3A8A]">
+                <CheckCircle2 className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="font-bold uppercase tracking-wider text-[11px] text-[#1E3A8A] block">
+                  Auto-Reconciliation Results ({reconcileResult.bank_account_name || "Account"})
+                </span>
+                <span>
+                  Evaluated <strong>{reconcileResult.total_unmatched_evaluated}</strong> unmatched line(s):{" "}
+                  <strong className="text-emerald-700">{reconcileResult.auto_matched_count} auto-matched</strong> (≥{reconcileResult.min_confidence_percent}% confidence)
+                  {reconcileResult.pending_review_count > 0 && (
+                    <>, <strong className="text-amber-700">{reconcileResult.pending_review_count} pending review</strong></>
+                  )}
+                  {reconcileResult.no_match_count > 0 && (
+                    <>, <strong>{reconcileResult.no_match_count} no match found</strong></>
+                  )}.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setReconcileResult(null)}
+              className="px-3 py-1 bg-white border-2 border-slate-300 hover:bg-slate-100 font-bold uppercase text-[10px] text-slate-700 shadow-sm"
+              data-testid="dismiss-reconcile-result-btn"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Account Selector Tabs */}
         <div className="flex items-center gap-2 border-b border-slate-200 overflow-x-auto overflow-y-hidden">
           <button
@@ -925,13 +1049,345 @@ export default function BankReconciliation() {
               </button>
             </div>
           ))}
+
+          {/* Cash Accounts Tabs */}
+          {cashAccounts.map((ca) => {
+            const isSelected = selectedAccountId === ca.id || selectedAccountId === `cash_${ca.id}`;
+            return (
+              <div
+                key={`ca_${ca.id}`}
+                className={`flex items-center gap-1 px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 -mb-px whitespace-nowrap ${
+                  isSelected
+                    ? "border-emerald-600 text-emerald-800 bg-emerald-50/80"
+                    : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50/50"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setSelectedAccountId(ca.id)}
+                  data-testid={`tab-cash-account-${ca.id}`}
+                  className="flex items-center gap-2"
+                >
+                  <Wallet className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{ca.name}</span>
+                  <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 border bg-emerald-100 text-emerald-800 border-emerald-300 rounded">
+                    Cash Pool
+                  </span>
+                  <span className="font-mono text-[11px] text-emerald-700 font-bold ml-0.5">
+                    ₹{inr(ca.current_balance)}
+                  </span>
+                </button>
+              </div>
+            );
+          })}
         </div>
 
-        {/* Month Navigator Control Bar */}
-        <div
-          className="bg-white border-2 border-slate-200 p-3 sm:p-4 flex items-center justify-between gap-4 flex-wrap shadow-sm rounded-sm"
-          data-testid="month-navigator-bar"
-        >
+        {isCashAccountSelected && selectedCashAccount ? (
+          <div className="space-y-6" data-testid="cash-pool-view">
+            {/* Header Banner */}
+            <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-teal-900 text-white p-5 rounded-sm shadow-sm flex items-center justify-between gap-4 flex-wrap border border-emerald-800/60">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-lg bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-300 shadow-inner">
+                  <Wallet className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-xl font-black tracking-wide" data-testid="cash-account-title">{selectedCashAccount.name}</h2>
+                    <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-emerald-500/30 text-emerald-200 border border-emerald-400/30 rounded">
+                      Per-Source Cash Pool
+                    </span>
+                  </div>
+                  <p className="text-xs text-emerald-200/80 mt-0.5">
+                    Isolated cash liquidity funded exclusively by withdrawals from <strong className="text-white">{selectedCashAccount.bank_name || "Source Bank Account"}</strong>
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowRecordCashModal(true)}
+                  data-testid="cash-pool-record-withdrawal-btn"
+                  className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold uppercase tracking-wider text-xs rounded flex items-center gap-2 shadow-sm transition-colors border border-emerald-400"
+                >
+                  <Plus className="w-4 h-4" /> Record Cash Withdrawal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedAccountId(selectedCashAccount.source_bank_account_id)}
+                  data-testid="view-source-bank-btn"
+                  className="px-3.5 py-2 bg-emerald-800/80 hover:bg-emerald-800 text-emerald-100 font-bold uppercase tracking-wider text-xs rounded border border-emerald-700/60 flex items-center gap-2 transition-colors"
+                  title={`Switch to ${selectedCashAccount.bank_name || "Bank"} bank statement view`}
+                >
+                  <Landmark className="w-4 h-4" /> View Bank Statement
+                </button>
+              </div>
+            </div>
+
+            {/* Rollup Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4" data-testid="cash-pool-metric-cards">
+              {/* Current Balance Card */}
+              <Card className="p-5 border-l-4 border-l-emerald-600 bg-gradient-to-br from-white to-emerald-50/40">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-emerald-800">Current Cash Balance</span>
+                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 grid place-items-center">
+                    <Wallet className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black font-mono text-emerald-800" data-testid="cash-pool-current-balance">
+                  ₹{inr(selectedCashAccount.current_balance)}
+                </div>
+                <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+                  <span>Available Cash in Hand</span>
+                  <span className="font-bold text-emerald-700">Live Rollup</span>
+                </div>
+              </Card>
+
+              {/* Total Withdrawn Card */}
+              <Card className="p-5 border-l-4 border-l-blue-600 bg-gradient-to-br from-white to-blue-50/30">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Total Withdrawn</span>
+                  <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 grid place-items-center">
+                    <ArrowDownCircle className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black font-mono text-slate-900" data-testid="cash-pool-total-withdrawn">
+                  ₹{inr(selectedCashAccount.total_withdrawn)}
+                </div>
+                <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100">
+                  Total inflows from {selectedCashAccount.bank_name || "bank"}
+                </div>
+              </Card>
+
+              {/* Total Disbursed Card */}
+              <Card className="p-5 border-l-4 border-l-amber-600 bg-gradient-to-br from-white to-amber-50/30">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Total Disbursed</span>
+                  <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 grid place-items-center">
+                    <ArrowUpRight className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black font-mono text-slate-900" data-testid="cash-pool-total-spent">
+                  ₹{inr(selectedCashAccount.total_spent)}
+                </div>
+                <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100">
+                  Karigar wages, cash expenses & advances
+                </div>
+              </Card>
+            </div>
+
+            {/* Unified Transactions Ledger Card */}
+            <Card className="p-4 sm:p-6 space-y-4" data-testid="cash-pool-transactions-card">
+              <div className="flex items-center justify-between gap-4 flex-wrap pb-3 border-b-2 border-slate-100">
+                <div>
+                  <h3 className="font-black text-slate-900 text-sm uppercase tracking-wide flex items-center gap-2">
+                    <span>Unified Cash Ledger</span>
+                    <Badge variant="neutral" size="sm">{filteredCashTransactions.length} transaction(s)</Badge>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Chronological ledger of Money IN (withdrawals) and Money OUT (wages, expenses, advances) with running balance.
+                  </p>
+                </div>
+
+                {/* Filter Toolbar */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Type Filter */}
+                  <select
+                    value={cashTxnTypeFilter}
+                    onChange={(e) => setCashTxnTypeFilter(e.target.value)}
+                    className="text-xs font-bold py-1.5 px-3 bg-white border-2 border-slate-300 rounded text-slate-800 focus:outline-none focus:border-[#1E3A8A]"
+                    data-testid="cash-type-filter"
+                  >
+                    <option value="all">All Transactions</option>
+                    <option value="inflow">Inflow Only (Withdrawals & Receipts)</option>
+                    <option value="client_payment">Client Receipts</option>
+                    <option value="outflow">Outflow Only (Disbursed)</option>
+                    <option value="wage_payment">Karigar Wages</option>
+                    <option value="expense">Cash Expenses</option>
+                    <option value="advance">Karigar Advances</option>
+                  </select>
+
+                  {/* Date Range Inputs */}
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="date"
+                      value={cashDateFilter.from}
+                      onChange={(e) => setCashDateFilter((prev) => ({ ...prev, from: e.target.value }))}
+                      className="text-xs font-mono py-1 px-2 border-2 border-slate-300 rounded bg-white text-slate-700"
+                      title="From Date"
+                      data-testid="cash-from-date"
+                    />
+                    <span className="text-slate-400 text-xs">to</span>
+                    <input
+                      type="date"
+                      value={cashDateFilter.to}
+                      onChange={(e) => setCashDateFilter((prev) => ({ ...prev, to: e.target.value }))}
+                      className="text-xs font-mono py-1 px-2 border-2 border-slate-300 rounded bg-white text-slate-700"
+                      title="To Date"
+                      data-testid="cash-to-date"
+                    />
+                    {(cashDateFilter.from || cashDateFilter.to) && (
+                      <button
+                        type="button"
+                        onClick={() => setCashDateFilter({ from: "", to: "" })}
+                        className="text-slate-400 hover:text-slate-600 p-1"
+                        title="Clear date filter"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search Box */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                    <input
+                      type="text"
+                      placeholder="Search payee / notes..."
+                      value={cashSearch}
+                      onChange={(e) => setCashSearch(e.target.value)}
+                      className="pl-7 pr-3 py-1 text-xs font-mono border-2 border-slate-300 bg-white focus:border-[#1E3A8A] focus:outline-none w-44 rounded"
+                      data-testid="cash-search-input"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => fetchCashAccountTransactions(selectedCashAccount.id)}
+                    disabled={cashTransactionsLoading}
+                    className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded"
+                    title="Refresh Transactions"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${cashTransactionsLoading ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Ledger Table */}
+              {cashTransactionsLoading ? (
+                <div className="text-center py-12 text-slate-500">
+                  <RefreshCw className="w-8 h-8 mx-auto animate-spin text-slate-400 mb-2" />
+                  <p className="text-xs font-bold uppercase">Loading transactions...</p>
+                </div>
+              ) : filteredCashTransactions.length === 0 ? (
+                <div className="text-center py-12 text-slate-500 space-y-3" data-testid="cash-empty-state">
+                  <Wallet className="w-10 h-10 mx-auto text-slate-400 opacity-60" />
+                  <div>
+                    <p className="font-bold text-slate-800 text-sm">No transactions found for this cash pool</p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Record a cash withdrawal from {selectedCashAccount.bank_name || "the bank"} to start funding disbursements.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowRecordCashModal(true)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs rounded inline-flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Plus className="w-4 h-4" /> Record First Cash Withdrawal
+                  </button>
+                </div>
+              ) : (
+                <div className="overflow-x-auto border-2 border-slate-200">
+                  <table className="w-full text-left text-xs border-collapse" data-testid="cash-ledger-table">
+                    <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-600 tracking-wider border-b-2 border-slate-200">
+                      <tr>
+                        <th className="px-4 py-3 w-32">Date</th>
+                        <th className="px-4 py-3 w-36">Type</th>
+                        <th className="px-4 py-3">Description / Recipient</th>
+                        <th className="px-4 py-3 text-right w-32">Inflow (+)</th>
+                        <th className="px-4 py-3 text-right w-32">Outflow (-)</th>
+                        <th className="px-4 py-3 text-right w-36">Running Balance</th>
+                        <th className="px-4 py-3 w-48">Reference / Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 font-medium">
+                      {filteredCashTransactions.map((t) => (
+                        <tr
+                          key={t.id}
+                          className={`hover:bg-slate-50/80 transition-colors ${
+                            t.direction === "in" ? "bg-emerald-50/20" : ""
+                          }`}
+                          data-testid={`cash-txn-row-${t.id}`}
+                        >
+                          <td className="px-4 py-3 font-mono text-slate-700 whitespace-nowrap">
+                            {t.date}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            {t.type === "cash_withdrawal" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                <ArrowDownCircle className="w-3 h-3" /> Withdrawal
+                              </span>
+                            ) : t.type === "client_payment" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-teal-100 text-teal-800 border border-teal-300">
+                                <CheckCircle2 className="w-3 h-3" /> Client Receipt
+                              </span>
+                            ) : t.type === "wage_payment" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-100 text-blue-800 border border-blue-300">
+                                <Coins className="w-3 h-3" /> Karigar Wage
+                              </span>
+                            ) : t.type === "expense" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-300">
+                                <TrendingUp className="w-3 h-3" /> Cash Expense
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-800 border border-purple-300">
+                                <Wallet className="w-3 h-3" /> Advance
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-slate-800">
+                            <div className="font-bold text-slate-900">{t.title}</div>
+                            {t.description && t.description !== t.title && (
+                              <div className="text-slate-500 text-[11px] truncate max-w-md">{t.description}</div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-bold whitespace-nowrap text-emerald-700">
+                            {t.direction === "in" ? `+₹${inr(t.amount)}` : "—"}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-bold whitespace-nowrap text-red-600">
+                            {t.direction === "out" ? `-₹${inr(t.amount)}` : "—"}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-black whitespace-nowrap text-slate-900">
+                            ₹{inr(t.running_balance)}
+                          </td>
+                          <td className="px-4 py-3 text-slate-500 text-[11px]">
+                            <div className="truncate max-w-xs" title={t.notes || t.ref_text}>
+                              {t.ref_text && <span className="font-mono font-bold text-slate-700 mr-1">{t.ref_text}:</span>}
+                              {t.notes}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-slate-50 border-t-2 border-slate-300 text-xs font-bold text-slate-700">
+                      <tr>
+                        <td colSpan={3} className="px-4 py-3 uppercase tracking-wider text-[10px]">
+                          Pool Summary Snapshot
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-emerald-700">
+                          +₹{inr(filteredCashTransactions.filter(t => t.direction === 'in').reduce((s, t) => s + t.amount, 0))}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-red-600">
+                          -₹{inr(filteredCashTransactions.filter(t => t.direction === 'out').reduce((s, t) => s + t.amount, 0))}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono font-black text-slate-900">
+                          ₹{inr(selectedCashAccount.current_balance)}
+                        </td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </Card>
+          </div>
+        ) : (
+          <>
+            {/* Month Navigator Control Bar */}
+            <div
+              className="bg-white border-2 border-slate-200 p-3 sm:p-4 flex items-center justify-between gap-4 flex-wrap shadow-sm rounded-sm"
+              data-testid="month-navigator-bar"
+            >
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded bg-blue-50 border border-blue-200 text-[#1E3A8A] flex items-center justify-center shrink-0">
               <Calendar className="w-5 h-5" />
@@ -1029,8 +1485,17 @@ export default function BankReconciliation() {
             <div className="text-2xl font-black font-mono text-slate-900" data-testid="erp-balance-val">
               {inr(erpBal)}
             </div>
-            <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100">
-              Reconciled Payouts & Expenses
+            <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100 flex items-center justify-between flex-wrap gap-1">
+              <span>Reconciled Payouts & Expenses</span>
+              <div className="flex items-center gap-1 font-mono text-[11px] font-bold">
+                <span className="text-emerald-700" title="Reconciled Inflows / Payments Received" data-testid="erp-reconciled-credits">
+                  +{inr(selectedAccountId === "all" ? (summary?.summary?.matched_income || 0) : (summary?.accounts?.find((a) => a.bank_account_id === selectedAccountId)?.total_reconciled_credits || 0))}
+                </span>
+                <span className="text-slate-300">/</span>
+                <span className="text-red-600" title="Reconciled Outflows / Expenses" data-testid="erp-reconciled-debits">
+                  -{inr(selectedAccountId === "all" ? (summary?.summary?.matched_expenses || 0) : (summary?.accounts?.find((a) => a.bank_account_id === selectedAccountId)?.total_reconciled_debits || 0))}
+                </span>
+              </div>
             </div>
           </Card>
 
@@ -1667,15 +2132,24 @@ export default function BankReconciliation() {
                     Invoiced client amounts, online settlements, and recorded expenses not yet confirmed on bank statements.
                   </p>
                 </div>
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    placeholder="Search ERP transactions..."
-                    value={erpSearch}
-                    onChange={(e) => setErpSearch(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 text-xs font-mono border-2 border-slate-300 bg-white focus:border-[#2563EB] focus:outline-none w-56"
-                  />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setShowRecordDepositModal(true)}
+                    className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-3 py-1.5 border-2 border-emerald-600 shadow-sm transition-colors"
+                    data-testid="tab-record-deposit-btn"
+                  >
+                    <ArrowDownCircle className="w-3.5 h-3.5" /> + Record Deposit
+                  </button>
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="Search ERP transactions..."
+                      value={erpSearch}
+                      onChange={(e) => setErpSearch(e.target.value)}
+                      className="pl-8 pr-3 py-1.5 text-xs font-mono border-2 border-slate-300 bg-white focus:border-[#2563EB] focus:outline-none w-56"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1711,7 +2185,7 @@ export default function BankReconciliation() {
                                 color={
                                   c.type === "settlement"
                                     ? "purple"
-                                    : c.type === "payment"
+                                    : c.type === "payment" || c.type === "deposit"
                                     ? "green"
                                     : "red"
                                 }
@@ -1984,6 +2458,8 @@ export default function BankReconciliation() {
             </Card>
           )}
         </div>
+        </>
+        )}
       </div>
 
       {/* ─────────────────────────────────────────────────────────────────────────
@@ -2134,7 +2610,7 @@ export default function BankReconciliation() {
       {showRecordCashModal && (
         <RecordCashWithdrawalModal
           accounts={accounts}
-          initialAccountId={selectedAccountId}
+          initialAccountId={selectedCashAccount ? selectedCashAccount.source_bank_account_id : selectedAccountId}
           onClose={() => setShowRecordCashModal(false)}
           onSuccess={() => {
             setShowRecordCashModal(false);
@@ -2142,6 +2618,26 @@ export default function BankReconciliation() {
             fetchSummary();
             fetchStatementLines();
             fetchSuggestedCashWithdrawals();
+            fetchCashAccounts();
+            if (selectedCashAccount) {
+              fetchCashAccountTransactions(selectedCashAccount.id);
+            }
+          }}
+        />
+      )}
+
+      {/* 9. RECORD DEPOSIT MODAL */}
+      {showRecordDepositModal && (
+        <RecordDepositModal
+          accounts={accounts}
+          initialAccountId={selectedAccountId}
+          onClose={() => setShowRecordDepositModal(false)}
+          onSuccess={() => {
+            setShowRecordDepositModal(false);
+            notify("Direct deposit recorded successfully!", "success");
+            fetchSummary();
+            fetchStatementLines();
+            fetchErpCandidates();
           }}
         />
       )}
@@ -2243,7 +2739,7 @@ function ManualMatchModal({ line, accounts, onClose, onMatch }) {
                   >
                     <div className="space-y-0.5 flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <Badge color={c.type === "settlement" ? "purple" : c.type === "payment" ? "green" : "red"}>
+                        <Badge color={c.type === "settlement" ? "purple" : (c.type === "payment" || c.type === "deposit") ? "green" : "red"}>
                           {c.type}
                         </Badge>
                         <span className="text-xs font-bold text-slate-900 truncate">{c.description}</span>
@@ -3175,6 +3671,183 @@ function RecordCashWithdrawalModal({ accounts, initialAccountId, onClose, onSucc
               data-testid="record-cash-submit-btn"
             >
               {loading ? "Recording..." : "Record Cash Withdrawal"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-Modal: Record Direct Deposit Modal
+// ─────────────────────────────────────────────────────────────────────────────
+function RecordDepositModal({ accounts, initialAccountId, onClose, onSuccess }) {
+  const [formData, setFormData] = useState({
+    bank_account_id: initialAccountId && initialAccountId !== "all" ? initialAccountId : accounts[0]?.id || "",
+    amount: "",
+    date: new Date().toISOString().slice(0, 10),
+    category: "refund",
+    description: "",
+    remarks: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.bank_account_id) {
+      setError("Please select a bank account.");
+      return;
+    }
+    const amt = parseFloat(formData.amount);
+    if (!amt || amt <= 0) {
+      setError("Please enter a valid deposit amount > 0.");
+      return;
+    }
+    if (!formData.date) {
+      setError("Please select a deposit date.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      await http.post("/banking/deposits", {
+        ...formData,
+        amount: amt,
+      });
+      onSuccess();
+    } catch (err) {
+      setError(err.message || "Failed to record deposit");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95">
+        <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-emerald-50/60">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-800 font-bold">Finance / Direct Income</div>
+            <h3 className="font-bold text-base text-slate-900 mt-0.5 flex items-center gap-2">
+              <ArrowDownCircle className="w-4 h-4 text-emerald-600" /> Record Deposit
+            </h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div className="p-3 bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+            <p className="font-bold">Direct Deposit Recording (Non-Invoice Income)</p>
+            <p className="text-[11px] text-emerald-800">
+              Record money received directly into your bank account (e.g. vendor refunds, interest credited, or miscellaneous receipts). This creates a tracked entry immediately matchable in reconciliation.
+            </p>
+          </div>
+
+          {error && (
+            <div className="p-3 bg-red-50 border-2 border-red-300 text-red-800 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Bank Account *</div>
+            <select
+              value={formData.bank_account_id}
+              onChange={(e) => setFormData({ ...formData, bank_account_id: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              required
+              data-testid="record-deposit-account-select"
+            >
+              <option value="">-- Select Bank Account --</option>
+              {accounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>
+                  {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Amount (₹) *</div>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                placeholder="e.g. 15000"
+                value={formData.amount}
+                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono font-bold focus:border-[#2563EB] focus:outline-none"
+                required
+                data-testid="record-deposit-amount-input"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Deposit Date *</div>
+              <input
+                type="date"
+                value={formData.date}
+                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#2563EB] focus:outline-none"
+                required
+                data-testid="record-deposit-date-input"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Category *</div>
+            <select
+              value={formData.category}
+              onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              required
+              data-testid="record-deposit-category-select"
+            >
+              <option value="refund">Vendor / Tax Refund</option>
+              <option value="interest">Bank Interest Credited</option>
+              <option value="capital">Capital / Owner Contribution</option>
+              <option value="other">Other / Miscellaneous Receipt</option>
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Description / Source (Optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. Sole Corp material refund or Q2 savings interest"
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="record-deposit-description-input"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Remarks / UTR Ref (Optional)</div>
+            <input
+              type="text"
+              placeholder="e.g. UTR / NEFT reference or internal notes"
+              value={formData.remarks}
+              onChange={(e) => setFormData({ ...formData, remarks: e.target.value })}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+              data-testid="record-deposit-remarks-input"
+            />
+          </div>
+
+          <div className="pt-3 flex items-center justify-end gap-2 border-t-2 border-slate-200">
+            <BtnSecondary onClick={onClose} type="button">Cancel</BtnSecondary>
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-emerald-600 shadow-ind flex items-center gap-1.5 disabled:opacity-50 transition-colors"
+              data-testid="record-deposit-submit-btn"
+            >
+              {loading ? "Recording..." : "Record Deposit"}
             </button>
           </div>
         </form>

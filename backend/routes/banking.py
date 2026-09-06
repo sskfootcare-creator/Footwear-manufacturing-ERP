@@ -10,6 +10,7 @@ from io import BytesIO
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Query, Response
 
+import inspect
 from models.banking import (
     BankAccountIn,
     BankAccountUpdate,
@@ -17,6 +18,7 @@ from models.banking import (
     BankStatementLineIn,
     BankStatementLineUpdate,
     CashLedgerCreateIn,
+    DepositCreateIn,
     PeriodLockIn,
     PeriodUnlockIn,
 )
@@ -45,8 +47,27 @@ def _oid(val: str) -> ObjectId:
         raise HTTPException(status_code=400, detail="Invalid ObjectId format")
 
 
+def _safe_oid(val: Any) -> Optional[ObjectId]:
+    if not val:
+        return None
+    try:
+        return ObjectId(str(val))
+    except Exception:
+        return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+async def _safe_update(collection, filter_q, update_q):
+    if collection is not None and hasattr(collection, "update_one"):
+        try:
+            res = collection.update_one(filter_q, update_q)
+            if inspect.isawaitable(res):
+                await res
+        except Exception:
+            pass
 
 
 def stringify(doc: dict) -> dict:
@@ -66,17 +87,191 @@ def stringify(doc: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Bank Accounts CRUD
+# Bank Accounts CRUD & Live Balance Calculation
 # ---------------------------------------------------------------------------
 
+async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Computes live ERP balance and financial rollups for a bank account:
+    - Opening Balance
+    - Inflows (Credits):
+        * Client Payments on Invoices (account_type != "cash", not vendor_payment)
+        * Direct Bank Deposits (type == "deposit")
+        * Marketplace Settlements (db.settlements)
+        * Inter-account transfers IN (to_account_id == bank_account_id)
+    - Outflows (Debits):
+        * Cash withdrawals into Cash Ledger
+        * Vendor Payments (type == "vendor_payment" or has vendor_id)
+        * Direct Expenses (status != "rejected")
+        * Inter-account transfers OUT (from_account_id == bank_account_id)
+    - current_balance = round(opening_balance + total_received - total_spent, 2)
+    """
+    aid_str = str(bank_account_id)
+    if not acc_doc:
+        try:
+            acc_doc = await db.bank_accounts.find_one({"_id": _oid(aid_str)})
+        except Exception:
+            acc_doc = None
+        if not acc_doc:
+            try:
+                acc_doc = await db.bank_accounts.find_one({"_id": aid_str})
+            except Exception:
+                acc_doc = None
+
+    op = float((acc_doc or {}).get("opening_balance") or 0.0)
+
+    # 1. Payments (Client Inflows & Vendor Outflows)
+    client_inflow = 0.0
+    vp_outflow = 0.0
+    payment_count = 0
+    if hasattr(db, "payments") and db.payments is not None:
+        try:
+            p_cur = db.payments.find({"bank_account_id": aid_str})
+            if hasattr(p_cur, "to_list"):
+                res = p_cur.to_list(10000)
+                pays = await res if hasattr(res, "__await__") else res
+            elif hasattr(p_cur, "__iter__"):
+                pays = list(p_cur)
+            else:
+                pays = []
+            for p in pays:
+                amt = float(p.get("amount") or 0.0)
+                if p.get("account_type") == "cash":
+                    continue
+                if p.get("type") == "vendor_payment" or bool(p.get("vendor_id")):
+                    vp_outflow += amt
+                else:
+                    client_inflow += amt
+                    payment_count += 1
+        except Exception as e:
+            log.warning(f"Error computing payments for bank account {aid_str}: {e}")
+
+    # 2. Marketplace Settlements
+    settle_inflow = 0.0
+    if hasattr(db, "settlements") and db.settlements is not None:
+        try:
+            s_cur = db.settlements.find({"bank_account_id": aid_str})
+            if hasattr(s_cur, "to_list"):
+                res = s_cur.to_list(5000)
+                settles = await res if hasattr(res, "__await__") else res
+            elif hasattr(s_cur, "__iter__"):
+                settles = list(s_cur)
+            else:
+                settles = []
+            settle_inflow = sum(float(s.get("net_payout") or s.get("settlement_amount") or 0.0) for s in settles)
+        except Exception:
+            settle_inflow = 0.0
+
+    # 3. Cash withdrawals into Cash Ledger
+    cash_outflow = 0.0
+    cl_count = 0
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            c_cur = db.cash_ledger.find({"bank_account_id": aid_str})
+            if hasattr(c_cur, "to_list"):
+                res = c_cur.to_list(5000)
+                cls = await res if hasattr(res, "__await__") else res
+            elif hasattr(c_cur, "__iter__"):
+                cls = list(c_cur)
+            else:
+                cls = []
+            cash_outflow = sum(float(c.get("amount") or 0.0) for c in cls)
+            cl_count = len(cls)
+        except Exception:
+            cash_outflow = 0.0
+
+    # 4. Direct Expenses
+    exp_outflow = 0.0
+    exp_count = 0
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            e_cur = db.expenses.find({
+                "bank_account_id": aid_str,
+                "status": {"$nin": ["rejected", "cancelled"]}
+            })
+            if hasattr(e_cur, "to_list"):
+                res = e_cur.to_list(5000)
+                exps = await res if hasattr(res, "__await__") else res
+            elif hasattr(e_cur, "__iter__"):
+                exps = list(e_cur)
+            else:
+                exps = []
+            exp_outflow = sum(float(e.get("amount") or 0.0) for e in exps)
+            exp_count = len(exps)
+        except Exception:
+            exp_outflow = 0.0
+
+    # 5. Inter-account Transfers
+    transfer_in = 0.0
+    transfer_out = 0.0
+    if hasattr(db, "inter_account_transfers") and db.inter_account_transfers is not None:
+        try:
+            t_in_cur = db.inter_account_transfers.find({"to_account_id": aid_str})
+            t_in = await t_in_cur.to_list(1000) if hasattr(t_in_cur, "to_list") else list(t_in_cur)
+            transfer_in = sum(float(t.get("amount") or 0.0) for t in t_in)
+            t_out_cur = db.inter_account_transfers.find({"from_account_id": aid_str})
+            t_out = await t_out_cur.to_list(1000) if hasattr(t_out_cur, "to_list") else list(t_out_cur)
+            transfer_out = sum(float(t.get("amount") or 0.0) for t in t_out)
+        except Exception:
+            pass
+
+    total_received = round(client_inflow + settle_inflow + transfer_in, 2)
+    total_spent = round(cash_outflow + vp_outflow + exp_outflow + transfer_out, 2)
+    current_balance = round(op + total_received - total_spent, 2)
+
+    return {
+        "bank_account_id": aid_str,
+        "opening_balance": op,
+        "total_received": total_received,
+        "total_spent": total_spent,
+        "current_balance": current_balance,
+        "balance": current_balance,
+        "client_payments_in": round(client_inflow, 2),
+        "settlements_in": round(settle_inflow, 2),
+        "transfers_in": round(transfer_in, 2),
+        "cash_withdrawn_out": round(cash_outflow, 2),
+        "vendor_payments_out": round(vp_outflow, 2),
+        "expenses_out": round(exp_outflow, 2),
+        "transfers_out": round(transfer_out, 2),
+        "entry_count": payment_count + cl_count + exp_count,
+    }
+
+
+async def sync_bank_account_balance(db, bank_account_id: str) -> float:
+    """
+    Computes and persists the latest current_balance to db.bank_accounts document.
+    """
+    if not bank_account_id or not hasattr(db, "bank_accounts") or db.bank_accounts is None:
+        return 0.0
+    aid_str = str(bank_account_id)
+    try:
+        stats = await compute_bank_account_balance(db, aid_str)
+        curr_bal = stats["current_balance"]
+        try:
+            await db.bank_accounts.update_one(
+                {"_id": _oid(aid_str)},
+                {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
+            )
+        except Exception:
+            await db.bank_accounts.update_one(
+                {"_id": aid_str},
+                {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
+            )
+        return curr_bal
+    except Exception as e:
+        log.warning(f"Failed to sync bank account balance for {aid_str}: {e}")
+        return 0.0
+
+
 @banking_router.get("/banking/accounts")
+@banking_router.get("/bank-accounts")
 async def list_bank_accounts(
     request: Request,
     active: Optional[bool] = None,
     account_type: Optional[str] = None,
     search: Optional[str] = None,
 ):
-    """List all configured bank accounts (e.g. HDFC - Online, UCO Bank - Offline)."""
+    """List all configured bank accounts enriched with live current_balance and financial metrics."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales", "production")(u)
     db = _get_db(request)
@@ -91,10 +286,23 @@ async def list_bank_accounts(
         q["$or"] = [{"name": rx}, {"bank_name": rx}, {"account_number_last4": rx}]
 
     docs = await db.bank_accounts.find(q).sort("name", 1).to_list(1000)
+    for d in docs:
+        aid_str = str(d.get("_id") or d.get("id") or "")
+        try:
+            stats = await compute_bank_account_balance(db, aid_str, d)
+            d["current_balance"] = stats["current_balance"]
+            d["balance"] = stats["balance"]
+            d["total_received"] = stats["total_received"]
+            d["total_spent"] = stats["total_spent"]
+        except Exception:
+            op = float(d.get("opening_balance") or 0.0)
+            d["current_balance"] = d.get("current_balance", op)
+            d["balance"] = d["current_balance"]
     return [stringify(d) for d in docs]
 
 
 @banking_router.post("/banking/accounts", status_code=201)
+@banking_router.post("/bank-accounts", status_code=201)
 async def create_bank_account(payload: BankAccountIn, request: Request):
     """Create a new bank account."""
     u = await _get_user(request)
@@ -105,6 +313,7 @@ async def create_bank_account(payload: BankAccountIn, request: Request):
     if not last4 and payload.account_number:
         last4 = payload.account_number.strip()[-4:]
 
+    op_bal = float(payload.opening_balance)
     doc = {
         "name": payload.name.strip(),
         "bank_name": payload.bank_name.strip(),
@@ -113,8 +322,10 @@ async def create_bank_account(payload: BankAccountIn, request: Request):
         "ifsc": (payload.ifsc or "").strip().upper() or None,
         "branch": (payload.branch or "").strip() or None,
         "account_type": payload.account_type,
-        "opening_balance": float(payload.opening_balance),
+        "opening_balance": op_bal,
         "opening_balance_date": payload.opening_balance_date,
+        "current_balance": op_bal,
+        "balance": op_bal,
         "statement_format": payload.statement_format.dict() if payload.statement_format else None,
         "active": payload.active,
         "created_at": _now_iso(),
@@ -126,8 +337,9 @@ async def create_bank_account(payload: BankAccountIn, request: Request):
 
 
 @banking_router.get("/banking/accounts/{id}")
+@banking_router.get("/bank-accounts/{id}")
 async def get_bank_account(id: str, request: Request):
-    """Retrieve a single bank account by ID."""
+    """Retrieve a single bank account by ID enriched with live current_balance."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales", "production")(u)
     db = _get_db(request)
@@ -135,6 +347,16 @@ async def get_bank_account(id: str, request: Request):
     doc = await db.bank_accounts.find_one({"_id": _oid(id)})
     if not doc:
         raise HTTPException(404, "Bank account not found")
+    try:
+        stats = await compute_bank_account_balance(db, str(doc.get("_id") or id), doc)
+        doc["current_balance"] = stats["current_balance"]
+        doc["balance"] = stats["balance"]
+        doc["total_received"] = stats["total_received"]
+        doc["total_spent"] = stats["total_spent"]
+    except Exception:
+        op = float(doc.get("opening_balance") or 0.0)
+        doc["current_balance"] = doc.get("current_balance", op)
+        doc["balance"] = doc["current_balance"]
     return stringify(doc)
 
 
@@ -1157,6 +1379,42 @@ async def match_statement_line(id: str, payload: BankStatementLineUpdate, reques
     if res.matched_count == 0:
         raise HTTPException(404, "Statement line not found")
 
+    # Keep linked document in sync
+    matched_to = updates.get("matched_to")
+    if isinstance(matched_to, dict) and matched_to.get("type") and matched_to.get("ref_id"):
+        m_type = matched_to["type"]
+        m_ref = str(matched_to["ref_id"])
+        m_oid = _safe_oid(m_ref)
+        acc_str = str(doc.get("bank_account_id") or "")
+        set_dict = {
+            "statement_line_id": str(id),
+            "reconciled": True,
+            "updated_at": updates["updated_at"],
+        }
+        if acc_str:
+            set_dict["bank_account_id"] = acc_str
+        doc_filter = {"_id": {"$in": [m_ref, m_oid]} if m_oid is not None else m_ref}
+        if m_type in ["payment", "vendor_payment", "deposit"]:
+            await _safe_update(getattr(db, "payments", None), doc_filter, {"$set": set_dict})
+        elif m_type == "expense":
+            await _safe_update(getattr(db, "expenses", None), doc_filter, {"$set": set_dict})
+        elif m_type == "settlement":
+            await _safe_update(getattr(db, "online_settlements", None), doc_filter, {"$set": set_dict})
+    elif doc.get("matched_to") and (updates.get("match_status") == "unmatched" or updates.get("matched_to") is None):
+        old_m = doc["matched_to"]
+        if isinstance(old_m, dict) and old_m.get("ref_id"):
+            old_ref = str(old_m["ref_id"])
+            old_type = old_m.get("type")
+            old_oid = _safe_oid(old_ref)
+            unset_dict = {"statement_line_id": "", "reconciled": ""}
+            old_filter = {"_id": {"$in": [old_ref, old_oid]} if old_oid is not None else old_ref}
+            if old_type in ["payment", "vendor_payment", "deposit"]:
+                await _safe_update(getattr(db, "payments", None), old_filter, {"$unset": unset_dict})
+            elif old_type == "expense":
+                await _safe_update(getattr(db, "expenses", None), old_filter, {"$unset": unset_dict})
+            elif old_type == "settlement":
+                await _safe_update(getattr(db, "online_settlements", None), old_filter, {"$unset": unset_dict})
+
     updated = await db.bank_statement_lines.find_one({"_id": _oid(id)})
     return stringify(updated)
 
@@ -1304,7 +1562,11 @@ async def _handle_reconcile_account(
     no_match_count = 0
 
     now = _now_iso()
-    account_filter = {"$in": [None, "", account_id_str]}
+    valid_acc_ids = [account_id_str]
+    acc_oid = _oid(account_id_str)
+    if acc_oid is not None:
+        valid_acc_ids.append(acc_oid)
+    account_filter = {"$in": [None, "", *valid_acc_ids]}
 
     online_settlements_raw = await db.online_settlements.find({
         "bank_account_id": account_filter,
@@ -1314,6 +1576,7 @@ async def _handle_reconcile_account(
         "type": {"$ne": "vendor_payment"},
         "vendor_id": {"$in": [None, ""]},
         "bank_account_id": account_filter,
+        "account_type": {"$ne": "cash"},
     }).to_list(10000)
 
     vendor_payments_raw = await db.payments.find({
@@ -1342,6 +1605,9 @@ async def _handle_reconcile_account(
                     s_id = str(s["_id"])
                     if s_id in claimed_ids:
                         continue
+                    s_acc = str(s.get("bank_account_id") or "")
+                    if s_acc and s_acc != account_id_str:
+                        continue
                     s_amount = float(s.get("net_payout") or s.get("settlement_amount") or 0.0)
                     s_dt = _parse_dt(s.get("settlement_date") or s.get("date") or s.get("created_at"))
                     if abs(s_amount - credit) <= amount_tolerance:
@@ -1355,14 +1621,27 @@ async def _handle_reconcile_account(
                     p_id = str(p["_id"])
                     if p_id in claimed_ids:
                         continue
+                    p_acc = str(p.get("bank_account_id") or "")
+                    if p_acc and p_acc != account_id_str:
+                        continue
                     p_amount = float(p.get("amount") or 0.0)
                     p_dt = _parse_dt(p.get("payment_date") or p.get("created_at"))
                     if abs(p_amount - credit) <= amount_tolerance:
+                        cand_ref = (
+                            p.get("client_name")
+                            or p.get("customer_name")
+                            or p.get("description")
+                            or p.get("category")
+                            or p.get("reference")
+                            or p.get("payment_no")
+                            or ""
+                        )
+                        cand_type = "deposit" if p.get("type") == "deposit" else "payment"
                         if stmt_dt and p_dt:
                             if abs((p_dt - stmt_dt).days) <= date_window_days:
-                                candidates.append(("payment", p, p_amount, p.get("payment_date") or p.get("created_at"), p.get("customer_name") or p.get("reference") or ""))
+                                candidates.append((cand_type, p, p_amount, p.get("payment_date") or p.get("created_at"), cand_ref))
                         else:
-                            candidates.append(("payment", p, p_amount, p.get("payment_date") or p.get("created_at"), p.get("customer_name") or p.get("reference") or ""))
+                            candidates.append((cand_type, p, p_amount, p.get("payment_date") or p.get("created_at"), cand_ref))
 
             if len(candidates) == 1:
                 target_type, match_doc, cand_amount, cand_date, cand_ref = candidates[0]
@@ -1405,12 +1684,22 @@ async def _handle_reconcile_account(
                         if target_type == "settlement":
                             await db.online_settlements.update_one(
                                 {"_id": match_doc["_id"]},
-                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                                {"$set": {
+                                    "bank_account_id": account_id_str,
+                                    "statement_line_id": str(line_id),
+                                    "reconciled": True,
+                                    "updated_at": now
+                                }}
                             )
-                        elif target_type == "payment":
+                        elif target_type in ["payment", "deposit"]:
                             await db.payments.update_one(
                                 {"_id": match_doc["_id"]},
-                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                                {"$set": {
+                                    "bank_account_id": account_id_str,
+                                    "statement_line_id": str(line_id),
+                                    "reconciled": True,
+                                    "updated_at": now
+                                }}
                             )
                 else:
                     # Low confidence match left for individual review
@@ -1427,27 +1716,35 @@ async def _handle_reconcile_account(
                 vp_id = str(vp["_id"])
                 if vp_id in claimed_ids:
                     continue
+                vp_acc = str(vp.get("bank_account_id") or "")
+                if vp_acc and vp_acc != account_id_str:
+                    continue
                 vp_amount = float(vp.get("amount") or 0.0)
                 vp_dt = _parse_dt(vp.get("payment_date") or vp.get("created_at"))
                 if abs(vp_amount - debit) <= amount_tolerance:
+                    cand_ref = vp.get("vendor_name") or vp.get("payee") or vp.get("reference") or vp.get("payment_no") or ""
                     if stmt_dt and vp_dt:
                         if abs((vp_dt - stmt_dt).days) <= date_window_days:
-                            candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), vp.get("vendor_name") or vp.get("payee") or ""))
+                            candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), cand_ref))
                     else:
-                        candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), vp.get("vendor_name") or vp.get("payee") or ""))
+                        candidates.append(("vendor_payment", vp, vp_amount, vp.get("payment_date") or vp.get("created_at"), cand_ref))
 
             for exp in expenses_raw:
                 exp_id = str(exp["_id"])
                 if exp_id in claimed_ids:
                     continue
+                exp_acc = str(exp.get("bank_account_id") or "")
+                if exp_acc and exp_acc != account_id_str:
+                    continue
                 exp_amount = float(exp.get("amount") or 0.0)
                 exp_dt = _parse_dt(exp.get("date") or exp.get("created_at"))
                 if abs(exp_amount - debit) <= amount_tolerance:
+                    cand_ref = exp.get("payee") or exp.get("category") or exp.get("reference") or ""
                     if stmt_dt and exp_dt:
                         if abs((exp_dt - stmt_dt).days) <= date_window_days:
-                            candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), exp.get("payee") or exp.get("category") or ""))
+                            candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), cand_ref))
                     else:
-                        candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), exp.get("payee") or exp.get("category") or ""))
+                        candidates.append(("expense", exp, exp_amount, exp.get("date") or exp.get("created_at"), cand_ref))
 
             if len(candidates) == 1:
                 target_type, match_doc, cand_amount, cand_date, cand_ref = candidates[0]
@@ -1490,12 +1787,22 @@ async def _handle_reconcile_account(
                         if target_type == "vendor_payment":
                             await db.payments.update_one(
                                 {"_id": match_doc["_id"]},
-                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                                {"$set": {
+                                    "bank_account_id": account_id_str,
+                                    "statement_line_id": str(line_id),
+                                    "reconciled": True,
+                                    "updated_at": now
+                                }}
                             )
                         elif target_type == "expense":
                             await db.expenses.update_one(
                                 {"_id": match_doc["_id"]},
-                                {"$set": {"bank_account_id": account_id_str, "updated_at": now}}
+                                {"$set": {
+                                    "bank_account_id": account_id_str,
+                                    "statement_line_id": str(line_id),
+                                    "reconciled": True,
+                                    "updated_at": now
+                                }}
                             )
                 else:
                     # Low confidence match left for individual review
@@ -1668,6 +1975,66 @@ async def get_suggested_cash_withdrawals(
     }
 
 
+async def _ensure_cash_account_for_bank(db, bank_account_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Lazily creates or retrieves a cash account in db.cash_accounts for the given source bank account.
+    Format: 'Cash ({bank_account_name})' e.g. 'Cash (HDFC)', 'Cash (UCO Bank)'.
+    Does NOT merge cash from different bank accounts.
+    """
+    if not bank_account_id or not hasattr(db, "cash_accounts") or db.cash_accounts is None:
+        return None
+
+    bank_acc_id_str = str(bank_account_id)
+    # Check if cash account already exists for this source bank account
+    try:
+        existing = await db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
+        if existing:
+            return existing
+    except Exception as e:
+        log.warning(f"Error checking existing cash account: {e}")
+
+    # Find the source bank account to get proper name
+    bank_name = "Bank"
+    if hasattr(db, "bank_accounts") and db.bank_accounts is not None:
+        bank_doc = None
+        try:
+            bank_doc = await db.bank_accounts.find_one({"_id": _oid(bank_acc_id_str)})
+        except Exception:
+            pass
+        if not bank_doc:
+            try:
+                bank_doc = await db.bank_accounts.find_one({"_id": bank_acc_id_str})
+            except Exception:
+                pass
+        if bank_doc:
+            bank_name = bank_doc.get("name") or bank_doc.get("bank_name") or "Bank"
+
+    if bank_name.startswith("Cash (") and bank_name.endswith(")"):
+        cash_account_name = bank_name
+    else:
+        cash_account_name = f"Cash ({bank_name})"
+
+    doc = {
+        "name": cash_account_name,
+        "source_bank_account_id": bank_acc_id_str,
+        "created_at": _now_iso(),
+    }
+
+    try:
+        res = await db.cash_accounts.insert_one(doc)
+        doc["_id"] = getattr(res, "inserted_id", None) or res
+        return doc
+    except Exception as e:
+        try:
+            existing = await db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
+            if existing:
+                return existing
+        except Exception:
+            pass
+        log.warning(f"Failed to create cash account for bank {bank_acc_id_str}: {e}")
+        return doc
+
+
 @banking_router.post("/banking/cash-withdrawals/confirm")
 @banking_router.post("/bank-accounts/cash-withdrawals/confirm")
 async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Request):
@@ -1752,6 +2119,12 @@ async def confirm_cash_withdrawal(payload: CashWithdrawalConfirmIn, request: Req
             res = await db.cash_ledger.insert_one(cash_ledger_doc)
             cash_ledger_id = str(res.inserted_id)
 
+    # Lazily ensure cash_accounts document exists for this bank account
+    try:
+        await _ensure_cash_account_for_bank(db, line_acc_id)
+    except Exception as e:
+        log.warning(f"Error ensuring cash account on withdrawal confirmation: {e}")
+
     # Update statement line to matched with matched_to: cash_withdrawal
     await db.bank_statement_lines.update_one(
         {"_id": line["_id"]},
@@ -1813,6 +2186,12 @@ async def create_cash_ledger_entry(payload: CashLedgerCreateIn, request: Request
     res = await db.cash_ledger.insert_one(cash_ledger_doc)
     cash_ledger_doc["_id"] = res.inserted_id
 
+    # Lazily ensure cash_accounts document exists for this bank account
+    try:
+        await _ensure_cash_account_for_bank(db, str(payload.bank_account_id))
+    except Exception as e:
+        log.warning(f"Error ensuring cash account on manual cash ledger creation: {e}")
+
     return {
         "ok": True,
         "message": "Cash withdrawal entry recorded successfully.",
@@ -1820,6 +2199,96 @@ async def create_cash_ledger_entry(payload: CashLedgerCreateIn, request: Request
         "id": str(res.inserted_id),
         "amount": amount,
         "remaining_balance": amount,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Direct Generic Deposit Recording
+# ---------------------------------------------------------------------------
+
+async def _next_deposit_no(db) -> str:
+    try:
+        from pymongo import ReturnDocument
+        if hasattr(db, "counters") and db.counters is not None:
+            res = db.counters.find_one_and_update(
+                {"_id": "deposit_no"},
+                {"$inc": {"seq": 1}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            if hasattr(res, "__await__"):
+                c = await res
+            elif isinstance(res, dict):
+                c = res
+            else:
+                c = None
+            seq = c.get("seq", 1) if isinstance(c, dict) else 1
+            return f"DEP-{seq:05d}"
+    except Exception:
+        pass
+    import uuid
+    return f"DEP-{uuid.uuid4().hex[:6].upper()}"
+
+
+@banking_router.post("/banking/deposits", status_code=201)
+@banking_router.post("/bank-accounts/deposits", status_code=201)
+async def create_deposit_entry(payload: DepositCreateIn, request: Request):
+    """Directly record a non-invoice bank deposit (e.g. vendor refund, interest, miscellaneous receipt)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    acc = await db.bank_accounts.find_one({"_id": _oid(payload.bank_account_id)})
+    if not acc:
+        raise HTTPException(404, f"Bank account '{payload.bank_account_id}' not found")
+
+    amount = float(payload.amount or 0.0)
+    if amount <= 0:
+        raise HTTPException(400, "Deposit amount must be > 0")
+
+    await _check_period_locked(db, str(payload.bank_account_id), payload.date, "create manual deposit")
+
+    now = _now_iso()
+    user_email = u.get("email") or u.get("name", "")
+
+    deposit_no = await _next_deposit_no(db)
+    category = (payload.category or "other").strip()
+    desc = (payload.description or "").strip()
+    category_title = category.replace("_", " ").title()
+    party_label = desc or f"Deposit ({category_title})"
+
+    doc = {
+        "payment_no": deposit_no,
+        "payment_date": payload.date,
+        "amount": round(amount, 2),
+        "mode": "bank_deposit",
+        "type": "deposit",
+        "category": category,
+        "description": desc or f"Bank Deposit - {category_title}",
+        "client_name": party_label,
+        "party": party_label,
+        "reference": payload.remarks or desc or deposit_no,
+        "bank_account_id": str(payload.bank_account_id),
+        "bank": acc.get("name") or acc.get("bank_name") or "",
+        "notes": payload.remarks or desc or "",
+        "remarks": payload.remarks or "",
+        "invoice_ids": [],
+        "allocations": {},
+        "vendor_id": None,
+        "reconciled": False,
+        "statement_line_id": None,
+        "created_at": now,
+        "by": user_email,
+    }
+    res = await db.payments.insert_one(doc)
+    doc["_id"] = res.inserted_id
+
+    return {
+        "ok": True,
+        "message": "Deposit recorded successfully.",
+        "deposit": stringify(doc),
+        "id": str(res.inserted_id),
+        "amount": round(amount, 2),
     }
 
 
@@ -2128,6 +2597,548 @@ async def get_cash_ledger_detail(cash_ledger_id: str, request: Request):
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-Source Cash Accounts & Unified Ledger
+# ---------------------------------------------------------------------------
+
+@banking_router.get("/banking/cash-accounts")
+@banking_router.get("/bank-accounts/cash-accounts")
+async def list_cash_accounts(request: Request):
+    """
+    List all cash accounts (per source bank account) with rollup metrics:
+    - current_balance: sum of remaining_balance from cash_ledger for this source_bank_account_id
+    - total_withdrawn: sum of amount from cash_ledger for this source_bank_account_id
+    - total_spent: total_withdrawn - current_balance
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
+    db = _get_db(request)
+
+    # 1. First ensure all distinct bank accounts present in cash_ledger have a cash_account doc
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            cl_bank_ids = []
+            if hasattr(db.cash_ledger, "distinct"):
+                res = db.cash_ledger.distinct("bank_account_id")
+                if hasattr(res, "__await__"):
+                    cl_bank_ids = await res
+                elif isinstance(res, list):
+                    cl_bank_ids = res
+            if not cl_bank_ids:
+                # Fallback: scan cash_ledger docs
+                cur = db.cash_ledger.find({})
+                if hasattr(cur, "to_list"):
+                    res = cur.to_list(2000)
+                    if hasattr(res, "__await__"):
+                        c_docs = await res
+                    elif isinstance(res, list):
+                        c_docs = res
+                    else:
+                        c_docs = []
+                    cl_bank_ids = list({str(c.get("bank_account_id")) for c in c_docs if c.get("bank_account_id")})
+            for bid in cl_bank_ids:
+                if bid:
+                    await _ensure_cash_account_for_bank(db, str(bid))
+        except Exception as e:
+            log.warning(f"Error auto-discovering cash accounts from cash_ledger: {e}")
+
+    # 2. Query all cash accounts
+    cash_accounts = []
+    if hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+        try:
+            cur = db.cash_accounts.find({})
+            if hasattr(cur, "sort"):
+                cur = cur.sort("created_at", 1)
+            if hasattr(cur, "to_list"):
+                res = cur.to_list(1000)
+                if hasattr(res, "__await__"):
+                    cash_accounts = await res
+                elif isinstance(res, list):
+                    cash_accounts = res
+        except Exception as e:
+            log.warning(f"Error querying cash_accounts: {e}")
+
+    # 3. Retrieve bank accounts map for naming / bank details
+    bank_map = {}
+    if hasattr(db, "bank_accounts") and db.bank_accounts is not None:
+        try:
+            b_cur = db.bank_accounts.find({})
+            if hasattr(b_cur, "to_list"):
+                res = b_cur.to_list(1000)
+                if hasattr(res, "__await__"):
+                    b_docs = await res
+                elif isinstance(res, list):
+                    b_docs = res
+                else:
+                    b_docs = []
+                for b in b_docs:
+                    b_id = str(b.get("_id") or b.get("id"))
+                    bank_map[b_id] = b
+        except Exception:
+            bank_map = {}
+
+    # 4. Fetch all cash_ledger entries to calculate rollups
+    all_cash_ledger = []
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            cl_cur = db.cash_ledger.find({})
+            if hasattr(cl_cur, "to_list"):
+                res = cl_cur.to_list(10000)
+                if hasattr(res, "__await__"):
+                    all_cash_ledger = await res
+                elif isinstance(res, list):
+                    all_cash_ledger = res
+                else:
+                    all_cash_ledger = []
+            elif hasattr(cl_cur, "__iter__"):
+                all_cash_ledger = list(cl_cur)
+        except Exception:
+            all_cash_ledger = []
+
+    # 4b. Fetch all client payments directed to cash accounts
+    all_cash_payments = []
+    if hasattr(db, "payments") and db.payments is not None:
+        try:
+            p_cur = db.payments.find({
+                "$or": [
+                    {"account_type": "cash"},
+                    {"cash_account_id": {"$nin": [None, ""]}}
+                ]
+            })
+            if hasattr(p_cur, "to_list"):
+                res = p_cur.to_list(10000)
+                if hasattr(res, "__await__"):
+                    all_cash_payments = await res
+                elif isinstance(res, list):
+                    all_cash_payments = res
+                else:
+                    all_cash_payments = []
+            elif hasattr(p_cur, "__iter__"):
+                all_cash_payments = list(p_cur)
+        except Exception:
+            all_cash_payments = []
+
+    # Group cash_ledger by source bank account id (string comparison)
+    cls_by_bank: Dict[str, List[Dict[str, Any]]] = {}
+    for cl in all_cash_ledger:
+        b_id = str(cl.get("bank_account_id") or "")
+        cls_by_bank.setdefault(b_id, []).append(cl)
+
+    items = []
+    for ca in cash_accounts:
+        ca_id = str(ca.get("_id") or ca.get("id"))
+        src_bank_id = str(ca.get("source_bank_account_id") or "")
+        linked_cls = cls_by_bank.get(src_bank_id, [])
+
+        linked_payments = [
+            p for p in all_cash_payments
+            if str(p.get("cash_account_id") or "") == ca_id or
+               (str(p.get("account_type") or "") == "cash" and str(p.get("bank_account_id") or "") == src_bank_id)
+        ]
+
+        curr_cl_bal = sum(float(c.get("remaining_balance") or 0.0) for c in linked_cls)
+        tot_withdrawn = sum(float(c.get("amount") or 0.0) for c in linked_cls)
+        tot_received = sum(float(p.get("amount") or 0.0) for p in linked_payments)
+        tot_spent = tot_withdrawn - curr_cl_bal
+        curr_bal = curr_cl_bal + tot_received
+
+        bank_doc = bank_map.get(src_bank_id, {})
+        bank_name = bank_doc.get("name") or bank_doc.get("bank_name") or ""
+
+        item = {
+            "id": ca_id,
+            "_id": ca_id,
+            "name": ca.get("name") or f"Cash ({bank_name or 'Bank'})",
+            "source_bank_account_id": src_bank_id,
+            "bank_name": bank_name,
+            "created_at": ca.get("created_at"),
+            "current_balance": round(curr_bal, 2),
+            "balance": round(curr_bal, 2),
+            "total_withdrawn": round(tot_withdrawn, 2),
+            "total_received": round(tot_received, 2),
+            "total_spent": round(tot_spent, 2),
+            "account_type": "cash",
+            "is_cash_account": True,
+            "entry_count": len(linked_cls) + len(linked_payments),
+        }
+        items.append(item)
+
+    total_cash_in_hand = round(sum(it["current_balance"] for it in items), 2)
+    total_cash_withdrawn = round(sum(it["total_withdrawn"] for it in items), 2)
+    total_cash_received = round(sum(it["total_received"] for it in items), 2)
+
+    return {
+        "ok": True,
+        "cash_accounts": items,
+        "items": items,
+        "total_cash_in_hand": total_cash_in_hand,
+        "total_cash_withdrawn": total_cash_withdrawn,
+        "total_cash_received": total_cash_received,
+        "count": len(items),
+    }
+
+
+@banking_router.get("/banking/cash-accounts/{id}/transactions")
+@banking_router.get("/bank-accounts/cash-accounts/{id}/transactions")
+async def get_cash_account_transactions(
+    id: str,
+    request: Request,
+    order: Optional[str] = "desc",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    txn_type: Optional[str] = None,
+):
+    """
+    Return chronological ledger for a specific cash account:
+    - Money IN: cash withdrawals from cash_ledger (date, amount, ref, running_balance)
+    - Money OUT: linked wage_payments, expenses, advances (date, amount, category, payee, running_balance)
+    - Running balance calculated in chronological order.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
+    db = _get_db(request)
+
+    # Lookup cash account by _id or source_bank_account_id
+    ca = None
+    if hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+        try:
+            ca = await db.cash_accounts.find_one({"_id": _oid(id)})
+        except Exception:
+            pass
+        if not ca:
+            try:
+                ca = await db.cash_accounts.find_one({"_id": id})
+            except Exception:
+                pass
+        if not ca:
+            try:
+                ca = await db.cash_accounts.find_one({"source_bank_account_id": str(id)})
+            except Exception:
+                pass
+
+    # If not found by cash_accounts id, check if id is a bank_account_id with cash ledger entries
+    if not ca:
+        ca = await _ensure_cash_account_for_bank(db, id)
+
+    if not ca:
+        raise HTTPException(404, f"Cash account '{id}' not found")
+
+    ca_id = str(ca.get("_id") or ca.get("id"))
+    src_bank_id = str(ca.get("source_bank_account_id"))
+
+    # Bank account details for naming
+    bank_name = "Bank"
+    if hasattr(db, "bank_accounts") and db.bank_accounts is not None:
+        b_doc = None
+        try:
+            b_doc = await db.bank_accounts.find_one({"_id": _oid(src_bank_id)})
+        except Exception:
+            pass
+        if not b_doc:
+            try:
+                b_doc = await db.bank_accounts.find_one({"_id": src_bank_id})
+            except Exception:
+                pass
+        if b_doc:
+            bank_name = b_doc.get("name") or b_doc.get("bank_name") or "Bank"
+
+    # Query cash_ledger entries for this source bank account
+    cash_docs = []
+    if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        q_bank_ids = [src_bank_id]
+        try:
+            q_bank_ids.append(_oid(src_bank_id))
+        except Exception:
+            pass
+        cl_cur = db.cash_ledger.find({"bank_account_id": {"$in": q_bank_ids}})
+        if hasattr(cl_cur, "to_list"):
+            res = cl_cur.to_list(5000)
+            if hasattr(res, "__await__"):
+                cash_docs = await res
+            elif isinstance(res, list):
+                cash_docs = res
+            else:
+                cash_docs = []
+
+    cl_ids = [str(c.get("_id")) for c in cash_docs if c.get("_id")]
+
+    # Query linked disbursements (wage_payments, expenses, advances)
+    wage_payments = []
+    expenses = []
+    advances = []
+
+    if cl_ids:
+        if hasattr(db, "wage_payments") and db.wage_payments is not None:
+            try:
+                wp_cur = db.wage_payments.find({"cash_ledger_id": {"$in": cl_ids}})
+                if hasattr(wp_cur, "to_list"):
+                    res = wp_cur.to_list(5000)
+                    if hasattr(res, "__await__"):
+                        wage_payments = await res
+                    elif isinstance(res, list):
+                        wage_payments = res
+            except Exception:
+                wage_payments = []
+
+        if hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                exp_cur = db.expenses.find({"cash_ledger_id": {"$in": cl_ids}})
+                if hasattr(exp_cur, "to_list"):
+                    res = exp_cur.to_list(5000)
+                    if hasattr(res, "__await__"):
+                        expenses = await res
+                    elif isinstance(res, list):
+                        expenses = res
+            except Exception:
+                expenses = []
+
+        if hasattr(db, "advances") and db.advances is not None:
+            try:
+                adv_cur = db.advances.find({"cash_ledger_id": {"$in": cl_ids}})
+                if hasattr(adv_cur, "to_list"):
+                    res = adv_cur.to_list(5000)
+                    if hasattr(res, "__await__"):
+                        advances = await res
+                    elif isinstance(res, list):
+                        advances = res
+            except Exception:
+                advances = []
+
+    # Query client payments received into this cash account
+    client_payments = []
+    if hasattr(db, "payments") and db.payments is not None:
+        p_q_or = [
+            {"cash_account_id": ca_id},
+            {"account_type": "cash", "bank_account_id": src_bank_id},
+        ]
+        if _oid(ca_id):
+            p_q_or.append({"cash_account_id": _oid(ca_id)})
+        if _oid(src_bank_id):
+            p_q_or.append({"account_type": "cash", "bank_account_id": _oid(src_bank_id)})
+        try:
+            p_cur = db.payments.find({"$or": p_q_or})
+            if hasattr(p_cur, "to_list"):
+                res = p_cur.to_list(5000)
+                if hasattr(res, "__await__"):
+                    client_payments = await res
+                elif isinstance(res, list):
+                    client_payments = res
+                else:
+                    client_payments = []
+            elif hasattr(p_cur, "__iter__"):
+                client_payments = list(p_cur)
+        except Exception:
+            client_payments = []
+
+    # Assemble unified ledger transactions
+    transactions = []
+
+    # 1. Money IN (Cash Withdrawals from cash_ledger)
+    for cl in cash_docs:
+        cl_id_str = str(cl.get("_id"))
+        is_stmt = bool(cl.get("source_statement_line_id"))
+        stmt_id = str(cl.get("source_statement_line_id") or "")
+        ref_text = f"Stmt Line {stmt_id[:8]}" if is_stmt else "Manual Cash Entry"
+        transactions.append({
+            "id": f"in_{cl_id_str}",
+            "source_id": cl_id_str,
+            "direction": "in",
+            "type": "cash_withdrawal",
+            "type_label": "Cash Withdrawal",
+            "category": "Withdrawal",
+            "date": cl.get("date") or "",
+            "created_at": cl.get("created_at") or "",
+            "title": f"Cash from {bank_name}",
+            "payee": bank_name,
+            "description": cl.get("notes") or f"Withdrawal from {bank_name}",
+            "amount": float(cl.get("amount") or 0.0),
+            "ref": "statement" if is_stmt else "manual",
+            "ref_text": ref_text,
+            "source_statement_line_id": cl.get("source_statement_line_id"),
+            "notes": cl.get("notes") or "",
+        })
+
+    # 1b. Money IN (Client Invoice Payments into Cash Account)
+    for cp in client_payments:
+        cp_id_str = str(cp.get("_id") or cp.get("id"))
+        inv_refs = []
+        if cp.get("allocations") and isinstance(cp.get("allocations"), dict):
+            inv_refs = list(cp["allocations"].keys())
+        elif cp.get("invoice_ids"):
+            inv_refs = cp.get("invoice_ids")
+        ref_text = f"Payment {cp.get('payment_no', '')}" if cp.get("payment_no") else "Invoice Payment"
+        if cp.get("reference"):
+            ref_text += f" ({cp.get('reference')})"
+        c_name = cp.get("client_name") or "Client"
+        transactions.append({
+            "id": f"in_pay_{cp_id_str}",
+            "source_id": cp_id_str,
+            "direction": "in",
+            "type": "client_payment",
+            "type_label": "Client Receipt",
+            "category": "Client Receipt",
+            "date": (cp.get("payment_date") or cp.get("created_at", ""))[:10],
+            "created_at": cp.get("created_at") or "",
+            "title": f"Payment from {c_name}",
+            "payee": c_name,
+            "party": c_name,
+            "client_name": c_name,
+            "description": cp.get("notes") or f"Invoice payment received from {c_name}",
+            "amount": float(cp.get("amount") or 0.0),
+            "ref": cp.get("reference") or cp.get("payment_no") or "payment",
+            "ref_text": ref_text,
+            "payment_no": cp.get("payment_no"),
+            "invoice_ids": inv_refs,
+            "notes": cp.get("notes") or "",
+        })
+
+    # 2. Money OUT (Wage Payments)
+    for wp in wage_payments:
+        wp_id_str = str(wp.get("_id") or wp.get("id"))
+        w_name = wp.get("worker_name") or f"Worker #{str(wp.get('worker_id'))[-6:]}"
+        desc = wp.get("notes") or f"Wage payment ({wp.get('period_from', '')} to {wp.get('period_to', '')})"
+        transactions.append({
+            "id": f"out_wp_{wp_id_str}",
+            "source_id": wp_id_str,
+            "cash_ledger_id": str(wp.get("cash_ledger_id")),
+            "direction": "out",
+            "type": "wage_payment",
+            "type_label": "Karigar Wage",
+            "category": "Wage Payment",
+            "date": wp.get("date") or "",
+            "created_at": wp.get("created_at") or "",
+            "title": w_name,
+            "payee": w_name,
+            "description": desc,
+            "amount": float(wp.get("amount") or 0.0),
+            "ref": "wage_payment",
+            "ref_text": f"Wage #{wp_id_str[:8]}",
+            "notes": wp.get("notes") or "",
+            "override_reason": wp.get("override_reason"),
+        })
+
+    # 3. Money OUT (Expenses)
+    for e in expenses:
+        exp_id_str = str(e.get("_id") or e.get("id"))
+        p_name = e.get("payee") or "Payee"
+        cat = e.get("category") or "Cash Expense"
+        desc = e.get("notes") or cat
+        transactions.append({
+            "id": f"out_exp_{exp_id_str}",
+            "source_id": exp_id_str,
+            "cash_ledger_id": str(e.get("cash_ledger_id")),
+            "direction": "out",
+            "type": "expense",
+            "type_label": "Cash Expense",
+            "category": cat,
+            "date": e.get("date") or "",
+            "created_at": e.get("created_at") or "",
+            "title": p_name,
+            "payee": p_name,
+            "description": desc,
+            "amount": float(e.get("amount") or 0.0),
+            "ref": "expense",
+            "ref_text": f"Expense #{exp_id_str[:8]}",
+            "notes": e.get("notes") or "",
+        })
+
+    # 4. Money OUT (Advances)
+    for a in advances:
+        adv_id_str = str(a.get("_id") or a.get("id"))
+        w_name = a.get("worker_name") or f"Karigar #{str(a.get('worker_id'))[-6:]}"
+        t_label = "Karigar Advance" if a.get("txn_type") == "advance" else "Karigar Payment"
+        transactions.append({
+            "id": f"out_adv_{adv_id_str}",
+            "source_id": adv_id_str,
+            "cash_ledger_id": str(a.get("cash_ledger_id")),
+            "direction": "out",
+            "type": a.get("txn_type") or "advance",
+            "type_label": t_label,
+            "category": t_label,
+            "date": a.get("date") or "",
+            "created_at": a.get("created_at") or "",
+            "title": w_name,
+            "payee": w_name,
+            "description": a.get("notes") or t_label,
+            "amount": float(a.get("amount") or 0.0),
+            "ref": "advance",
+            "ref_text": f"Advance #{adv_id_str[:8]}",
+            "notes": a.get("notes") or "",
+        })
+
+    # Sort strictly chronologically ASCENDING to calculate running balance accurately
+    # Inflow before outflow on same date, then created_at, then id
+    transactions.sort(key=lambda t: (
+        str(t.get("date") or ""),
+        0 if t.get("direction") == "in" else 1,
+        str(t.get("created_at") or ""),
+        t["id"],
+    ))
+
+    running_bal = 0.0
+    for t in transactions:
+        amt = t["amount"]
+        if t["direction"] == "in":
+            running_bal += amt
+        else:
+            running_bal -= amt
+        t["running_balance"] = round(running_bal, 2)
+
+    total_withdrawn = round(sum(t["amount"] for t in transactions if t.get("type") == "cash_withdrawal"), 2)
+    total_received = round(sum(t["amount"] for t in transactions if t.get("type") == "client_payment"), 2)
+    total_in = round(sum(t["amount"] for t in transactions if t["direction"] == "in"), 2)
+    total_spent = round(sum(t["amount"] for t in transactions if t["direction"] == "out"), 2)
+    current_balance = round(running_bal, 2)
+
+    # Apply date and type filters if provided (post running balance calculation)
+    filtered = transactions
+    if from_date:
+        filtered = [t for t in filtered if str(t.get("date") or "") >= from_date]
+    if to_date:
+        filtered = [t for t in filtered if str(t.get("date") or "") <= to_date]
+    if txn_type and txn_type != "all":
+        if txn_type == "inflow":
+            filtered = [t for t in filtered if t.get("direction") == "in"]
+        elif txn_type == "outflow":
+            filtered = [t for t in filtered if t.get("direction") == "out"]
+        else:
+            filtered = [t for t in filtered if t.get("type") == txn_type]
+
+    # For display, if order == "desc" (default), reverse the list so latest appears first
+    display_txns = list(reversed(filtered)) if order == "desc" else filtered
+
+    ca_summary = {
+        "id": ca_id,
+        "_id": ca_id,
+        "name": ca.get("name"),
+        "source_bank_account_id": src_bank_id,
+        "bank_name": bank_name,
+        "created_at": ca.get("created_at"),
+        "current_balance": current_balance,
+        "balance": current_balance,
+        "total_withdrawn": total_withdrawn,
+        "total_received": total_received,
+        "total_in": total_in,
+        "total_spent": total_spent,
+        "account_type": "cash",
+        "is_cash_account": True,
+    }
+
+    return {
+        "ok": True,
+        "cash_account": ca_summary,
+        "current_balance": current_balance,
+        "balance": current_balance,
+        "total_withdrawn": total_withdrawn,
+        "total_received": total_received,
+        "total_in": total_in,
+        "total_spent": total_spent,
+        "transactions": display_txns,
+        "items": display_txns,
+        "count": len(display_txns),
+    }
+
+
 @banking_router.get("/banking/transfers/suggested")
 @banking_router.get("/bank-accounts/transfers/suggested")
 async def get_suggested_transfers(
@@ -2403,10 +3414,27 @@ async def get_reconciliation_summary(
                     acc_stat["matched_expenses"] += debit
             else:
                 unmatched_expenses += debit
+    total_erp_bank_balance = 0.0
     for acc_id_key, acc_stat in per_account_stats.items():
         acc_stat["total_reconciled_credits"] = round(acc_stat["matched_income"], 2)
         acc_stat["total_reconciled_debits"] = round(acc_stat["matched_expenses"], 2)
         acc_stat["net_statement_flow"] = round(acc_stat["income"] - acc_stat["expenses"], 2)
+        try:
+            b_stats = await compute_bank_account_balance(db, acc_id_key)
+            acc_stat["current_balance"] = b_stats["current_balance"]
+            acc_stat["balance"] = b_stats["balance"]
+            acc_stat["erp_book_balance"] = b_stats["current_balance"]
+            acc_stat["total_erp_income"] = b_stats["total_received"]
+            acc_stat["total_erp_expenses"] = b_stats["total_spent"]
+            total_erp_bank_balance += b_stats["current_balance"]
+        except Exception:
+            cur = float(acc_stat.get("opening_balance") or 0.0) + acc_stat["total_reconciled_credits"] - acc_stat["total_reconciled_debits"]
+            acc_stat["current_balance"] = round(cur, 2)
+            acc_stat["balance"] = round(cur, 2)
+            acc_stat["erp_book_balance"] = round(cur, 2)
+            acc_stat["total_erp_income"] = acc_stat["total_reconciled_credits"]
+            acc_stat["total_erp_expenses"] = acc_stat["total_reconciled_debits"]
+            total_erp_bank_balance += cur
 
     # Cash in hand remaining balance from cash_ledger
     cash_docs = []
@@ -2465,6 +3493,8 @@ async def get_reconciliation_summary(
             "total_statement_lines": len(docs),
             "total_cash_in_hand": total_cash_in_hand,
             "total_cash_withdrawn": total_cash_withdrawn,
+            "erp_book_balance": round(total_erp_bank_balance, 2),
+            "total_bank_balance": round(total_erp_bank_balance, 2),
         },
         "accounts": list(per_account_stats.values()),
     }
@@ -2489,11 +3519,17 @@ async def get_unmatched_erp_candidates(
 
     account_type = "b2b_client"
     account_filter = None
+    account_id_str = None
     if bank_account_id and bank_account_id != "all":
         acc = await db.bank_accounts.find_one({"_id": _oid(bank_account_id)})
         if acc:
             account_type = acc.get("account_type", "b2b_client")
-            account_filter = {"$in": [None, "", str(acc["_id"])]}
+            account_id_str = str(acc["_id"])
+            acc_oid = _oid(acc["_id"])
+            valid_acc_ids = [account_id_str]
+            if acc_oid is not None:
+                valid_acc_ids.append(acc_oid)
+            account_filter = {"$in": [None, "", *valid_acc_ids]}
 
     candidates = []
 
@@ -2508,6 +3544,10 @@ async def get_unmatched_erp_candidates(
                 s_q["$or"] = [{"seller_order_id": s_rx}, {"order_release_id": s_rx}, {"platform": s_rx}]
             settlements = await db.online_settlements.find(s_q).sort("settlement_date", -1).limit(limit).to_list(limit)
             for s in settlements:
+                if account_id_str:
+                    s_acc = str(s.get("bank_account_id") or "")
+                    if s_acc and s_acc != account_id_str:
+                        continue
                 candidates.append({
                     "type": "settlement",
                     "id": str(s["_id"]),
@@ -2523,22 +3563,42 @@ async def get_unmatched_erp_candidates(
             p_q = {
                 "type": {"$ne": "vendor_payment"},
                 "vendor_id": {"$in": [None, ""]},
+                "account_type": {"$ne": "cash"},
             }
             if account_filter:
                 p_q["bank_account_id"] = account_filter
             if search:
                 p_rx = {"$regex": re.escape(str(search)), "$options": "i"}
-                p_q["$or"] = [{"client_name": p_rx}, {"reference": p_rx}, {"payment_no": p_rx}]
+                p_q["$or"] = [
+                    {"client_name": p_rx},
+                    {"reference": p_rx},
+                    {"payment_no": p_rx},
+                    {"description": p_rx},
+                    {"category": p_rx},
+                    {"notes": p_rx},
+                ]
             payments = await db.payments.find(p_q).sort("payment_date", -1).limit(limit).to_list(limit)
             for p in payments:
+                if p.get("account_type") == "cash":
+                    continue
+                if p.get("cash_account_id") and not p.get("bank_account_id"):
+                    continue
+                if account_id_str:
+                    p_acc = str(p.get("bank_account_id") or "")
+                    if p_acc and p_acc != account_id_str:
+                        continue
+                is_dep = p.get("type") == "deposit"
+                cand_type = "deposit" if is_dep else "payment"
+                party_label = p.get("party") or p.get("client_name") or (f"Deposit ({p.get('category', 'Other').title()})" if is_dep else "Client")
+                desc_label = p.get("description") or (f"Deposit ({p.get('category', 'Other').title()}) - {p.get('notes', '')}".strip(" -") if is_dep else f"Client Payment {p.get('payment_no', '')} - {party_label}")
                 candidates.append({
-                    "type": "payment",
+                    "type": cand_type,
                     "id": str(p["_id"]),
                     "date": p.get("payment_date", "")[:10],
                     "amount": float(p.get("amount") or 0.0),
-                    "description": f"Client Payment {p.get('payment_no', '')} - {p.get('client_name', 'Client')}",
+                    "description": desc_label,
                     "side": "credit",
-                    "party": p.get("client_name", "Client"),
+                    "party": party_label,
                     "reference": p.get("reference") or p.get("payment_no") or "",
                 })
 
@@ -2554,6 +3614,10 @@ async def get_unmatched_erp_candidates(
             vp_q["$or"] = [{"vendor_name": vp_rx}, {"reference": vp_rx}, {"payment_no": vp_rx}]
         vendor_payments = await db.payments.find(vp_q).sort("payment_date", -1).limit(limit).to_list(limit)
         for vp in vendor_payments:
+            if account_id_str:
+                vp_acc = str(vp.get("bank_account_id") or "")
+                if vp_acc and vp_acc != account_id_str:
+                    continue
             candidates.append({
                 "type": "vendor_payment",
                 "id": str(vp["_id"]),
@@ -2576,6 +3640,10 @@ async def get_unmatched_erp_candidates(
             e_q["$or"] = [{"payee": e_rx}, {"category": e_rx}, {"notes": e_rx}]
         expenses = await db.expenses.find(e_q).sort("date", -1).limit(limit).to_list(limit)
         for exp in expenses:
+            if account_id_str:
+                exp_acc = str(exp.get("bank_account_id") or "")
+                if exp_acc and exp_acc != account_id_str:
+                    continue
             candidates.append({
                 "type": "expense",
                 "id": str(exp["_id"]),
@@ -3475,14 +4543,16 @@ async def export_reconciliation_report(
                         "credit_amount": credit,
                         "reconciled_amount": float(s_doc.get("net_payout") or credit),
                     })
-                elif m_type == "payment" and ref_id in client_payments_map:
+                elif m_type in ["payment", "deposit"] and ref_id in client_payments_map:
                     p_doc = client_payments_map[ref_id]
+                    party = p_doc.get("client_name") or (f"Deposit ({p_doc.get('category', 'Other').title()})" if p_doc.get("type") == "deposit" else "Client Payment")
+                    voucher = p_doc.get("payment_no") or p_doc.get("reference") or "Payment"
                     rev_items.append({
                         "date": d.get("date"),
                         "narration": d.get("narration"),
                         "reference_no": d.get("reference_no"),
-                        "party_name": p_doc.get("client_name") or "Client Payment",
-                        "erp_voucher": p_doc.get("payment_no") or p_doc.get("reference") or "Payment",
+                        "party_name": party,
+                        "erp_voucher": voucher,
                         "credit_amount": credit,
                         "reconciled_amount": float(p_doc.get("amount") or credit),
                     })

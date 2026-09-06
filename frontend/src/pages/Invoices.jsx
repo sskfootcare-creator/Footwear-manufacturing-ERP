@@ -58,15 +58,29 @@ export default function Invoices() {
   const [paymentFor, setPaymentFor] = useState(null);
   const [deleteFor, setDeleteFor] = useState(null);
   const [showForecast, setShowForecast] = useState(true);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [cashAccounts, setCashAccounts] = useState([]);
 
   const load = async () => {
     try {
-      const [{ data: invData }, { data: forecastData }] = await Promise.all([
+      const [{ data: invData }, { data: forecastData }, bankRes, cashRes] = await Promise.all([
         http.get("/invoices"),
         http.get("/invoices/cash-forecast").catch(() => ({ data: null })),
+        http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
+        http.get("/banking/cash-accounts").catch(() => ({ data: [] })),
       ]);
       setRows(invData || []);
       setForecast(forecastData || null);
+      setBankAccounts(Array.isArray(bankRes?.data) ? bankRes.data : bankRes?.data?.items || []);
+      setCashAccounts(
+        Array.isArray(cashRes?.data?.cash_accounts)
+          ? cashRes.data.cash_accounts
+          : Array.isArray(cashRes?.data?.items)
+          ? cashRes.data.items
+          : Array.isArray(cashRes?.data)
+          ? cashRes.data
+          : []
+      );
     } catch (err) {
       console.error("Failed to load invoices or forecast", err);
     }
@@ -513,6 +527,8 @@ export default function Invoices() {
       {paymentFor && (
         <PaymentDialog
           invoiceMeta={paymentFor}
+          bankAccounts={bankAccounts}
+          cashAccounts={cashAccounts}
           onClose={() => setPaymentFor(null)}
           onSaved={() => {
             setPaymentFor(null);
@@ -758,6 +774,7 @@ function InvoiceDetailModal({ inv, onClose }) {
                     <th className="px-3 py-2 font-bold">Receipt #</th>
                     <th className="px-3 py-2 font-bold">Date</th>
                     <th className="px-3 py-2 font-bold">Mode</th>
+                    <th className="px-3 py-2 font-bold">Account</th>
                     <th className="px-3 py-2 font-bold">Reference</th>
                     <th className="px-3 py-2 font-bold text-right">Amount</th>
                   </tr>
@@ -772,6 +789,17 @@ function InvoiceDetailModal({ inv, onClose }) {
                         {p.payment_date}
                       </td>
                       <td className="px-3 py-1.5">{p.mode}</td>
+                      <td className="px-3 py-1.5">
+                        {p.account_type === "cash" ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            💵 {p.account_name || p.bank || "Cash Account"}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                            🏦 {p.account_name || p.bank || "Bank Account"}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-1.5 font-mono text-slate-600">
                         {p.reference || "—"}
                       </td>
@@ -1176,31 +1204,167 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
 }
 
 /* ------------------- PAYMENT DIALOG ------------------- */
-function PaymentDialog({ invoiceMeta, onClose, onSaved }) {
+export function PaymentDialog({
+  invoiceMeta,
+  onClose,
+  onSaved,
+  bankAccounts: propBankAccounts,
+  cashAccounts: propCashAccounts,
+}) {
+  const [bankAccounts, setBankAccounts] = useState(propBankAccounts || []);
+  const [cashAccounts, setCashAccounts] = useState(propCashAccounts || []);
   const [form, setForm] = useState({
     amount: invoiceMeta.outstanding || 0,
     payment_date: new Date().toISOString().slice(0, 10),
     mode: "NEFT",
     reference: "",
     bank: "",
+    account_type: "bank",
+    bank_account_id: "",
+    cash_account_id: "",
     notes: "",
   });
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  useEffect(() => {
+    if (propBankAccounts && propBankAccounts.length > 0) {
+      setBankAccounts(propBankAccounts);
+      return;
+    }
+    let mounted = true;
+    http
+      .get("/banking/accounts", { params: { active: true } })
+      .then((res) => {
+        if (!mounted) return;
+        const list = Array.isArray(res?.data) ? res.data : res?.data?.items || [];
+        setBankAccounts(list);
+      })
+      .catch((err) => {
+        console.error("Failed to load bank accounts for PaymentDialog:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [propBankAccounts]);
+
+  useEffect(() => {
+    if (propCashAccounts && propCashAccounts.length > 0) {
+      setCashAccounts(propCashAccounts);
+      return;
+    }
+    let mounted = true;
+    http
+      .get("/banking/cash-accounts")
+      .then((res) => {
+        if (!mounted) return;
+        const list = Array.isArray(res?.data?.cash_accounts)
+          ? res.data.cash_accounts
+          : Array.isArray(res?.data?.items)
+          ? res.data.items
+          : Array.isArray(res?.data)
+          ? res.data
+          : [];
+        setCashAccounts(list);
+      })
+      .catch((err) => {
+        console.error("Failed to load cash accounts for PaymentDialog:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [propCashAccounts]);
+
+  const handleModeChange = (newMode) => {
+    setForm((f) => {
+      const updated = { ...f, mode: newMode };
+      if (newMode === "Cash" && f.account_type !== "cash" && cashAccounts.length > 0) {
+        const matched = cashAccounts.find((c) => c.source_bank_account_id === f.bank_account_id) || cashAccounts[0];
+        if (matched) {
+          const cId = matched.id || matched._id;
+          updated.account_type = "cash";
+          updated.cash_account_id = cId;
+          updated.bank_account_id = matched.source_bank_account_id || "";
+          updated.bank = matched.name || "Cash Account";
+        }
+      } else if (newMode !== "Cash" && f.account_type === "cash" && bankAccounts.length > 0) {
+        const matched = bankAccounts.find((b) => (b.id || b._id) === f.bank_account_id) || bankAccounts[0];
+        if (matched) {
+          const bId = matched.id || matched._id;
+          updated.account_type = "bank";
+          updated.bank_account_id = bId;
+          updated.cash_account_id = "";
+          updated.bank = matched.bank_name || matched.name || "Bank";
+        }
+      }
+      return updated;
+    });
+  };
+
+  const handleAccountChange = (val) => {
+    if (!val) {
+      setForm((f) => ({
+        ...f,
+        account_type: "bank",
+        bank_account_id: "",
+        cash_account_id: "",
+        bank: "",
+      }));
+      return;
+    }
+
+    const cashAcc = cashAccounts.find(
+      (c) => (c.id || c._id) === val || `cash_${c.id || c._id}` === val
+    );
+    if (cashAcc || val.startsWith("cash_")) {
+      const ca = cashAcc || cashAccounts.find((c) => `cash_${c.id || c._id}` === val);
+      const cId = ca ? (ca.id || ca._id) : val.replace(/^cash_/, "");
+      const bankName = ca ? (ca.name || `Cash (${ca.bank_name || "Bank"})`) : "Cash Account";
+      setForm((f) => ({
+        ...f,
+        account_type: "cash",
+        cash_account_id: cId,
+        bank_account_id: ca?.source_bank_account_id || "",
+        bank: bankName,
+        mode: f.mode === "NEFT" || f.mode === "RTGS" ? "Cash" : f.mode,
+      }));
+      return;
+    }
+
+    const bankAcc = bankAccounts.find(
+      (b) => (b.id || b._id) === val || `bank_${b.id || b._id}` === val
+    );
+    const bId = bankAcc ? (bankAcc.id || bankAcc._id) : val.replace(/^bank_/, "");
+    const bankName = bankAcc ? (bankAcc.bank_name || bankAcc.name || f.bank) : f.bank;
+    setForm((f) => ({
+      ...f,
+      account_type: "bank",
+      bank_account_id: bId,
+      cash_account_id: "",
+      bank: bankName,
+    }));
+  };
+
   const submit = async () => {
     if (!Number(form.amount)) return alert("Amount must be > 0");
+    if (!form.bank_account_id && !form.cash_account_id) return alert("Please select a bank account");
     setSaving(true);
     try {
-      await http.post("/payments", {
+      const payload = {
         invoice_ids: [invoiceMeta.id],
         amount: Number(form.amount),
         payment_date: form.payment_date,
         mode: form.mode,
         reference: form.reference,
         bank: form.bank,
+        bank_account_id: form.bank_account_id,
         notes: form.notes,
-      });
+      };
+      if (form.account_type === "cash") {
+        payload.account_type = "cash";
+        payload.cash_account_id = form.cash_account_id;
+      }
+      await http.post("/payments", payload);
       onSaved();
     } catch (e) {
       alert("Payment failed: " + (e.response?.data?.detail || e.message));
@@ -1208,6 +1372,11 @@ function PaymentDialog({ invoiceMeta, onClose, onSaved }) {
       setSaving(false);
     }
   };
+
+  const currentSelectValue =
+    form.account_type === "cash"
+      ? (form.cash_account_id ? (cashAccounts.some(c => (c.id || c._id) === form.cash_account_id) ? `cash_${form.cash_account_id}` : form.cash_account_id) : "")
+      : (form.bank_account_id || "");
 
   return (
     <div
@@ -1266,7 +1435,7 @@ function PaymentDialog({ invoiceMeta, onClose, onSaved }) {
             <Field label="Mode">
               <select
                 value={form.mode}
-                onChange={(e) => set("mode", e.target.value)}
+                onChange={(e) => handleModeChange(e.target.value)}
                 data-testid="pay-mode"
                 className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#16A34A] outline-none"
               >
@@ -1277,25 +1446,65 @@ function PaymentDialog({ invoiceMeta, onClose, onSaved }) {
                 ))}
               </select>
             </Field>
+            <Field label="Deposit / Receiving Account *">
+              <select
+                value={currentSelectValue}
+                onChange={(e) => handleAccountChange(e.target.value)}
+                data-testid="pay-bank-account"
+                className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#16A34A] outline-none"
+                required
+              >
+                <option value="">-- Select Bank Account --</option>
+                {bankAccounts.length > 0 && (
+                  <optgroup label="🏦 Bank Accounts">
+                    {bankAccounts.map((acc) => {
+                      const id = acc.id || acc._id;
+                      return (
+                        <option key={`bank_${id}`} value={id}>
+                          {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                        </option>
+                      );
+                    })}
+                  </optgroup>
+                )}
+                {cashAccounts.length > 0 && (
+                  <optgroup label="💵 Cash Accounts">
+                    {cashAccounts.map((ca) => {
+                      const id = ca.id || ca._id;
+                      return (
+                        <option key={`cash_${id}`} value={`cash_${id}`}>
+                          {`${ca.name || "Cash"} (In Hand: ₹${Number(ca.current_balance || 0).toLocaleString("en-IN")})`}
+                        </option>
+                      );
+                    })}
+                  </optgroup>
+                )}
+              </select>
+              {form.account_type === "cash" && (
+                <div className="text-[11px] text-emerald-700 font-medium mt-1 flex items-center gap-1">
+                  💵 Physical Cash Account selected: funds will increase Cash in Hand.
+                </div>
+              )}
+            </Field>
             <Field label="Reference (UTR / Cheque #)">
               <input
                 value={form.reference}
                 onChange={(e) => set("reference", e.target.value)}
                 data-testid="pay-ref"
-                placeholder="NEFT-UTR-XXXXXXXX"
+                placeholder={form.account_type === "cash" ? "Cash Receipt # / Memo" : "NEFT-UTR-XXXXXXXX"}
                 className="w-full border-2 border-slate-300 px-3 py-2 font-mono text-sm focus:border-[#16A34A] outline-none"
               />
             </Field>
-            <Field label="Bank">
+            <Field label="Bank / Counter">
               <input
                 value={form.bank}
                 onChange={(e) => set("bank", e.target.value)}
                 data-testid="pay-bank"
-                placeholder="HDFC / ICICI / SBI"
+                placeholder={form.account_type === "cash" ? "Cash Counter / Drawer" : "HDFC / ICICI / SBI"}
                 className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#16A34A] outline-none"
               />
             </Field>
-            <Field label="Notes">
+            <Field label="Notes" className="col-span-2">
               <input
                 value={form.notes}
                 onChange={(e) => set("notes", e.target.value)}
@@ -1322,12 +1531,12 @@ function PaymentDialog({ invoiceMeta, onClose, onSaved }) {
   );
 }
 
-function Field({ label, children }) {
+function Field({ label, children, className }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-1">
+    <div className={className}>
+      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-1 block">
         {label}
-      </div>
+      </label>
       {children}
     </div>
   );

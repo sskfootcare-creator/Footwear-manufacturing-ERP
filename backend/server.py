@@ -1242,6 +1242,16 @@ async def on_startup():
     except Exception as e:
         log.warning(f"Parser template seed failed: {e}")
 
+    # Cash accounts: unique per source_bank_account_id
+    try:
+        await db.cash_accounts.create_index(
+            "source_bank_account_id",
+            unique=True,
+            name="cash_accounts_source_bank_unique",
+        )
+    except Exception as e:
+        log.warning(f"Could not create cash_accounts index: {e}")
+
     await seed_admin(db)
     try:
         seeded = await _seed_color_master()
