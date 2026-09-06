@@ -212,7 +212,7 @@ describe("Expenses Bank Account Selection", () => {
     });
   });
 
-  it("allows selecting 'Paid via Cash' and choosing a cash withdrawal entry", async () => {
+  it("allows selecting 'Paid via Cash' and choosing a Per-Source Cash Account without individual withdrawals", async () => {
     http.get.mockImplementation((url) => {
       if (url === "/expenses") return Promise.resolve({ data: [] });
       if (url === "/reports/pnl") return Promise.resolve({ data: {} });
@@ -237,6 +237,20 @@ describe("Expenses Bank Account Selection", () => {
           },
         });
       }
+      if (url === "/banking/cash-accounts") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: "ca_hdfc_01",
+                name: "Cash (HDFC Primary)",
+                current_balance: 6500,
+                source_bank_account_id: "bank_acc_101",
+              },
+            ],
+          },
+        });
+      }
       return Promise.resolve({ data: [] });
     });
 
@@ -252,9 +266,13 @@ describe("Expenses Bank Account Selection", () => {
     // Cash ledger dropdown should appear
     const cashDropdown = await screen.findByTestId("expense-form-cash-ledger");
     expect(cashDropdown).toBeInTheDocument();
-    expect(screen.getByText(/₹6,500/)).toBeInTheDocument();
+    expect(screen.getByText(/Cash \(HDFC Primary\) • Available: ₹6,500/)).toBeInTheDocument();
 
-    // Fill form and select cash ledger
+    // Verify Specific Cash Withdrawals is NOT present in document
+    expect(screen.queryByText(/Specific Cash Withdrawals/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ATM Floor Cash/i)).not.toBeInTheDocument();
+
+    // Fill form and select cash account
     fireEvent.change(screen.getByTestId("expense-form-amount"), {
       target: { value: "3500" },
     });
@@ -262,7 +280,7 @@ describe("Expenses Bank Account Selection", () => {
       target: { value: "Agra Packaging Store" },
     });
     fireEvent.change(cashDropdown, {
-      target: { value: "cash_leg_55" },
+      target: { value: "ca_hdfc_01" },
     });
 
     http.post.mockResolvedValueOnce({ data: { id: "exp_cash_1" } });
@@ -277,15 +295,15 @@ describe("Expenses Bank Account Selection", () => {
           amount: 3500,
           payee: "Agra Packaging Store",
           paid_via: "cash",
-          cash_ledger_id: "cash_leg_55",
+          cash_account_id: "ca_hdfc_01",
           bank_account_id: null,
         })
       );
     });
   });
 
-  it("allows recording a direct cash withdrawal and immediately using it for cash expense", async () => {
-    let cashEntries = [];
+  it("allows recording a direct cash withdrawal and immediately using it for cash expense via cash account", async () => {
+    let cashAccounts = [];
     http.get.mockImplementation((url) => {
       if (url === "/banking/accounts") {
         return Promise.resolve({
@@ -302,11 +320,10 @@ describe("Expenses Bank Account Selection", () => {
         });
       }
       if (url === "/banking/cash-ledger") {
-        return Promise.resolve({
-          data: {
-            items: cashEntries,
-          },
-        });
+        return Promise.resolve({ data: { items: [] } });
+      }
+      if (url === "/banking/cash-accounts") {
+        return Promise.resolve({ data: { items: cashAccounts } });
       }
       if (url === "/expenses") return Promise.resolve({ data: [] });
       if (url === "/reports/pnl") return Promise.resolve({ data: { revenue: 0, expenses: 0, gross_profit: 0, net_profit: 0 } });
@@ -330,7 +347,7 @@ describe("Expenses Bank Account Selection", () => {
     fireEvent.change(amountInput, { target: { value: "50000" } });
     fireEvent.change(notesInput, { target: { value: "for worker wages this week" } });
 
-    // Mock direct cash-ledger creation response
+    // Mock direct cash-ledger creation response and cash account addition
     http.post.mockImplementation((url, payload) => {
       if (url === "/banking/cash-ledger") {
         const newDoc = {
@@ -341,11 +358,19 @@ describe("Expenses Bank Account Selection", () => {
           date: payload.date,
           notes: payload.notes,
         };
-        cashEntries = [newDoc];
+        cashAccounts = [
+          {
+            id: "ca_hdfc_01",
+            name: "Cash (HDFC Primary)",
+            current_balance: 50000,
+            source_bank_account_id: "bank_acc_101",
+          },
+        ];
         return Promise.resolve({
           data: {
             ok: true,
             cash_ledger: newDoc,
+            cash_account_id: "ca_hdfc_01",
           },
         });
       }
@@ -374,10 +399,11 @@ describe("Expenses Bank Account Selection", () => {
     const cashToggle = await screen.findByTestId("expense-pay-via-cash");
     fireEvent.click(cashToggle);
 
-    // Newly recorded withdrawal is immediately available in dropdown
+    // Newly funded cash account is available in dropdown and specific withdrawals are omitted
     const cashDropdown = await screen.findByTestId("expense-form-cash-ledger");
     expect(cashDropdown).toBeInTheDocument();
-    expect(await screen.findByText(/₹50,000 remaining/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Cash \(HDFC Primary\) • Available: ₹50,000/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Specific Cash Withdrawals/i)).not.toBeInTheDocument();
   });
 
   test("renders bank-paid wage expense with Wage Payout badge and bank attribution", async () => {
@@ -445,6 +471,129 @@ describe("Expenses Bank Account Selection", () => {
     const bankAttr = screen.getByTestId("expense-bank-attr-exp_wage_1");
     expect(bankAttr).toBeInTheDocument();
     expect(bankAttr).toHaveTextContent("HDFC Primary Current A/C");
+  });
+
+  it("allows selecting a Per-Source Cash Account, shows balance pill, and submits cash_account_id", async () => {
+    http.get.mockImplementation((url) => {
+      if (url === "/expenses") return Promise.resolve({ data: [] });
+      if (url === "/reports/pnl") return Promise.resolve({ data: {} });
+      if (url === "/expenses/due-queue" || url === "/expenses/recurring") return Promise.resolve({ data: [] });
+      if (url === "/banking/accounts") return Promise.resolve({ data: [] });
+      if (url === "/banking/cash-ledger") return Promise.resolve({ data: { items: [] } });
+      if (url === "/banking/cash-accounts") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: "ca_hdfc_01",
+                name: "Cash (HDFC Primary)",
+                current_balance: 25000,
+                source_bank_account_id: "bank_acc_101",
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    render(<Expenses />);
+
+    const addBtn = await screen.findByTestId("add-expense-btn");
+    fireEvent.click(addBtn);
+
+    // Switch to Paid via Cash
+    const cashToggle = await screen.findByTestId("expense-pay-via-cash");
+    fireEvent.click(cashToggle);
+
+    // Cash account option should appear in dropdown
+    const cashDropdown = await screen.findByTestId("expense-form-cash-ledger");
+    expect(cashDropdown).toBeInTheDocument();
+    expect(screen.getByText(/Cash \(HDFC Primary\) • Available: ₹25,000/)).toBeInTheDocument();
+
+    // Select the cash account
+    fireEvent.change(cashDropdown, { target: { value: "ca_hdfc_01" } });
+
+    // Fill amount that is within balance
+    fireEvent.change(screen.getByTestId("expense-form-amount"), { target: { value: "12000" } });
+    fireEvent.change(screen.getByTestId("expense-form-payee"), { target: { value: "Office Supplies Depot" } });
+
+    // Balance status pill should show sufficient balance
+    const pill = await screen.findByTestId("expense-cash-balance-pill");
+    expect(pill).toBeInTheDocument();
+    expect(pill).toHaveTextContent(/Sufficient cash balance/);
+    expect(pill).toHaveTextContent(/25,000/);
+
+    // If amount exceeds balance
+    fireEvent.change(screen.getByTestId("expense-form-amount"), { target: { value: "30000" } });
+    expect(screen.getByTestId("expense-cash-balance-pill")).toHaveTextContent(/Exceeds balance by/);
+
+    // Reset amount back to valid 12000
+    fireEvent.change(screen.getByTestId("expense-form-amount"), { target: { value: "12000" } });
+
+    http.post.mockResolvedValueOnce({ data: { id: "exp_ca_99" } });
+
+    const submitBtn = screen.getByTestId("save-expense-btn");
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith(
+        "/expenses",
+        expect.objectContaining({
+          amount: 12000,
+          payee: "Office Supplies Depot",
+          paid_via: "cash",
+          cash_account_id: "ca_hdfc_01",
+          cash_ledger_id: null,
+          bank_account_id: null,
+        })
+      );
+    });
+  });
+
+  it("renders cash expense with cash account attribution badge in table", async () => {
+    const mockCashExpense = {
+      id: "exp_cash_99",
+      category: "Transport & Logistics",
+      amount: 1500,
+      date: "2026-08-20",
+      payee: "Local Tempo Driver",
+      notes: "Material transport",
+      paid_via: "cash",
+      cash_account_id: "ca_hdfc_01",
+      status: "confirmed",
+    };
+
+    http.get.mockImplementation((url) => {
+      if (url === "/expenses") return Promise.resolve({ data: [mockCashExpense] });
+      if (url === "/reports/pnl") return Promise.resolve({ data: {} });
+      if (url === "/expenses/due-queue" || url === "/expenses/recurring") return Promise.resolve({ data: [] });
+      if (url === "/banking/accounts") return Promise.resolve({ data: [] });
+      if (url === "/banking/cash-ledger") return Promise.resolve({ data: { items: [] } });
+      if (url === "/banking/cash-accounts") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: "ca_hdfc_01",
+                name: "Cash (HDFC Primary)",
+                current_balance: 20000,
+              },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    render(<Expenses />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("expense-cash-attr-exp_cash_99")).toBeInTheDocument();
+    });
+
+    const cashBadge = screen.getByTestId("expense-cash-attr-exp_cash_99");
+    expect(cashBadge).toHaveTextContent("Cash (HDFC Primary)");
   });
 });
 

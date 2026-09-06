@@ -141,30 +141,112 @@ async def create_expense(payload: ExpenseIn, request: Request):
     if amount <= 0:
         raise HTTPException(400, "Expense amount must be greater than 0")
 
+    cash_account_id = None
     if payload.paid_via == "cash":
-        if not payload.cash_ledger_id:
-            raise HTTPException(400, "cash_ledger_id is required when paid_via is 'cash'")
+        target_cash_id = payload.cash_account_id or payload.cash_ledger_id
+        if not target_cash_id:
+            raise HTTPException(400, "cash_account_id or cash_ledger_id is required when paid_via is 'cash'")
 
-        # Atomic conditional decrement to eliminate concurrency race conditions
-        result = await db.cash_ledger.update_one(
-            {"_id": oid(payload.cash_ledger_id), "remaining_balance": {"$gte": round(amount, 2)}},
-            {"$inc": {"remaining_balance": -round(amount, 2)}},
-        )
-        if result.modified_count == 0:
-            # Check why it failed for a clear user error message
-            cash_entry = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
-            if not cash_entry:
-                raise HTTPException(404, f"Cash ledger entry '{payload.cash_ledger_id}' not found")
-            remaining = float(cash_entry.get("remaining_balance") or 0.0)
-            raise HTTPException(
-                400,
-                f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
+        # 1. Check if target_cash_id matches a cash_account (or source bank account)
+        ca_doc = None
+        if hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+            try:
+                ca_doc = await db.cash_accounts.find_one({"_id": oid(target_cash_id)})
+            except Exception:
+                pass
+            if not ca_doc:
+                try:
+                    ca_doc = await db.cash_accounts.find_one({"_id": str(target_cash_id)})
+                except Exception:
+                    pass
+            if not ca_doc:
+                try:
+                    ca_doc = await db.cash_accounts.find_one({"source_bank_account_id": str(target_cash_id)})
+                except Exception:
+                    pass
+
+        if ca_doc:
+            src_bank_id = str(ca_doc.get("source_bank_account_id") or "")
+            ca_id = str(ca_doc.get("_id") or ca_doc.get("id"))
+            ca_name = ca_doc.get("name") or "Cash Account"
+
+            q_bank_ids = [src_bank_id]
+            try:
+                q_bank_ids.append(oid(src_bank_id))
+            except Exception:
+                pass
+
+            cl_entries = []
+            if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+                cur = db.cash_ledger.find({
+                    "bank_account_id": {"$in": q_bank_ids},
+                    "remaining_balance": {"$gt": 0}
+                }).sort("date", 1)
+                if hasattr(cur, "to_list"):
+                    res = cur.to_list(1000)
+                    if hasattr(res, "__await__"):
+                        cl_entries = await res
+                    elif isinstance(res, list):
+                        cl_entries = res
+                    else:
+                        cl_entries = []
+                elif hasattr(cur, "__iter__"):
+                    cl_entries = list(cur)
+
+            total_available = sum(float(c.get("remaining_balance") or 0.0) for c in cl_entries)
+            if round(total_available, 2) < round(amount, 2):
+                raise HTTPException(
+                    400,
+                    f"Insufficient cash in account '{ca_name}'. Available remaining balance: ₹{total_available:.2f}, Requested expense amount: ₹{amount:.2f}",
+                )
+
+            # Draw down across cash_ledger entries in FIFO order
+            to_deduct = round(amount, 2)
+            primary_cl_id = None
+            for entry in cl_entries:
+                rem = float(entry.get("remaining_balance") or 0.0)
+                if rem <= 0:
+                    continue
+                deduct = min(rem, to_deduct)
+                await db.cash_ledger.update_one(
+                    {"_id": entry["_id"], "remaining_balance": {"$gte": round(deduct, 2)}},
+                    {"$inc": {"remaining_balance": -round(deduct, 2)}}
+                )
+                if not primary_cl_id:
+                    primary_cl_id = str(entry["_id"])
+                to_deduct = round(to_deduct - deduct, 2)
+                if to_deduct <= 0:
+                    break
+
+            bank_account_id = src_bank_id
+            cash_ledger_id = primary_cl_id or str(target_cash_id)
+            cash_account_id = ca_id
+        else:
+            # Atomic conditional decrement on single cash_ledger entry (backward compatibility)
+            result = await db.cash_ledger.update_one(
+                {"_id": oid(target_cash_id), "remaining_balance": {"$gte": round(amount, 2)}},
+                {"$inc": {"remaining_balance": -round(amount, 2)}},
             )
-        bank_account_id = None
-        cash_ledger_id = str(payload.cash_ledger_id)
+            if result.modified_count == 0:
+                # Check why it failed for a clear user error message
+                cash_entry = await db.cash_ledger.find_one({"_id": oid(target_cash_id)})
+                if not cash_entry:
+                    raise HTTPException(404, f"Cash ledger entry '{target_cash_id}' not found")
+                remaining = float(cash_entry.get("remaining_balance") or 0.0)
+                raise HTTPException(
+                    400,
+                    f"Insufficient cash in ledger entry. Available remaining balance: ₹{remaining:.2f}, Requested expense amount: ₹{amount:.2f}",
+                )
+            bank_account_id = str(cash_entry.get("bank_account_id") or "") or None
+            cash_ledger_id = str(target_cash_id)
+            if bank_account_id and hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+                ca_entry = await db.cash_accounts.find_one({"source_bank_account_id": bank_account_id})
+                if ca_entry:
+                    cash_account_id = str(ca_entry.get("_id") or ca_entry.get("id"))
     else:
         bank_account_id = payload.bank_account_id
         cash_ledger_id = None
+        cash_account_id = None
 
     doc = {
         "category": payload.category,
@@ -175,6 +257,7 @@ async def create_expense(payload: ExpenseIn, request: Request):
         "receipt": payload.receipt,
         "paid_via": payload.paid_via,
         "cash_ledger_id": cash_ledger_id,
+        "cash_account_id": cash_account_id,
         "bank_account_id": bank_account_id,
         "is_recurring": bool(payload.is_recurring),
         "recurring_expense_id": payload.recurring_expense_id or "",
@@ -531,6 +614,14 @@ async def confirm_expense(eid: str, request: Request, payload: Optional[dict] = 
             update_fields["receipt"] = payload["receipt"]
         if "category" in payload and payload["category"]:
             update_fields["category"] = payload["category"]
+        if "bank_account_id" in payload:
+            update_fields["bank_account_id"] = payload["bank_account_id"]
+        if "paid_via" in payload:
+            update_fields["paid_via"] = payload["paid_via"]
+        if "cash_account_id" in payload:
+            update_fields["cash_account_id"] = payload["cash_account_id"]
+        if "cash_ledger_id" in payload:
+            update_fields["cash_ledger_id"] = payload["cash_ledger_id"]
 
     await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_fields})
     doc = await db.expenses.find_one({"_id": oid(eid)})
@@ -588,11 +679,22 @@ async def delete_expense(eid: str, request: Request):
         raise HTTPException(404, "Expense not found")
     if not doc:
         raise HTTPException(404, "Expense not found")
-    if doc.get("paid_via") == "cash" and doc.get("cash_ledger_id") and hasattr(db, "cash_ledger"):
-        await db.cash_ledger.update_one(
-            {"_id": oid(doc["cash_ledger_id"])},
-            {"$inc": {"remaining_balance": round(float(doc.get("amount") or 0.0), 2)}}
-        )
+    if doc.get("paid_via") == "cash" and hasattr(db, "cash_ledger"):
+        cl_id = doc.get("cash_ledger_id")
+        if cl_id:
+            try:
+                await db.cash_ledger.update_one(
+                    {"_id": oid(cl_id)},
+                    {"$inc": {"remaining_balance": round(float(doc.get("amount") or 0.0), 2)}}
+                )
+            except Exception:
+                try:
+                    await db.cash_ledger.update_one(
+                        {"_id": str(cl_id)},
+                        {"$inc": {"remaining_balance": round(float(doc.get("amount") or 0.0), 2)}}
+                    )
+                except Exception:
+                    pass
     await db.expenses.delete_one({"_id": oid(eid)})
     await log_activity_db(
         db,

@@ -931,8 +931,8 @@ export default function BankReconciliation() {
                   </span>
                   <span>
                     This account's starting balance was corrected on{" "}
-                    <strong className="font-mono">{activeAccountCorrection.corrected_at?.slice(0, 10)}</strong> from ₹
-                    {inr(activeAccountCorrection.old_value)} to ₹{inr(activeAccountCorrection.new_value)} by{" "}
+                    <strong className="font-mono">{activeAccountCorrection.corrected_at?.slice(0, 10)}</strong> from{" "}
+                    {inr(activeAccountCorrection.old_value)} to {inr(activeAccountCorrection.new_value)} by{" "}
                     <strong>{activeAccountCorrection.corrected_by}</strong>. Reason: <em>"{activeAccountCorrection.reason}"</em>
                   </span>
                 </div>
@@ -1074,7 +1074,7 @@ export default function BankReconciliation() {
                     Cash Pool
                   </span>
                   <span className="font-mono text-[11px] text-emerald-700 font-bold ml-0.5">
-                    ₹{inr(ca.current_balance)}
+                    {inr(ca.current_balance)}
                   </span>
                 </button>
               </div>
@@ -1135,7 +1135,7 @@ export default function BankReconciliation() {
                   </div>
                 </div>
                 <div className="text-3xl font-black font-mono text-emerald-800" data-testid="cash-pool-current-balance">
-                  ₹{inr(selectedCashAccount.current_balance)}
+                  {inr(selectedCashAccount.current_balance)}
                 </div>
                 <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
                   <span>Available Cash in Hand</span>
@@ -1152,7 +1152,7 @@ export default function BankReconciliation() {
                   </div>
                 </div>
                 <div className="text-3xl font-black font-mono text-slate-900" data-testid="cash-pool-total-withdrawn">
-                  ₹{inr(selectedCashAccount.total_withdrawn)}
+                  {inr(selectedCashAccount.total_withdrawn)}
                 </div>
                 <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100">
                   Total inflows from {selectedCashAccount.bank_name || "bank"}
@@ -1168,7 +1168,7 @@ export default function BankReconciliation() {
                   </div>
                 </div>
                 <div className="text-3xl font-black font-mono text-slate-900" data-testid="cash-pool-total-spent">
-                  ₹{inr(selectedCashAccount.total_spent)}
+                  {inr(selectedCashAccount.total_spent)}
                 </div>
                 <div className="text-xs text-slate-500 font-medium mt-2 pt-2 border-t border-slate-100">
                   Karigar wages, cash expenses & advances
@@ -1342,13 +1342,13 @@ export default function BankReconciliation() {
                             )}
                           </td>
                           <td className="px-4 py-3 text-right font-mono font-bold whitespace-nowrap text-emerald-700">
-                            {t.direction === "in" ? `+₹${inr(t.amount)}` : "—"}
+                            {t.direction === "in" ? `+${inr(t.amount)}` : "—"}
                           </td>
                           <td className="px-4 py-3 text-right font-mono font-bold whitespace-nowrap text-red-600">
-                            {t.direction === "out" ? `-₹${inr(t.amount)}` : "—"}
+                            {t.direction === "out" ? `-${inr(t.amount)}` : "—"}
                           </td>
                           <td className="px-4 py-3 text-right font-mono font-black whitespace-nowrap text-slate-900">
-                            ₹{inr(t.running_balance)}
+                            {inr(t.running_balance)}
                           </td>
                           <td className="px-4 py-3 text-slate-500 text-[11px]">
                             <div className="truncate max-w-xs" title={t.notes || t.ref_text}>
@@ -1365,13 +1365,13 @@ export default function BankReconciliation() {
                           Pool Summary Snapshot
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-emerald-700">
-                          +₹{inr(filteredCashTransactions.filter(t => t.direction === 'in').reduce((s, t) => s + t.amount, 0))}
+                          +{inr(filteredCashTransactions.filter(t => t.direction === 'in').reduce((s, t) => s + t.amount, 0))}
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-red-600">
-                          -₹{inr(filteredCashTransactions.filter(t => t.direction === 'out').reduce((s, t) => s + t.amount, 0))}
+                          -{inr(filteredCashTransactions.filter(t => t.direction === 'out').reduce((s, t) => s + t.amount, 0))}
                         </td>
                         <td className="px-4 py-3 text-right font-mono font-black text-slate-900">
-                          ₹{inr(selectedCashAccount.current_balance)}
+                          {inr(selectedCashAccount.current_balance)}
                         </td>
                         <td></td>
                       </tr>
@@ -1553,7 +1553,7 @@ export default function BankReconciliation() {
               {inr(summary?.summary?.total_cash_in_hand || 0)}
             </div>
             <div className="text-xs text-slate-600 font-medium mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
-              <span>Drawn: ₹{inr(summary?.summary?.total_cash_withdrawn || 0)}</span>
+              <span>Drawn: {inr(summary?.summary?.total_cash_withdrawn || 0)}</span>
               <span className="text-[10px] uppercase font-bold text-emerald-700 hover:underline">View Pools →</span>
             </div>
           </Card>
@@ -1963,7 +1963,7 @@ export default function BankReconciliation() {
                             <div className="text-right">
                               <div className="text-[10px] uppercase font-bold text-slate-500">Transfer Amount</div>
                               <div className="text-base font-mono font-black text-slate-900">
-                                ₹{inr(pair.from_line.amount)}
+                                {inr(pair.from_line.amount)}
                               </div>
                             </div>
 
@@ -2089,7 +2089,7 @@ export default function BankReconciliation() {
                         </div>
                         {line.is_existing_manual_entry && (
                           <div className="text-[11px] text-emerald-800 font-medium bg-emerald-50 p-1.5 border border-emerald-200">
-                            Linked to manual entry on {line.existing_cash_ledger_date} (₹{inr(line.existing_cash_ledger_remaining ?? line.amount)} remaining) • No duplicate will be created
+                            Linked to manual entry on {line.existing_cash_ledger_date} ({inr(line.existing_cash_ledger_remaining ?? line.amount)} remaining) • No duplicate will be created
                           </div>
                         )}
                       </div>
@@ -2404,10 +2404,10 @@ export default function BankReconciliation() {
                                               <div className="text-[9px] text-amber-800 font-sans font-medium">
                                                 {line.cash_ledger_info.wage_payment_count > 0 ? (
                                                   <span>
-                                                    ₹{inr(line.cash_ledger_info.allocated_amount)} paid ({line.cash_ledger_info.wage_payment_count}) • ₹{inr(line.cash_ledger_info.remaining_balance)} rem
+                                                    {inr(line.cash_ledger_info.allocated_amount)} paid ({line.cash_ledger_info.wage_payment_count}) • {inr(line.cash_ledger_info.remaining_balance)} rem
                                                   </span>
                                                 ) : (
-                                                  <span>₹{inr(line.cash_ledger_info.remaining_balance)} unallocated</span>
+                                                  <span>{inr(line.cash_ledger_info.remaining_balance)} unallocated</span>
                                                 )}
                                               </div>
                                             )}
@@ -3284,7 +3284,7 @@ function CorrectOpeningBalanceModal({ account, accounts, onClose, onSuccess }) {
             >
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {`${acc.name} (${acc.bank_name} • Current: ₹${inr(acc.opening_balance || 0)})`}
+                  {`${acc.name} (${acc.bank_name} • Current: ${inr(acc.opening_balance || 0)})`}
                 </option>
               ))}
             </select>
@@ -3293,7 +3293,7 @@ function CorrectOpeningBalanceModal({ account, accounts, onClose, onSuccess }) {
           {targetAccount && (
             <div className="p-2.5 bg-blue-50/50 border border-blue-200 flex items-center justify-between text-xs">
               <span className="text-slate-600">Current Starting Balance:</span>
-              <span className="font-mono font-bold text-slate-900">₹{inr(targetAccount.opening_balance || 0)}</span>
+              <span className="font-mono font-bold text-slate-900">{inr(targetAccount.opening_balance || 0)}</span>
             </div>
           )}
 
@@ -3405,10 +3405,10 @@ function BalanceCorrectionHistoryModal({ accountId, accounts, onClose }) {
                         {c.corrected_at ? c.corrected_at.slice(0, 16).replace("T", " ") : "-"}
                       </td>
                       <td className="px-3 py-2 text-right text-slate-500 whitespace-nowrap">
-                        ₹{inr(c.old_value)}
+                        {inr(c.old_value)}
                       </td>
                       <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">
-                        ₹{inr(c.new_value)}
+                        {inr(c.new_value)}
                       </td>
                       <td className="px-3 py-2 font-sans text-slate-800 max-w-xs">{c.reason}</td>
                       <td className="px-3 py-2 text-slate-600 text-[11px] whitespace-nowrap">{c.corrected_by}</td>
@@ -3470,7 +3470,7 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Matches Existing Manual Cash Withdrawal
               </p>
               <p className="text-[11px] text-emerald-800">
-                Found unlinked manual entry of <strong>₹{inr(line.existing_cash_ledger_amount || amount)}</strong> recorded on {line.existing_cash_ledger_date || line.date} (₹{inr(line.existing_cash_ledger_remaining ?? amount)} remaining balance).
+                Found unlinked manual entry of <strong>{inr(line.existing_cash_ledger_amount || amount)}</strong> recorded on {line.existing_cash_ledger_date || line.date} ({inr(line.existing_cash_ledger_remaining ?? amount)} remaining balance).
               </p>
               <p className="text-[10px] text-emerald-700">
                 Confirming will link this statement line directly to that entry without resetting disbursements or creating a duplicate.
@@ -3480,7 +3480,7 @@ function ConfirmCashWithdrawalModal({ line, accounts, onClose, onConfirm }) {
             <div className="p-3 bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
               <p className="font-bold">This transaction looks like a cash withdrawal.</p>
               <p className="text-[11px] text-amber-800">
-                Confirming will create an entry in the <strong>Cash in Hand</strong> ledger with initial balance equal to withdrawal amount (₹{inr(amount)}), and mark this statement line as fully reconciled.
+                Confirming will create an entry in the <strong>Cash in Hand</strong> ledger with initial balance equal to withdrawal amount ({inr(amount)}), and mark this statement line as fully reconciled.
               </p>
             </div>
           )}
@@ -4034,13 +4034,13 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="p-3 bg-white border-2 border-slate-200">
               <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Withdrawn Amount</div>
-              <div className="text-lg font-mono font-bold text-slate-900 mt-0.5">₹{inr(withdrawalAmount)}</div>
+              <div className="text-lg font-mono font-bold text-slate-900 mt-0.5">{inr(withdrawalAmount)}</div>
               <div className="text-[10px] text-slate-400 font-mono mt-0.5">Gross Bank Debit</div>
             </div>
 
             <div className="p-3 bg-white border-2 border-emerald-200 bg-emerald-50/20">
               <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">Disbursed to Karigars</div>
-              <div className="text-lg font-mono font-bold text-emerald-700 mt-0.5">₹{inr(allocatedAmount)}</div>
+              <div className="text-lg font-mono font-bold text-emerald-700 mt-0.5">{inr(allocatedAmount)}</div>
               <div className="text-[10px] text-emerald-600 font-mono mt-0.5">
                 {wagePayments.length} wage payout(s) • {expenses.length} general expense(s)
               </div>
@@ -4048,7 +4048,7 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
 
             <div className="p-3 bg-white border-2 border-amber-200 bg-amber-50/20">
               <div className="text-[10px] uppercase font-bold text-amber-900 tracking-wider">Unallocated Cash in Hand</div>
-              <div className="text-lg font-mono font-bold text-amber-900 mt-0.5">₹{inr(remainingBalance)}</div>
+              <div className="text-lg font-mono font-bold text-amber-900 mt-0.5">{inr(remainingBalance)}</div>
               <div className="text-[10px] text-amber-700 font-mono mt-0.5">Available for future wages & expenses</div>
             </div>
           </div>
@@ -4057,7 +4057,7 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
           <div className="space-y-1.5">
             <div className="flex justify-between text-xs font-mono text-slate-600 font-bold">
               <span>Disbursement Progress: {pctAllocated}%</span>
-              <span>₹{inr(allocatedAmount)} / ₹{inr(withdrawalAmount)}</span>
+              <span>{inr(allocatedAmount)} / {inr(withdrawalAmount)}</span>
             </div>
             <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
               <div
@@ -4085,7 +4085,7 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
                 <Wallet className="w-8 h-8 mx-auto text-slate-400 opacity-60" />
                 <p className="font-bold text-xs text-slate-700">No wage or expense disbursements recorded yet from this withdrawal.</p>
                 <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
-                  The full amount (₹{inr(withdrawalAmount)}) is currently sitting as unallocated cash in hand. When wage payouts or expenses are recorded with paid_via="cash" drawing from this withdrawal, they will automatically appear here.
+                  The full amount ({inr(withdrawalAmount)}) is currently sitting as unallocated cash in hand. When wage payouts or expenses are recorded with paid_via="cash" drawing from this withdrawal, they will automatically appear here.
                 </p>
               </div>
             ) : (
@@ -4161,7 +4161,7 @@ function CashWithdrawalBreakdownModal({ cashLedgerId, line, accounts, onClose })
                               )}
                             </td>
                             <td className="px-3 py-2 text-right font-bold text-emerald-700 whitespace-nowrap">
-                              ₹{inr(d.amount)}
+                              {inr(d.amount)}
                             </td>
                           </tr>
 

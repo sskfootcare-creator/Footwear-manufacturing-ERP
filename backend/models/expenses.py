@@ -29,6 +29,7 @@ class ExpenseIn(BaseModel):
     bank_account_id: Optional[str] = None
     paid_via: Literal["bank", "cash"] = "bank"
     cash_ledger_id: Optional[str] = None
+    cash_account_id: Optional[str] = None
     is_recurring: bool = False
     recurring_expense_id: Optional[str] = None
     status: str = "confirmed"  # confirmed, due, overdue
@@ -45,6 +46,7 @@ class ExpenseUpdate(BaseModel):
     bank_account_id: Optional[str] = None
     paid_via: Optional[Literal["bank", "cash"]] = None
     cash_ledger_id: Optional[str] = None
+    cash_account_id: Optional[str] = None
     is_recurring: Optional[bool] = None
     recurring_expense_id: Optional[str] = None
     status: Optional[str] = None

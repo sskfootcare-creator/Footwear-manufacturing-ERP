@@ -2882,7 +2882,13 @@ async def get_cash_account_transactions(
 
         if hasattr(db, "expenses") and db.expenses is not None:
             try:
-                exp_cur = db.expenses.find({"cash_ledger_id": {"$in": cl_ids}})
+                exp_q_or = [
+                    {"cash_account_id": ca_id},
+                    {"cash_ledger_id": {"$in": cl_ids}},
+                ]
+                if _oid(ca_id):
+                    exp_q_or.append({"cash_account_id": _oid(ca_id)})
+                exp_cur = db.expenses.find({"$or": exp_q_or})
                 if hasattr(exp_cur, "to_list"):
                     res = exp_cur.to_list(5000)
                     if hasattr(res, "__await__"):

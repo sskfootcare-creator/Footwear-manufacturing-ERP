@@ -76,6 +76,7 @@ export default function Expenses() {
   const [dueQueue, setDueQueue] = useState([]);
   const [recurringTemplates, setRecurringTemplates] = useState([]);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [cashAccounts, setCashAccounts] = useState([]);
   const [cashLedgerEntries, setCashLedgerEntries] = useState([]);
   const [pnl, setPnl] = useState({
     revenue: 0,
@@ -145,6 +146,7 @@ export default function Expenses() {
     notes: "",
     receipt: null,
     paid_via: "bank",
+    cash_account_id: "",
     cash_ledger_id: "",
     bank_account_id: "",
     is_recurring: false,
@@ -159,13 +161,14 @@ export default function Expenses() {
       if (toDate) params.to_date = toDate;
       if (search) params.search = search;
 
-      const [expRes, pnlRes, dueRes, recRes, bankRes, cashRes] = await Promise.all([
+      const [expRes, pnlRes, dueRes, recRes, bankRes, cashRes, cashAccRes] = await Promise.all([
         http.get("/expenses", { params }),
         http.get("/reports/pnl", { params: { from_date: fromDate, to_date: toDate } }),
         http.get("/expenses/due-queue"),
         http.get("/expenses/recurring"),
         http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
         http.get("/banking/cash-ledger").catch(() => ({ data: [] })),
+        http.get("/banking/cash-accounts").catch(() => ({ data: [] })),
       ]);
 
       setExpenses(expRes.data || []);
@@ -175,6 +178,8 @@ export default function Expenses() {
       setBankAccounts(Array.isArray(bankRes?.data) ? bankRes.data : bankRes?.data?.items || []);
       const clItems = cashRes?.data?.items || (Array.isArray(cashRes?.data) ? cashRes.data : []);
       setCashLedgerEntries(clItems);
+      const caItems = cashAccRes?.data?.items || (Array.isArray(cashAccRes?.data) ? cashAccRes.data : []);
+      setCashAccounts(caItems);
     } catch (err) {
       console.error("Failed to load expenses data:", err);
     } finally {
@@ -198,6 +203,7 @@ export default function Expenses() {
       notes: "",
       receipt: null,
       paid_via: "bank",
+      cash_account_id: "",
       cash_ledger_id: "",
       bank_account_id: "",
       is_recurring: false,
@@ -216,8 +222,17 @@ export default function Expenses() {
       payee: item.payee || "",
       notes: item.notes || "",
       receipt: item.receipt || null,
-      paid_via: item.paid_via || (item.cash_ledger_id ? "cash" : "bank"),
-      cash_ledger_id: item.cash_ledger_id || "",
+      paid_via: item.paid_via || (item.cash_account_id || item.cash_ledger_id ? "cash" : "bank"),
+      cash_account_id:
+        item.cash_account_id ||
+        (item.cash_ledger_id
+          ? (() => {
+              const cl = cashLedgerEntries.find((c) => String(c.id || c._id) === String(item.cash_ledger_id));
+              const ca = cl ? cashAccounts.find((a) => String(a.source_bank_account_id) === String(cl.bank_account_id)) : null;
+              return ca ? String(ca.id || ca._id) : "";
+            })()
+          : ""),
+      cash_ledger_id: "",
       bank_account_id: item.bank_account_id || "",
       is_recurring: !!item.is_recurring,
     });
@@ -231,8 +246,8 @@ export default function Expenses() {
       return;
     }
 
-    if (form.paid_via === "cash" && !form.cash_ledger_id) {
-      alert("Please select a Cash Withdrawal ledger entry for cash payment.");
+    if (form.paid_via === "cash" && !form.cash_account_id) {
+      alert("Please select a Cash Account for cash payment.");
       return;
     }
 
@@ -249,7 +264,8 @@ export default function Expenses() {
       notes: form.notes ? form.notes.trim() : "",
       receipt: form.receipt,
       paid_via: form.paid_via || "bank",
-      cash_ledger_id: form.paid_via === "cash" ? form.cash_ledger_id : null,
+      cash_account_id: form.paid_via === "cash" ? (form.cash_account_id || null) : null,
+      cash_ledger_id: form.paid_via === "cash" ? (form.cash_ledger_id || null) : null,
       bank_account_id: form.paid_via === "bank" ? (form.bank_account_id || null) : null,
       is_recurring: form.is_recurring,
       status: "confirmed",
@@ -757,6 +773,18 @@ export default function Expenses() {
                                       data-testid={`expense-bank-attr-${item.id}`}
                                     >
                                       🏛️ {bankAccounts.find((b) => (b.id || b._id) === item.bank_account_id)?.name || "Bank Account"}
+                                    </span>
+                                  )}
+                                  {item.paid_via === "cash" && (
+                                    <span
+                                      className="block text-[10px] text-amber-700 font-semibold truncate max-w-[140px]"
+                                      title={
+                                        cashAccounts.find((ca) => (ca.id || ca._id) === item.cash_account_id)?.name ||
+                                        "Cash in Hand"
+                                      }
+                                      data-testid={`expense-cash-attr-${item.id}`}
+                                    >
+                                      💵 {cashAccounts.find((ca) => (ca.id || ca._id) === item.cash_account_id)?.name || "Cash in Hand"}
                                     </span>
                                   )}
                                 </td>
@@ -1380,7 +1408,7 @@ export default function Expenses() {
                 <div className="grid grid-cols-2 gap-2 mb-2">
                   <button
                     type="button"
-                    onClick={() => setForm({ ...form, paid_via: "bank", cash_ledger_id: "" })}
+                    onClick={() => setForm({ ...form, paid_via: "bank", cash_account_id: "", cash_ledger_id: "" })}
                     className={`px-3 py-2 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
                       form.paid_via === "bank"
                         ? "bg-[#0F172A] text-white border-[#0F172A] shadow-sm"
@@ -1425,9 +1453,9 @@ export default function Expenses() {
                   </div>
                 ) : (
                   <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[10px] font-bold uppercase tracking-wider text-amber-900">
-                        Cash in Hand Withdrawal Pool *
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] uppercase font-bold text-slate-700 tracking-wider">
+                        Cash Account *
                       </label>
                       <button
                         type="button"
@@ -1439,26 +1467,68 @@ export default function Expenses() {
                       </button>
                     </div>
                     <select
-                      value={form.cash_ledger_id || ""}
-                      onChange={(e) => setForm({ ...form, cash_ledger_id: e.target.value })}
+                      value={form.cash_account_id || ""}
+                      onChange={(e) => {
+                        setForm({ ...form, cash_account_id: e.target.value, cash_ledger_id: "" });
+                      }}
                       className="w-full border-2 border-amber-400 bg-amber-50/40 px-3 py-2 text-xs font-bold text-amber-950 outline-none focus:border-amber-700"
                       required
                       data-testid="expense-form-cash-ledger"
                     >
-                      <option value="">-- Select Cash Withdrawal to Draw From --</option>
-                      {cashLedgerEntries.map((cl) => {
-                        const cid = String(cl.id || cl._id);
-                        const rem = Number(cl.remaining_balance ?? cl.amount ?? 0);
+                      <option value="">-- Select Cash Account --</option>
+                      {cashAccounts.map((ca) => {
+                        const cid = String(ca.id || ca._id);
+                        const bal = Number(ca.current_balance ?? ca.balance ?? 0);
                         return (
-                          <option key={cid} value={cid}>
-                            {`Withdrawal #${cid.slice(-6)} • ${cl.date || "Date"} • ₹${inr(rem)} remaining${cl.notes ? ` (${cl.notes})` : ""}`}
+                          <option key={`ca-${cid}`} value={cid}>
+                            {`💵 ${ca.name} • Available: ${inr(bal)}`}
                           </option>
                         );
                       })}
                     </select>
-                    <p className="text-[10px] text-amber-800 mt-1 font-medium">
-                      Payment will draw down this withdrawal's remaining cash pool.
-                    </p>
+
+                    {/* Balance Status Pill */}
+                    {(() => {
+                      const selectedCa = cashAccounts.find(
+                        (ca) => String(ca.id || ca._id) === String(form.cash_account_id)
+                      );
+                      const available = selectedCa
+                        ? Number(selectedCa.current_balance ?? selectedCa.balance ?? 0)
+                        : null;
+
+                      if (available === null) {
+                        return (
+                          <p className="text-[10px] text-amber-800 mt-1 font-medium">
+                            Payment will draw down this cash account's liquidity pool.
+                          </p>
+                        );
+                      }
+
+                      const amt = parseFloat(form.amount) || 0;
+                      const isInsufficient = amt > available;
+
+                      return (
+                        <div
+                          className={`mt-1.5 p-2 rounded text-xs flex items-center justify-between font-semibold ${
+                            isInsufficient
+                              ? "bg-red-50 text-red-700 border border-red-200"
+                              : "bg-amber-100/80 text-amber-900 border border-amber-300"
+                          }`}
+                          data-testid="expense-cash-balance-pill"
+                        >
+                          <span>
+                            Available: <b>{inr(available)}</b>
+                          </span>
+                          {isInsufficient ? (
+                            <span className="text-red-600 text-[11px] font-bold">
+                              ⚠️ Exceeds balance by {inr(amt - available)}
+                            </span>
+                          ) : (
+                            <span className="text-emerald-700 text-[11px] font-bold">✓ Sufficient cash balance</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -1529,14 +1599,39 @@ export default function Expenses() {
         <RecordCashWithdrawalModal
           bankAccounts={bankAccounts}
           onClose={() => setShowCashWithdrawalModal(false)}
-          onSuccess={(newEntry) => {
+          onSuccess={async (newEntry) => {
             setShowCashWithdrawalModal(false);
-            loadData();
-            if (newEntry && (newEntry.id || newEntry._id)) {
-              const newId = String(newEntry.id || newEntry._id);
-              if (modalOpen) {
-                setForm((prev) => ({ ...prev, paid_via: "cash", cash_ledger_id: newId }));
+            try {
+              const [cashRes, cashAccRes] = await Promise.all([
+                http.get("/banking/cash-ledger").catch(() => ({ data: [] })),
+                http.get("/banking/cash-accounts").catch(() => ({ data: [] })),
+              ]);
+              const clItems = cashRes?.data?.items || (Array.isArray(cashRes?.data) ? cashRes.data : []);
+              setCashLedgerEntries(clItems);
+              const caItems =
+                cashAccRes?.data?.cash_accounts ||
+                cashAccRes?.data?.items ||
+                (Array.isArray(cashAccRes?.data) ? cashAccRes.data : []);
+              setCashAccounts(caItems);
+
+              if (newEntry && modalOpen) {
+                const bankId = newEntry.bank_account_id || newEntry.source_bank_account_id;
+                const matchedCa = caItems.find(
+                  (ca) =>
+                    String(ca.source_bank_account_id) === String(bankId) ||
+                    String(ca.id || ca._id) === String(newEntry.cash_account_id)
+                );
+                if (matchedCa) {
+                  setForm((prev) => ({
+                    ...prev,
+                    paid_via: "cash",
+                    cash_account_id: String(matchedCa.id || matchedCa._id),
+                    cash_ledger_id: "",
+                  }));
+                }
               }
+            } catch (e) {
+              loadData();
             }
           }}
         />

@@ -662,11 +662,34 @@ async def test_stage4_full_realistic_workflow():
         if not q or not q.get("cash_ledger_id") or
            (isinstance(q.get("cash_ledger_id"), dict) and str(w.get("cash_ledger_id")) in [str(x) for x in q["cash_ledger_id"].get("$in", [])])
     ]))
-    mock_db.expenses.find = MagicMock(side_effect=lambda q: MockCursor([
-        e for e in expenses
-        if not q or not q.get("cash_ledger_id") or
-           (isinstance(q.get("cash_ledger_id"), dict) and str(e.get("cash_ledger_id")) in [str(x) for x in q["cash_ledger_id"].get("$in", [])])
-    ]))
+    def _filter_expenses(q):
+        if not q:
+            return expenses
+        if "$or" in q:
+            matched = []
+            for e in expenses:
+                for cond in q["$or"]:
+                    if "cash_account_id" in cond and str(e.get("cash_account_id") or "") == str(cond["cash_account_id"]):
+                        matched.append(e)
+                        break
+                    if "cash_ledger_id" in cond:
+                        cl_filter = cond["cash_ledger_id"]
+                        if isinstance(cl_filter, dict) and "$in" in cl_filter:
+                            if str(e.get("cash_ledger_id") or "") in [str(x) for x in cl_filter["$in"]]:
+                                matched.append(e)
+                                break
+                        elif str(e.get("cash_ledger_id") or "") == str(cl_filter):
+                            matched.append(e)
+                            break
+            return matched
+        if "cash_ledger_id" in q:
+            cl_filter = q["cash_ledger_id"]
+            if isinstance(cl_filter, dict) and "$in" in cl_filter:
+                return [e for e in expenses if str(e.get("cash_ledger_id") or "") in [str(x) for x in cl_filter["$in"]]]
+            return [e for e in expenses if str(e.get("cash_ledger_id") or "") == str(cl_filter)]
+        return expenses
+
+    mock_db.expenses.find = MagicMock(side_effect=lambda q: MockCursor(_filter_expenses(q)))
     mock_db.advances.find = MagicMock(side_effect=lambda q: MockCursor([
         a for a in advances
         if not q or not q.get("cash_ledger_id") or
@@ -749,5 +772,128 @@ async def test_stage4_full_realistic_workflow():
     assert total_cash_in_hand_summary == 68000.0
     assert total_from_individual_accounts == 68000.0
     assert total_cash_in_hand_summary == total_from_individual_accounts
+
+
+@pytest.mark.anyio
+async def test_expense_creation_with_cash_account_id_and_fifo_drawdown(monkeypatch):
+    """Verify expense created with cash_account_id draws down cash_ledger entries FIFO and handles errors."""
+    import server
+    from models.expenses import ExpenseIn
+    from routes.expenses import create_expense, delete_expense
+
+    async def mock_get_current_user(request=None):
+        return {
+            "id": "admin_1",
+            "email": "admin@sskfootcare.com",
+            "role": "admin",
+            "name": "Admin User",
+        }
+
+    monkeypatch.setattr(server, "get_current_user", mock_get_current_user)
+
+    ca_id = str(ObjectId())
+    bank_id = str(ObjectId())
+    cl1_id = ObjectId()
+    cl2_id = ObjectId()
+
+    ca_doc = {
+        "_id": ObjectId(ca_id),
+        "id": ca_id,
+        "name": "Cash (HDFC Primary)",
+        "source_bank_account_id": bank_id,
+    }
+
+    cl_entries = [
+        {
+            "_id": cl1_id,
+            "bank_account_id": bank_id,
+            "amount": 10000.0,
+            "remaining_balance": 5000.0,
+            "date": "2026-08-01",
+        },
+        {
+            "_id": cl2_id,
+            "bank_account_id": bank_id,
+            "amount": 10000.0,
+            "remaining_balance": 10000.0,
+            "date": "2026-08-05",
+        },
+    ]
+
+    mock_db = MagicMock()
+    mock_db.cash_accounts.find_one = AsyncMock(return_value=ca_doc)
+    mock_db.cash_ledger.find = MagicMock(return_value=MockCursor(cl_entries))
+
+    updated_balances = {cl1_id: 5000.0, cl2_id: 10000.0}
+
+    async def mock_cl_update(q, u):
+        eid = q["_id"]
+        inc = u.get("$inc", {}).get("remaining_balance", 0.0)
+        updated_balances[eid] = round(updated_balances[eid] + inc, 2)
+        return MagicMock(modified_count=1)
+
+    mock_db.cash_ledger.update_one = AsyncMock(side_effect=mock_cl_update)
+
+    inserted_expenses = []
+
+    async def mock_insert_expense(doc):
+        doc["_id"] = ObjectId()
+        inserted_expenses.append(doc)
+        res = MagicMock()
+        res.inserted_id = doc["_id"]
+        return res
+
+    mock_db.expenses.insert_one = AsyncMock(side_effect=mock_insert_expense)
+    mock_db.activity_logs.insert_one = AsyncMock()
+
+    req = MagicMock(spec=Request)
+    req.app.mongodb = mock_db
+    req.state.user = {"email": "admin@sskfootwear.com", "role": "admin"}
+
+    # 1. Error: Insufficient cash in account (request 18,000 when only 15,000 available)
+    payload_excess = ExpenseIn(
+        category="Machinery & Maintenance",
+        amount=18000.0,
+        payee="Machine Repair Co",
+        date="2026-08-10",
+        paid_via="cash",
+        cash_account_id=ca_id,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await create_expense(payload_excess, req)
+    assert exc_info.value.status_code == 400
+    assert "Insufficient cash in account" in exc_info.value.detail
+
+    # 2. Success: Expense for 8,000 draws down 5,000 from cl1 and 3,000 from cl2 (FIFO)
+    payload_valid = ExpenseIn(
+        category="Packaging & Printing",
+        amount=8000.0,
+        payee="Agra Carton Works",
+        date="2026-08-10",
+        paid_via="cash",
+        cash_account_id=ca_id,
+    )
+    res = await create_expense(payload_valid, req)
+    assert res["payee"] == "Agra Carton Works"
+    assert res["amount"] == 8000.0
+    assert res["paid_via"] == "cash"
+    assert res["cash_account_id"] == ca_id
+    assert res["bank_account_id"] == bank_id
+    assert res["cash_ledger_id"] == str(cl1_id)
+
+    # Verify FIFO deductions
+    assert updated_balances[cl1_id] == 0.0  # Fully consumed
+    assert updated_balances[cl2_id] == 7000.0  # 10000 - 3000 = 7000
+
+    # 3. Test delete_expense restores balance to the primary cash ledger entry
+    exp_doc = inserted_expenses[0]
+    mock_db.expenses.find_one = AsyncMock(return_value=exp_doc)
+    mock_db.expenses.delete_one = AsyncMock()
+
+    del_res = await delete_expense(str(exp_doc["_id"]), req)
+    assert del_res["ok"] is True
+    # The 8000 is restored
+    assert updated_balances[cl1_id] == 8000.0
+
 
 

@@ -9,7 +9,11 @@ jest.mock("../../lib/api", () => ({
     patch: jest.fn(),
     delete: jest.fn(),
   },
-  inr: (val) => Number(val || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 }),
+  inr: (val) =>
+    `₹${Number(val || 0).toLocaleString("en-IN", {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 0,
+    })}`,
   formatApiError: (err) => err?.message || "Error",
 }));
 
@@ -173,9 +177,15 @@ describe("Bank Reconciliation - Per-Source Cash Accounts Flow", () => {
     expect(await screen.findByText("HDFC Primary")).toBeInTheDocument();
     expect(await screen.findByText("UCO Bank Offline")).toBeInTheDocument();
 
-    // Check cash account tabs with Cash Pool badges
-    expect(await screen.findByTestId("tab-cash-account-ca_hdfc")).toBeInTheDocument();
-    expect(await screen.findByTestId("tab-cash-account-ca_uco")).toBeInTheDocument();
+    // Check cash account tabs with Cash Pool badges and single rupee symbol (no ₹₹)
+    const hdfcTab = await screen.findByTestId("tab-cash-account-ca_hdfc");
+    const ucoTab = await screen.findByTestId("tab-cash-account-ca_uco");
+    expect(hdfcTab).toBeInTheDocument();
+    expect(ucoTab).toBeInTheDocument();
+    expect(hdfcTab).toHaveTextContent("₹35,000");
+    expect(hdfcTab.textContent).not.toContain("₹₹");
+    expect(ucoTab).toHaveTextContent("₹25,000");
+    expect(ucoTab.textContent).not.toContain("₹₹");
 
     const cashPoolBadges = screen.getAllByText("Cash Pool");
     expect(cashPoolBadges.length).toBeGreaterThanOrEqual(2);
@@ -191,10 +201,17 @@ describe("Bank Reconciliation - Per-Source Cash Accounts Flow", () => {
     expect(await screen.findByTestId("cash-pool-view")).toBeInTheDocument();
     expect(screen.getByTestId("cash-account-title")).toHaveTextContent("Cash (HDFC)");
 
-    // Check rollup metrics
-    expect(screen.getByTestId("cash-pool-current-balance")).toBeInTheDocument();
-    expect(screen.getByTestId("cash-pool-total-withdrawn")).toBeInTheDocument();
-    expect(screen.getByTestId("cash-pool-total-spent")).toBeInTheDocument();
+    // Check rollup metrics for correct single rupee formatting (no ₹₹)
+    const balCard = screen.getByTestId("cash-pool-current-balance");
+    const wdlCard = screen.getByTestId("cash-pool-total-withdrawn");
+    const spCard = screen.getByTestId("cash-pool-total-spent");
+
+    expect(balCard).toHaveTextContent("₹35,000");
+    expect(balCard.textContent).not.toContain("₹₹");
+    expect(wdlCard).toHaveTextContent("₹50,000");
+    expect(wdlCard.textContent).not.toContain("₹₹");
+    expect(spCard).toHaveTextContent("₹15,000");
+    expect(spCard.textContent).not.toContain("₹₹");
 
     // Check transactions ledger table rows
     expect(await screen.findByTestId("cash-txn-row-in_cl_1")).toBeInTheDocument();
