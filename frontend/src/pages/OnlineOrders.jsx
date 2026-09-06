@@ -1767,155 +1767,195 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
   };
 
   return (
-    <Drawer onClose={onClose} title="Upload Daily Marketplace Payments" width="max-w-2xl">
+    <Drawer onClose={onClose} title="Upload Daily Marketplace Payment" width="max-w-2xl">
       <div className="space-y-6">
-        {/* Cadence Progress Card */}
-        <div className="bg-slate-50 border border-slate-200 rounded-md p-4 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-            <div>
-              <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-blue-600" />
-                Monthly Upload Cadence
-              </div>
-              <div className="text-sm font-bold text-slate-800 mt-0.5">
-                {progress ? `${progress.uploaded_business_days_count} of ${progress.expected_business_days_mtd} business days uploaded MTD` : "Loading cadence..."}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="month"
-                value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                className="text-xs font-mono border border-slate-300 rounded px-2 py-1 bg-white text-slate-700"
-              />
-              <button
-                type="button"
-                onClick={() => loadProgress(selectedMonth)}
-                disabled={progLoading}
-                className="p-1 hover:bg-slate-200 rounded text-slate-500"
-                title="Refresh Cadence"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${progLoading ? "animate-spin" : ""}`} />
-              </button>
-            </div>
+        {error && (
+          <div className="p-3 text-xs bg-red-50 border border-red-200 text-red-700 font-bold rounded">
+            {error}
           </div>
+        )}
 
-          {/* Progress Bar */}
-          {progress && (
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-[11px] font-mono text-slate-600">
-                <span>Business Days Progress</span>
-                <span className="font-bold">{progress.progress_pct}%</span>
-              </div>
-              <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
-                <div
-                  className={`h-full transition-all duration-500 rounded-full ${
-                    progress.progress_pct >= 100
-                      ? "bg-emerald-500"
-                      : progress.progress_pct >= 60
-                      ? "bg-blue-600"
-                      : "bg-amber-500"
-                  }`}
-                  style={{ width: `${Math.min(100, Math.max(0, progress.progress_pct))}%` }}
-                />
-              </div>
-              <div className="text-[11px] text-slate-500 flex justify-between">
-                <span>{progress.total_rows_this_month} total rows uploaded</span>
-                <span>{progress.distinct_payment_dates?.length || 0} payment date(s) active</span>
-              </div>
+        {result ? (
+          /* Stage 1: New / Skipped Duplicate Summary — Done */
+          <div className="p-6 bg-emerald-50 border-2 border-emerald-300 rounded-lg space-y-4" data-testid="daily-payment-result-card">
+            <div className="flex items-center gap-2.5 text-emerald-900 font-bold text-lg">
+              <CheckCircle2 className="w-6 h-6 text-emerald-600 flex-shrink-0" />
+              <span>Daily Payment File Processed</span>
             </div>
-          )}
-
-          {/* Missing days warning */}
-          {progress?.missing_business_days_mtd?.length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800 space-y-1">
-              <div className="font-bold flex items-center gap-1.5 text-amber-900">
-                <AlertTriangle className="w-4 h-4 text-amber-600" />
-                Missing Uploads ({progress.missing_business_days_mtd.length} business day{progress.missing_business_days_mtd.length > 1 ? "s" : ""})
-              </div>
-              <div className="font-mono text-[11px] text-amber-800 max-h-16 overflow-y-auto">
-                {progress.missing_business_days_mtd.join(", ")}
-              </div>
-              <p className="text-[10px] text-amber-700">
-                Daily payments have a ~4-day settlement lag. Upload all business day files to prevent false overdue alerts.
-              </p>
+            <div className="text-xs font-mono text-emerald-800 bg-white/80 px-3 py-1.5 rounded border border-emerald-200 inline-block">
+              {result.filename}
             </div>
-          )}
-        </div>
 
-        {/* Upload Form Box */}
-        <div className="bg-white border-2 border-dashed border-slate-300 rounded-lg p-5 space-y-4">
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-              Daily Payment File (.csv, .xlsx, .xls)
-            </label>
-            <p className="text-[11px] text-slate-500 mb-3">
-              Upload Myntra daily prepaid or postpaid settlement report. Natural key 
-              <span className="font-mono font-semibold text-slate-700"> (NEFT + Order Line ID + Date + Type)</span> automatically skips duplicate rows.
-            </p>
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept=".csv,.xlsx,.xls"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#0F172A] file:text-white hover:file:bg-slate-700 cursor-pointer"
-            />
-          </div>
-
-          {error && (
-            <div className="p-3 text-xs bg-red-50 border border-red-200 text-red-700 font-bold rounded">
-              {error}
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-2">
-            <BtnSecondary onClick={onClose}>Close</BtnSecondary>
-            <BtnPrimary onClick={handleUpload} disabled={loading || !file}>
-              {loading ? (
-                <span className="flex items-center gap-1.5">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Uploading...
-                </span>
-              ) : (
-                <span className="flex items-center gap-1.5">
-                  <Upload className="w-3.5 h-3.5" /> Upload & Process
-                </span>
-              )}
-            </BtnPrimary>
-          </div>
-        </div>
-
-        {/* Import Results Summary */}
-        {result && (
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 space-y-3">
-            <div className="flex items-center gap-2 text-emerald-800 font-bold text-sm">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-              <span>Import processed for {result.filename}</span>
-            </div>
             {result.message && (
-              <div className={`p-2.5 text-xs font-semibold rounded border text-center ${result.inserted === 0 && result.skipped_duplicates > 0 ? "bg-amber-50 border-amber-300 text-amber-900" : "bg-white border-slate-200 text-slate-800"}`}>
+              <div className={`p-3 text-xs font-semibold rounded border ${
+                result.inserted === 0 && result.skipped_duplicates > 0
+                  ? "bg-amber-50 border-amber-300 text-amber-900"
+                  : "bg-white border-emerald-200 text-emerald-900"
+              }`}>
                 {result.message}
               </div>
             )}
-            <div className="grid grid-cols-3 gap-3 pt-2">
-              <div className="bg-white p-3 border border-slate-200 rounded text-center">
-                <div className="text-[10px] uppercase font-bold text-slate-500">Total in File</div>
-                <div className="text-xl font-bold font-mono text-slate-900 mt-1">{result.total_in_file}</div>
+
+            {/* Stage 1 KPI Summary: Total, New Inserted, Duplicates Skipped */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-white p-3.5 border border-slate-200 rounded text-center shadow-sm">
+                <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total in File</div>
+                <div className="text-2xl font-black font-mono text-slate-900 mt-1" data-testid="stat-total-in-file">
+                  {result.total_in_file}
+                </div>
               </div>
-              <div className="bg-white p-3 border border-emerald-200 rounded text-center">
-                <div className="text-[10px] uppercase font-bold text-emerald-600">New Inserted</div>
-                <div className="text-xl font-bold font-mono text-emerald-700 mt-1">{result.inserted}</div>
+              <div className="bg-white p-3.5 border border-emerald-300 rounded text-center shadow-sm">
+                <div className="text-[10px] uppercase font-bold text-emerald-700 tracking-wider">New Inserted</div>
+                <div className="text-2xl font-black font-mono text-emerald-700 mt-1" data-testid="stat-new-inserted">
+                  {result.inserted}
+                </div>
               </div>
-              <div className="bg-white p-3 border border-amber-200 rounded text-center">
-                <div className="text-[10px] uppercase font-bold text-amber-600">Duplicates Skipped</div>
-                <div className="text-xl font-bold font-mono text-amber-700 mt-1">{result.skipped_duplicates}</div>
+              <div className="bg-white p-3.5 border border-amber-300 rounded text-center shadow-sm">
+                <div className="text-[10px] uppercase font-bold text-amber-700 tracking-wider">Duplicates Skipped</div>
+                <div className="text-2xl font-black font-mono text-amber-700 mt-1" data-testid="stat-duplicates-skipped">
+                  {result.skipped_duplicates}
+                </div>
               </div>
             </div>
+
             {result.skipped_duplicates > 0 && (
-              <p className="text-[11px] text-amber-700 bg-amber-50 p-2 rounded border border-amber-200">
-                {result.skipped_duplicates} row(s) were already present in the database and skipped to avoid duplicate payouts.
+              <p className="text-xs text-amber-800 bg-amber-50 p-2.5 rounded border border-amber-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                <span>
+                  <strong>{result.skipped_duplicates} duplicate row(s)</strong> were already present in the database and skipped to avoid duplicate payouts.
+                </span>
               </p>
             )}
+
+            {progress && (
+              <div className="bg-white/80 border border-slate-200 rounded p-3 text-xs text-slate-700 flex justify-between items-center">
+                <span>Month Cadence: <strong className="font-mono">{progress.uploaded_business_days_count}/{progress.expected_business_days_mtd}d</strong> uploaded MTD</span>
+                <span className="font-mono font-bold text-slate-900">{progress.progress_pct}%</span>
+              </div>
+            )}
+
+            <div className="pt-3 flex justify-end gap-2 border-t border-emerald-200">
+              <BtnSecondary onClick={() => { setResult(null); setFile(null); }}>
+                Upload Another File
+              </BtnSecondary>
+              <BtnPrimary id="btn-daily-payment-done" onClick={onClose}>
+                Done
+              </BtnPrimary>
+            </div>
           </div>
+        ) : (
+          /* Single-purpose file picker & upload form */
+          <>
+            {/* Cadence Progress Card */}
+            <div className="bg-slate-50 border border-slate-200 rounded-md p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+                <div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                    Monthly Upload Cadence
+                  </div>
+                  <div className="text-sm font-bold text-slate-800 mt-0.5">
+                    {progress ? `${progress.uploaded_business_days_count} of ${progress.expected_business_days_mtd} business days uploaded MTD` : "Loading cadence..."}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="month"
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    className="text-xs font-mono border border-slate-300 rounded px-2 py-1 bg-white text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => loadProgress(selectedMonth)}
+                    disabled={progLoading}
+                    className="p-1 hover:bg-slate-200 rounded text-slate-500"
+                    title="Refresh Cadence"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${progLoading ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              {progress && (
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-[11px] font-mono text-slate-600">
+                    <span>Business Days Progress</span>
+                    <span className="font-bold">{progress.progress_pct}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 rounded-full ${
+                        progress.progress_pct >= 100
+                          ? "bg-emerald-500"
+                          : progress.progress_pct >= 60
+                          ? "bg-blue-600"
+                          : "bg-amber-500"
+                      }`}
+                      style={{ width: `${Math.min(100, Math.max(0, progress.progress_pct))}%` }}
+                    />
+                  </div>
+                  <div className="text-[11px] text-slate-500 flex justify-between">
+                    <span>{progress.total_rows_this_month} total rows uploaded</span>
+                    <span>{progress.distinct_payment_dates?.length || 0} payment date(s) active</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Missing days warning */}
+              {progress?.missing_business_days_mtd?.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                    <AlertTriangle className="w-4 h-4 text-amber-600" />
+                    Missing Uploads ({progress.missing_business_days_mtd.length} business day{progress.missing_business_days_mtd.length > 1 ? "s" : ""})
+                  </div>
+                  <div className="font-mono text-[11px] text-amber-800 max-h-16 overflow-y-auto">
+                    {progress.missing_business_days_mtd.join(", ")}
+                  </div>
+                  <p className="text-[10px] text-amber-700">
+                    Daily payments have a ~4-day settlement lag. Upload all business day files to prevent false overdue alerts.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Upload Form Box */}
+            <div className="bg-white border-2 border-dashed border-slate-300 rounded-lg p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
+                  Daily Payment File (.csv, .xlsx, .xls)
+                </label>
+                <p className="text-[11px] text-slate-500 mb-3">
+                  Upload Myntra daily prepaid or postpaid settlement report. Natural key{" "}
+                  <span className="font-mono font-semibold text-slate-700">(NEFT + Order Line ID + Date + Type)</span> automatically skips duplicate rows.
+                </p>
+                <input
+                  type="file"
+                  id="daily-payment-file-input"
+                  ref={fileInputRef}
+                  accept=".csv,.xlsx,.xls"
+                  onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#0F172A] file:text-white hover:file:bg-slate-700 cursor-pointer"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+                <BtnPrimary id="btn-daily-payment-upload-submit" onClick={handleUpload} disabled={loading || !file}>
+                  {loading ? (
+                    <span className="flex items-center gap-1.5">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Uploading...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <Upload className="w-3.5 h-3.5" /> Upload & Process
+                    </span>
+                  )}
+                </BtnPrimary>
+              </div>
+            </div>
+          </>
         )}
       </div>
     </Drawer>
@@ -2253,25 +2293,6 @@ export default function OnlineOrders() {
                 </span>
               </BtnSecondary>
             </Link>
-            <BtnSecondary
-              id="btn-daily-payment-upload"
-              onClick={() => setDailyPaymentOpen(true)}
-              title="Upload daily payment CSV/XLSX"
-            >
-              <span className="flex items-center gap-1.5">
-                <DollarSign className="w-4 h-4 text-emerald-600" />
-                <span>Upload Daily Payment</span>
-                {dailyProgress && (
-                  <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
-                    dailyProgress.uploaded_business_days_count >= (dailyProgress.expected_business_days_mtd || 1)
-                      ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
-                      : "bg-amber-100 text-amber-800 border border-amber-300"
-                  }`}>
-                    {dailyProgress.uploaded_business_days_count}/{dailyProgress.expected_business_days_mtd}d
-                  </span>
-                )}
-              </span>
-            </BtnSecondary>
             {tab === "orders" && (
               <>
                 <BtnSecondary id="btn-refresh-orders" onClick={load}>
@@ -2279,6 +2300,26 @@ export default function OnlineOrders() {
                 </BtnSecondary>
                 <BtnSecondary id="btn-dispatch-import" onClick={() => setDispatchOpen(true)}>
                   <span className="flex items-center gap-2"><Truck className="w-4 h-4" /> Import dispatch</span>
+                </BtnSecondary>
+                <BtnSecondary
+                  id="btn-daily-payment-upload"
+                  data-testid="btn-daily-payment-upload"
+                  onClick={() => setDailyPaymentOpen(true)}
+                  title="Upload daily payment CSV/XLSX"
+                >
+                  <span className="flex items-center gap-1.5 font-semibold">
+                    <DollarSign className="w-4 h-4 text-emerald-600" />
+                    <span>Upload Daily Payment</span>
+                    {dailyProgress && (
+                      <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+                        dailyProgress.uploaded_business_days_count >= (dailyProgress.expected_business_days_mtd || 1)
+                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                          : "bg-amber-100 text-amber-800 border border-amber-300"
+                      }`}>
+                        {dailyProgress.uploaded_business_days_count}/{dailyProgress.expected_business_days_mtd}d
+                      </span>
+                    )}
+                  </span>
                 </BtnSecondary>
                 <BtnPrimary id="btn-import-orders" onClick={() => setImportOpen(true)}>
                   <span className="flex items-center gap-2"><Upload className="w-4 h-4" /> Import orders</span>
@@ -2291,9 +2332,21 @@ export default function OnlineOrders() {
               </BtnPrimary>
             )}
             {tab === "settlement" && (
-              <BtnPrimary id="btn-settlement-import" onClick={() => setSettlementOpen(true)}>
-                <span className="flex items-center gap-2"><DollarSign className="w-4 h-4" /> Import settlement</span>
-              </BtnPrimary>
+              <>
+                <BtnSecondary
+                  id="btn-daily-payment-upload-settle"
+                  onClick={() => setDailyPaymentOpen(true)}
+                  title="Upload daily payment CSV/XLSX"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <DollarSign className="w-4 h-4 text-emerald-600" />
+                    <span>Upload Daily Payment</span>
+                  </span>
+                </BtnSecondary>
+                <BtnPrimary id="btn-settlement-import" onClick={() => setSettlementOpen(true)}>
+                  <span className="flex items-center gap-2"><DollarSign className="w-4 h-4" /> Import settlement</span>
+                </BtnPrimary>
+              </>
             )}
           </div>
         }
