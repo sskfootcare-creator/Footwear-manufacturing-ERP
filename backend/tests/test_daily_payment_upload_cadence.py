@@ -324,3 +324,79 @@ class TestDailyPaymentUploadCadence:
         # Settled UTR matched daily payments with 0 mismatch diff:
         assert len(summary["neft_mismatches"]) == 0
 
+    def test_running_indicator_excluding_weekends_and_bank_holidays(self, client):
+        """Verifies:
+        1. Querying progress endpoint returns indicator_text matching 'X of Y expected business days uploaded'.
+        2. Weekends (Sat/Sun) and bank holidays are strictly excluded from expected business days.
+        3. Uploading daily payment files incrementally updates the running indicator.
+        4. Missing business days count reflects un-uploaded weekdays accurately.
+        """
+        client.post("/online-reconciliation/clear-test-data")
+
+        # Check initial state for Sep 2026 (today 2026-09-06 is Sunday)
+        # Weekdays MTD: 2026-09-01 (Tue), 02 (Wed), 03 (Thu), 04 (Fri) = 4 expected business days
+        # Sat 05 and Sun 06 are excluded!
+        res0 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        assert res0.status_code == 200
+        d0 = res0.json()
+
+        # Expected weekdays MTD must exclude weekends 2026-09-05 and 2026-09-06
+        assert "2026-09-05" not in d0["missing_business_days_mtd"]
+        assert "2026-09-06" not in d0["missing_business_days_mtd"]
+        assert d0["expected_business_days_mtd"] == 4
+        assert d0["uploaded_business_days_count"] == 0
+        assert d0["missing_business_days_count"] == 4
+        assert d0["indicator_text"] == "0 of 4 expected business days uploaded"
+
+        # 1. Upload Day 1 (2026-09-01)
+        csv_day1 = (
+            "NEFT_Ref,Settled_Amount,Commission,Shipping_Fee,TDS,Payment_Type,Order_Type,order_release_id,seller_order_id,order_line_id,return_id,Payment_Date\n"
+            "NEFT_1,500.00,50.00,30.00,5.00,prepaid,Forward,REL_1,SO_1,LINE_1,,2026-09-01\n"
+        )
+        r_up1 = client.post("/online-reconciliation/import-daily-payments", files={"file": ("day1.csv", csv_day1.encode("utf-8"), "text/csv")})
+        assert r_up1.status_code == 200
+        assert r_up1.json()["inserted"] == 1
+
+        res1 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        d1 = res1.json()
+        assert d1["uploaded_business_days_count"] == 1
+        assert d1["expected_business_days_mtd"] == 4
+        assert d1["missing_business_days_count"] == 3
+        assert d1["indicator_text"] == "1 of 4 expected business days uploaded"
+        assert "2026-09-01" in d1["uploaded_business_days"]
+        assert "2026-09-01" not in d1["missing_business_days_mtd"]
+
+        # 2. Upload Day 2 (2026-09-02)
+        csv_day2 = (
+            "NEFT_Ref,Settled_Amount,Commission,Shipping_Fee,TDS,Payment_Type,Order_Type,order_release_id,seller_order_id,order_line_id,return_id,Payment_Date\n"
+            "NEFT_2,600.00,60.00,30.00,6.00,postpaid,Forward,REL_2,SO_2,LINE_2,,2026-09-02\n"
+        )
+        r_up2 = client.post("/online-reconciliation/import-daily-payments", files={"file": ("day2.csv", csv_day2.encode("utf-8"), "text/csv")})
+        assert r_up2.status_code == 200
+
+        res2 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        d2 = res2.json()
+        assert d2["uploaded_business_days_count"] == 2
+        assert d2["expected_business_days_mtd"] == 4
+        assert d2["missing_business_days_count"] == 2
+        assert d2["indicator_text"] == "2 of 4 expected business days uploaded"
+        assert set(d2["uploaded_business_days"]) == {"2026-09-01", "2026-09-02"}
+        assert set(d2["missing_business_days_mtd"]) == {"2026-09-03", "2026-09-04"}
+
+        # 3. Upload Day 3 (2026-09-03)
+        csv_day3 = (
+            "NEFT_Ref,Settled_Amount,Commission,Shipping_Fee,TDS,Payment_Type,Order_Type,order_release_id,seller_order_id,order_line_id,return_id,Payment_Date\n"
+            "NEFT_3,700.00,70.00,35.00,7.00,prepaid,Forward,REL_3,SO_3,LINE_3,,2026-09-03\n"
+        )
+        r_up3 = client.post("/online-reconciliation/import-daily-payments", files={"file": ("day3.csv", csv_day3.encode("utf-8"), "text/csv")})
+        assert r_up3.status_code == 200
+
+        res3 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        d3 = res3.json()
+        assert d3["uploaded_business_days_count"] == 3
+        assert d3["expected_business_days_mtd"] == 4
+        assert d3["missing_business_days_count"] == 1
+        assert d3["indicator_text"] == "3 of 4 expected business days uploaded"
+        assert d3["missing_business_days_mtd"] == ["2026-09-04"]
+
+

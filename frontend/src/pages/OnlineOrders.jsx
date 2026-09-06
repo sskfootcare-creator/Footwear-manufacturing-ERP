@@ -1828,9 +1828,22 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
             )}
 
             {progress && (
-              <div className="bg-white/80 border border-slate-200 rounded p-3 text-xs text-slate-700 flex justify-between items-center">
-                <span>Month Cadence: <strong className="font-mono">{progress.uploaded_business_days_count}/{progress.expected_business_days_mtd}d</strong> uploaded MTD</span>
-                <span className="font-mono font-bold text-slate-900">{progress.progress_pct}%</span>
+              <div className="bg-white/80 border border-slate-200 rounded p-3 text-xs text-slate-700 flex justify-between items-center" data-testid="result-cadence-snapshot">
+                <span>
+                  Month Cadence:{" "}
+                  <strong className="font-mono text-slate-900" data-testid="result-cadence-indicator-text">
+                    {progress.uploaded_business_days_count} of {progress.expected_business_days_mtd} expected business days uploaded
+                  </strong>
+                </span>
+                <span className={`text-[11px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                  progress.missing_business_days_count === 0 && progress.uploaded_business_days_count > 0
+                    ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                    : "bg-amber-100 text-amber-800 border border-amber-300"
+                }`}>
+                  {progress.missing_business_days_count === 0 && progress.uploaded_business_days_count > 0
+                    ? "All caught up"
+                    : `${progress.missing_business_days_count || progress.missing_business_days_mtd?.length || 0} missing`}
+                </span>
               </div>
             )}
 
@@ -1847,15 +1860,31 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
           /* Single-purpose file picker & upload form */
           <>
             {/* Cadence Progress Card */}
-            <div className="bg-slate-50 border border-slate-200 rounded-md p-4 space-y-3">
+            <div className="bg-slate-50 border border-slate-200 rounded-md p-4 space-y-3" data-testid="drawer-cadence-indicator">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
                 <div>
                   <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 flex items-center gap-1.5">
                     <Calendar className="w-3.5 h-3.5 text-blue-600" />
-                    Monthly Upload Cadence
+                    Daily Payment Cadence (Mon–Fri Weekdays)
                   </div>
-                  <div className="text-sm font-bold text-slate-800 mt-0.5">
-                    {progress ? `${progress.uploaded_business_days_count} of ${progress.expected_business_days_mtd} business days uploaded MTD` : "Loading cadence..."}
+                  <div className="text-sm sm:text-base font-extrabold text-slate-900 mt-1 flex flex-wrap items-center gap-2">
+                    <span data-testid="cadence-indicator-heading">
+                      {progress ? `${progress.uploaded_business_days_count} of ${progress.expected_business_days_mtd} expected business days uploaded` : "Loading cadence..."}
+                    </span>
+                    {progress && (
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                        progress.missing_business_days_count === 0 && progress.uploaded_business_days_count > 0
+                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                          : "bg-amber-100 text-amber-800 border border-amber-300"
+                      }`}>
+                        {progress.missing_business_days_count === 0 && progress.uploaded_business_days_count > 0
+                          ? "All caught up"
+                          : `${progress.missing_business_days_count || progress.missing_business_days_mtd?.length || 0} missing`}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">
+                    Weekdays only. Weekends (Sat/Sun) and bank holidays are excluded from expected business days.
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1898,24 +1927,50 @@ export function DailyPaymentImportDrawer({ onClose, onDone }) {
                   </div>
                   <div className="text-[11px] text-slate-500 flex justify-between">
                     <span>{progress.total_rows_this_month} total rows uploaded</span>
-                    <span>{progress.distinct_payment_dates?.length || 0} payment date(s) active</span>
+                    <span>{progress.distinct_payment_dates?.length || 0} distinct payment date(s) active</span>
                   </div>
                 </div>
               )}
 
-              {/* Missing days warning */}
-              {progress?.missing_business_days_mtd?.length > 0 && (
-                <div className="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-800 space-y-1">
-                  <div className="font-bold flex items-center gap-1.5 text-amber-900">
-                    <AlertTriangle className="w-4 h-4 text-amber-600" />
-                    Missing Uploads ({progress.missing_business_days_mtd.length} business day{progress.missing_business_days_mtd.length > 1 ? "s" : ""})
-                  </div>
-                  <div className="font-mono text-[11px] text-amber-800 max-h-16 overflow-y-auto">
-                    {progress.missing_business_days_mtd.join(", ")}
-                  </div>
-                  <p className="text-[10px] text-amber-700">
-                    Daily payments have a ~4-day settlement lag. Upload all business day files to prevent false overdue alerts.
-                  </p>
+              {/* Uploaded vs Missing Summary Badges */}
+              {progress && (
+                <div className="space-y-2 pt-1 border-t border-slate-200">
+                  {progress.uploaded_business_days?.length > 0 && (
+                    <div className="text-xs space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-emerald-700">Uploaded Business Dates:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {progress.uploaded_business_days.map((d) => (
+                          <span key={d} className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.5 rounded font-mono text-[10px] font-medium">
+                            ✓ {d}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {progress.missing_business_days_mtd?.length > 0 ? (
+                    <div className="bg-amber-50 border border-amber-200 rounded p-2.5 text-xs text-amber-800 space-y-1">
+                      <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                        Missing Business Days ({progress.missing_business_days_mtd.length} day{progress.missing_business_days_mtd.length > 1 ? "s" : ""}):
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {progress.missing_business_days_mtd.map((d) => (
+                          <span key={d} className="bg-white text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold">
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-amber-700 mt-1">
+                        Upload payments for missing business days to avoid month-end reconciliation gaps.
+                      </p>
+                    </div>
+                  ) : progress.uploaded_business_days_count > 0 ? (
+                    <div className="text-xs text-emerald-700 bg-emerald-50 p-2 rounded border border-emerald-200 flex items-center gap-1.5 font-medium">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      All expected business days month-to-date have payment data uploaded.
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -2305,18 +2360,21 @@ export default function OnlineOrders() {
                   id="btn-daily-payment-upload"
                   data-testid="btn-daily-payment-upload"
                   onClick={() => setDailyPaymentOpen(true)}
-                  title="Upload daily payment CSV/XLSX"
+                  title={dailyProgress ? `${dailyProgress.indicator_text || `${dailyProgress.uploaded_business_days_count} of ${dailyProgress.expected_business_days_mtd} expected business days uploaded`} (${dailyProgress.missing_business_days_count || dailyProgress.missing_business_days_mtd?.length || 0} missing)` : "Upload daily payment CSV/XLSX"}
                 >
                   <span className="flex items-center gap-1.5 font-semibold">
                     <DollarSign className="w-4 h-4 text-emerald-600" />
                     <span>Upload Daily Payment</span>
                     {dailyProgress && (
-                      <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
-                        dailyProgress.uploaded_business_days_count >= (dailyProgress.expected_business_days_mtd || 1)
-                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
-                          : "bg-amber-100 text-amber-800 border border-amber-300"
-                      }`}>
-                        {dailyProgress.uploaded_business_days_count}/{dailyProgress.expected_business_days_mtd}d
+                      <span
+                        data-testid="trigger-cadence-badge"
+                        className={`ml-1 text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                          dailyProgress.missing_business_days_count === 0 && dailyProgress.uploaded_business_days_count > 0
+                            ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                            : "bg-amber-100 text-amber-800 border border-amber-300"
+                        }`}
+                      >
+                        {dailyProgress.uploaded_business_days_count} of {dailyProgress.expected_business_days_mtd} expected business days uploaded
                       </span>
                     )}
                   </span>

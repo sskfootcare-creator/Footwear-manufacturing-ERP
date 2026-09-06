@@ -62,14 +62,16 @@ describe("DailyPaymentImportDrawer & Daily Habit Trigger", () => {
     expect(dailyBtn).toHaveTextContent("Upload Daily Payment");
     // Wait for cadence badge to load asynchronously
     await waitFor(() => {
-      expect(dailyBtn).toHaveTextContent("2/5d");
+      expect(dailyBtn).toHaveTextContent("2 of 5 expected business days uploaded");
     });
 
     // Click daily button opens drawer directly without navigating through monthly reconciliation
     fireEvent.click(dailyBtn);
 
     await waitFor(() => {
-      expect(screen.getByText(/2 of 5 business days uploaded MTD/i)).toBeInTheDocument();
+      expect(screen.getByTestId("cadence-indicator-heading")).toHaveTextContent("2 of 5 expected business days uploaded");
+      expect(screen.getByText(/3 missing/i)).toBeInTheDocument();
+      expect(screen.getByText(/2026-09-03/i)).toBeInTheDocument();
     });
   });
 

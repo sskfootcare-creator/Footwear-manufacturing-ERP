@@ -1025,6 +1025,35 @@ async def save_reconciliation_settings(request: Request, payload: Reconciliation
     }
 
 
+# Standard known national bank holidays (NEFT / settlement holidays)
+KNOWN_BANK_HOLIDAYS = {
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-04-02",  # Good Friday
+    "2026-04-14",  # Ambedkar Jayanti
+    "2026-05-01",  # May Day / Maharashtra Day
+    "2026-08-15",  # Independence Day
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-08",  # Diwali
+    "2026-12-25",  # Christmas
+}
+
+
+async def _get_bank_holidays(db) -> set:
+    holidays = set(KNOWN_BANK_HOLIDAYS)
+    if db is not None:
+        try:
+            settings_coll = getattr(db, "system_settings", None)
+            if settings_coll is not None:
+                doc = await settings_coll.find_one({"key": "bank_holidays"})
+                if doc and isinstance(doc.get("holidays"), list):
+                    holidays.update(doc["holidays"])
+        except Exception:
+            pass
+    return holidays
+
+
 @online_reconciliation_router.get("/online-reconciliation/daily-payments/progress")
 async def get_daily_payments_progress(request: Request, month: Optional[str] = None):
     await _get_user(request)
@@ -1040,14 +1069,24 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
         yr, mo = now_dt.year, now_dt.month
         target_month = f"{yr:04d}-{mo:02d}"
 
+    bank_holidays = await _get_bank_holidays(db)
+
     num_days = calendar.monthrange(yr, mo)[1]
     all_month_days = [_date(yr, mo, d) for d in range(1, num_days + 1)]
-    all_business_days = [d.isoformat() for d in all_month_days if d.weekday() < 5]
+
+    # Weekdays (Mon-Fri) excluding known bank holidays per "no Sat/Sun/bank holidays" cadence
+    all_business_days = [
+        d.isoformat() for d in all_month_days
+        if d.weekday() < 5 and d.isoformat() not in bank_holidays
+    ]
     total_business_days_in_month = len(all_business_days)
 
     today = now_dt.date()
     if yr == today.year and mo == today.month:
-        expected_mtd_business_days = [d.isoformat() for d in all_month_days if d.weekday() < 5 and d <= today]
+        expected_mtd_business_days = [
+            d.isoformat() for d in all_month_days
+            if d.weekday() < 5 and d.isoformat() not in bank_holidays and d <= today
+        ]
     elif _date(yr, mo, 1) < _date(today.year, today.month, 1):
         expected_mtd_business_days = all_business_days
     else:
@@ -1078,16 +1117,20 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
     missing_business_days_mtd = [d for d in expected_mtd_business_days if d not in uploaded_dates_set]
 
     progress_pct = round((len(uploaded_business_days) / expected_mtd_count * 100), 1) if expected_mtd_count > 0 else 100.0
+    indicator_text = f"{len(uploaded_business_days)} of {expected_mtd_count} expected business days uploaded"
 
     return {
         "month": target_month,
         "uploaded_business_days_count": len(uploaded_business_days),
         "expected_business_days_mtd": expected_mtd_count,
+        "missing_business_days_count": len(missing_business_days_mtd),
         "total_business_days_in_month": total_business_days_in_month,
+        "indicator_text": indicator_text,
         "progress_pct": progress_pct,
         "distinct_payment_dates": sorted(list(uploaded_dates_set)),
         "uploaded_business_days": uploaded_business_days,
         "missing_business_days_mtd": missing_business_days_mtd,
+        "bank_holidays_in_month": [d.isoformat() for d in all_month_days if d.isoformat() in bank_holidays],
         "total_rows_this_month": total_rows_this_month,
     }
 
