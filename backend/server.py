@@ -1268,7 +1268,7 @@ async def on_startup():
         log.warning(f"Listing format registry seed failed: {e}")
 
     try:
-        seeded_oifc = await _seed_order_import_configs()
+        seeded_oifc = await _seed_order_import_format_configs(db)
         if seeded_oifc:
             log.info(f"Order import registry: seeded {seeded_oifc} platform configs (flipkart/myntra)")
     except Exception as e:

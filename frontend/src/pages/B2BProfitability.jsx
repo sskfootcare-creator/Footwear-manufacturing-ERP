@@ -23,7 +23,7 @@ import {
   RefreshCw,
   Download,
   Filter,
-  DollarSign,
+  IndianRupee,
   Briefcase,
   Layers,
   Calendar,

@@ -858,10 +858,11 @@ function PayrollPanel({ worker, onViewCard }) {
       {/* Summary cards */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
         {[
+          { label: "Opening Bal (b/f)", value: inr(p.opening_balance || 0), color: "#38bdf8" },
           { label: "Pairs Done", value: p.total_pairs, color: "#60a5fa" },
-          { label: "Earnings", value: inr(p.total_earning), color: "#6ee7b7" },
+          { label: "Period Earnings", value: inr(p.total_earning), color: "#6ee7b7" },
           { label: "Bonus", value: inr(p.total_bonus || 0), color: "#fbbf24" },
-          { label: "Net Payable", value: inr(p.net_payable), color: "#a78bfa" },
+          { label: "Net Payable Due", value: inr(p.net_payable), color: (p.net_payable || 0) >= 0 ? "#a78bfa" : "#f87171" },
         ].map((s) => (
           <div key={s.label} style={{
             background: "rgba(30,41,59,0.8)", border: "1px solid rgba(255,255,255,0.07)",
@@ -872,6 +873,7 @@ function PayrollPanel({ worker, onViewCard }) {
           </div>
         ))}
       </div>
+
 
       {/* By-role breakdown */}
       {p.by_role && Object.keys(p.by_role).length > 0 && (

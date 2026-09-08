@@ -5,7 +5,7 @@ import { http } from "@/lib/api";
 import {
   LayoutDashboard, Boxes, Layers, Calculator, FileText, Hammer,
   Users, LogOut, Factory, AlertOctagon, BarChart3, HardHat,
-  Warehouse, IndianRupee, Settings as SettingsIcon, Receipt,
+  Warehouse, IndianRupee, Settings as SettingsIcon, ReceiptIndianRupee,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
   Check, Bell, TrendingUp, Landmark,
@@ -47,7 +47,7 @@ const NAV_GROUPS = [
       { to: "/production", label: "Production",   icon: Hammer,      roles: ["admin","manager","production"] },
       { to: "/vendors",    label: "Vendors",      icon: Truck,       roles: ["admin","manager"] },
       { to: "/vendor-pos", label: "Vendor POs",   icon: FileText,    roles: ["admin","manager"] },
-      { to: "/invoices",   label: "Invoices",     icon: Receipt,     roles: ["admin","manager","sales"] },
+      { to: "/invoices",   label: "Invoices",     icon: ReceiptIndianRupee, roles: ["admin","manager","sales"] },
       { to: "/clients",    label: "Clients",      icon: BookOpen,    roles: ["admin","manager","sales"] },
       { to: "/costing",           label: "Costing",           icon: Calculator,  roles: ["admin","manager"] },
       { to: "/b2b-profitability", label: "B2B Profitability", icon: TrendingUp,  roles: ["admin","manager"] },
@@ -115,7 +115,7 @@ const WORKSPACE_TABS = {
     { to: "/",           label: "Dashboard",  icon: LayoutDashboard, end: true },
     { to: "/production", label: "Production", icon: Hammer },
     { to: "/pos",        label: "POs",        icon: FileText },
-    { to: "/invoices",   label: "Invoices",   icon: Receipt },
+    { to: "/invoices",   label: "Invoices",   icon: ReceiptIndianRupee },
   ],
   online: [
     { to: "/",              label: "Dashboard",     icon: LayoutDashboard, end: true },
@@ -126,7 +126,7 @@ const WORKSPACE_TABS = {
   management: [
     { to: "/",        label: "Dashboard", icon: LayoutDashboard, end: true },
     { to: "/reports", label: "Reports",   icon: BarChart3 },
-    { to: "/invoices",label: "Invoices",  icon: Receipt },
+    { to: "/invoices",label: "Invoices",  icon: ReceiptIndianRupee },
     { to: "/styles",  label: "Styles",    icon: Layers },
   ],
 };

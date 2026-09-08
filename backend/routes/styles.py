@@ -1699,6 +1699,117 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
     }
 
 
+@styles_router.get("/styles/not-in-pipeline")
+async def list_styles_not_in_pipeline(request: Request, search: Optional[str] = None):
+    await _get_user(request)
+    db = get_db()
+    q: dict = {}
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        q["$or"] = [{"code": rx}, {"name": rx}]
+    styles = await db.styles.find(q).sort("code", 1).to_list(5000)
+    ids_in_pipeline = {
+        d["style_id"]
+        for d in await db.style_lifecycle.find({}, {"style_id": 1}).to_list(20000)
+    }
+    out = []
+    for s in styles:
+        sid = str(s["_id"])
+        if sid in ids_in_pipeline:
+            continue
+        out.append({
+            "id":                   sid,
+            "code":                 s.get("code"),
+            "name":                 s.get("name", ""),
+            "image_url":            s.get("image_url", ""),
+            "image_display_url":    s.get("image_display_url", ""),
+            "image_thumbnail_url":  s.get("image_thumbnail_url", ""),
+        })
+    return out
+
+
+@styles_router.get("/styles/online")
+async def list_online_styles(
+    request: Request,
+    online_status:  Optional[str] = None,
+    sale_channel:   Optional[str] = None,
+    search:         Optional[str] = None,
+):
+    await _get_user(request)
+    db = get_db()
+    style_query: dict = {}
+    if search:
+        rx = {"$regex": re.escape(search), "$options": "i"}
+        style_query["$or"] = [{"code": rx}, {"name": rx}]
+
+    styles = await db.styles.find(style_query).sort("code", 1).to_list(5000)
+    style_ids_str = [str(s["_id"]) for s in styles]
+
+    lifecycles = await db.style_lifecycle.find({"style_id": {"$in": style_ids_str}}).to_list(5000)
+    lc_by_id = {l["style_id"]: l for l in lifecycles}
+    style_ids_in_pipeline = set(lc_by_id.keys())
+
+    mappings = await db.sku_map.find({"style_id": {"$in": list(style_ids_in_pipeline)}}).to_list(20000)
+    maps_by_style: dict = {}
+    for m in mappings:
+        maps_by_style.setdefault(m["style_id"], []).append({
+            "id":                  str(m["_id"]),
+            "source_type":         m.get("source_type"),
+            "source_name":         m.get("source_name"),
+            "external_sku":        m.get("external_sku"),
+            "external_style_name": m.get("external_style_name", ""),
+        })
+
+    out = []
+    for s in styles:
+        sid = str(s["_id"])
+        if sid not in style_ids_in_pipeline:
+            continue
+        lc = lc_by_id[sid]
+        if online_status and lc.get("online_status") != online_status:
+            continue
+        if sale_channel and sale_channel not in (lc.get("sale_channels") or []):
+            continue
+
+        out.append({
+            "style_id":               sid,
+            "style_code":             s.get("code"),
+            "style_name":             s.get("name", ""),
+            "image_url":              s.get("image_url", ""),
+            "image_display_url":      s.get("image_display_url", ""),
+            "image_thumbnail_url":    s.get("image_thumbnail_url", ""),
+            "online_status":          lc.get("online_status", "draft"),
+            "online_status_history":  lc.get("online_status_history", []),
+            "sale_channels":          lc.get("sale_channels", []),
+            "mrp":                    lc.get("mrp"),
+            "online_selling_price":   lc.get("online_selling_price"),
+            "gst_pct":                s.get("gst_pct", 5),
+            "platform_commission_pct": lc.get("platform_commission_pct", {}),
+            "planned_min_stock":      lc.get("planned_min_stock", 25),
+            "planned_components":     lc.get("planned_components", []),
+            "planned_colors":         lc.get("planned_colors", []),
+            "planned_sizes":          lc.get("planned_sizes", []),
+            "sole_mould_name":        lc.get("sole_mould_name", ""),
+            "sole_shape":             lc.get("sole_shape", ""),
+            "pattern_number":         lc.get("pattern_number", ""),
+            "photoshoot_link":        lc.get("photoshoot_link", ""),
+            "catalogue_link":         lc.get("catalogue_link", ""),
+            "back_track_number":      lc.get("back_track_number", ""),
+            "went_live_at":           lc.get("went_live_at"),
+            "channel_skus":           maps_by_style.get(sid, []),
+        })
+
+    def sort_key(row):
+        st = row["online_status"]
+        try:
+            idx = ONLINE_STATUS_SEQUENCE.index(st)
+        except ValueError:
+            idx = 99 if st == "archived" else 98
+        return (idx, row["style_code"] or "")
+    out.sort(key=sort_key)
+    return out
+
+
 @styles_router.get("/styles/{sid}")
 async def get_style(sid: str, request: Request, color: Optional[str] = None):
     await _get_user(request)
@@ -1965,35 +2076,6 @@ async def remove_style_from_online_pipeline(sid: str, request: Request):
     return {"ok": True, "was_in_pipeline": True}
 
 
-@styles_router.get("/styles/not-in-pipeline")
-async def list_styles_not_in_pipeline(request: Request, search: Optional[str] = None):
-    await _get_user(request)
-    db = get_db()
-    q: dict = {}
-    if search:
-        rx = {"$regex": re.escape(search), "$options": "i"}
-        q["$or"] = [{"code": rx}, {"name": rx}]
-    styles = await db.styles.find(q).sort("code", 1).to_list(5000)
-    ids_in_pipeline = {
-        d["style_id"]
-        for d in await db.style_lifecycle.find({}, {"style_id": 1}).to_list(20000)
-    }
-    out = []
-    for s in styles:
-        sid = str(s["_id"])
-        if sid in ids_in_pipeline:
-            continue
-        out.append({
-            "id":                   sid,
-            "code":                 s.get("code"),
-            "name":                 s.get("name", ""),
-            "image_url":            s.get("image_url", ""),
-            "image_display_url":    s.get("image_display_url", ""),
-            "image_thumbnail_url":  s.get("image_thumbnail_url", ""),
-        })
-    return out
-
-
 @styles_router.put("/style-lifecycle/{style_id}")
 async def upsert_style_lifecycle(style_id: str, payload: StyleLifecycleUpsert, request: Request):
     u = await _get_user(request)
@@ -2075,88 +2157,6 @@ async def patch_style_online_status(sid: str, payload: OnlineStatusPatchIn, requ
     if seed_result:
         resp["seed_result"] = seed_result
     return resp
-
-
-@styles_router.get("/styles/online")
-async def list_online_styles(
-    request: Request,
-    online_status:  Optional[str] = None,
-    sale_channel:   Optional[str] = None,
-    search:         Optional[str] = None,
-):
-    await _get_user(request)
-    db = get_db()
-    style_query: dict = {}
-    if search:
-        rx = {"$regex": re.escape(search), "$options": "i"}
-        style_query["$or"] = [{"code": rx}, {"name": rx}]
-
-    styles = await db.styles.find(style_query).sort("code", 1).to_list(5000)
-    style_ids_str = [str(s["_id"]) for s in styles]
-
-    lifecycles = await db.style_lifecycle.find({"style_id": {"$in": style_ids_str}}).to_list(5000)
-    lc_by_id = {l["style_id"]: l for l in lifecycles}
-    style_ids_in_pipeline = set(lc_by_id.keys())
-
-    mappings = await db.sku_map.find({"style_id": {"$in": list(style_ids_in_pipeline)}}).to_list(20000)
-    maps_by_style: dict = {}
-    for m in mappings:
-        maps_by_style.setdefault(m["style_id"], []).append({
-            "id":                  str(m["_id"]),
-            "source_type":         m.get("source_type"),
-            "source_name":         m.get("source_name"),
-            "external_sku":        m.get("external_sku"),
-            "external_style_name": m.get("external_style_name", ""),
-        })
-
-    out = []
-    for s in styles:
-        sid = str(s["_id"])
-        if sid not in style_ids_in_pipeline:
-            continue
-        lc = lc_by_id[sid]
-        if online_status and lc.get("online_status") != online_status:
-            continue
-        if sale_channel and sale_channel not in (lc.get("sale_channels") or []):
-            continue
-
-        out.append({
-            "style_id":               sid,
-            "style_code":             s.get("code"),
-            "style_name":             s.get("name", ""),
-            "image_url":              s.get("image_url", ""),
-            "image_display_url":      s.get("image_display_url", ""),
-            "image_thumbnail_url":    s.get("image_thumbnail_url", ""),
-            "online_status":          lc.get("online_status", "draft"),
-            "online_status_history":  lc.get("online_status_history", []),
-            "sale_channels":          lc.get("sale_channels", []),
-            "mrp":                    lc.get("mrp"),
-            "online_selling_price":   lc.get("online_selling_price"),
-            "gst_pct":                s.get("gst_pct", 5),
-            "platform_commission_pct": lc.get("platform_commission_pct", {}),
-            "planned_min_stock":      lc.get("planned_min_stock", 25),
-            "planned_components":     lc.get("planned_components", []),
-            "planned_colors":         lc.get("planned_colors", []),
-            "planned_sizes":          lc.get("planned_sizes", []),
-            "sole_mould_name":        lc.get("sole_mould_name", ""),
-            "sole_shape":             lc.get("sole_shape", ""),
-            "pattern_number":         lc.get("pattern_number", ""),
-            "photoshoot_link":        lc.get("photoshoot_link", ""),
-            "catalogue_link":         lc.get("catalogue_link", ""),
-            "back_track_number":      lc.get("back_track_number", ""),
-            "went_live_at":           lc.get("went_live_at"),
-            "channel_skus":           maps_by_style.get(sid, []),
-        })
-
-    def sort_key(row):
-        st = row["online_status"]
-        try:
-            idx = ONLINE_STATUS_SEQUENCE.index(st)
-        except ValueError:
-            idx = 99 if st == "archived" else 98
-        return (idx, row["style_code"] or "")
-    out.sort(key=sort_key)
-    return out
 
 
 # ── Catalogue Codes & Color Master Endpoints ─────────────────────────────────

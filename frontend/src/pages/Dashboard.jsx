@@ -4,7 +4,7 @@ import { PageHeader, StatTile, Card, BtnSecondary } from "../components/ui-kit";
 import { Link } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import {
-  AlertTriangle, Clock, ArrowRight, Receipt, Wrench,
+  AlertTriangle, Clock, ArrowRight, ReceiptIndianRupee, Wrench,
   Factory, ShoppingBag, BarChart3, Database, Calendar,
   Wallet, Coins, Landmark
 } from "lucide-react";
@@ -111,7 +111,7 @@ export default function Dashboard() {
         {dashTab !== "online" && overdueInvoices.length > 0 && (
           <Card className="bg-red-50 border-2 border-red-300 px-5 py-3 flex items-center justify-between" data-testid="overdue-invoices-banner">
             <div className="flex items-center gap-3">
-              <Receipt className="w-5 h-5 text-red-600" />
+              <ReceiptIndianRupee className="w-5 h-5 text-red-600" />
               <div>
                 <div className="font-bold text-red-700 text-sm">
                   {overdueInvoices.length} overdue payment{overdueInvoices.length > 1 ? "s" : ""} · {inr(overdueInvoices.reduce((s, r) => s + (r.outstanding || 0), 0))} receivable

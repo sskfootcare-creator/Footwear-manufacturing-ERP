@@ -9,7 +9,7 @@ import { SafeImage } from "../components/ImageUploader";
 import {
   Layers, ChevronRight, RefreshCw, Search, Rocket, Archive, TrendingDown,
   ImageOff, ExternalLink, Save, X, Plus, AlertTriangle, CheckCircle2,
-  Package, DollarSign, Palette, Ruler, Camera, BookOpen,
+  Package, IndianRupee, Palette, Ruler, Camera, BookOpen,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────
@@ -300,7 +300,7 @@ function EditDetailsDrawer({ card, onClose, onDone }) {
         {form.sale_channels.length > 0 && (
           <div>
             <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1.5 flex items-center gap-1.5">
-              <DollarSign className="w-3.5 h-3.5" /> Platform Commission % (per channel)
+              <IndianRupee className="w-3.5 h-3.5" /> Platform Commission % (per channel)
             </div>
             <div className="grid grid-cols-2 gap-2">
               {form.sale_channels.map((ch) => (
@@ -529,6 +529,7 @@ function StyleCard({ card, onAdvance, onEdit }) {
 export default function OnlineStylePipeline() {
   const [rows, setRows]         = useState([]);
   const [loading, setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [search, setSearch]     = useState("");
   const [channel, setChannel]   = useState("");
   const [advanceCard, setAdvanceCard] = useState(null);
@@ -537,6 +538,7 @@ export default function OnlineStylePipeline() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const p = new URLSearchParams();
       if (search)  p.append("search", search);
@@ -544,6 +546,8 @@ export default function OnlineStylePipeline() {
       const qs = p.toString() ? `?${p}` : "";
       const r = await http.get(`/styles/online${qs}`);
       setRows(r.data);
+    } catch (err) {
+      setLoadError(formatApiError(err) || "Failed to load online pipeline styles");
     } finally { setLoading(false); }
   }, [search, channel]);
 
@@ -553,7 +557,9 @@ export default function OnlineStylePipeline() {
   const byStage = useMemo(() => {
     const g = Object.fromEntries(ALL_STAGES.map((s) => [s.key, []]));
     for (const r of rows) {
-      if (g[r.online_status]) g[r.online_status].push(r);
+      const st = r.online_status || "draft";
+      if (g[st]) g[st].push(r);
+      else (g.draft = g.draft || []).push(r);
     }
     return g;
   }, [rows]);
@@ -582,6 +588,21 @@ export default function OnlineStylePipeline() {
           </div>
         }
       />
+
+      {loadError && (
+        <div className="mx-4 sm:mx-8 mb-4 border-2 border-red-500 bg-red-50 text-red-800 px-4 py-3 text-xs font-bold flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            onClick={load}
+            className="text-[11px] uppercase tracking-wider font-bold underline hover:text-red-950"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {showAddPicker && (
         <AddStyleToPipelineDrawer

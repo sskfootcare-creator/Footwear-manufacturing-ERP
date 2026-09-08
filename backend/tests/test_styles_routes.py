@@ -335,3 +335,29 @@ async def test_style_master_crud_and_summary(monkeypatch, mock_db):
 
     pipe_rem = await remove_style_from_online_pipeline(sid, req)
     assert pipe_rem["ok"] is True
+
+
+def test_styles_online_and_not_in_pipeline_routing(monkeypatch, mock_db):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "db", mock_db)
+
+    async def mock_user(request=None):
+        return {"email": "admin@sskfootcare.com", "role": "admin"}
+    monkeypatch.setattr(server, "get_current_user", mock_user)
+
+    test_app = FastAPI()
+    test_app.include_router(styles_router)
+    client = TestClient(test_app)
+
+    # Calling /api/styles/online should NOT be captured by /api/styles/{sid} (which returns 400 Invalid ObjectId)
+    res_online = client.get("/api/styles/online")
+    assert res_online.status_code == 200
+    assert isinstance(res_online.json(), list)
+
+    # Calling /api/styles/not-in-pipeline should NOT be captured by /api/styles/{sid}
+    res_nip = client.get("/api/styles/not-in-pipeline")
+    assert res_nip.status_code == 200
+    assert isinstance(res_nip.json(), list)
+

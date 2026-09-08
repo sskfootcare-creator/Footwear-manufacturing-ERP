@@ -275,11 +275,16 @@ export default function Payroll() {
           <Card className="p-12 text-center text-slate-400">Loading...</Card>
         ) : (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
               <KpiTile
                 label="Karigars"
                 value={data.worker_count}
                 icon={<UsersIcon className="w-4 h-4" />}
+              />
+              <KpiTile
+                label="Opening Bal (b/f)"
+                value={inr(data.grand_opening_balance || 0)}
+                accent="#3B82F6"
               />
               <KpiTile
                 label="Earnings"
@@ -301,7 +306,7 @@ export default function Payroll() {
               <KpiTile
                 label="Net Balance"
                 value={inr(data.grand_net_payable)}
-                accent="#16A34A"
+                accent={data.grand_net_payable >= 0 ? "#16A34A" : "#DC2626"}
               />
             </div>
 
@@ -312,6 +317,7 @@ export default function Payroll() {
                     <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                       <th className="px-4 py-3 font-bold">Karigar</th>
                       <th className="px-4 py-3 font-bold">Skill</th>
+                      <th className="px-4 py-3 font-bold text-right">Opening Bal</th>
                       <th className="px-4 py-3 font-bold text-right">Pairs</th>
                       <th className="px-4 py-3 font-bold text-right">
                         Earnings
@@ -330,7 +336,7 @@ export default function Payroll() {
                     {data.rows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan="8"
+                          colSpan="9"
                           className="px-6 py-10 text-center text-slate-400"
                         >
                           No payroll data in this period.
@@ -370,10 +376,16 @@ export default function Payroll() {
                     <tfoot>
                       <tr className="bg-[#0F172A] text-white">
                         <td
-                          colSpan="3"
+                          colSpan="2"
                           className="px-4 py-3 text-right font-bold uppercase tracking-wider text-xs"
                         >
                           Total
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono font-bold text-blue-300">
+                          {inr(data.grand_opening_balance || 0)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          {data.rows.reduce((s, r) => s + (r.total_pairs || 0), 0)}
                         </td>
                         <td className="px-4 py-3 text-right font-mono font-bold">
                           {inr(data.grand_total)}
@@ -538,10 +550,18 @@ export default function Payroll() {
           width="max-w-3xl"
         >
           <div className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-blue-50 border-2 border-blue-300 p-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-blue-700">
+                  Opening Balance (b/f)
+                </div>
+                <div className="font-mono text-xl font-bold text-blue-900 mt-1">
+                  {inr(ledgerFor.ledger.opening_balance || 0)}
+                </div>
+              </div>
               <div className="bg-orange-50 border-2 border-orange-300 p-3">
                 <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-orange-700">
-                  Total Earned
+                  Period Earned
                 </div>
                 <div className="font-mono text-xl font-bold text-orange-900 mt-1">
                   {inr(ledgerFor.ledger.total_earned)}
@@ -549,7 +569,7 @@ export default function Payroll() {
               </div>
               <div className="bg-red-50 border-2 border-red-300 p-3">
                 <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-red-700">
-                  Total Paid Out
+                  Period Paid Out
                 </div>
                 <div className="font-mono text-xl font-bold text-red-900 mt-1">
                   {inr(ledgerFor.ledger.total_paid)}
@@ -564,7 +584,7 @@ export default function Payroll() {
                   Net Balance Due
                 </div>
                 <div
-                  className={`font-mono text-2xl font-bold mt-1 ${ledgerFor.ledger.balance >= 0 ? "text-green-900" : "text-red-900"}`}
+                  className={`font-mono text-xl font-bold mt-1 ${ledgerFor.ledger.balance >= 0 ? "text-green-900" : "text-red-900"}`}
                 >
                   {inr(ledgerFor.ledger.balance)}
                 </div>
@@ -619,18 +639,20 @@ export default function Payroll() {
                   ledgerFor.ledger.entries.map((e, i) => {
                     const isCredit = e.amount > 0;
                     const colorMap = {
+                      opening_balance: "blue",
                       earning: "orange",
                       bonus: "purple",
                       advance: "yellow",
                       payment: "blue",
                       adjustment: "slate",
                     };
+                    const typeLabel = e.txn_type === "opening_balance" ? "OPENING" : e.txn_type.toUpperCase();
                     return (
-                      <tr key={i} className="border-b border-slate-100">
+                      <tr key={i} className={`border-b border-slate-100 ${e.txn_type === "opening_balance" ? "bg-blue-50/50 font-semibold" : ""}`}>
                         <td className="px-3 py-2 font-mono">{e.date}</td>
                         <td className="px-3 py-2">
                           <Badge color={colorMap[e.txn_type] || "slate"}>
-                            {e.txn_type.toUpperCase()}
+                            {typeLabel}
                           </Badge>
                         </td>
                         <td className="px-3 py-2 text-slate-600 max-w-md">
@@ -1062,6 +1084,9 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
         <td className="px-4 py-3">
           <Badge color="orange">{r.skill}</Badge>
         </td>
+        <td className="px-4 py-3 text-right font-mono font-medium text-slate-600">
+          {inr(r.opening_balance || 0)}
+        </td>
         <td className="px-4 py-3 text-right font-mono">{r.total_pairs}</td>
         <td className="px-4 py-3 text-right font-mono font-bold text-[#C27842]">
           {inr(r.total_earning)}
@@ -1109,7 +1134,7 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan="8" className="bg-slate-50 px-8 py-5">
+          <td colSpan="9" className="bg-slate-50 px-8 py-5">
             <div className="space-y-3">
               {r.bonus_pct > 0 && r.target_cycle_days > 0 && (
                 <div className="bg-purple-50 border border-purple-200 px-3 py-2 text-xs flex items-center gap-2">

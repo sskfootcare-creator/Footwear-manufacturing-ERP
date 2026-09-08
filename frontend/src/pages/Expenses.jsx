@@ -10,7 +10,7 @@ import {
   IndianRupee,
   TrendingUp,
   TrendingDown,
-  Receipt,
+  ReceiptIndianRupee,
   Trash2,
   Edit3,
   X,
@@ -468,7 +468,7 @@ export default function Expenses() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Operating Expenses</span>
               <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 grid place-items-center">
-                <Receipt className="w-4 h-4" />
+                <ReceiptIndianRupee className="w-4 h-4" />
               </div>
             </div>
             <div className="text-2xl font-black text-slate-900" data-testid="pnl-expenses-value">
@@ -525,7 +525,7 @@ export default function Expenses() {
               }`}
               data-testid="tab-all-expenses"
             >
-              <Receipt className="w-4 h-4 inline mr-1.5" />
+              <ReceiptIndianRupee className="w-4 h-4 inline mr-1.5" />
               Main Expenses List
             </button>
             <button
@@ -695,7 +695,7 @@ export default function Expenses() {
                 <Card className="overflow-hidden">
                   <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
                     <div className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
-                      <Receipt className="w-4 h-4 text-[#C27842]" /> Expense Records ({expenses.length})
+                      <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" /> Expense Records ({expenses.length})
                     </div>
                     <div className="font-black text-sm text-slate-900">Total: {inr(listTotalExpenses)}</div>
                   </div>
@@ -1325,7 +1325,7 @@ export default function Expenses() {
           <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div className="bg-[#0F172A] text-white px-5 py-3.5 flex items-center justify-between flex-shrink-0">
               <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
-                <Receipt className="w-4 h-4 text-[#C27842]" /> {editingItem ? "Edit Expense Record" : "Add New Expense Record"}
+                <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" /> {editingItem ? "Edit Expense Record" : "Add New Expense Record"}
               </div>
               <button onClick={() => setModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
                 <X className="w-5 h-5" />

@@ -13,6 +13,7 @@ class WorkerIn(BaseModel):
     notes: Optional[str] = ""
     bonus_pct: float = 0
     target_cycle_days: float = 0
+    opening_balance: Optional[float] = 0.0
 
 
 class AssignmentUpdate(BaseModel):

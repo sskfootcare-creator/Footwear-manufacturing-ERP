@@ -29,7 +29,7 @@ import {
   RotateCcw,
   Loader2,
   Info,
-  DollarSign,
+  IndianRupee,
   Upload,
   FileSpreadsheet,
   FileText,
@@ -820,7 +820,7 @@ export default function OnlineProfitability() {
               <div className="flex justify-between items-center border-b pb-3 mb-3">
                 <div>
                   <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-amber-600" /> Non-Order Deductions Ledger
+                    <IndianRupee className="w-4 h-4 text-amber-600" /> Non-Order Deductions Ledger
                   </h4>
                   <p className="text-xs text-slate-500">Deductions not attributed to any specific order line</p>
                 </div>

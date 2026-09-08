@@ -1072,5 +1072,90 @@ async def test_multi_concurrent_wage_payment_requests_high_contention(monkeypatc
     assert cash_entry["remaining_balance"] == 8000.0
 
 
+@pytest.mark.anyio
+async def test_payroll_carry_forward_balance_and_continuous_ledger(client, mock_workers_env):
+    """
+    Test that work completed in August (e.g. 2026-08-10) carries forward as Opening Balance
+    when computing payroll for September (2026-08-31 to 2026-09-08), preventing inconsistent negative balances.
+    """
+    wid = str(ObjectId())
+    mock_workers_env.workers_store[wid] = {
+        "_id": ObjectId(wid),
+        "name": "Prem Jatoliya",
+        "rate_per_pair": 10.0,
+        "skill": "upper",
+        "active": True,
+    }
+
+    # 1. Job completed on 2026-08-10 (earning = 1000 * 10 = 10,000)
+    jid = str(ObjectId())
+    mock_workers_env.jobs_store[jid] = {
+        "_id": ObjectId(jid),
+        "po_number": "PO-AUG",
+        "style_code": "ST-01",
+        "color": "Black",
+        "size": "7",
+        "updated_at": "2026-08-10T10:00:00Z",
+        "stage": "upper",
+        "quantity": 1000,
+        "completed_qty": 1000,
+        "assignments": {"upper": {"worker_id": wid, "completed_qty": 1000, "rate_per_pair": 10.0}},
+        "history": [
+            {"event": "stage_update", "stage": "upper", "role": "upper", "worker_id": wid, "completed_qty": 1000, "rate_per_pair": 10.0, "at": "2026-08-10T10:00:00Z"}
+        ],
+    }
+
+    # 2. Payment made on 2026-09-02 (amount = 4,000)
+    aid = str(ObjectId())
+    mock_workers_env.advances_store[aid] = {
+        "_id": ObjectId(aid),
+        "worker_id": wid,
+        "amount": 4000.0,
+        "date": "2026-09-02",
+        "txn_type": "payment",
+        "notes": "Partial wage payout",
+    }
+
+    # Check 1: Query full period encompassing both (2026-08-01 to 2026-09-08)
+    from routes.pos import compute_payroll
+    payroll_full = await compute_payroll(db=mock_workers_env, from_date="2026-08-01", to_date="2026-09-08")
+    row_full = next(r for r in payroll_full["rows"] if r["worker_id"] == wid)
+    assert row_full["total_earning"] == 10000.0
+    assert row_full["payments_paid"] == 4000.0
+    assert row_full["net_payable"] == 6000.0
+
+    # Check 2: Query September ONLY (2026-08-31 to 2026-09-08)
+    # Opening balance must carry forward 10,000 from August, and net_payable must be 6,000 (NOT -4,000!)
+    payroll_sept = await compute_payroll(db=mock_workers_env, from_date="2026-08-31", to_date="2026-09-08")
+    row_sept = next(r for r in payroll_sept["rows"] if r["worker_id"] == wid)
+    assert row_sept["opening_balance"] == 10000.0
+    assert row_sept["total_earning"] == 0.0
+    assert row_sept["payments_paid"] == 4000.0
+    assert row_sept["net_payable"] == 6000.0
+    assert payroll_sept["grand_opening_balance"] == 10000.0
+    assert payroll_sept["grand_total"] == 0.0
+    assert payroll_sept["grand_payments"] == 4000.0
+    assert payroll_sept["grand_net_payable"] == 6000.0
+
+    # Check 3: Continuous worker ledger for September (2026-08-31 to 2026-09-08)
+    res = client.get(f"/api/workers/{wid}/ledger?from_date=2026-08-31&to_date=2026-09-08")
+    assert res.status_code == 200
+    ledger = res.json()
+    assert ledger["opening_balance"] == 10000.0
+    assert ledger["total_earned"] == 0.0
+    assert ledger["total_paid"] == 4000.0
+    assert ledger["balance"] == 6000.0
+    # First entry must be opening balance
+    entries = ledger["entries"]
+    assert len(entries) == 2
+    assert entries[0]["txn_type"] == "opening_balance"
+    assert entries[0]["amount"] == 10000.0
+    assert entries[0]["balance"] == 10000.0
+    # Second entry is payment
+    assert entries[1]["txn_type"] == "payment"
+    assert entries[1]["amount"] == -4000.0
+    assert entries[1]["balance"] == 6000.0
+
+
 
 

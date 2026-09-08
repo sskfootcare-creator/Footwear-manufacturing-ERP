@@ -75,10 +75,11 @@ def build_payroll_summary(data: dict) -> bytes:
 
     meta = Table([
         ["Period", period, "Karigars", str(data.get("worker_count", 0))],
-        ["Total Earnings", _inr(data.get("grand_total", 0)),
-         "Open Advances", _inr(data.get("grand_advances_open", 0))],
-        ["Net Payable", _inr(data.get("grand_net_payable", 0)), "Generated", datetime.now().strftime("%d %b %Y %H:%M")],
-    ], colWidths=[30 * mm, 60 * mm, 30 * mm, 60 * mm])
+        ["Opening Balance", _inr(data.get("grand_opening_balance", 0)),
+         "Period Earnings", _inr(data.get("grand_total", 0))],
+        ["Paid / Advances", _inr((data.get("grand_advances_open", 0) or 0) + (data.get("grand_payments", 0) or 0)),
+         "Net Payable", _inr(data.get("grand_net_payable", 0))],
+    ], colWidths=[32 * mm, 58 * mm, 32 * mm, 58 * mm])
     meta.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.6, LINE),
         ("GRID", (0, 0), (-1, -1), 0.4, LINE),
@@ -92,37 +93,39 @@ def build_payroll_summary(data: dict) -> bytes:
     ]))
 
     # Karigar table
-    header = ["#", "Karigar", "Skill", "Pairs", "Earnings", "Advances Open", "Net Payable"]
+    header = ["#", "Karigar", "Skill", "Opening Bal", "Pairs", "Earnings", "Paid / Adv", "Net Payable"]
     table_rows = [header]
     for i, r in enumerate(rows, 1):
+        debit = (r.get("advances_open", 0) or 0) + (r.get("payments_paid", 0) or 0)
         table_rows.append([
-            str(i), r["name"], r["skill"], str(r["total_pairs"]),
-            _inr(r["total_earning"]), _inr(r["advances_open"]), _inr(r["net_payable"]),
+            str(i), r["name"], r["skill"], _inr(r.get("opening_balance", 0)), str(r["total_pairs"]),
+            _inr(r["total_earning"]), _inr(debit), _inr(r["net_payable"]),
         ])
     table_rows.append(["", Paragraph("<b>TOTAL</b>", ParagraphStyle("b", fontName="Helvetica-Bold", fontSize=9, alignment=2)),
-                       "", str(sum(r["total_pairs"] for r in rows)),
-                       _inr(data.get("grand_total", 0)), _inr(data.get("grand_advances_open", 0)),
+                       "", _inr(data.get("grand_opening_balance", 0)), str(sum(r["total_pairs"] for r in rows)),
+                       _inr(data.get("grand_total", 0)), _inr((data.get("grand_advances_open", 0) or 0) + (data.get("grand_payments", 0) or 0)),
                        _inr(data.get("grand_net_payable", 0))])
 
-    t = Table(table_rows, colWidths=[10 * mm, 45 * mm, 25 * mm, 18 * mm, 28 * mm, 28 * mm, 26 * mm])
+    t = Table(table_rows, colWidths=[8 * mm, 38 * mm, 22 * mm, 24 * mm, 16 * mm, 24 * mm, 24 * mm, 24 * mm])
     t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.6, LINE),
         ("GRID", (0, 0), (-1, -2), 0.4, LINE),
         ("BACKGROUND", (0, 0), (-1, 0), HEAD),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
-        ("FONT", (0, 1), (-1, -2), "Helvetica", 9),
+        ("FONT", (0, 1), (-1, -2), "Helvetica", 8),
         ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (0, -1), (-1, -1), LIGHT),
-        ("FONT", (0, -1), (-1, -1), "Helvetica-Bold", 10),
+        ("FONT", (0, -1), (-1, -1), "Helvetica-Bold", 9),
         ("LINEABOVE", (0, -1), (-1, -1), 1, BLACK),
-        ("TEXTCOLOR", (5, 1), (5, -2), RED),
-        ("TEXTCOLOR", (6, 1), (6, -2), GREEN),
+        ("TEXTCOLOR", (6, 1), (6, -2), RED),
+        ("TEXTCOLOR", (7, 1), (7, -2), GREEN),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
+
 
     elements = [
         _company_header(),
@@ -227,11 +230,13 @@ def build_wage_slip(row: dict, advances: list, from_date: str, to_date: str) -> 
     ]))
 
     # Final settlement block
+    debit_amt = (row.get("advances_open", 0) or 0) + (row.get("payments_paid", 0) or 0)
     settle_data = [
-        ["Total Earnings", _inr(row.get("total_earning", 0))],
-        ["Less: Open Advances", "(-) " + _inr(row.get("advances_open", 0))],
-        ["", ""],
-        ["Net Payable", _inr(row.get("net_payable", 0))],
+        ["Opening Balance (b/f)", _inr(row.get("opening_balance", 0))],
+        ["Current Period Earnings", _inr(row.get("total_earning", 0))],
+        ["Productivity Bonus", _inr(row.get("total_bonus", 0))],
+        ["Less: Period Advances / Paid", "(-) " + _inr(debit_amt)],
+        ["Net Payable Due", _inr(row.get("net_payable", 0))],
     ]
     settle = Table(settle_data, colWidths=[80 * mm, 70 * mm])
     settle.setStyle(TableStyle([
@@ -244,9 +249,9 @@ def build_wage_slip(row: dict, advances: list, from_date: str, to_date: str) -> 
         ("BACKGROUND", (0, -1), (-1, -1), HEAD),
         ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
         ("FONT", (0, -1), (-1, -1), "Helvetica-Bold", 11),
-        ("TEXTCOLOR", (1, 1), (1, 1), RED),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TEXTCOLOR", (1, 3), (1, 3), RED),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
 
     elements = [

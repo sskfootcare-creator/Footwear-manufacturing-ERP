@@ -866,6 +866,21 @@ async def list_order_import_format_configs(
     return [stringify(d) for d in docs]
 
 
+@online_orders_router.get("/order-import-format-configs/_meta/canonical-fields")
+async def get_order_import_canonical_fields(
+    request: Request,
+    role: ConfigRole = "order",
+):
+    await _get_user(request)
+    mapping = {
+        "order": ORDER_CANONICAL_FIELDS,
+        "dispatch": DISPATCH_CANONICAL_FIELDS,
+        "monthly_report": MONTHLY_REPORT_CANONICAL_FIELDS,
+        "settlement": SETTLEMENT_CANONICAL_FIELDS,
+    }
+    return {"canonical_fields": mapping.get(role, ORDER_CANONICAL_FIELDS)}
+
+
 @online_orders_router.get("/order-import-format-configs/{platform}")
 async def get_order_import_format_config(
     platform: str,

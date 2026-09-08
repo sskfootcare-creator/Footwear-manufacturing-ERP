@@ -2836,19 +2836,51 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
     workers = await db.workers.find({}).to_list(500)
     worker_map = {str(w["_id"]): w for w in workers}
 
-    q = {}
-    if from_date:
-        q["updated_at"] = {"$gte": from_date}
+    job_q = {}
     if to_date:
-        q.setdefault("updated_at", {})
-        q["updated_at"]["$lte"] = to_date + "T23:59:59Z"
-    jobs = await db.production_jobs.find(q).to_list(5000)
+        job_q["updated_at"] = {"$lte": to_date + "T23:59:59Z"}
+    try:
+        jobs = await db.production_jobs.find(job_q).to_list(10000)
+    except Exception:
+        jobs = await db.production_jobs.find({}).to_list(10000)
 
     styles = await db.styles.find({}).to_list(1000)
     styles_cache = {str(s.get("code")).strip().upper(): stringify(s) for s in styles if s.get("code")}
 
-    earnings = {}
+    # Per-worker tracking
+    worker_data = {}
+    for wid, w in worker_map.items():
+        worker_data[wid] = {
+            "worker_id": wid,
+            "name": w.get("name", ""),
+            "skill": w.get("skill", ""),
+            "phone": w.get("phone", ""),
+            "default_rate": float(w.get("rate_per_pair", 0) or 0),
+            "bonus_pct": float(w.get("bonus_pct", 0) or 0),
+            "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
+            "base_opening_balance": float(w.get("opening_balance", 0.0) or 0.0),
+            # Prior to from_date
+            "prior_earning": 0.0,
+            "prior_bonus": 0.0,
+            "prior_advances_open": 0.0,
+            "prior_advances_taken": 0.0,
+            "prior_payments": 0.0,
+            "prior_adjustments": 0.0,
+            # Current period (from_date to to_date)
+            "opening_balance": 0.0,
+            "total_pairs": 0,
+            "total_earning": 0.0,
+            "total_bonus": 0.0,
+            "advances_taken": 0.0,
+            "advances_open": 0.0,
+            "payments_paid": 0.0,
+            "net_payable": 0.0,
+            "by_role": {},
+            "jobs": [],
+        }
+
     raw_jobs_by_worker = {}
+
     for j in jobs:
         roles_to_check = set()
         for r in (j.get("assignments") or {}).keys():
@@ -2868,28 +2900,21 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
                 w = worker_map.get(wid)
                 if not w:
                     continue
+                if wid not in worker_data:
+                    continue
+
                 role_comp = s["pairs"]
                 rate = s["rate"]
-                earn = rate * role_comp
-                if wid not in earnings:
-                    earnings[wid] = {
-                        "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
-                        "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
-                        "bonus_pct": float(w.get("bonus_pct", 0) or 0),
-                        "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
-                        "total_pairs": 0, "total_earning": 0.0,
-                        "total_bonus": 0.0,
-                        "advances_taken": 0.0, "advances_open": 0.0,
-                        "payments_paid": 0.0,
-                        "net_payable": 0.0,
-                        "by_role": {}, "jobs": [],
-                    }
-                    raw_jobs_by_worker[wid] = []
-                earnings[wid]["total_pairs"] += role_comp
-                earnings[wid]["total_earning"] += earn
-                earnings[wid]["by_role"][role] = earnings[wid]["by_role"].get(role, 0) + role_comp
+                earn = round(rate * role_comp, 2)
+                comp_date = (s.get("at") or j.get("updated_at") or j.get("created_at") or "")[:10]
 
-                bonus_amt = 0
+                if to_date and comp_date and comp_date > to_date:
+                    continue
+
+                is_prior = bool(from_date and comp_date and comp_date < from_date)
+
+                # Productivity bonus check
+                bonus_amt = 0.0
                 bp = float(w.get("bonus_pct", 0) or 0)
                 td = float(w.get("target_cycle_days", 0) or 0)
                 if bp > 0 and td > 0:
@@ -2908,25 +2933,33 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
                             delta_days = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
                             if 0 <= delta_days <= td:
                                 bonus_amt = round(earn * bp / 100, 2)
-                                earnings[wid]["total_bonus"] += bonus_amt
                         except Exception:
                             pass
 
-                raw_jobs_by_worker[wid].append({
-                    "job_id": str(j["_id"]),
-                    "po_number": j.get("po_number"),
-                    "style_code": j.get("style_code"),
-                    "color": j.get("color"),
-                    "size": j.get("size"),
-                    "role": role,
-                    "pairs": role_comp,
-                    "rate": rate,
-                    "earning": round(earn, 2),
-                    "bonus": bonus_amt,
-                })
+                if is_prior:
+                    worker_data[wid]["prior_earning"] = round(worker_data[wid]["prior_earning"] + earn, 2)
+                    worker_data[wid]["prior_bonus"] = round(worker_data[wid]["prior_bonus"] + bonus_amt, 2)
+                else:
+                    worker_data[wid]["total_pairs"] += role_comp
+                    worker_data[wid]["total_earning"] = round(worker_data[wid]["total_earning"] + earn, 2)
+                    worker_data[wid]["total_bonus"] = round(worker_data[wid]["total_bonus"] + bonus_amt, 2)
+                    worker_data[wid]["by_role"][role] = worker_data[wid]["by_role"].get(role, 0) + role_comp
 
-    for wid, e in earnings.items():
-        raw_list = raw_jobs_by_worker.get(wid, [])
+                    raw_jobs_by_worker.setdefault(wid, []).append({
+                        "job_id": str(j["_id"]),
+                        "po_number": j.get("po_number"),
+                        "style_code": j.get("style_code"),
+                        "color": j.get("color"),
+                        "size": j.get("size"),
+                        "role": role,
+                        "pairs": role_comp,
+                        "rate": rate,
+                        "earning": earn,
+                        "bonus": bonus_amt,
+                    })
+
+    # Group job cards for current period
+    for wid, raw_list in raw_jobs_by_worker.items():
         grouped_cards = {}
         for item in raw_list:
             po_num = str(item.get("po_number") or "").strip()
@@ -2973,7 +3006,7 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
             gc["total_earning"] = round(gc["total_earning"] + item["earning"], 2)
             gc["earning"] = gc["total_earning"]
             gc["bonus"] = round(gc["bonus"] + item["bonus"], 2)
-            
+
             sz_str = str(item.get("size", "—"))
             if sz_str not in gc["size_map"]:
                 gc["size_map"][sz_str] = {
@@ -2994,135 +3027,149 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
                 return float(s) if s.replace('.', '', 1).isdigit() else 999
             gc["sizes"] = sorted(list(gc.pop("size_map").values()), key=parse_sz)
 
-        e["jobs"] = list(grouped_cards.values())
+        worker_data[wid]["jobs"] = list(grouped_cards.values())
 
+    # Process advances & payments
     adv_q = {}
-    if from_date:
-        adv_q["date"] = {"$gte": from_date}
     if to_date:
-        adv_q.setdefault("date", {})
-        adv_q["date"]["$lte"] = to_date
-    advances = await db.advances.find(adv_q).to_list(5000)
-    adv_by_worker = {}
+        adv_q["date"] = {"$lte": to_date}
+    try:
+        advances = await db.advances.find(adv_q).to_list(10000)
+    except Exception:
+        advances = await db.advances.find({}).to_list(10000)
+
     for a in advances:
-        wid = a.get("worker_id")
-        if not wid:
+        wid = str(a.get("worker_id") or "")
+        if not wid or wid not in worker_data:
             continue
-        adv_by_worker.setdefault(wid, []).append(a)
+        amt = float(a.get("amount", 0) or 0)
+        ttype = a.get("txn_type") or "advance"
+        adv_date = (a.get("date") or a.get("created_at") or "")[:10]
 
-    for wid, e in earnings.items():
-        for a in adv_by_worker.get(wid, []):
-            amt = float(a.get("amount", 0) or 0)
-            ttype = a.get("txn_type") or "advance"
+        if to_date and adv_date and adv_date > to_date:
+            continue
+
+        is_prior = bool(from_date and adv_date and adv_date < from_date)
+
+        if is_prior:
             if ttype == "advance":
-                e["advances_taken"] += amt
+                worker_data[wid]["prior_advances_taken"] = round(worker_data[wid]["prior_advances_taken"] + amt, 2)
                 if not a.get("settled"):
-                    e["advances_open"] += amt
+                    worker_data[wid]["prior_advances_open"] = round(worker_data[wid]["prior_advances_open"] + amt, 2)
             elif ttype == "payment":
-                e["payments_paid"] += amt
+                worker_data[wid]["prior_payments"] = round(worker_data[wid]["prior_payments"] + amt, 2)
             elif ttype == "bonus":
-                e["total_bonus"] += amt
-        gross = e["total_earning"] + e["total_bonus"]
-        e["net_payable"] = round(gross - e["advances_open"] - e["payments_paid"], 2)
-        e["total_earning"] = round(e["total_earning"], 2)
-        e["total_bonus"] = round(e["total_bonus"], 2)
-        e["advances_taken"] = round(e["advances_taken"], 2)
-        e["advances_open"] = round(e["advances_open"], 2)
-        e["payments_paid"] = round(e["payments_paid"], 2)
-
-    for wid, advs in adv_by_worker.items():
-        if wid in earnings:
-            continue
-        w = worker_map.get(wid)
-        if not w:
-            continue
-        taken = sum(float(a.get("amount", 0) or 0) for a in advs if (a.get("txn_type") or "advance") == "advance")
-        open_amt = sum(float(a.get("amount", 0) or 0) for a in advs if (a.get("txn_type") or "advance") == "advance" and not a.get("settled"))
-        paid = sum(float(a.get("amount", 0) or 0) for a in advs if a.get("txn_type") == "payment")
-        bon = sum(float(a.get("amount", 0) or 0) for a in advs if a.get("txn_type") == "bonus")
-        earnings[wid] = {
-            "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
-            "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
-            "bonus_pct": float(w.get("bonus_pct", 0) or 0),
-            "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
-            "total_pairs": 0, "total_earning": 0.0, "total_bonus": round(bon, 2),
-            "advances_taken": round(taken, 2), "advances_open": round(open_amt, 2),
-            "payments_paid": round(paid, 2),
-            "net_payable": round(bon - open_amt - paid, 2),
-            "by_role": {}, "jobs": [],
-        }
+                worker_data[wid]["prior_bonus"] = round(worker_data[wid]["prior_bonus"] + amt, 2)
+            elif ttype == "adjustment":
+                worker_data[wid]["prior_adjustments"] = round(worker_data[wid]["prior_adjustments"] + amt, 2)
+        else:
+            if ttype == "advance":
+                worker_data[wid]["advances_taken"] = round(worker_data[wid]["advances_taken"] + amt, 2)
+                if not a.get("settled"):
+                    worker_data[wid]["advances_open"] = round(worker_data[wid]["advances_open"] + amt, 2)
+            elif ttype == "payment":
+                worker_data[wid]["payments_paid"] = round(worker_data[wid]["payments_paid"] + amt, 2)
+            elif ttype == "bonus":
+                worker_data[wid]["total_bonus"] = round(worker_data[wid]["total_bonus"] + amt, 2)
+            elif ttype == "adjustment":
+                pass
 
     # Query wage payment records for actual disbursements against this period
-    wp_q: dict = {}
-    if from_date:
-        wp_q["period_from"] = from_date
-    if to_date:
-        wp_q["period_to"] = to_date
-
-    wage_payments_list = []
+    wp_by_worker = {}
     if hasattr(db, "wage_payments") and db.wage_payments is not None:
         try:
-            cursor = db.wage_payments.find(wp_q if (from_date or to_date) else {})
+            cursor = db.wage_payments.find({})
             if hasattr(cursor, "to_list"):
-                res = cursor.to_list(5000)
+                res = cursor.to_list(10000)
                 if hasattr(res, "__await__"):
                     wage_payments_list = await res
                 elif isinstance(res, list):
                     wage_payments_list = res
+                else:
+                    wage_payments_list = []
+            else:
+                wage_payments_list = []
         except Exception:
             wage_payments_list = []
 
-    wp_by_worker = {}
-    for wp in wage_payments_list:
-        wid_key = str(wp.get("worker_id"))
-        wp_by_worker.setdefault(wid_key, []).append(wp)
+        existing_adv_exp_ids = {a.get("linked_expense_id") for a in advances if a.get("linked_expense_id")}
 
-    for wid, wps in wp_by_worker.items():
-        if wid in earnings:
-            continue
-        w = worker_map.get(wid)
-        if not w:
-            continue
-        earnings[wid] = {
-            "worker_id": wid, "name": w.get("name", ""), "skill": w.get("skill", ""),
-            "phone": w.get("phone", ""), "default_rate": float(w.get("rate_per_pair", 0) or 0),
-            "bonus_pct": float(w.get("bonus_pct", 0) or 0),
-            "target_cycle_days": float(w.get("target_cycle_days", 0) or 0),
-            "total_pairs": 0, "total_earning": 0.0, "total_bonus": 0.0,
-            "advances_taken": 0.0, "advances_open": 0.0,
-            "payments_paid": 0.0,
-            "net_payable": 0.0,
-            "by_role": {}, "jobs": [],
-        }
+        for wp in wage_payments_list:
+            wid_key = str(wp.get("worker_id"))
+            if wid_key not in worker_data:
+                continue
+            wp_date = (wp.get("date") or wp.get("created_at") or "")[:10]
+            wp_from = wp.get("period_from")
+            wp_to = wp.get("period_to")
+            p_amt = float(wp.get("amount") or 0.0)
 
-    rows = list(earnings.values())
+            # Check if this wage payment matches the queried period
+            matches_period = True
+            if from_date and wp_from and wp_from != from_date:
+                matches_period = False
+            if to_date and wp_to and wp_to != to_date:
+                matches_period = False
+            if not wp_from and not wp_to:
+                if from_date and wp_date and wp_date < from_date:
+                    matches_period = False
+                if to_date and wp_date and wp_date > to_date:
+                    matches_period = False
 
-    for r in rows:
-        wid = str(r["worker_id"])
+            if matches_period:
+                wp_by_worker.setdefault(wid_key, []).append(wp)
+            elif from_date and wp_date and wp_date < from_date:
+                if not (wp.get("linked_expense_id") and wp["linked_expense_id"] in existing_adv_exp_ids):
+                    worker_data[wid_key]["prior_payments"] = round(worker_data[wid_key]["prior_payments"] + p_amt, 2)
+
+    # Compute opening balance and net payable for each worker
+    rows = []
+    for wid, acc in worker_data.items():
+        base_op = acc["base_opening_balance"]
+        prior_credits = acc["prior_earning"] + acc["prior_bonus"] + acc["prior_adjustments"]
+        prior_debits = acc["prior_advances_open"] + acc["prior_payments"]
+        opening_bal = round(base_op + prior_credits - prior_debits, 2) if from_date else round(base_op, 2)
+        acc["opening_balance"] = opening_bal
+
+        gross = acc["total_earning"] + acc["total_bonus"]
+        net_payable = round(opening_bal + gross - acc["advances_open"] - acc["payments_paid"], 2)
+        acc["net_payable"] = net_payable
+
         w_payments = wp_by_worker.get(wid, [])
         disbursed = round(sum(float(p.get("amount") or 0.0) for p in w_payments), 2)
-        net_payable = float(r.get("net_payable") or 0.0)
         remaining_balance = round(net_payable - disbursed, 2)
 
         override_reasons = [str(p["override_reason"]).strip() for p in w_payments if p.get("override_reason")]
 
-        r["computed_owed"] = net_payable
-        r["actual_paid"] = disbursed
-        r["disbursed_amount"] = disbursed
-        r["remaining_owed"] = remaining_balance
-        r["balance_owed"] = remaining_balance
-        r["is_overpaid"] = disbursed > net_payable + 0.01
-        r["override_reasons"] = override_reasons
-        r["override_reason"] = ", ".join(override_reasons) if override_reasons else None
-        r["payment_status"] = (
+        acc["computed_owed"] = net_payable
+        acc["actual_paid"] = disbursed
+        acc["disbursed_amount"] = disbursed
+        acc["remaining_owed"] = remaining_balance
+        acc["balance_owed"] = remaining_balance
+        acc["is_overpaid"] = disbursed > net_payable + 0.01
+        acc["override_reasons"] = override_reasons
+        acc["override_reason"] = ", ".join(override_reasons) if override_reasons else None
+        acc["payment_status"] = (
             "overpaid" if disbursed > net_payable + 0.01
             else "paid" if (disbursed >= net_payable and net_payable > 0)
             else "partially_paid" if disbursed > 0
             else "unpaid"
         )
-        r["wage_payments"] = [stringify(p) for p in w_payments]
+        acc["wage_payments"] = [stringify(p) for p in w_payments]
+
+        has_activity = (
+            abs(opening_bal) > 0.001
+            or acc["total_pairs"] > 0
+            or acc["total_earning"] > 0
+            or acc["total_bonus"] > 0
+            or acc["advances_taken"] > 0
+            or acc["payments_paid"] > 0
+            or disbursed > 0
+        )
+        if has_activity:
+            rows.append(acc)
 
     rows.sort(key=lambda r: r["net_payable"], reverse=True)
+    grand_opening = round(sum(r["opening_balance"] for r in rows), 2)
     grand = round(sum(r["total_earning"] for r in rows), 2)
     grand_bonus = round(sum(r["total_bonus"] for r in rows), 2)
     grand_advances = round(sum(r["advances_open"] for r in rows), 2)
@@ -3132,11 +3179,12 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
 
     return {
         "rows": rows,
+        "grand_opening_balance": grand_opening,
         "grand_total": grand,
         "grand_bonus": grand_bonus,
         "grand_advances_open": grand_advances,
         "grand_payments": grand_payments,
-        "grand_net_payable": round(grand + grand_bonus - grand_advances - grand_payments, 2),
+        "grand_net_payable": round(grand_opening + grand + grand_bonus - grand_advances - grand_payments, 2),
         "grand_disbursed": grand_disbursed,
         "grand_actual_paid": grand_disbursed,
         "grand_balance_owed": grand_balance_owed,
@@ -3144,6 +3192,7 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
         "worker_count": len(rows),
         "from_date": from_date, "to_date": to_date,
     }
+
 
 
 @pos_router.get("/reports/payroll")

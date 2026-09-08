@@ -27,7 +27,7 @@ import {
   Truck,
   Package,
   Barcode,
-  Receipt,
+  ReceiptIndianRupee,
   ExternalLink,
   ArrowRight,
 } from "lucide-react";
@@ -562,7 +562,7 @@ export default function POs() {
                           {loadingInvoices && selectedPoForInvoices?.id === p.id ? (
                             <Loader2 className="w-4 h-4 animate-spin text-[#C27842]" />
                           ) : (
-                            <Receipt className="w-4 h-4" />
+                            <ReceiptIndianRupee className="w-4 h-4" />
                           )}
                         </button>
                         <button
@@ -966,7 +966,7 @@ export default function POs() {
                   data-testid="detail-invoices-packing-btn"
                   title="View list of invoices and packing lists produced for this PO"
                 >
-                  <Receipt className="w-3.5 h-3.5" />
+                  <ReceiptIndianRupee className="w-3.5 h-3.5" />
                   <span>
                     Invoices &amp; Packing Lists
                     {viewDocuments ? ` (${(viewDocuments.invoices?.length || 0) + (viewDocuments.dispatch_records?.length || 0)})` : ""}
@@ -1176,7 +1176,7 @@ export default function POs() {
             <div className="pt-3 border-t-2 border-slate-200" data-testid="po-view-invoices-and-packing">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <Receipt className="w-4 h-4 text-[#C27842]" />
+                  <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" />
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
                     Invoices &amp; Packing Lists Produced
                   </h3>
@@ -1325,7 +1325,7 @@ export default function POs() {
               <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
-                    <Receipt className="w-3.5 h-3.5 text-[#C27842]" />
+                    <ReceiptIndianRupee className="w-3.5 h-3.5 text-[#C27842]" />
                     <span>Production Invoice: {poInvoicesList[0].invoice_no}</span>
                   </div>
                   <div className="text-[11px] text-amber-800 mt-0.5">
@@ -1419,7 +1419,7 @@ export default function POs() {
               </div>
             ) : poInvoicesList.length === 0 && (poDocumentsData?.dispatch_records || []).length === 0 ? (
               <div className="py-8 px-4 text-center bg-slate-50 rounded-lg border border-dashed border-slate-200">
-                <Receipt className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                <ReceiptIndianRupee className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                 <p className="text-sm font-medium text-slate-700">No Invoices or Packing Lists Produced Yet</p>
                 <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
                   Invoices, packing lists, and carton labels are produced automatically upon completing and dispatching production jobs in the Kanban board.

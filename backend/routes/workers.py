@@ -648,11 +648,6 @@ async def my_payroll(
         raise HTTPException(status_code=403, detail="Worker access only")
     caller_wid = u.get("worker_id") or u.get("id")
 
-    if not from_date:
-        from_date = datetime.now(timezone.utc).strftime("%Y-%m-01")
-    if not to_date:
-        to_date = datetime.now(timezone.utc).date().isoformat()
-
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     from routes.pos import compute_payroll
     full = await compute_payroll(db=db, from_date=from_date, to_date=to_date)
@@ -663,6 +658,7 @@ async def my_payroll(
             "worker_id": caller_wid,
             "name": u.get("name", ""),
             "skill": u.get("skill", ""),
+            "opening_balance": 0.0,
             "total_pairs": 0,
             "total_earning": 0.0,
             "total_bonus": 0.0,
@@ -841,7 +837,7 @@ async def create_advance(payload: AdvanceIn, request: Request):
 @workers_router.get("/workers/{wid}/ledger")
 async def worker_ledger(wid: str, request: Request,
                         from_date: Optional[str] = None, to_date: Optional[str] = None):
-    """Per-worker chronological ledger of earnings (credit) and payments/advances (debit)."""
+    """Per-worker chronological ledger of earnings (credit) and payments/advances (debit) with opening balance carry-forward."""
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     w = await db.workers.find_one({"_id": oid(wid)})
@@ -851,18 +847,24 @@ async def worker_ledger(wid: str, request: Request,
 
     bonus_pct = float(worker.get("bonus_pct", 0) or 0)
     target_cycle_days = float(worker.get("target_cycle_days", 0) or 0)
+    base_opening_balance = float(worker.get("opening_balance", 0.0) or 0.0)
 
     job_q = {}
-    if from_date:
-        job_q["updated_at"] = {"$gte": from_date}
     if to_date:
-        job_q.setdefault("updated_at", {})
-        job_q["updated_at"]["$lte"] = to_date + "T23:59:59Z"
-    jobs = await db.production_jobs.find(job_q).to_list(5000)
+        job_q["updated_at"] = {"$lte": to_date + "T23:59:59Z"}
+    try:
+        jobs = await db.production_jobs.find(job_q).to_list(10000)
+    except Exception:
+        jobs = await db.production_jobs.find({}).to_list(10000)
 
     from routes.pos import extract_role_completions
     entries = []
     worker_map = {wid: worker}
+
+    prior_earned = 0.0
+    prior_bonus = 0.0
+    prior_paid = 0.0
+
     for j in jobs:
         roles_to_check = set()
         for r in (j.get("assignments") or {}).keys():
@@ -884,13 +886,22 @@ async def worker_ledger(wid: str, request: Request,
                 rate = s["rate"]
                 earning = round(rate * role_comp, 2)
                 entry_date = (s.get("at") or j.get("updated_at") or j.get("created_at") or "")[:10]
-                entries.append({
-                    "date": entry_date,
-                    "txn_type": "earning",
-                    "amount": earning,
-                    "description": f"{j.get('po_number','')} · {j.get('style_code','')} · {j.get('color','')} · Sz {j.get('size','')} · {role.upper()} ({role_comp} prs × ₹{rate}/pr)",
-                    "ref": j.get("po_number"),
-                })
+
+                if to_date and entry_date and entry_date > to_date:
+                    continue
+
+                is_prior = bool(from_date and entry_date and entry_date < from_date)
+
+                if is_prior:
+                    prior_earned = round(prior_earned + earning, 2)
+                else:
+                    entries.append({
+                        "date": entry_date,
+                        "txn_type": "earning",
+                        "amount": earning,
+                        "description": f"{j.get('po_number','')} · {j.get('style_code','')} · {j.get('color','')} · Sz {j.get('size','')} · {role.upper()} ({role_comp} prs × ₹{rate}/pr)",
+                        "ref": j.get("po_number"),
+                    })
 
                 if bonus_pct > 0 and target_cycle_days > 0:
                     hist = j.get("history") or []
@@ -908,23 +919,29 @@ async def worker_ledger(wid: str, request: Request,
                             delta = (datetime.fromisoformat(done_at) - datetime.fromisoformat(assign_at)).total_seconds() / 86400
                             if 0 <= delta <= target_cycle_days:
                                 bonus = round(earning * bonus_pct / 100, 2)
-                                entries.append({
-                                    "date": done_at[:10],
-                                    "txn_type": "bonus",
-                                    "amount": bonus,
-                                    "description": f"Productivity bonus ({bonus_pct}%) for completing in {delta:.1f} days (target {target_cycle_days}d) · {j.get('style_code')} {j.get('color')}",
-                                    "ref": j.get("po_number"),
-                                })
+                                b_date = done_at[:10]
+                                if to_date and b_date > to_date:
+                                    pass
+                                elif from_date and b_date < from_date:
+                                    prior_bonus = round(prior_bonus + bonus, 2)
+                                else:
+                                    entries.append({
+                                        "date": b_date,
+                                        "txn_type": "bonus",
+                                        "amount": bonus,
+                                        "description": f"Productivity bonus ({bonus_pct}%) for completing in {delta:.1f} days (target {target_cycle_days}d) · {j.get('style_code')} {j.get('color')}",
+                                        "ref": j.get("po_number"),
+                                    })
                         except Exception:
                             pass
 
     adv_q = {"worker_id": wid}
-    if from_date:
-        adv_q["date"] = {"$gte": from_date}
     if to_date:
-        adv_q.setdefault("date", {})
-        adv_q["date"]["$lte"] = to_date
-    advs = await db.advances.find(adv_q).to_list(5000)
+        adv_q["date"] = {"$lte": to_date}
+    try:
+        advs = await db.advances.find(adv_q).to_list(10000)
+    except Exception:
+        advs = await db.advances.find({"worker_id": wid}).to_list(10000)
 
     bank_ids = list({a.get("bank_account_id") for a in advs if a.get("bank_account_id")})
     cash_ids = list({a.get("cash_ledger_id") for a in advs if a.get("cash_ledger_id")})
@@ -962,6 +979,19 @@ async def worker_ledger(wid: str, request: Request,
         else:
             signed = amt
 
+        a_date = (a_str.get("date") or a_str.get("created_at", ""))[:10]
+        if to_date and a_date and a_date > to_date:
+            continue
+
+        is_prior = bool(from_date and a_date and a_date < from_date)
+
+        if is_prior:
+            if ttype in ("advance", "payment"):
+                prior_paid = round(prior_paid + amt, 2)
+            elif ttype == "bonus":
+                prior_bonus = round(prior_bonus + amt, 2)
+            continue
+
         paid_via = a_str.get("paid_via")
         source_label = ""
         bank_name = None
@@ -987,7 +1017,7 @@ async def worker_ledger(wid: str, request: Request,
 
         entries.append({
             "id": a_str.get("id"),
-            "date": (a_str.get("date") or a_str.get("created_at", ""))[:10],
+            "date": a_date,
             "txn_type": ttype,
             "amount": signed,
             "description": full_desc,
@@ -1004,25 +1034,28 @@ async def worker_ledger(wid: str, request: Request,
     if hasattr(db, "wage_payments") and db.wage_payments is not None:
         try:
             wp_q = {"worker_id": wid}
-            if from_date or to_date:
-                dq = {}
-                if from_date:
-                    dq["$gte"] = from_date
-                if to_date:
-                    dq["$lte"] = to_date
-                wp_q["date"] = dq
-            wps = await db.wage_payments.find(wp_q).to_list(2000)
+            if to_date:
+                wp_q["date"] = {"$lte": to_date}
+            wps = await db.wage_payments.find(wp_q).to_list(10000)
             existing_adv_exp_ids = {a.get("linked_expense_id") for a in advs if a.get("linked_expense_id")}
             for wp in wps:
                 wp_str = stringify(wp)
                 if wp_str.get("linked_expense_id") and wp_str["linked_expense_id"] in existing_adv_exp_ids:
                     continue
                 w_amt = float(wp_str.get("amount", 0) or 0)
+                wp_date = (wp_str.get("date") or wp_str.get("created_at", ""))[:10]
+                if to_date and wp_date and wp_date > to_date:
+                    continue
+
+                if from_date and wp_date and wp_date < from_date:
+                    prior_paid = round(prior_paid + w_amt, 2)
+                    continue
+
                 pv = wp_str.get("paid_via")
                 s_lbl = f" [{pv.upper() if pv else 'PAYMENT'}]"
                 entries.append({
                     "id": wp_str.get("id"),
-                    "date": (wp_str.get("date") or wp_str.get("created_at", ""))[:10],
+                    "date": wp_date,
                     "txn_type": "payment",
                     "amount": -w_amt,
                     "description": f"{wp_str.get('notes') or 'Wage payout'}{s_lbl}",
@@ -1037,23 +1070,43 @@ async def worker_ledger(wid: str, request: Request,
 
     entries.sort(key=lambda e: (e["date"] or "", 0 if e["txn_type"] in ("earning", "bonus") else 1))
 
-    bal = 0.0
+    # Calculate Opening Balance (b/f)
+    opening_balance = round(base_opening_balance + prior_earned + prior_bonus - prior_paid, 2) if from_date else round(base_opening_balance, 2)
+
+    if from_date:
+        entries.insert(0, {
+            "id": "opening-balance",
+            "date": from_date,
+            "txn_type": "opening_balance",
+            "amount": opening_balance,
+            "description": f"Opening Balance (b/f as of {from_date})",
+            "balance": opening_balance,
+        })
+
+    bal = opening_balance if from_date else 0.0
     for e in entries:
+        if e.get("id") == "opening-balance":
+            e["balance"] = bal
+            continue
         bal = round(bal + e["amount"], 2)
         e["balance"] = bal
 
     total_earned = round(sum(e["amount"] for e in entries if e["txn_type"] in ("earning", "bonus")), 2)
     total_paid = round(sum(-e["amount"] for e in entries if e["txn_type"] in ("advance", "payment")), 2)
+
     return {
         "worker": {
             "id": wid, "name": worker.get("name"), "skill": worker.get("skill"),
             "phone": worker.get("phone"), "rate_per_pair": worker.get("rate_per_pair"),
             "bonus_pct": bonus_pct, "target_cycle_days": target_cycle_days,
+            "base_opening_balance": base_opening_balance,
         },
+        "opening_balance": opening_balance,
         "entries": entries,
         "total_earned": total_earned,
         "total_paid": total_paid,
-        "balance": round(total_earned - total_paid, 2),
+        "balance": bal,
+        "closing_balance": bal,
         "from_date": from_date, "to_date": to_date,
     }
 

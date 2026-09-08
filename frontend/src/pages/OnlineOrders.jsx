@@ -7,7 +7,7 @@ import {
 import { Drawer } from "./Materials";
 import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
-  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, DollarSign, Calendar,
+  ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, IndianRupee, Calendar,
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -2168,7 +2168,7 @@ function SettlementReconciliationCard({ platformFilter, onOpenImport }) {
               <span className="flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</span>
             </BtnSecondary>
             <BtnPrimary onClick={onOpenImport}>
-              <span className="flex items-center gap-1.5"><DollarSign className="w-3.5 h-3.5" /> Import settlement</span>
+              <span className="flex items-center gap-1.5"><IndianRupee className="w-3.5 h-3.5" /> Import settlement</span>
             </BtnPrimary>
           </div>
         </div>
@@ -2453,7 +2453,7 @@ export default function OnlineOrders() {
                   title={dailyProgress ? `${dailyProgress.indicator_text || `${dailyProgress.uploaded_business_days_count} of ${dailyProgress.expected_business_days_mtd} expected business days uploaded`} (${dailyProgress.missing_business_days_count || dailyProgress.missing_business_days_mtd?.length || 0} missing)` : "Upload daily payment CSV/XLSX"}
                 >
                   <span className="flex items-center gap-1.5 font-semibold">
-                    <DollarSign className="w-4 h-4 text-emerald-600" />
+                    <IndianRupee className="w-4 h-4 text-emerald-600" />
                     <span>Upload Daily Payment</span>
                     {dailyProgress && (
                       <span
@@ -2487,12 +2487,12 @@ export default function OnlineOrders() {
                   title="Upload daily payment CSV/XLSX"
                 >
                   <span className="flex items-center gap-1.5">
-                    <DollarSign className="w-4 h-4 text-emerald-600" />
+                    <IndianRupee className="w-4 h-4 text-emerald-600" />
                     <span>Upload Daily Payment</span>
                   </span>
                 </BtnSecondary>
                 <BtnPrimary id="btn-settlement-import" onClick={() => setSettlementOpen(true)}>
-                  <span className="flex items-center gap-2"><DollarSign className="w-4 h-4" /> Import settlement</span>
+                  <span className="flex items-center gap-2"><IndianRupee className="w-4 h-4" /> Import settlement</span>
                 </BtnPrimary>
               </>
             )}
@@ -2505,7 +2505,7 @@ export default function OnlineOrders() {
         {[
           { key: "orders", label: "Orders", icon: ShoppingBag },
           { key: "reconciliation", label: "Monthly Reconciliation", icon: ScrollText },
-          { key: "settlement", label: "Settlement Reconciliation", icon: DollarSign },
+          { key: "settlement", label: "Settlement Reconciliation", icon: IndianRupee },
         ].map((t) => {
           const Ic = t.icon; const active = tab === t.key;
           return (

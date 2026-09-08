@@ -15,7 +15,7 @@ import {
   FileDown,
   Eye,
   X,
-  Receipt,
+  ReceiptIndianRupee,
   ClipboardCheck,
   IndianRupee,
   AlertCircle,
