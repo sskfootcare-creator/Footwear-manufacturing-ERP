@@ -31,6 +31,10 @@ function makeDevServerV5Compatible(devServerConfig) {
       : https
         ? "https"
         : "http";
+  compatibleConfig.historyApiFallback = {
+    disableDotRule: true,
+    index: '/index.html',
+  };
   compatibleConfig.headers = {
     ...compatibleConfig.headers,
     "Cross-Origin-Resource-Policy": "same-origin",

@@ -37,6 +37,9 @@ import {
   Sparkles,
   Copy,
   Check,
+  FileSpreadsheet,
+  Loader2,
+  ExternalLink,
 } from "lucide-react";
 
 const ONLINE_CHANNELS = ["myntra", "flipkart", "nykaa", "website"];
@@ -370,6 +373,72 @@ export default function Styles() {
       }
     });
     return map;
+  };
+
+  const downloadBulkTemplate = async () => {
+    try {
+      const res = await http.get("/styles/bulk/template", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "Style_Master_Bulk_Upload_Template.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Failed to download bulk template", e);
+      window.open(`${API}/styles/bulk/template`, "_blank");
+    }
+  };
+
+  const onPreviewBulk = async (e) => {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    setBulkFile(file);
+    setBulkErrors([]);
+    setBulkPreview(null);
+    setBulkResult(null);
+    setBulkUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await http.post("/styles/bulk/preview", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setBulkPreview(res.data?.styles || res.data?.preview || []);
+      setBulkErrors(res.data?.errors || []);
+    } catch (err) {
+      console.error("Bulk preview error:", err);
+      const errMsg =
+        err.response?.data?.detail || err.message || "Failed to process Excel file for preview.";
+      setBulkErrors([errMsg]);
+    } finally {
+      setBulkUploading(false);
+      if (e.target) e.target.value = "";
+    }
+  };
+
+  const submitBulk = async () => {
+    if (!bulkFile) return;
+    setBulkUploading(true);
+    setBulkErrors([]);
+    try {
+      const formData = new FormData();
+      formData.append("file", bulkFile);
+      const res = await http.post("/styles/bulk/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setBulkResult(res.data);
+      await load();
+    } catch (err) {
+      console.error("Bulk upload error:", err);
+      const errMsg =
+        err.response?.data?.detail || err.message || "Failed to upload styles.";
+      setBulkErrors([errMsg]);
+    } finally {
+      setBulkUploading(false);
+    }
   };
 
   const load = async (filter = statusFilter, search = searchQuery) => {
@@ -3276,60 +3345,104 @@ export default function Styles() {
             setBulkFile(null);
           }}
           title="Bulk Upload Styles"
-          width="max-w-4xl"
+          width="max-w-6xl"
         >
-          <div className="p-4 sm:p-8 space-y-6">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 bg-slate-50 p-4 border border-slate-200 rounded">
-              <div>
-                <div className="text-sm font-semibold text-slate-800">
-                  Download Style Master Template
+          <div className="p-4 sm:p-6 space-y-6">
+            {/* Template Download Banner */}
+            <div className="bg-gradient-to-r from-amber-50/70 via-orange-50/50 to-slate-50 p-4 sm:p-5 border border-amber-200/80 rounded-lg shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <div className="p-2.5 bg-[#C27842]/10 border border-[#C27842]/20 rounded-lg text-[#C27842] shrink-0 mt-0.5">
+                  <FileSpreadsheet className="w-6 h-6" />
                 </div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  No style code column required (system auto-generates sequential SSK_XXXXX codes).
+                <div>
+                  <div className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <span>Enhanced Style Master Template (.xlsx)</span>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full border border-emerald-300">
+                      Multi-Sheet Formatted
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-600 mt-1 leading-relaxed max-w-2xl">
+                    Pre-formatted multi-sheet workbook with validation dropdowns, tooling definitions (Sole Shape, Insole/Sole Moulds), commercial targets (MRP, Target RSP, COP), color variant codes, and multi-channel launch attributes. Sequential codes (<code className="text-[#C27842] font-bold font-mono">SSK_XXXXX</code>) are automatically generated.
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 mt-2 text-[11px] text-slate-500 font-medium">
+                    <span className="inline-flex items-center gap-1 bg-white/80 px-2 py-0.5 rounded border border-slate-200">
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span> Sheet 1: Styles Data
+                    </span>
+                    <span className="inline-flex items-center gap-1 bg-white/80 px-2 py-0.5 rounded border border-slate-200">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Sheet 2: Field Reference Guide
+                    </span>
+                    <span className="inline-flex items-center gap-1 bg-white/80 px-2 py-0.5 rounded border border-slate-200">
+                      <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span> Auto-Resolves Drive Images
+                    </span>
+                  </div>
                 </div>
               </div>
-              <a
-                href={`${API}/styles/bulk/template`}
-                className="px-3 py-2 border-2 border-[#C27842] text-[#C27842] hover:bg-[#C27842] hover:text-white transition-colors text-xs font-bold uppercase tracking-wider bg-white shrink-0 inline-flex items-center gap-1.5 rounded"
-                download
-              >
-
-                <Download className="w-4 h-4" />
-                Download Template
-              </a>
+              <div className="shrink-0 flex items-center">
+                <button
+                  type="button"
+                  onClick={downloadBulkTemplate}
+                  className="px-4 py-2.5 border-2 border-[#C27842] text-[#C27842] hover:bg-[#C27842] hover:text-white transition-all text-xs font-bold uppercase tracking-wider bg-white shrink-0 inline-flex items-center gap-2 rounded-md shadow-sm active:scale-95"
+                >
+                  <Download className="w-4 h-4" />
+                  Download Template
+                </button>
+              </div>
             </div>
 
+            {/* Dropzone Area */}
             {!bulkResult && (
-              <div className="border-2 border-dashed border-slate-300 p-8 text-center bg-slate-50 hover:bg-slate-100 transition-colors relative cursor-pointer group rounded">
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                  onChange={onPreviewBulk}
-                  title=""
-                />
-                <Upload className="w-10 h-10 mx-auto text-slate-400 group-hover:text-slate-600 mb-2 transition-colors" />
-                <div className="text-slate-700 font-bold uppercase text-sm tracking-wider">
-                  Drag & drop Excel file here
+              <div className="space-y-2">
+                <div className="border-2 border-dashed border-slate-300 hover:border-[#C27842] p-8 text-center bg-slate-50/70 hover:bg-amber-50/30 transition-all relative cursor-pointer group rounded-lg">
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-not-allowed"
+                    onChange={onPreviewBulk}
+                    disabled={bulkUploading}
+                    title=""
+                  />
+                  {bulkUploading ? (
+                    <div className="py-3 flex flex-col items-center justify-center space-y-2">
+                      <Loader2 className="w-9 h-9 text-[#C27842] animate-spin" />
+                      <div className="text-sm font-semibold text-slate-700">
+                        Analyzing and validating spreadsheet rows...
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Parsing tooling, commercials, color variants, and pipeline metadata
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <Upload className="w-10 h-10 mx-auto text-slate-400 group-hover:text-[#C27842] mb-2 transition-colors" />
+                      <div className="text-slate-700 font-bold uppercase text-sm tracking-wider">
+                        Drag & Drop filled Excel template here
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1">
+                        or click to browse from computer (<span className="font-mono">.xlsx, .xls, .csv</span>)
+                      </div>
+                      {bulkFile && (
+                        <div className="mt-3 text-xs font-semibold text-emerald-800 border border-emerald-300 bg-emerald-50 px-3 py-1.5 inline-flex items-center gap-2 rounded shadow-xs">
+                          <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Selected File: <strong className="font-mono">{bulkFile.name}</strong> ({(bulkFile.size / 1024).toFixed(1)} KB)</span>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-                <div className="text-xs text-slate-400 mt-1">
-                  or click to browse (.xlsx, .xls, .csv)
-                </div>
-                {bulkFile && (
-                  <div className="mt-3 text-xs font-semibold text-emerald-700 border border-emerald-300 bg-emerald-50 px-3 py-1.5 inline-block rounded">
-                    File selected: {bulkFile.name}
-                  </div>
-                )}
               </div>
             )}
 
+            {/* Validation Errors & Warnings Callout */}
             {bulkErrors && bulkErrors.length > 0 && !bulkResult && (
-              <div className="p-3.5 bg-amber-50 border border-amber-300 rounded text-amber-900 text-xs space-y-1.5 shadow-sm">
-                <div className="font-bold flex items-center gap-1.5 text-amber-900">
+              <div className="p-4 bg-amber-50 border border-amber-300 rounded-lg text-amber-900 text-xs space-y-2 shadow-sm">
+                <div className="font-bold flex items-center gap-2 text-amber-900 text-sm">
                   <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>{bulkErrors.length} {bulkErrors.length === 1 ? "validation issue" : "validation issues"} found (invalid rows will be skipped):</span>
+                  <span>
+                    {bulkErrors.length} {bulkErrors.length === 1 ? "validation issue" : "validation issues"} detected
+                    (invalid rows will be skipped during creation):
+                  </span>
                 </div>
-                <ul className="list-disc list-inside space-y-1 font-mono text-[11px] text-amber-800 pl-1 max-h-36 overflow-y-auto">
+                <ul className="list-disc list-inside space-y-1 font-mono text-[11px] text-amber-800 pl-1 max-h-40 overflow-y-auto">
                   {bulkErrors.map((err, i) => (
                     <li key={i}>{err}</li>
                   ))}
@@ -3337,22 +3450,26 @@ export default function Styles() {
               </div>
             )}
 
+            {/* Upload Success Report */}
             {bulkResult && (
-              <div className="space-y-4 border border-emerald-200 rounded p-5 bg-emerald-50 shadow-sm">
-                <div className="flex items-center gap-2 text-emerald-800 font-bold text-base">
-                  <CheckCircle className="w-6 h-6 text-emerald-600 shrink-0" />
-                  <span>
-                    Bulk Upload Complete: {bulkResult.success_count} {bulkResult.success_count === 1 ? "style" : "styles"} created!
-                  </span>
+              <div className="space-y-5 border border-emerald-200 rounded-lg p-5 sm:p-6 bg-emerald-50/50 shadow-sm">
+                <div className="flex items-center gap-3 text-emerald-800 font-bold text-lg">
+                  <CheckCircle className="w-7 h-7 text-emerald-600 shrink-0" />
+                  <div>
+                    <div>Bulk Upload Completed Successfully!</div>
+                    <div className="text-xs font-normal text-emerald-700 mt-0.5">
+                      {bulkResult.success_count} {bulkResult.success_count === 1 ? "style" : "styles"} created and indexed with auto-generated sequential codes.
+                    </div>
+                  </div>
                 </div>
 
                 {bulkResult.errors && bulkResult.errors.length > 0 && (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded text-amber-900 text-xs space-y-1">
-                    <div className="font-bold flex items-center gap-1">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-md text-amber-900 text-xs space-y-1">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600" />
                       <span>{bulkResult.errors.length} skipped row(s):</span>
                     </div>
-                    <ul className="list-disc list-inside font-mono text-[11px] text-amber-800">
+                    <ul className="list-disc list-inside font-mono text-[11px] text-amber-800 max-h-32 overflow-y-auto">
                       {bulkResult.errors.map((e, idx) => (
                         <li key={idx}>{e}</li>
                       ))}
@@ -3362,26 +3479,35 @@ export default function Styles() {
 
                 {bulkResult.created && bulkResult.created.length > 0 && (
                   <div className="space-y-2">
-                    <div className="text-xs font-bold text-emerald-900 uppercase tracking-wider">
-                      Assigned Style Codes & Calculated Costing:
+                    <div className="text-xs font-bold text-emerald-950 uppercase tracking-wider flex items-center justify-between">
+                      <span>Newly Assigned Style Codes & Costing Breakdown</span>
+                      <span className="text-[11px] font-normal text-emerald-700 lowercase">
+                        {bulkResult.created.length} styles added to master
+                      </span>
                     </div>
-                    <div className="overflow-x-auto max-h-64 bg-white border border-emerald-200 rounded shadow-inner">
+                    <div className="overflow-x-auto max-h-72 bg-white border border-emerald-200 rounded-lg shadow-inner">
                       <table className="w-full text-left text-xs">
-                        <thead className="bg-emerald-100 text-emerald-900 sticky top-0">
+                        <thead className="bg-emerald-100/70 text-emerald-900 sticky top-0 font-semibold border-b border-emerald-200">
                           <tr>
-                            <th className="p-2.5 border-b font-bold">Source Row</th>
-                            <th className="p-2.5 border-b font-bold">Assigned Code</th>
-                            <th className="p-2.5 border-b font-bold">Style Name</th>
-                            <th className="p-2.5 border-b font-bold text-right">Selling Price</th>
+                            <th className="p-2.5 font-bold">Source Row</th>
+                            <th className="p-2.5 font-bold">Assigned Code</th>
+                            <th className="p-2.5 font-bold">Style Name</th>
+                            <th className="p-2.5 font-bold">Category</th>
+                            <th className="p-2.5 font-bold text-right">Selling Price</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {bulkResult.created.map((c, idx) => (
-                            <tr key={idx} className="hover:bg-slate-50">
+                            <tr key={idx} className="hover:bg-slate-50 transition-colors">
                               <td className="p-2.5 text-slate-500 font-mono">Row {c.row}</td>
-                              <td className="p-2.5 font-bold font-mono text-emerald-700 bg-emerald-50/50">{c.code}</td>
+                              <td className="p-2.5 font-bold font-mono text-emerald-700 bg-emerald-50/40">
+                                <span className="inline-flex items-center gap-1">
+                                  {c.code}
+                                </span>
+                              </td>
                               <td className="p-2.5 font-semibold text-slate-800">{c.name}</td>
-                              <td className="p-2.5 text-right font-mono font-bold text-slate-700">
+                              <td className="p-2.5 text-slate-600">{c.category || "Footwear"}</td>
+                              <td className="p-2.5 text-right font-mono font-bold text-slate-800">
                                 ₹{c.costing?.suggested_target_price || c.costing?.selling_price || c.costing?.sell || c.costing?.total_cost || 0}
                               </td>
                             </tr>
@@ -3392,7 +3518,7 @@ export default function Styles() {
                   </div>
                 )}
 
-                <div className="pt-2 flex justify-end gap-3">
+                <div className="pt-3 border-t border-emerald-200 flex justify-end gap-3">
                   <BtnSecondary
                     onClick={() => {
                       setBulkResult(null);
@@ -3418,62 +3544,239 @@ export default function Styles() {
               </div>
             )}
 
+            {/* Rich Data Preview Table */}
             {bulkPreview && !bulkResult && (
-              <div className="space-y-4 border border-slate-200 rounded p-4 bg-white shadow-sm">
-                <div className="text-sm font-bold border-b pb-2 flex justify-between items-center text-slate-800">
-                  <span>Preview ({bulkPreview.length} valid {bulkPreview.length === 1 ? "style" : "styles"} to import)</span>
+              <div className="space-y-4 border border-slate-200 rounded-lg p-4 sm:p-5 bg-white shadow-sm">
+                {/* Statistics Highlights Strip */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pb-3 border-b border-slate-200">
+                  <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Valid Styles</div>
+                    <div className="text-xl font-bold text-slate-800 font-mono mt-0.5">{bulkPreview.length}</div>
+                  </div>
+                  <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Color Variants</div>
+                    <div className="text-xl font-bold text-[#C27842] font-mono mt-0.5">
+                      {bulkPreview.reduce((acc, s) => acc + (s.color_variants?.length || 0), 0)}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Online Enabled</div>
+                    <div className="text-xl font-bold text-purple-700 font-mono mt-0.5">
+                      {bulkPreview.filter(s => (s.launch_channels?.length > 0) || s.initial_sample_received_date).length}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
+                    <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Target RSP Avg</div>
+                    <div className="text-xl font-bold text-emerald-700 font-mono mt-0.5">
+                      ₹{Math.round(
+                        bulkPreview.filter(s => Number(s.target_rsp) > 0)
+                          .reduce((acc, s, _, arr) => acc + Number(s.target_rsp) / (arr.length || 1), 0)
+                      ) || "-"}
+                    </div>
+                  </div>
                 </div>
-                <div className="overflow-x-auto text-xs max-h-[40vh]">
-                  <table className="w-full text-left">
-                    <thead className="bg-slate-100 sticky top-0 shadow-sm text-slate-700 font-semibold">
+
+                <div className="text-sm font-bold flex justify-between items-center text-slate-800">
+                  <span className="flex items-center gap-2">
+                    <span>Parsed Preview ({bulkPreview.length} styles ready to import)</span>
+                  </span>
+                  <span className="text-xs text-slate-500 font-normal">
+                    Review specifications, tooling, pricing, and colorways below
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto text-xs max-h-[50vh] border border-slate-200 rounded-lg shadow-inner">
+                  <table className="w-full text-left min-w-[950px]">
+                    <thead className="bg-slate-100 text-slate-700 font-semibold sticky top-0 shadow-sm border-b border-slate-200 z-10">
                       <tr>
-                        <th className="p-2 border-b">Row</th>
-                        <th className="p-2 border-b">Generated Code</th>
-                        <th className="p-2 border-b">Name</th>
-                        <th className="p-2 border-b">Category</th>
-                        <th className="p-2 border-b text-center">Base Size</th>
-                        <th className="p-2 border-b">Insole Mould</th>
-                        <th className="p-2 border-b">Sole Mould</th>
-                        <th className="p-2 border-b text-center">Carton Pairs</th>
-                        <th className="p-2 border-b text-center">Margin %</th>
+                        <th className="p-2.5 border-b">Row</th>
+                        <th className="p-2.5 border-b">Style & Code</th>
+                        <th className="p-2.5 border-b">Category / Gender</th>
+                        <th className="p-2.5 border-b">Tooling & Specs</th>
+                        <th className="p-2.5 border-b">Commercials (₹)</th>
+                        <th className="p-2.5 border-b">Colorways</th>
+                        <th className="p-2.5 border-b">Launch & Pipeline</th>
+                        <th className="p-2.5 border-b text-center">Carton</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {bulkPreview.map((r, i) => (
-                        <tr key={i} className="hover:bg-slate-50">
-                          <td className="p-2 text-slate-400 font-mono">Row {r.row_number || i + 2}</td>
-                          <td className="p-2 font-medium">
-                            <span className="italic text-slate-500 font-mono text-[11px] bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-                              Auto (SSK_XXXXX)
-                            </span>
+                        <tr key={i} className="hover:bg-amber-50/30 transition-colors">
+                          <td className="p-2.5 text-slate-400 font-mono text-[11px] align-top">
+                            Row {r.row_number || i + 2}
+                            {r.image_url && (
+                              <div className="mt-1">
+                                <img
+                                  src={r.image_url}
+                                  alt=""
+                                  className="w-8 h-8 rounded object-cover border border-slate-200 bg-white"
+                                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                />
+                              </div>
+                            )}
                           </td>
-                          <td className="p-2 font-semibold text-slate-800">{r.name}</td>
-                          <td className="p-2 text-slate-600">{r.category}</td>
-                          <td className="p-2 text-center text-slate-600">{r.base_size}</td>
-                          <td className="p-2 text-slate-600 font-mono text-[11px]">{r.insole_mould_name || "-"}</td>
-                          <td className="p-2 text-slate-600 font-mono text-[11px]">{r.sole_mould_name || "-"}</td>
-                          <td className="p-2 text-center text-slate-600 font-mono">
-                            {r.default_pairs_per_carton ? (r.default_pairs_per_carton.default ?? JSON.stringify(r.default_pairs_per_carton)) : "-"}
+                          <td className="p-2.5 align-top">
+                            <div className="font-semibold text-slate-800 text-xs">{r.name}</div>
+                            <div className="mt-1 flex items-center gap-1.5">
+                              <span className="text-[10px] font-mono text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.2 rounded font-medium">
+                                Auto: SSK_XXXXX
+                              </span>
+                            </div>
+                            {r.description && (
+                              <div className="text-[10px] text-slate-500 mt-1 line-clamp-1 italic max-w-xs">
+                                {r.description}
+                              </div>
+                            )}
                           </td>
-                          <td className="p-2 text-center text-slate-600">{r.margin_pct}%</td>
+                          <td className="p-2.5 align-top space-y-1">
+                            <div className="text-slate-700 font-medium">{r.category || "Footwear"}</div>
+                            {r.gender && (
+                              <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded font-medium inline-block">
+                                {r.gender}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-2.5 align-top space-y-1 font-mono text-[11px] text-slate-600">
+                            {r.sole_shape && (
+                              <div><span className="text-slate-400 font-sans text-[10px]">Shape:</span> {r.sole_shape}</div>
+                            )}
+                            {r.sole_mould_name && (
+                              <div><span className="text-slate-400 font-sans text-[10px]">Sole Mld:</span> {r.sole_mould_name}</div>
+                            )}
+                            {r.insole_mould_name && (
+                              <div><span className="text-slate-400 font-sans text-[10px]">Insole Mld:</span> {r.insole_mould_name}</div>
+                            )}
+                            {r.pattern_number && (
+                              <div><span className="text-slate-400 font-sans text-[10px]">Pattern:</span> {r.pattern_number}</div>
+                            )}
+                            {r.base_size && (
+                              <div className="text-slate-500 font-sans text-[10px]">Base Size: <strong className="font-mono text-slate-700">{r.base_size}</strong></div>
+                            )}
+                            {!r.sole_shape && !r.sole_mould_name && !r.insole_mould_name && !r.pattern_number && (
+                              <span className="text-slate-400 italic">-</span>
+                            )}
+                          </td>
+                          <td className="p-2.5 align-top font-mono text-[11px] space-y-0.5">
+                            {r.mrp ? (
+                              <div className="text-slate-800">
+                                <span className="text-[10px] font-sans text-slate-400">MRP: </span>
+                                <strong>₹{r.mrp}</strong>
+                              </div>
+                            ) : null}
+                            {r.target_rsp ? (
+                              <div className="text-emerald-700 font-bold">
+                                <span className="text-[10px] font-sans text-slate-400">Target RSP: </span>
+                                ₹{r.target_rsp}
+                              </div>
+                            ) : null}
+                            {r.target_cop ? (
+                              <div className="text-slate-600">
+                                <span className="text-[10px] font-sans text-slate-400">Target COP: </span>
+                                ₹{r.target_cop}
+                              </div>
+                            ) : null}
+                            <div className="text-[10px] text-slate-500 font-sans pt-0.5">
+                              Margin: <strong className="text-slate-700 font-mono">{r.margin_pct || 25}%</strong>
+                              {r.gst_pct ? ` (GST ${r.gst_pct}%)` : ""}
+                            </div>
+                          </td>
+                          <td className="p-2.5 align-top">
+                            {r.color_variants && r.color_variants.length > 0 ? (
+                              <div className="flex flex-wrap gap-1 max-w-xs">
+                                {r.color_variants.map((v, cIdx) => (
+                                  <span
+                                    key={cIdx}
+                                    className="text-[10px] bg-slate-100 text-slate-800 border border-slate-300 px-1.5 py-0.5 rounded font-medium inline-flex items-center gap-1"
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                                    <span>{v.color_name}</span>
+                                    {v.sku_code && (
+                                      <span className="font-mono text-slate-400 text-[9px]">({v.sku_code})</span>
+                                    )}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">No variants</span>
+                            )}
+                          </td>
+                          <td className="p-2.5 align-top space-y-1">
+                            {r.launch_season && (
+                              <div className="text-[10px] font-semibold text-slate-700">
+                                Season: {r.launch_season}
+                              </div>
+                            )}
+                            {r.launch_channels && r.launch_channels.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {r.launch_channels.map((ch, chIdx) => {
+                                  const c = String(ch).toLowerCase();
+                                  let badgeCls = "bg-slate-100 text-slate-700 border-slate-200";
+                                  if (c.includes("myntra")) badgeCls = "bg-purple-50 text-purple-700 border-purple-200";
+                                  else if (c.includes("flipkart")) badgeCls = "bg-blue-50 text-blue-700 border-blue-200";
+                                  else if (c.includes("nykaa")) badgeCls = "bg-pink-50 text-pink-700 border-pink-200";
+                                  else if (c.includes("web") || c.includes("online")) badgeCls = "bg-emerald-50 text-emerald-700 border-emerald-200";
+                                  return (
+                                    <span
+                                      key={chIdx}
+                                      className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border ${badgeCls}`}
+                                    >
+                                      {ch}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 inline-block">
+                                Offline Only
+                              </span>
+                            )}
+                            {r.initial_sample_received_date && (
+                              <div className="text-[9px] text-purple-700 font-mono">
+                                Sample: {r.initial_sample_received_date}
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-2.5 align-top text-center font-mono text-slate-600">
+                            {r.default_pairs_per_carton ? (
+                              typeof r.default_pairs_per_carton === "object"
+                                ? (r.default_pairs_per_carton.default ?? JSON.stringify(r.default_pairs_per_carton))
+                                : r.default_pairs_per_carton
+                            ) : "-"}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                <div className="pt-4 border-t flex justify-end gap-3">
-                  <BtnSecondary
-                    onClick={() => {
-                      setBulkPreview(null);
-                      setBulkErrors([]);
-                      setBulkFile(null);
-                    }}
-                  >
-                    Cancel
-                  </BtnSecondary>
-                  <BtnPrimary onClick={submitBulk} disabled={bulkUploading || bulkPreview.length === 0}>
-                    {bulkUploading ? "Uploading & Generating Codes..." : `Confirm & Upload (${bulkPreview.length} Styles)`}
-                  </BtnPrimary>
+
+                <div className="pt-4 border-t border-slate-200 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+                  <div className="text-xs text-slate-500">
+                    Clicking Confirm will auto-generate codes and register these styles into the Style Master.
+                  </div>
+                  <div className="flex items-center gap-3 self-end">
+                    <BtnSecondary
+                      onClick={() => {
+                        setBulkPreview(null);
+                        setBulkErrors([]);
+                        setBulkFile(null);
+                      }}
+                    >
+                      Cancel
+                    </BtnSecondary>
+                    <BtnPrimary
+                      onClick={submitBulk}
+                      disabled={bulkUploading || bulkPreview.length === 0}
+                    >
+                      {bulkUploading ? (
+                        <span className="inline-flex items-center gap-2">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Uploading & Generating Codes...
+                        </span>
+                      ) : (
+                        `Confirm & Upload (${bulkPreview.length} Styles)`
+                      )}
+                    </BtnPrimary>
+                  </div>
                 </div>
               </div>
             )}

@@ -270,3 +270,49 @@ async def test_bulk_styles_verification_suite(monkeypatch):
         assert single_data["sole_mould_name"] == "SO-SINGLE"
         assert single_data["default_pairs_per_carton"] == {"default": 12}
         assert single_data["costing"] is not None
+
+        # -------------------------------------------------------------
+        # 8. Template Download & Direct File /styles/bulk/upload E2E
+        # -------------------------------------------------------------
+        tmpl_resp = await client.get("/api/styles/bulk/template")
+        assert tmpl_resp.status_code == 200
+        content = tmpl_resp.content
+        assert len(content) > 1000
+        xls = pd.ExcelFile(io.BytesIO(content))
+        assert "Styles Data" in xls.sheet_names
+        assert "Field Reference Guide" in xls.sheet_names
+
+        df_tmpl = pd.read_excel(xls, sheet_name="Styles Data")
+        assert "Style Name" in df_tmpl.columns
+        assert "Sole Shape" in df_tmpl.columns
+        assert "Target RSP (₹)" in df_tmpl.columns
+        assert "Launch Channels (comma-sep)" in df_tmpl.columns
+        assert "Color Variants (Color:SKU)" in df_tmpl.columns
+
+        # Preview template file
+        prev_tmpl_resp = await client.post(
+            "/api/styles/bulk/preview",
+            files={"file": ("template.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        )
+        assert prev_tmpl_resp.status_code == 200
+        prev_tmpl = prev_tmpl_resp.json()
+        assert prev_tmpl.get("valid_count") >= 2
+        assert len(prev_tmpl.get("styles", [])) >= 2
+        first_s = prev_tmpl["styles"][0]
+        assert first_s["sole_shape"] == "Pointed"
+        assert first_s["target_rsp"] == 1499.0
+        assert len(first_s["color_variants"]) == 3
+        assert "myntra" in first_s["launch_channels"]
+
+        # Direct file upload endpoint
+        file_upload_resp = await client.post(
+            "/api/styles/bulk/upload",
+            files={"file": ("template.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+        )
+        assert file_upload_resp.status_code == 200
+        fu_data = file_upload_resp.json()
+        assert fu_data["ok"] is True
+        assert fu_data["success_count"] >= 2
+        for it in fu_data["created"]:
+            assert it["code"].startswith("SSK_")
+

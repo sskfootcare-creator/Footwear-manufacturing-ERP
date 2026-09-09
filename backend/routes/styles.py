@@ -1380,26 +1380,151 @@ async def list_styles(
 
 @styles_router.get("/styles/bulk/template")
 async def get_styles_template():
-    import pandas as pd
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    # Sheet 1: Styles Data
+    ws1 = wb.active
+    ws1.title = "Styles Data"
+
     columns = [
-        "Name", "Category", "Description", "Base Size",
-        "Insole Mould Name", "Sole Mould Name", "Default Pairs Per Carton",
-        "Overhead %", "Packing Cost", "Margin %", "GST %", "Image URL",
+        "Style Name", "Category", "Description", "Status", "Base Size",
+        "Insole Mould Name", "Sole Mould Name", "Sole Shape", "Pattern Number",
+        "Default Pairs Per Carton", "Overhead %", "Packing Cost (₹)", "Margin %", "GST %",
+        "MRP (₹)", "Target RSP (₹)", "Color Variants (Color:SKU)", "Planned Sizes",
+        "Add to Online Pipeline", "Launch Channels (comma-sep)", "Launch Season", "Sample Date",
+        "Photoshoot Link", "Catalogue Link", "Image URL",
         "Labor: Cutting", "Labor: Fitting", "Labor: Pasting", "Labor: Finishing", "Labor: Packing"
     ]
-    sample_data = [
-        {
-            "Name": "Classic Oxford", "Category": "Footwear", "Description": "Men's leather shoe",
-            "Base Size": 7, "Insole Mould Name": "INSOLE-OX-01", "Sole Mould Name": "SOLE-OX-01",
-            "Default Pairs Per Carton": 12,
-            "Overhead %": 10, "Packing Cost": 15, "Margin %": 25, "GST %": 5, "Image URL": "",
-            "Labor: Cutting": 12, "Labor: Fitting": 18, "Labor: Pasting": 10, "Labor: Finishing": 8, "Labor: Packing": 5
-        }
+
+    sample_rows = [
+        [
+            "Oxford Leather Classic", "Formal", "Handcrafted genuine leather dress oxford", "Active", "8",
+            "IN-OX-01", "SO-OX-01", "Pointed", "PT-OX-101",
+            12, 10, 15, 25, 5,
+            2999, 1499, "Tan:OX-TAN, Black:OX-BLK, Brown:OX-BRN", "7, 8, 9, 10, 11",
+            "Yes", "myntra, flipkart, website", "SS26", "2026-03-15",
+            "https://drive.google.com/sample-photoshoot-oxford", "https://docs.google.com/sample-catalog-oxford", "https://www.dropbox.com/scl/fi/oxford-sample/photo.jpg?dl=0",
+            15, 20, 12, 10, 8
+        ],
+        [
+            "Urban Chelsea Boot", "Boots", "Elastic gusset ankle boot with pull tab", "Inactive", "7",
+            "IN-CH-02", "SO-CH-02", "Round Toe", "PT-CH-202",
+            18, 8, 18, 30, 5,
+            3499, 1899, "Black:CH-BLK, Dark Brown:CH-DBRN", "6, 7, 8, 9, 10",
+            "Yes", "myntra, nykaa, website", "AW26", "2026-04-01",
+            "", "", "",
+            12, 25, 15, 10, 8
+        ]
     ]
-    df = pd.DataFrame(sample_data, columns=columns)
+
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border_side = Side(border_style="thin", color="CBD5E1")
+    cell_border = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
+    data_font = Font(name="Calibri", size=10)
+
+    ws1.append(columns)
+    ws1.row_dimensions[1].height = 28
+
+    for col_idx in range(1, len(columns) + 1):
+        cell = ws1.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+        cell.border = cell_border
+
+    for row_data in sample_rows:
+        ws1.append(row_data)
+
+    for row_idx in range(2, len(sample_rows) + 2):
+        ws1.row_dimensions[row_idx].height = 20
+        for col_idx in range(1, len(columns) + 1):
+            cell = ws1.cell(row=row_idx, column=col_idx)
+            cell.font = data_font
+            cell.border = cell_border
+            if col_idx in (4, 5, 10, 11, 12, 13, 14, 15, 16, 19, 21, 22, 26, 27, 28, 29, 30):
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    for col_idx, col_name in enumerate(columns, start=1):
+        max_len = max(len(col_name), max(len(str(r[col_idx-1])) for r in sample_rows))
+        col_letter = get_column_letter(col_idx)
+        ws1.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
+    # Sheet 2: Field Reference Guide
+    ws2 = wb.create_sheet(title="Field Reference Guide")
+    instructions_headers = ["Field Name", "Required?", "Data Type", "Example / Permitted Values", "Purpose & SSK Automation Rules"]
+    ws2.append(instructions_headers)
+    ws2.row_dimensions[1].height = 26
+
+    for col_idx in range(1, len(instructions_headers) + 1):
+        cell = ws2.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = PatternFill(start_color="0F766E", end_color="0F766E", fill_type="solid")
+        cell.alignment = header_align
+        cell.border = cell_border
+
+    instructions_rows = [
+        ("Style Name", "YES", "Text", "Oxford Leather Classic", "Mandatory unique style identifier. Style Code is auto-assigned (SSK_XXXXX) on upload."),
+        ("Category", "No", "Text", "Footwear / Formal / Casual / Sneaker / Boots / Sandal", "Style grouping category. Defaults to 'Footwear' if empty."),
+        ("Description", "No", "Text", "Full grain leather dress shoe with padded collar", "Design or product description displayed in master and PLM."),
+        ("Status", "No", "Text", "Active / Inactive", "Defaults to 'Inactive'. Set 'Active' to make immediately selectable in POs and Production."),
+        ("Base Size", "No", "Text/Number", "7, 8, 9", "Sample size used for baseline costing sheet and BOM. Defaults to 7."),
+        ("Insole Mould Name", "No", "Text", "IN-OX-01 / Flat Die", "Reference die/mold used for cutting the insole component."),
+        ("Sole Mould Name", "No", "Text", "SO-OX-01 / Unit Cup", "Reference bottom mould used for casting/attaching outer sole."),
+        ("Sole Shape", "No", "Text", "Round Toe / Square Toe / Pointed / Almond", "Toe shape / silhouette specification used in PLM tech packs."),
+        ("Pattern Number", "No", "Text", "PT-OX-101", "Upper pattern or paper die reference number."),
+        ("Default Pairs Per Carton", "No", "Integer", "12, 18, 24, 36", "Standard carton packing quantity for finished goods packaging and WMS cartons."),
+        ("Overhead %", "No", "Decimal", "8, 10, 12", "Factory overhead markup percentage applied over base manufacturing cost. Defaults to 0."),
+        ("Packing Cost (₹)", "No", "Decimal (₹)", "12, 15, 20", "Fixed per-pair inner box, tissue, silica gel, and carton packing cost in ₹. Defaults to 0."),
+        ("Margin %", "No", "Decimal", "25, 30", "Target profit margin percentage. Used to compute Suggested Target Price. Defaults to 25%."),
+        ("GST %", "No", "Decimal", "5 or 18", "GST tax bracket. If left empty, system auto-suggests (5% for ≤₹2,500, 18% for >₹2,500)."),
+        ("MRP (₹)", "No", "Decimal (₹)", "2499, 2999", "Maximum Retail Price printed on shoe box barcode label."),
+        ("Target RSP (₹)", "No", "Decimal (₹)", "1299, 1499", "Target e-commerce retail selling price on digital channels."),
+        ("Color Variants (Color:SKU)", "No", "Color:SKU comma list", "Tan:OX-TAN, Black:OX-BLK", "Registers color variants and SKU codes automatically, pre-populating color BOM tabs and SKU generator!"),
+        ("Planned Sizes", "No", "Comma-separated text", "6, 7, 8, 9, 10", "Pre-configures standard size run for catalogue leaf SKUs."),
+        ("Add to Online Pipeline", "No", "Yes / No", "Yes / No", "When Yes (or if channels/prices given), auto-enlists style into Online Style Pipeline at Draft stage."),
+        ("Launch Channels (comma-sep)", "No", "Comma-separated text", "myntra, flipkart, nykaa, website, amazon, ajio", "E-commerce platforms style is planned for. Auto-syncs to Online Merchandising pipeline."),
+        ("Launch Season", "No", "Text", "SS26, AW26, Core", "Target retail merchandising launch season."),
+        ("Sample Date", "No", "Date (YYYY-MM-DD)", "2026-03-15", "Initial physical sample target or received date."),
+        ("Photoshoot Link", "No", "URL", "https://drive.google.com/sample-photoshoot", "Cloud link to studio product photoshoot assets (Dropbox, Drive, OneDrive)."),
+        ("Catalogue Link", "No", "URL", "https://docs.google.com/sample-catalogue", "Cloud link to external listing catalogue or master attribute spreadsheet."),
+        ("Image URL", "No", "URL", "https://www.dropbox.com/scl/fi/sample.jpg?dl=0", "Primary product photo. Dropbox, Google Drive, and OneDrive share links auto-convert to direct image thumbnails!"),
+        ("Labor: Cutting", "No", "Decimal (₹)", "12, 15", "Labor rate in ₹ per pair for leather/upper cutting operation."),
+        ("Labor: Fitting", "No", "Decimal (₹)", "18, 20", "Labor rate in ₹ per pair for upper skiving and stitching operation."),
+        ("Labor: Pasting", "No", "Decimal (₹)", "10, 12", "Labor rate in ₹ per pair for strobel lasting / sole pasting operation."),
+        ("Labor: Finishing", "No", "Decimal (₹)", "8, 10", "Labor rate in ₹ per pair for edge painting, buffing, and cream finishing."),
+        ("Labor: Packing", "No", "Decimal (₹)", "5, 8", "Labor rate in ₹ per pair for tagging, lacing, and boxing operation."),
+    ]
+
+    for row_idx, r in enumerate(instructions_rows, start=2):
+        ws2.append(list(r))
+        ws2.row_dimensions[row_idx].height = 22
+        for col_idx in range(1, len(instructions_headers) + 1):
+            cell = ws2.cell(row=row_idx, column=col_idx)
+            cell.font = data_font
+            cell.border = cell_border
+            if col_idx in (2, 3):
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    for col_idx in range(1, len(instructions_headers) + 1):
+        col_letter = get_column_letter(col_idx)
+        if col_idx == 1: ws2.column_dimensions[col_letter].width = 28
+        elif col_idx == 2: ws2.column_dimensions[col_letter].width = 12
+        elif col_idx == 3: ws2.column_dimensions[col_letter].width = 16
+        elif col_idx == 4: ws2.column_dimensions[col_letter].width = 36
+        elif col_idx == 5: ws2.column_dimensions[col_letter].width = 65
+
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False)
+    wb.save(output)
     output.seek(0)
     return StreamingResponse(
         output,
@@ -1419,7 +1544,14 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         if filename.endswith(".csv"):
             df = pd.read_csv(io.BytesIO(content))
         else:
-            df = pd.read_excel(io.BytesIO(content))
+            # Multi-sheet Excel: prefer "Styles Data", then "Styles Bulk Upload", else sheet index 0
+            xls = pd.ExcelFile(io.BytesIO(content))
+            target_sheet = 0
+            if "Styles Data" in xls.sheet_names:
+                target_sheet = "Styles Data"
+            elif "Styles Bulk Upload" in xls.sheet_names:
+                target_sheet = "Styles Bulk Upload"
+            df = pd.read_excel(xls, sheet_name=target_sheet)
     except Exception as e:
         raise HTTPException(400, f"Invalid Excel/CSV file: {str(e)}")
 
@@ -1431,37 +1563,65 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         norm = re.sub(r'[\s_]+', ' ', c_lower)
         if c_lower.startswith("labor:"):
             labor_cols.append(col)
-        elif norm in ("name", "style name", "stylename"):
+        elif norm in ("name", "style name", "stylename", "style_name", "article name"):
             col_map[col] = "name"
         elif norm in ("category", "cat"):
             col_map[col] = "category"
-        elif norm in ("description", "desc"):
+        elif norm in ("description", "desc", "product description"):
             col_map[col] = "description"
+        elif norm in ("status", "style status"):
+            col_map[col] = "status"
         elif norm in ("base size", "basesize", "base_size", "size"):
             col_map[col] = "base_size"
-        elif norm in ("insole mould name", "insole mould", "insole mold name", "insole mold", "insole_mould_name", "insole_mould"):
+        elif norm in ("insole mould name", "insole mould", "insole mold name", "insole mold", "insole_mould_name", "insole_mould", "insole die"):
             col_map[col] = "insole_mould_name"
         elif norm in ("sole mould name", "sole mould", "sole mold name", "sole mold", "sole_mould_name", "sole_mould"):
             col_map[col] = "sole_mould_name"
-        elif norm in ("default pairs per carton", "pairs per carton", "default_pairs_per_carton", "pairs_per_carton", "carton pairs", "default pairs"):
+        elif norm in ("sole shape", "soleshape", "sole_shape", "toe shape", "toeshape"):
+            col_map[col] = "sole_shape"
+        elif norm in ("pattern number", "pattern no", "pattern_number", "pattern_no", "pattern"):
+            col_map[col] = "pattern_number"
+        elif norm in ("default pairs per carton", "pairs per carton", "default_pairs_per_carton", "pairs_per_carton", "carton pairs", "default pairs", "carton capacity"):
             col_map[col] = "default_pairs_per_carton"
         elif norm in ("overhead %", "overhead pct", "overhead percentage", "overhead", "overhead_pct"):
             col_map[col] = "overhead_pct"
-        elif norm in ("packing cost", "packing_cost", "packing"):
+        elif norm in ("packing cost", "packing cost (₹)", "packing cost (rs)", "packing_cost", "packing", "packing ₹", "packing rs"):
             col_map[col] = "packing_cost"
         elif norm in ("margin %", "margin pct", "margin percentage", "margin", "margin_pct"):
             col_map[col] = "margin_pct"
         elif norm in ("gst %", "gst pct", "gst percentage", "gst", "gst_pct"):
             col_map[col] = "gst_pct"
+        elif norm in ("mrp", "mrp (₹)", "mrp (rs)", "maximum retail price", "retail price", "mrp ₹", "mrp rs"):
+            col_map[col] = "mrp"
+        elif norm in ("target rsp (₹)", "target rsp", "target_rsp", "online selling price", "online price", "online_selling_price", "ecom price", "selling price", "target price"):
+            col_map[col] = "online_selling_price"
+        elif norm in ("target cop (₹)", "target cop", "target_cop", "cop"):
+            col_map[col] = "target_cop"
+        elif norm in ("color variants (color:sku)", "color variants", "colour variants", "planned colors", "planned colours", "colors", "colours", "planned_colors"):
+            col_map[col] = "planned_colors"
+        elif norm in ("planned sizes", "sizes", "planned_sizes", "size run", "size range"):
+            col_map[col] = "planned_sizes"
+        elif norm in ("add to online pipeline", "online pipeline", "in online pipeline", "pipeline", "in_online_pipeline", "ecom pipeline"):
+            col_map[col] = "in_online_pipeline"
+        elif norm in ("launch channels (comma-sep)", "launch channels", "sale channels", "channels", "sales channels", "platforms", "sale_channels", "sales_channels"):
+            col_map[col] = "sale_channels"
+        elif norm in ("launch season", "season", "launch_season"):
+            col_map[col] = "launch_season"
+        elif norm in ("sample date", "initial sample date", "sample_date", "initial_sample_received_date"):
+            col_map[col] = "initial_sample_received_date"
+        elif norm in ("photoshoot link", "photoshoot url", "photoshoot", "photoshoot_link"):
+            col_map[col] = "photoshoot_link"
+        elif norm in ("catalogue link", "catalog link", "catalogue url", "catalog url", "catalogue_link", "catalog_link"):
+            col_map[col] = "catalogue_link"
         elif norm in ("image url", "image_url", "image", "image link", "photo url", "photo_url"):
             col_map[col] = "image_url"
 
     if "name" not in col_map.values():
-        raise HTTPException(400, "Missing required column: Name")
+        raise HTTPException(400, "Missing required column: Name or Style Name")
 
     df = df.rename(columns=col_map)
 
-    def _parse_float(val, default: float) -> float:
+    def _parse_float(val, default: Optional[float] = None) -> Optional[float]:
         if pd.isna(val): return default
         try:
             s = str(val).strip().rstrip("%")
@@ -1479,6 +1639,52 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
                 if f.is_integer(): return str(int(f))
             except Exception: pass
         return s
+
+    def _parse_list(val) -> List[str]:
+        if pd.isna(val): return []
+        if isinstance(val, (list, tuple)): return [str(x).strip() for x in val if str(x).strip()]
+        s = str(val).strip()
+        if not s or s.lower() == "nan": return []
+        items = re.split(r'[,;/|]+', s)
+        return [i.strip() for i in items if i.strip()]
+
+    def _parse_color_variants(val) -> (List[Dict[str, str]], List[str]):
+        """Parses formats like 'Tan:OX-TAN, Black:OX-BLK' or 'Tan, Black'."""
+        if pd.isna(val): return [], []
+        raw_items = []
+        if isinstance(val, (list, tuple)):
+            raw_items = [str(x).strip() for x in val if str(x).strip()]
+        else:
+            s = str(val).strip()
+            if not s or s.lower() == "nan": return [], []
+            raw_items = [i.strip() for i in re.split(r'[,;/|]+', s) if i.strip()]
+
+        variants = []
+        color_names = []
+        for item in raw_items:
+            if ":" in item:
+                parts = item.split(":", 1)
+                c_name = parts[0].strip()
+                sku = parts[1].strip()
+            else:
+                c_name = item.strip()
+                sku = ""
+            if c_name:
+                variants.append({"color_name": c_name, "sku_code": sku})
+                color_names.append(c_name)
+        return variants, color_names
+
+    def _parse_bool(val, default: bool = False) -> bool:
+        if pd.isna(val): return default
+        if isinstance(val, bool): return val
+        s = str(val).strip().lower()
+        if s in ("1", "true", "yes", "y", "t"): return True
+        if s in ("0", "false", "no", "n", "f"): return False
+        return default
+
+    def _parse_status(val) -> str:
+        s = _parse_str(val, "inactive").lower()
+        return "active" if s in ("active", "live", "enabled", "1", "yes") else "inactive"
 
     def _parse_pairs_per_carton(val) -> Optional[Dict[str, Any]]:
         if pd.isna(val): return None
@@ -1512,15 +1718,37 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
 
         category = _parse_str(row.get("category"), "Footwear")
         description = _parse_str(row.get("description"), "")
+        status = _parse_status(row.get("status"))
         base_size = _parse_str(row.get("base_size"), "7")
         insole_mould = _parse_str(row.get("insole_mould_name"), "") or None
         sole_mould = _parse_str(row.get("sole_mould_name"), "") or None
+        sole_shape = _parse_str(row.get("sole_shape"), "") or None
+        pattern_number = _parse_str(row.get("pattern_number"), "") or None
         default_pairs = _parse_pairs_per_carton(row.get("default_pairs_per_carton"))
 
-        overhead_pct = _parse_float(row.get("overhead_pct"), 0.0)
-        packing_cost = _parse_float(row.get("packing_cost"), 0.0)
-        margin_pct = _parse_float(row.get("margin_pct"), 25.0)
-        gst_pct = _parse_float(row.get("gst_pct"), 5.0)
+        overhead_pct = _parse_float(row.get("overhead_pct"), 0.0) or 0.0
+        packing_cost = _parse_float(row.get("packing_cost"), 0.0) or 0.0
+        margin_pct = _parse_float(row.get("margin_pct"), 25.0) or 25.0
+        gst_pct = _parse_float(row.get("gst_pct"), 5.0) or 5.0
+
+        mrp = _parse_float(row.get("mrp"), None)
+        online_selling_price = _parse_float(row.get("online_selling_price"), None)
+        target_cop = _parse_float(row.get("target_cop"), None)
+        color_variants, planned_colors = _parse_color_variants(row.get("planned_colors"))
+        planned_sizes = _parse_list(row.get("planned_sizes"))
+
+        sale_channels_raw = _parse_list(row.get("sale_channels"))
+        sale_channels = [c.lower() for c in sale_channels_raw]
+
+        launch_season = _parse_str(row.get("launch_season"), "") or None
+        initial_sample_date = _parse_str(row.get("initial_sample_received_date"), "") or None
+
+        in_online_pipeline = _parse_bool(row.get("in_online_pipeline"), False)
+        if not in_online_pipeline and (sale_channels or mrp is not None or online_selling_price is not None or launch_season or initial_sample_date):
+            in_online_pipeline = True
+
+        photoshoot_link = _parse_str(row.get("photoshoot_link"), "") or None
+        catalogue_link = _parse_str(row.get("catalogue_link"), "") or None
 
         raw_img = _parse_str(row.get("image_url"), "")
         norm_img = normalize_image_url(raw_img) if raw_img else ""
@@ -1536,30 +1764,57 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
                 except Exception:
                     pass
 
+        labor_total = sum(l.get("rate", 0) for l in labor)
+        est_base_cost = labor_total
+        est_overhead = (est_base_cost * overhead_pct) / 100
+        est_total = est_base_cost + est_overhead + packing_cost
+        est_sell = est_total + ((est_total * margin_pct) / 100)
+
         preview.append({
             "row_number": row_num,
             "name": name,
             "category": category or "Footwear",
             "description": description,
+            "status": status,
             "base_size": base_size or "7",
             "insole_mould_name": insole_mould,
             "sole_mould_name": sole_mould,
+            "sole_shape": sole_shape,
+            "pattern_number": pattern_number,
             "default_pairs_per_carton": default_pairs,
             "overhead_pct": overhead_pct,
             "packing_cost": packing_cost,
             "margin_pct": margin_pct,
             "gst_pct": gst_pct,
+            "mrp": mrp,
+            "online_selling_price": online_selling_price,
+            "target_rsp": online_selling_price,
+            "target_cop": target_cop,
+            "color_variants": color_variants,
+            "planned_colors": planned_colors,
+            "planned_sizes": planned_sizes,
+            "in_online_pipeline": in_online_pipeline,
+            "sale_channels": sale_channels,
+            "launch_channels": sale_channels,
+            "launch_season": launch_season,
+            "initial_sample_received_date": initial_sample_date,
+            "photoshoot_link": photoshoot_link,
+            "catalogue_link": catalogue_link,
             "image_url": norm_img,
             "image_display_url": norm_img,
             "image_thumbnail_url": norm_img,
             "labor": labor,
+            "labor_total": labor_total,
+            "est_target_price": round(est_sell, 2) if est_sell > 0 else (online_selling_price or mrp or 0),
             "bom": [],
         })
 
     return {
         "preview": preview,
+        "styles": preview,
         "total_rows": total_rows,
         "valid_rows": len(preview),
+        "valid_count": len(preview),
         "errors": errors,
     }
 
@@ -1589,9 +1844,14 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
 
             category = str(row.get("category") or "Footwear").strip() or "Footwear"
             description = str(row.get("description") or "").strip()
+            status = str(row.get("status") or "inactive").strip().lower()
+            if status not in ("active", "inactive"):
+                status = "inactive"
             base_size = str(row.get("base_size") or "7").strip() or "7"
             insole_mould_name = row.get("insole_mould_name") or None
             sole_mould_name = row.get("sole_mould_name") or None
+            sole_shape = row.get("sole_shape") or None
+            pattern_number = row.get("pattern_number") or None
 
             try: overhead_pct = float(row.get("overhead_pct", 0) or 0)
             except Exception: overhead_pct = 0.0
@@ -1601,6 +1861,27 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
             except Exception: margin_pct = 25.0
             try: gst_pct = float(row.get("gst_pct", 5) if row.get("gst_pct") is not None else 5)
             except Exception: gst_pct = 5.0
+
+            mrp = None
+            if row.get("mrp") is not None:
+                try: mrp = float(row.get("mrp"))
+                except Exception: mrp = None
+
+            online_selling_price = None
+            if row.get("online_selling_price") is not None:
+                try: online_selling_price = float(row.get("online_selling_price"))
+                except Exception: online_selling_price = None
+
+            planned_colors = [str(c).strip() for c in (row.get("planned_colors") or []) if str(c).strip()]
+            planned_sizes = [str(s).strip() for s in (row.get("planned_sizes") or []) if str(s).strip()]
+            sale_channels = [str(c).strip().lower() for c in (row.get("sale_channels") or []) if str(c).strip()]
+            in_online_pipeline = bool(row.get("in_online_pipeline") or sale_channels or mrp is not None or online_selling_price is not None)
+
+            launch_season = str(row.get("launch_season") or "").strip() or None
+            initial_sample_date = str(row.get("initial_sample_received_date") or "").strip() or None
+
+            photoshoot_link = str(row.get("photoshoot_link") or "").strip() or None
+            catalogue_link = str(row.get("catalogue_link") or "").strip() or None
 
             raw_img = str(row.get("image_url") or "").strip()
             norm_img = normalize_image_url(raw_img) if raw_img else ""
@@ -1627,20 +1908,32 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
                 "name": name,
                 "category": category,
                 "description": description,
+                "status": status,
                 "base_size": base_size,
                 "insole_mould_name": insole_mould_name,
                 "sole_mould_name": sole_mould_name,
+                "sole_shape": sole_shape,
+                "pattern_number": pattern_number,
                 "overhead_pct": overhead_pct,
                 "packing_cost": packing_cost,
                 "margin_pct": margin_pct,
                 "gst_pct": gst_pct,
+                "mrp": mrp,
+                "online_selling_price": online_selling_price,
+                "planned_colors": planned_colors,
+                "planned_sizes": planned_sizes,
+                "in_online_pipeline": in_online_pipeline,
+                "sale_channels": sale_channels,
+                "launch_season": launch_season,
+                "initial_sample_received_date": initial_sample_date,
+                "photoshoot_link": photoshoot_link,
+                "catalogue_link": catalogue_link,
                 "image_url": norm_img,
                 "image_display_url": image_display,
                 "image_thumbnail_url": image_thumb,
                 "default_pairs_per_carton": default_pairs_per_carton,
                 "bom": [],
                 "labor": labor,
-                "status": "inactive",
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
             }
@@ -1651,6 +1944,7 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
                 errors.append(f"Row {row_num}: Style code '{generated_code}' collision")
                 continue
 
+            # Auto-create 23 PLM folders for each bulk-created style
             try:
                 await db.style_folders.insert_one({
                     "style_id": str(res.inserted_id),
@@ -1661,6 +1955,39 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
                 })
             except Exception:
                 pass
+
+            # Auto-create / initialize style_lifecycle if online pipeline enabled or attributes present
+            if in_online_pipeline:
+                try:
+                    lc_doc = _default_lifecycle(str(res.inserted_id), generated_code)
+                    if sale_channels:
+                        lc_doc["sale_channels"] = sale_channels
+                    if mrp is not None:
+                        lc_doc["mrp"] = mrp
+                    if online_selling_price is not None:
+                        lc_doc["online_selling_price"] = online_selling_price
+                    if planned_colors:
+                        lc_doc["planned_colors"] = planned_colors
+                    if planned_sizes:
+                        lc_doc["planned_sizes"] = planned_sizes
+                    if sole_mould_name:
+                        lc_doc["sole_mould_name"] = sole_mould_name
+                    if sole_shape:
+                        lc_doc["sole_shape"] = sole_shape
+                    if pattern_number:
+                        lc_doc["pattern_number"] = pattern_number
+                    if photoshoot_link:
+                        lc_doc["photoshoot_link"] = photoshoot_link
+                    if catalogue_link:
+                        lc_doc["catalogue_link"] = catalogue_link
+                    if launch_season:
+                        lc_doc["launch_season"] = launch_season
+                    if initial_sample_date:
+                        lc_doc["initial_sample_received_date"] = initial_sample_date
+
+                    await db.style_lifecycle.insert_one(lc_doc)
+                except Exception:
+                    pass
 
             doc.pop("_id", None)
             doc["id"] = str(res.inserted_id)
@@ -1679,6 +2006,9 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
                 "code": generated_code,
                 "name": name,
                 "costing": costing,
+                "status": status,
+                "in_online_pipeline": in_online_pipeline,
+                "planned_colors": planned_colors,
             })
             success += 1
         except Exception as e:
@@ -1697,6 +2027,17 @@ async def bulk_upload_styles(payload: dict, request: Request = None):
         "errors": errors,
         "created": created,
     }
+
+
+@styles_router.post("/styles/bulk/upload", dependencies=[Depends(upload_rate_limiter)])
+async def bulk_upload_styles_file(file: UploadFile = File(...), request: Request = None):
+    """Direct multipart file upload for bulk style creation."""
+    prev_result = await bulk_upload_preview(file=file, request=request)
+    styles = prev_result.get("styles") or prev_result.get("preview") or []
+    if not styles:
+        errs = prev_result.get("errors") or []
+        raise HTTPException(400, f"No valid styles found to import: {', '.join(errs[:3])}")
+    return await bulk_upload_styles({"styles": styles}, request=request)
 
 
 @styles_router.get("/styles/not-in-pipeline")
