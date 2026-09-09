@@ -714,9 +714,38 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
             if inv_doc and inv_doc.get("client_name"):
                 client_name = inv_doc["client_name"]
 
-    invs = await db.invoices.find({"client_name": client_name}, {"file_b64": 0}).to_list(2000)
-    grns = await db.grns.find({"client_name": client_name}).to_list(2000)
-    pays = await db.payments.find({"client_name": client_name}).to_list(2000)
+    name_regex = {"$regex": f"^{re.escape(client_name.strip())}$", "$options": "i"} if client_name else client_name
+    inv_q = {"$or": [{"client_name": client_name}, {"client_name": name_regex}]} if client_name else {"client_name": client_name}
+    invs = await db.invoices.find(inv_q, {"file_b64": 0}).to_list(2000)
+    inv_ids = [str(d["_id"]) for d in invs]
+
+    grn_q = {"$or": [{"client_name": client_name}, {"client_name": name_regex}]} if client_name else {"client_name": client_name}
+    if inv_ids:
+        grn_q["$or"].append({"invoice_id": {"$in": inv_ids}})
+    raw_grns = await db.grns.find(grn_q).to_list(2000)
+    seen_grn_ids = set()
+    grns = []
+    for g in raw_grns:
+        gid = str(g.get("_id"))
+        if gid not in seen_grn_ids:
+            seen_grn_ids.add(gid)
+            grns.append(g)
+
+    pay_q = {"$or": [{"client_name": client_name}, {"client_name": name_regex}]} if client_name else {"client_name": client_name}
+    if inv_ids:
+        pay_q["$or"].append({"invoice_ids": {"$in": inv_ids}})
+    raw_pays = await db.payments.find(pay_q).to_list(2000)
+    seen_pay_ids = set()
+    pays = []
+    for p in raw_pays:
+        pid = str(p.get("_id"))
+        if pid not in seen_pay_ids:
+            seen_pay_ids.add(pid)
+            pays.append(p)
+
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+    decorated = [_decorate_invoice(d, pay_map, grn_map) for d in invs]
 
     price_idx: dict[str, dict] = {}
     for inv in invs:
@@ -731,11 +760,13 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
         d = inv.get("invoice_iso_date") or _invoice_iso_date(inv.get("invoice_date", ""))
         grand = float(inv.get("grand_total") or inv.get("net_amount") or 0)
         due_date = _due_iso(inv["grn_date"], int(inv.get("payment_terms_days") or 45)) if inv.get("grn_date") else inv.get("due_date")
+        po_num = (inv.get("po_numbers") or [inv.get("po_number") or ""])[0] or ""
+        particulars = f"Inv {inv.get('invoice_no')} · {po_num}".strip(" ·")
         entries.append({
             "date": d,
             "vch_type": "Invoice",
             "vch_no": inv.get("invoice_no"),
-            "particulars": f"Inv {inv.get('invoice_no')} · {(inv.get('po_numbers') or [inv.get('po_number')])[0] or ''}",
+            "particulars": particulars,
             "debit": grand,
             "credit": 0.0,
             "ref_id": str(inv["_id"]),
@@ -750,12 +781,17 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
             short = max(0, int(ln.get("dispatched_qty", 0)) - int(ln.get("accepted_qty", 0)))
             unit = prices.get((ln.get("style_code"), ln.get("color"), str(ln.get("size") or ""))) or 0
             short_value += short * unit
+        if short_value == 0.0:
+            iid = g.get("invoice_id", "")
+            if iid and iid in grn_map:
+                short_value = float(grn_map[iid].get("adjustment") or 0.0)
         if short_value > 0:
+            short_pcs = g.get("total_dispatched", 0) - g.get("total_accepted", 0)
             entries.append({
                 "date": g.get("grn_date") or g.get("received_date") or "",
                 "vch_type": "GR Adj",
                 "vch_no": g.get("grn_no"),
-                "particulars": f"GRN {g.get('grn_no')} · short/rejected {g.get('total_dispatched',0) - g.get('total_accepted',0)} pcs",
+                "particulars": f"GRN {g.get('grn_no')} · short/rejected {short_pcs} pcs",
                 "debit": 0.0,
                 "credit": round(short_value, 2),
                 "ref_id": str(g["_id"]),
@@ -766,7 +802,7 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
             "date": p.get("payment_date") or "",
             "vch_type": "Payment",
             "vch_no": p.get("payment_no"),
-            "particulars": f"{p.get('mode')} · {p.get('reference', '')}".strip(" ·"),
+            "particulars": f"{p.get('mode') or ''} · {p.get('reference', '')}".strip(" ·"),
             "debit": 0.0,
             "credit": float(p.get("amount") or 0),
             "ref_id": str(p["_id"]),
@@ -774,7 +810,7 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
             "reference": p.get("reference"),
         })
 
-    entries.sort(key=lambda e: (e["date"] or "", e["vch_type"]))
+    entries.sort(key=lambda e: (e["date"] or "", 0 if e["vch_type"] == "Invoice" else (1 if e["vch_type"] == "GR Adj" else 2)))
     bal = 0.0
     for e in entries:
         bal += float(e["debit"]) - float(e["credit"])
@@ -783,6 +819,7 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
         e["credit"] = round(float(e["credit"]), 2)
         e["balance"] = bal
         e["running_balance"] = bal
+        e["balance_type"] = "Dr" if bal >= 0 else "Cr"
         tx_item = {
             "type": e["vch_type"].lower().replace(" ", "_"),
             "vch_type": e["vch_type"],
@@ -793,24 +830,40 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
             "credit": e["credit"],
             "running_balance": bal,
             "due_date": e.get("due_date"),
+            "balance_type": e["balance_type"],
         }
         transactions.append(tx_item)
 
-    inv_ids = [str(d["_id"]) for d in invs]
-    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
-    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
-    decorated = [_decorate_invoice(d, pay_map, grn_map) for d in invs]
+    tot_invoiced = sum(float(r.get("net_amount") or 0) for r in decorated)
+    tot_received = sum(float(r.get("received_amount") or 0) for r in decorated)
+    tot_outstanding = sum(float(r.get("outstanding") or 0) for r in decorated)
+    totals = {
+        "invoiced": round(tot_invoiced, 2),
+        "received": round(tot_received, 2),
+        "outstanding": round(tot_outstanding, 2),
+    }
 
     today = datetime.now(timezone.utc).date()
     ageing_buckets = {
         "current": 0.0,
         "days_1_30": 0.0,
         "days_31_60": 0.0,
+        "days_61_90": 0.0,
         "days_60_plus": 0.0,
+        "days_90_plus": 0.0,
     }
-
-    tot_invoiced = sum(float(r.get("net_amount") or 0) for r in decorated)
-    tot_received = sum(float(r.get("received_amount") or 0) for r in decorated)
+    aging_counts = {
+        "0-30": 0,
+        "31-60": 0,
+        "61-90": 0,
+        "90+": 0,
+    }
+    aging_amounts = {
+        "0-30": 0.0,
+        "31-60": 0.0,
+        "61-90": 0.0,
+        "90+": 0.0,
+    }
 
     for r in decorated:
         outstanding = float(r.get("outstanding") or 0)
@@ -819,6 +872,8 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
         due_str = r.get("due_date") or r.get("invoice_date")
         if not due_str:
             ageing_buckets["current"] = round(ageing_buckets["current"] + outstanding, 2)
+            aging_amounts["0-30"] = round(aging_amounts["0-30"] + outstanding, 2)
+            aging_counts["0-30"] += 1
             continue
         try:
             due = datetime.strptime(str(due_str)[:10], "%Y-%m-%d").date()
@@ -828,29 +883,52 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
 
         if days_overdue <= 0:
             ageing_buckets["current"] = round(ageing_buckets["current"] + outstanding, 2)
+            aging_amounts["0-30"] = round(aging_amounts["0-30"] + outstanding, 2)
+            aging_counts["0-30"] += 1
         elif 1 <= days_overdue <= 30:
             ageing_buckets["days_1_30"] = round(ageing_buckets["days_1_30"] + outstanding, 2)
+            aging_amounts["0-30"] = round(aging_amounts["0-30"] + outstanding, 2)
+            aging_counts["0-30"] += 1
         elif 31 <= days_overdue <= 60:
             ageing_buckets["days_31_60"] = round(ageing_buckets["days_31_60"] + outstanding, 2)
-        else:
+            aging_amounts["31-60"] = round(aging_amounts["31-60"] + outstanding, 2)
+            aging_counts["31-60"] += 1
+        elif 61 <= days_overdue <= 90:
+            ageing_buckets["days_61_90"] = round(ageing_buckets["days_61_90"] + outstanding, 2)
             ageing_buckets["days_60_plus"] = round(ageing_buckets["days_60_plus"] + outstanding, 2)
+            aging_amounts["61-90"] = round(aging_amounts["61-90"] + outstanding, 2)
+            aging_counts["61-90"] += 1
+        else:
+            ageing_buckets["days_90_plus"] = round(ageing_buckets["days_90_plus"] + outstanding, 2)
+            ageing_buckets["days_60_plus"] = round(ageing_buckets["days_60_plus"] + outstanding, 2)
+            aging_amounts["90+"] = round(aging_amounts["90+"] + outstanding, 2)
+            aging_counts["90+"] += 1
 
     aging_list = [
-        {"bucket": "0-30", "amount": round(ageing_buckets["days_1_30"] + ageing_buckets["current"], 2), "count": 0},
-        {"bucket": "31-60", "amount": ageing_buckets["days_31_60"], "count": 0},
-        {"bucket": "60+", "amount": ageing_buckets["days_60_plus"], "count": 0},
+        {"bucket": "0-30", "amount": round(aging_amounts["0-30"], 2), "count": aging_counts["0-30"]},
+        {"bucket": "31-60", "amount": round(aging_amounts["31-60"], 2), "count": aging_counts["31-60"]},
+        {"bucket": "61-90", "amount": round(aging_amounts["61-90"], 2), "count": aging_counts["61-90"]},
+        {"bucket": "90+", "amount": round(aging_amounts["90+"], 2), "count": aging_counts["90+"]},
     ]
+
+    bal_type = "Dr" if bal >= 0 else "Cr"
 
     return {
         "client_name": client_name,
         "total_invoiced": round(tot_invoiced, 2),
         "total_received": round(tot_received, 2),
+        "outstanding": round(tot_outstanding, 2),
+        "current_balance": bal,
         "closing_balance": bal,
-        "balance_type": "Dr" if bal >= 0 else "Cr",
+        "closing_balance_type": bal_type,
+        "balance_type": bal_type,
+        "totals": totals,
         "aging": aging_list,
         "ageing_buckets": ageing_buckets,
         "ledger": entries,
+        "entries": entries,
         "transactions": transactions,
+        "invoices": decorated,
     }
 
 
@@ -2088,6 +2166,104 @@ async def list_clients(request: Request):
             s[k] = round(s[k], 2)
     out.sort(key=lambda s: -s["outstanding"])
     return out
+
+
+@pos_router.get("/clients/ageing")
+async def get_clients_ageing(request: Request):
+    """Client aging summary across all clients."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = get_db()
+    from routes.invoice_packing import _aggregate_payments_for_invoices, _aggregate_grn_adjustments, _decorate_invoice
+
+    docs = await db.invoices.find({}, {"file_b64": 0}).to_list(5000)
+    if not docs:
+        return {
+            "summary": {
+                "total_clients": 0,
+                "total_outstanding": 0.0,
+                "total_current": 0.0,
+                "total_days_1_30": 0.0,
+                "total_days_31_60": 0.0,
+                "total_days_60_plus": 0.0,
+            },
+            "clients": [],
+        }
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+    decorated = [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    by_client: dict[str, list] = defaultdict(list)
+    for inv in decorated:
+        c_name = inv.get("client_name") or "—"
+        by_client[c_name].append(inv)
+
+    today = datetime.now(timezone.utc).date()
+    records = []
+    tot_out = 0.0
+    tot_curr = 0.0
+    tot_1_30 = 0.0
+    tot_31_60 = 0.0
+    tot_60_plus = 0.0
+
+    for c_name, c_invs in by_client.items():
+        c_out = sum(float(i.get("outstanding") or 0) for i in c_invs)
+        curr = 0.0
+        d_1_30 = 0.0
+        d_31_60 = 0.0
+        d_60_plus = 0.0
+
+        for inv in c_invs:
+            out = float(inv.get("outstanding") or 0)
+            if out <= 0:
+                continue
+            due_str = inv.get("due_date") or inv.get("invoice_date")
+            if not due_str:
+                curr = round(curr + out, 2)
+                continue
+            try:
+                due = datetime.strptime(str(due_str)[:10], "%Y-%m-%d").date()
+                days_overdue = (today - due).days
+            except Exception:
+                days_overdue = 0
+
+            if days_overdue <= 0:
+                curr = round(curr + out, 2)
+            elif 1 <= days_overdue <= 30:
+                d_1_30 = round(d_1_30 + out, 2)
+            elif 31 <= days_overdue <= 60:
+                d_31_60 = round(d_31_60 + out, 2)
+            else:
+                d_60_plus = round(d_60_plus + out, 2)
+
+        record = {
+            "client_name": c_name,
+            "outstanding_balance": round(c_out, 2),
+            "current": curr,
+            "days_1_30": d_1_30,
+            "days_31_60": d_31_60,
+            "days_60_plus": d_60_plus,
+        }
+        records.append(record)
+        tot_out += c_out
+        tot_curr += curr
+        tot_1_30 += d_1_30
+        tot_31_60 += d_31_60
+        tot_60_plus += d_60_plus
+
+    records.sort(key=lambda r: -r["outstanding_balance"])
+    return {
+        "summary": {
+            "total_clients": len(records),
+            "total_outstanding": round(tot_out, 2),
+            "total_current": round(tot_curr, 2),
+            "total_days_1_30": round(tot_1_30, 2),
+            "total_days_31_60": round(tot_31_60, 2),
+            "total_days_60_plus": round(tot_60_plus, 2),
+        },
+        "clients": records,
+    }
 
 
 @pos_router.get("/clients/{cid}/ledger")

@@ -79,8 +79,19 @@ def stringify(doc):
     return d
 
 
+def _get_db(request=None):
+    if request is not None:
+        app = getattr(request, "app", None)
+        if app is not None:
+            db = getattr(app, "mongodb", None)
+            if db:
+                return db
+    return getattr(__import__("server"), "db")
+
+
 async def _get_user(request: Request) -> dict:
-    getter = getattr(request.app.state, "get_current_user", None)
+    app = getattr(request, "app", None)
+    getter = getattr(getattr(app, "state", None), "get_current_user", None)
     if getter:
         return await getter(request)
     from server import get_current_user
@@ -717,7 +728,7 @@ async def resync_invoice_sequence(request: Request):
     """Admin endpoint to audit and synchronize the invoice sequence counter with database records."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     today = datetime.now(timezone.utc)
     yr = today.year
@@ -748,7 +759,7 @@ async def resync_invoice_sequence(request: Request):
 @invoice_packing_router.get("/pos/{pid}/invoices")
 async def list_po_invoices(pid: str, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
     if not doc:
         raise HTTPException(404, "PO not found")
@@ -804,7 +815,7 @@ async def list_po_invoices(pid: str, request: Request):
 async def get_po_production_documents(pid: str, request: Request):
     """Retrieve all production documents (invoices, dispatch records, packing lists) linked to a PO."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
     if not doc:
         raise HTTPException(404, "PO not found")
@@ -893,7 +904,7 @@ async def get_po_production_documents(pid: str, request: Request):
 @invoice_packing_router.get("/pos/{pid}/invoice.pdf", dependencies=[Depends(pdf_rate_limiter)])
 async def po_invoice(pid: str, request: Request):
     u = await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
     if not doc:
         raise HTTPException(404, "Not found")
@@ -988,7 +999,7 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
     """Generate an invoice for a subset of production jobs (dispatched). Supports merging."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     po_doc = await db.pos.find_one({"_id": oid(payload.po_id)})
     if not po_doc:
@@ -1080,7 +1091,7 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
 async def delete_invoice(id: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     inv = await db.invoices.find_one({"_id": oid(id)})
     if not inv:
@@ -1144,7 +1155,7 @@ async def merged_invoice(payload: dict, request: Request):
     """
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     entries = payload.get("entries", [])
     if not entries:
@@ -1255,7 +1266,7 @@ async def merged_invoice(payload: dict, request: Request):
 async def po_challan(pid: str, request: Request, dispatch_qty: Optional[int] = None,
                      transporter: str = "", vehicle: str = ""):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.pos.find_one({"_id": oid(pid)})
     if not doc:
         raise HTTPException(404, "Not found")
@@ -1272,7 +1283,7 @@ async def po_challan(pid: str, request: Request, dispatch_qty: Optional[int] = N
 async def get_inflow_cash_forecast(request: Request):
     """Weekly cash inflow forecast based on GRN-calculated due dates for vendor payment planning."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     docs = await db.invoices.find({"legacy": {"$ne": True}}, {"file_b64": 0}).sort("created_at", -1).to_list(1000)
     inv_ids = [str(d["_id"]) for d in docs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
@@ -1401,7 +1412,7 @@ async def list_invoices(request: Request, client: Optional[str] = None,
                         limit: int = 500):
     """Return all generated invoices, decorated with live status + outstanding."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q: dict = {}
     if not include_legacy:
         q["legacy"] = {"$ne": True}
@@ -1420,7 +1431,7 @@ async def list_invoices(request: Request, client: Optional[str] = None,
 @invoice_packing_router.get("/invoices/overdue")
 async def overdue_invoices(request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     docs = await db.invoices.find({}, {"file_b64": 0}).sort("due_date", 1).to_list(500)
     inv_ids = [str(d["_id"]) for d in docs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
@@ -1432,7 +1443,7 @@ async def overdue_invoices(request: Request):
 @invoice_packing_router.get("/invoices/{iid}")
 async def get_invoice(iid: str, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.invoices.find_one({"_id": oid(iid)})
     if not doc:
         raise HTTPException(404, "Invoice not found")
@@ -1450,7 +1461,7 @@ async def get_invoice(iid: str, request: Request):
 @invoice_packing_router.get("/invoices/{iid}/file", dependencies=[Depends(pdf_rate_limiter)])
 async def download_invoice_file(iid: str, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.invoices.find_one({"_id": oid(iid)})
     if not doc:
         raise HTTPException(404, "Invoice not found")
@@ -1468,7 +1479,7 @@ async def download_invoice_file(iid: str, request: Request):
 async def download_invoice_carton_labels(iid: str, request: Request):
     """Re-download carton labels PDF stored on an invoice without regeneration."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.invoices.find_one({"_id": oid(iid)}, {"carton_labels_file_b64": 1, "invoice_no": 1})
     if not doc:
         raise HTTPException(404, "Invoice not found")
@@ -1487,7 +1498,7 @@ async def download_invoice_carton_labels(iid: str, request: Request):
 async def get_ean_codes(style_id: str, request: Request, color: str | None = None):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q = {"style_id": style_id}
     if color:
         q["color"] = color
@@ -1499,7 +1510,7 @@ async def get_ean_codes(style_id: str, request: Request, color: str | None = Non
 async def create_ean_code(payload: EanCodeIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q = {"style_id": payload.style_id, "color": payload.color, "size": payload.size}
     existing = await db.sku_ean_codes.find_one(q)
     if existing:
@@ -1515,7 +1526,7 @@ async def create_ean_code(payload: EanCodeIn, request: Request):
 async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: Optional[str] = None):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q = {}
     if job_ids:
         q["job_id"] = {"$in": job_ids.split(",")}
@@ -1529,7 +1540,7 @@ async def get_cartons(request: Request, job_id: Optional[str] = None, job_ids: O
 async def pack_carton(payload: CartonIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     job = await db.production_jobs.find_one({"_id": oid(payload.job_id)})
     if not job:
         raise HTTPException(404, "Job not found")
@@ -1580,7 +1591,7 @@ async def pack_carton(payload: CartonIn, request: Request):
 async def delete_carton(cid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     await db.packing_cartons.delete_one({"_id": oid(cid)})
     return {"ok": True}
 
@@ -1589,7 +1600,7 @@ async def delete_carton(cid: str, request: Request):
 async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     if not payload.job_ids:
         raise HTTPException(400, "No job IDs provided")
         
@@ -1703,7 +1714,7 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
 async def get_direct_carton_labels(job_ids: str, request: Request):
     """Generate carton labels directly for given job IDs."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     jids = job_ids.split(",")
     carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
     if not carton_docs:
@@ -1744,7 +1755,7 @@ async def get_direct_carton_labels(job_ids: str, request: Request):
 async def get_direct_carton_list(job_ids: str, request: Request):
     """Generate carton list directly for given job IDs."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     jids = job_ids.split(",")
     carton_docs = await db.packing_cartons.find({"job_id": {"$in": jids}}).sort([("size", 1), ("_id", 1)]).to_list(1000)
     if not carton_docs:
@@ -1802,7 +1813,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     """Unified dispatch action for one or more qc_pack jobs."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     if not payload.job_ids:
         raise HTTPException(400, "job_ids required")
@@ -2149,7 +2160,7 @@ async def list_dispatch_records(
 ):
     """List all dispatch records (file bytes excluded for size)."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q: dict = {}
     if client:
         q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
@@ -2171,7 +2182,7 @@ async def list_dispatch_records(
 async def get_dispatch_record(dr_id: str, request: Request):
     """Full dispatch record detail (excludes file bytes)."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one(
         {"_id": oid(dr_id)},
         {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0},
@@ -2185,7 +2196,7 @@ async def get_dispatch_record(dr_id: str, request: Request):
 async def download_dispatch_invoice(dr_id: str, request: Request):
     """Re-download the invoice PDF exactly as generated at dispatch time."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"invoice_file_b64": 1, "invoice_no": 1})
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2203,7 +2214,7 @@ async def download_dispatch_invoice(dr_id: str, request: Request):
 async def download_dispatch_packing_list(dr_id: str, request: Request):
     """Re-download the packing list XLSX as generated at dispatch time."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"packing_list_file_b64": 1, "invoice_no": 1})
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2222,7 +2233,7 @@ async def download_dispatch_packing_list(dr_id: str, request: Request):
 async def download_dispatch_carton_labels(dr_id: str, request: Request):
     """Re-download the carton labels PDF as generated at dispatch time."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"carton_labels_file_b64": 1, "invoice_no": 1})
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2240,7 +2251,7 @@ async def download_dispatch_carton_labels(dr_id: str, request: Request):
 async def download_dispatch_carton_list(dr_id: str, request: Request):
     """Re-download the carton list XLSX as generated at dispatch time."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one({"_id": oid(dr_id)}, {"carton_list_file_b64": 1, "invoice_no": 1})
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2259,7 +2270,7 @@ async def download_dispatch_carton_list(dr_id: str, request: Request):
 async def reprint_dispatch_zip(dr_id: str, request: Request):
     """Re-download all dispatch documents as a ZIP (for reprinting)."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.dispatch_records.find_one({"_id": oid(dr_id)})
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2292,7 +2303,7 @@ async def generate_packing_list(payload: PackingListGenerate, request: Request):
     """Generate a packing-list xlsx for a single PO (optionally filtered by jobs)."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     po_doc = await db.pos.find_one({"_id": oid(payload.po_id)})
     if not po_doc:
@@ -2333,7 +2344,7 @@ async def generate_merged_packing_list(payload: MergedPackingListGenerate, reque
     """Generate ONE packing list covering jobs from multiple POs of the same client."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     if not payload.job_ids:
         raise HTTPException(400, "Provide job_ids to merge")
@@ -2395,7 +2406,7 @@ async def list_packing_lists(request: Request, po_id: Optional[str] = None,
                              client: Optional[str] = None, limit: int = 200):
     """List saved packing lists. Optional filters: by po_id or client_name."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q: dict = {}
     if po_id:
         q["po_id"] = po_id
@@ -2408,7 +2419,7 @@ async def list_packing_lists(request: Request, po_id: Optional[str] = None,
 @invoice_packing_router.get("/packing-lists/{plid}/file", dependencies=[Depends(pdf_rate_limiter)])
 async def download_packing_list(plid: str, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.packing_lists.find_one({"_id": oid(plid)})
     if not doc:
         raise HTTPException(404, "Packing list not found")
@@ -2428,7 +2439,7 @@ async def download_packing_list(plid: str, request: Request):
 async def preview_packing_list(payload: dict, request: Request):
     """Generate structured JSON preview of the packing list for pre-generation verification."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     po_id = payload.get("po_id")
     po_doc = None
     if po_id:
@@ -2549,7 +2560,7 @@ async def preview_packing_list(payload: dict, request: Request):
 async def validate_packing_list(payload: dict, request: Request):
     """Validate packing list inputs before generation."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     errors = []
 
     po_id = payload.get("po_id")
@@ -2583,7 +2594,7 @@ async def validate_packing_list(payload: dict, request: Request):
 async def get_po_packing_list_pdf(pid: str, request: Request):
     """Generate and stream PDF packing list for a PO matching master visual reference PDF."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     po_doc = await db.pos.find_one({"_id": oid(pid)})
     if not po_doc:
         raise HTTPException(404, "PO not found")
@@ -2601,7 +2612,7 @@ async def get_po_packing_list_pdf(pid: str, request: Request):
 async def get_po_packing_list_xlsx(pid: str, request: Request):
     """Generate and stream Excel packing list for a PO matching master visual reference PDF."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     po_doc = await db.pos.find_one({"_id": oid(pid)})
     if not po_doc:
         raise HTTPException(404, "PO not found")
@@ -2618,7 +2629,7 @@ async def get_po_packing_list_xlsx(pid: str, request: Request):
 @invoice_packing_router.get("/packing-templates")
 async def list_packing_templates(request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     docs = await db.packing_templates.find({}, {"file_b64": 0}).to_list(200)
     return [stringify(d) for d in docs]
 
@@ -2627,7 +2638,7 @@ async def list_packing_templates(request: Request):
 async def create_packing_template(payload: PackingTemplateIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     try:
         raw = base64.b64decode(payload.file_b64.split(",", 1)[-1] if "," in payload.file_b64 else payload.file_b64)
@@ -2656,7 +2667,7 @@ async def create_packing_template(payload: PackingTemplateIn, request: Request):
 async def delete_packing_template(tid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     t = await db.packing_templates.find_one({"_id": oid(tid)})
     if not t:
         raise HTTPException(404, "Template not found")

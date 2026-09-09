@@ -1078,4 +1078,60 @@ async def test_attach_po_profitability_single_query_50_pos(mock_pos_env):
     assert single_result["profit"] is not None
 
 
+def test_client_ledger_and_ageing_contract(client, mock_pos_env):
+    """Verify client ledger data contract required by frontend and aging endpoint."""
+    client_name = "Ledger Test Corp"
+    inv_id = str(ObjectId())
+    asyncio.run(mock_pos_env.invoices.insert_one({
+        "_id": ObjectId(inv_id),
+        "invoice_no": "INV-LEDGER-001",
+        "client_name": client_name,
+        "grand_total": 50000.0,
+        "net_amount": 50000.0,
+        "received_amount": 0.0,
+        "outstanding": 50000.0,
+        "invoice_date": "2026-08-01",
+        "invoice_iso_date": "2026-08-01",
+        "due_date": "2026-08-31",
+        "line_items_snapshot": [
+            {"style_code": "SSK_L1", "color": "Tan", "size": "8", "quantity": 100, "unit_price": 500.0, "amount": 50000.0}
+        ],
+    }))
+
+    # 1. Fetch client ledger
+    r = client.get(f"/api/clients/{client_name}/ledger")
+    assert r.status_code == 200, r.text
+    data = r.json()
+
+    # Required top-level keys
+    for k in ("client_name", "totals", "entries", "invoices", "aging", "closing_balance", "closing_balance_type", "total_invoiced", "total_received", "outstanding"):
+        assert k in data, f"Missing key {k} in ledger response"
+
+    assert data["totals"]["invoiced"] == 50000.0
+    assert data["totals"]["received"] == 0.0
+    assert data["totals"]["outstanding"] == 50000.0
+    assert data["closing_balance"] == 50000.0
+    assert data["closing_balance_type"] == "Dr"
+    assert len(data["entries"]) == 1
+    assert data["entries"][0]["vch_type"] == "Invoice"
+    assert data["entries"][0]["balance_type"] == "Dr"
+    assert len(data["invoices"]) == 1
+
+    # Check 4 standard aging buckets
+    aging_buckets = {a["bucket"] for a in data["aging"]}
+    for b in ("0-30", "31-60", "61-90", "90+"):
+        assert b in aging_buckets
+
+    # 2. Fetch clients ageing endpoint
+    r_age = client.get("/api/clients/ageing")
+    assert r_age.status_code == 200, r_age.text
+    age_data = r_age.json()
+    assert "summary" in age_data
+    assert "clients" in age_data
+    found = next((c for c in age_data["clients"] if c["client_name"] == client_name), None)
+    assert found is not None
+    assert found["outstanding_balance"] == 50000.0
+
+
+
 

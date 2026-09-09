@@ -231,6 +231,22 @@ function Tile({ label, value, accent }) {
 
 /* ------------------- LEDGER MODAL ------------------- */
 function LedgerModal({ ledger, onClose }) {
+  if (!ledger) return null;
+
+  const totals = ledger.totals || {
+    invoiced: ledger.total_invoiced || 0,
+    received: ledger.total_received || 0,
+    outstanding: ledger.outstanding || 0,
+  };
+  const entries = ledger.entries || ledger.ledger || [];
+  const invoices = ledger.invoices || [];
+  const aging = ledger.aging || [];
+  const closingBalance = ledger.closing_balance ?? ledger.current_balance ?? 0;
+  const closingBalanceType =
+    ledger.closing_balance_type ||
+    ledger.balance_type ||
+    (closingBalance >= 0 ? "Dr" : "Cr");
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4"
@@ -256,22 +272,22 @@ function LedgerModal({ ledger, onClose }) {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Tile
               label="Total Invoiced"
-              value={inr(ledger.totals.invoiced)}
+              value={inr(totals.invoiced)}
               accent="#0F172A"
             />
             <Tile
               label="Received"
-              value={inr(ledger.totals.received)}
+              value={inr(totals.received)}
               accent="#16A34A"
             />
             <Tile
               label="Closing Balance"
-              value={`${inr(Math.abs(ledger.closing_balance))} ${ledger.closing_balance_type}`}
+              value={`${inr(Math.abs(closingBalance))} ${closingBalanceType}`}
               accent="#C27842"
             />
             <Tile
               label="No. of Entries"
-              value={ledger.entries.length}
+              value={entries.length}
               accent="#2563EB"
             />
           </div>
@@ -282,11 +298,11 @@ function LedgerModal({ ledger, onClose }) {
               Aging analysis
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-              {ledger.aging.map((a, i) => (
+              {aging.map((a, i) => (
                 <div
                   key={i}
                   className="border-2 border-slate-200 px-4 py-3"
-                  data-testid={`aging-${a.bucket.replace("+", "plus")}`}
+                  data-testid={`aging-${(a.bucket || "").replace("+", "plus")}`}
                 >
                   <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
                     {a.bucket} days
@@ -294,10 +310,10 @@ function LedgerModal({ ledger, onClose }) {
                   <div
                     className={`font-mono font-bold text-lg ${a.amount > 0 ? "text-red-600" : "text-slate-400"}`}
                   >
-                    {inr(a.amount)}
+                    {inr(a.amount || 0)}
                   </div>
                   <div className="text-[10px] text-slate-500 font-mono">
-                    {a.count} invoice{a.count !== 1 ? "s" : ""}
+                    {a.count || 0} invoice{a.count !== 1 ? "s" : ""}
                   </div>
                 </div>
               ))}
@@ -305,7 +321,7 @@ function LedgerModal({ ledger, onClose }) {
           </div>
 
           {/* Outstanding invoices */}
-          {(ledger.invoices || []).some((i) => i.outstanding > 0) && (
+          {invoices.some((i) => (i.outstanding || 0) > 0) && (
             <div>
               <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#C27842] mb-2 border-b border-slate-200 pb-1">
                 Open invoices
@@ -330,8 +346,8 @@ function LedgerModal({ ledger, onClose }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {ledger.invoices
-                      .filter((i) => i.outstanding > 0)
+                    {invoices
+                      .filter((i) => (i.outstanding || 0) > 0)
                       .map((i, idx) => (
                         <tr
                           key={idx}
@@ -370,7 +386,7 @@ function LedgerModal({ ledger, onClose }) {
                             {inr(i.received_amount || 0)}
                           </td>
                           <td className="px-3 py-2 text-right font-mono font-bold">
-                            {inr(i.outstanding)}
+                            {inr(i.outstanding || 0)}
                           </td>
                           <td className="px-3 py-2">
                             <Badge color={STATUS_COLOR[i.status] || "yellow"}>
@@ -390,7 +406,7 @@ function LedgerModal({ ledger, onClose }) {
             <h3 className="text-[11px] uppercase tracking-[0.2em] font-bold text-[#C27842] mb-2 border-b border-slate-200 pb-1 flex items-center justify-between">
               <span>Ledger entries (Tally format)</span>
               <span className="text-slate-500 normal-case font-mono text-[10px]">
-                {ledger.entries.length} entries
+                {entries.length} entries
               </span>
             </h3>
             <div className="overflow-x-auto">
@@ -414,14 +430,14 @@ function LedgerModal({ ledger, onClose }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {ledger.entries.length === 0 ? (
+                  {entries.length === 0 ? (
                     <tr>
                       <td colSpan="7" className="text-center text-slate-400 py-8">
                         No entries.
                       </td>
                     </tr>
                   ) : (
-                    ledger.entries.map((e, i) => (
+                    entries.map((e, i) => (
                       <tr
                         key={i}
                         className="border-t border-slate-100 hover:bg-slate-50"
@@ -451,9 +467,9 @@ function LedgerModal({ ledger, onClose }) {
                           {e.credit > 0 ? inr(e.credit) : ""}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono font-bold">
-                          {inr(Math.abs(e.balance))}{" "}
+                          {inr(Math.abs(e.balance || 0))}{" "}
                           <span className="text-slate-500 text-[10px]">
-                            {e.balance_type}
+                            {e.balance_type || (e.balance >= 0 ? "Dr" : "Cr")}
                           </span>
                         </td>
                       </tr>
@@ -469,15 +485,15 @@ function LedgerModal({ ledger, onClose }) {
                       Closing Balance
                     </td>
                     <td className="px-3 py-2 text-right font-mono">
-                      {inr(ledger.entries.reduce((s, e) => s + e.debit, 0))}
+                      {inr(entries.reduce((s, e) => s + (e.debit || 0), 0))}
                     </td>
                     <td className="px-3 py-2 text-right font-mono">
-                      {inr(ledger.entries.reduce((s, e) => s + e.credit, 0))}
+                      {inr(entries.reduce((s, e) => s + (e.credit || 0), 0))}
                     </td>
                     <td className="px-3 py-2 text-right font-mono font-bold text-base">
-                      {inr(Math.abs(ledger.closing_balance))}{" "}
+                      {inr(Math.abs(closingBalance))}{" "}
                       <span className="text-[#C27842]">
-                        {ledger.closing_balance_type}
+                        {closingBalanceType}
                       </span>
                     </td>
                   </tr>
@@ -486,19 +502,19 @@ function LedgerModal({ ledger, onClose }) {
             </div>
           </div>
 
-          {ledger.closing_balance > 0 && (
+          {closingBalance > 0 && (
             <Card className="bg-amber-50 border-amber-200 p-4">
               <div className="text-xs text-slate-700 flex items-baseline gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-600 -mb-0.5" />
                 <div>
-                  <b>{inr(ledger.closing_balance)} Dr</b> still receivable from{" "}
+                  <b>{inr(closingBalance)} Dr</b> still receivable from{" "}
                   {ledger.client_name}.
-                  {ledger.aging.find((a) => a.bucket === "90+")?.amount > 0 && (
+                  {aging.find((a) => a.bucket === "90+")?.amount > 0 && (
                     <span className="text-red-600 font-bold">
                       {" "}
                       ·{" "}
                       {inr(
-                        ledger.aging.find((a) => a.bucket === "90+").amount,
+                        aging.find((a) => a.bucket === "90+").amount,
                       )}{" "}
                       is more than 90 days overdue.
                     </span>
