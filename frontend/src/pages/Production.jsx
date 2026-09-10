@@ -219,6 +219,7 @@ export default function Production() {
   const [styles, setStyles] = useState([]);
   const [selected, setSelected] = useState({});
   const [procSelected, setProcSelected] = useState({});
+  const [qcPackSelected, setQcPackSelected] = useState({});
   const [shortageModal, setShortageModal] = useState(null);
   const [merging, setMerging] = useState(false);
   const [assignFor, setAssignFor] = useState(null);
@@ -557,6 +558,32 @@ export default function Production() {
     return first.po_number !== group.po_number;
   };
 
+  // QC & Pack: select cards & generate merged dispatch documents for same PO
+  const toggleQcPackSelect = (group) => setQcPackSelected(s => {
+    const next = { ...s };
+    if (next[group.key]) {
+      delete next[group.key];
+    } else {
+      const values = Object.values(next);
+      if (values.length > 0) {
+        const first = values[0];
+        if (first.po_number !== group.po_number) {
+          alert(`Cannot merge cards from different POs. All selected cards must share PO: ${first.po_number}`);
+          return s;
+        }
+      }
+      next[group.key] = group;
+    }
+    return next;
+  });
+
+  const isQcPackSelectionDisabled = (group) => {
+    const values = Object.values(qcPackSelected);
+    if (values.length === 0) return false;
+    const first = values[0];
+    return first.po_number !== group.po_number;
+  };
+
   // Procurement: select cards & generate material requirement
   const toggleProcSelect = (group) => setProcSelected(s => {
     const next = { ...s }; if (next[group.key]) delete next[group.key]; else next[group.key] = group; return next;
@@ -628,6 +655,7 @@ export default function Production() {
 
   const dispatchedCount = Object.keys(selected).length;
   const procSelectedCount = Object.keys(procSelected).length;
+  const qcPackSelectedCount = Object.keys(qcPackSelected).length;
 
   return (
     <div>
@@ -663,6 +691,17 @@ export default function Production() {
                   <span className="inline sm:hidden">({procSelectedCount})</span>
                 </BtnSecondary>
               </>
+            )}
+            {qcPackSelectedCount > 0 && (
+              <BtnPrimary
+                onClick={() => setDispatchFor({ groups: Object.values(qcPackSelected) })}
+                data-testid="qc-pack-merge-dispatch-btn"
+                className="bg-[#0D9488] border-[#0D9488] hover:bg-[#0B7A70] text-white px-3 sm:px-4 flex items-center gap-1.5 shadow-sm"
+              >
+                <Truck className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline">Merge Dispatch Docs ({qcPackSelectedCount})</span>
+                <span className="inline sm:hidden">Dispatch ({qcPackSelectedCount})</span>
+              </BtnPrimary>
             )}
             {dispatchedCount > 0 && (
               <BtnPrimary onClick={downloadMergedInvoice} disabled={merging} data-testid="merged-invoice-btn" className="px-3 sm:px-4 flex items-center gap-1">
@@ -744,6 +783,29 @@ export default function Production() {
                         Drop here → assign to {STAGE_TO_ROLE[s.key]} role on {groups.length} card(s)
                       </div>
                     )}
+                    {s.key === "qc_pack" && qcPackSelectedCount > 0 && (
+                      <div className="mt-2 pt-2 border-t border-teal-200 flex items-center justify-between gap-1 text-[11px] text-teal-800">
+                        <span className="font-bold truncate">Selected: {qcPackSelectedCount} card(s)</span>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setDispatchFor({ groups: Object.values(qcPackSelected) })}
+                            className="px-2 py-0.5 bg-[#0D9488] text-white font-bold text-[10px] uppercase rounded hover:bg-[#0B7A70] transition-colors"
+                            data-testid="column-merge-dispatch-btn"
+                          >
+                            Merge Dispatch
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQcPackSelected({})}
+                            className="px-1.5 py-0.5 text-slate-500 hover:text-slate-800 text-[10px] font-bold"
+                            title="Clear selection"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-3">
@@ -771,6 +833,10 @@ export default function Production() {
                         isPlanning={isPlanning}
                         isProc={isProc}
                         isDispatched={isDisp}
+                        isQcPack={s.key === "qc_pack"}
+                        isQcPackSelected={!!qcPackSelected[g.key]}
+                        onToggleQcPackSelect={toggleQcPackSelect}
+                        isQcPackSelectDisabled={isQcPackSelectionDisabled(g)}
                         onMatReq={(split = true) => downloadMaterialRequirement([g], `${g.style_code} · ${g.color}`, split)}
                         procSelected={!!procSelected[g.key]}
                         onToggleProcSelect={toggleProcSelect}
@@ -887,9 +953,11 @@ export default function Production() {
 
       {dispatchFor && (
         <DispatchDialog
-          group={dispatchFor}
+          group={dispatchFor.groups ? null : dispatchFor}
+          groups={dispatchFor.groups || null}
           onClose={() => setDispatchFor(null)}
           load={load}
+          onSuccess={() => setQcPackSelected({})}
         />
       )}
 
@@ -935,7 +1003,8 @@ export default function Production() {
 
 function ColorGroupCard(props) {
   const { group, style, stageColor, stageIdx, canEdit, onMove, onToggleComponent,
-    onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isPlanning, isProc, isDispatched, onMatReq,
+    onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isPlanning, isProc, isDispatched,
+    isQcPack, isQcPackSelected, onToggleQcPackSelect, isQcPackSelectDisabled, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
     dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails } = props;
   const nextStage = STAGES[stageIdx + 1];
@@ -1195,6 +1264,22 @@ function ColorGroupCard(props) {
             <label className="inline-flex items-center gap-1.5 cursor-pointer">
               <input type="checkbox" checked={isSelected} disabled={isSelectDisabled && !isSelected} onChange={() => onToggleSelect(group)} className={`w-4 h-4 accent-[#C27842] ${isSelectDisabled && !isSelected ? "cursor-not-allowed opacity-50" : ""}`} data-testid={`select-${group.key}`} />
               <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Merge</span>
+            </label>
+          )}
+          {isQcPack && (
+            <label
+              className="inline-flex items-center gap-1.5 cursor-pointer"
+              title={isQcPackSelectDisabled && !isQcPackSelected ? "Cannot merge with cards from a different PO" : "Select card to merge dispatch docs"}
+            >
+              <input
+                type="checkbox"
+                checked={isQcPackSelected}
+                disabled={isQcPackSelectDisabled && !isQcPackSelected}
+                onChange={() => onToggleQcPackSelect(group)}
+                className={`w-4 h-4 accent-[#0D9488] ${isQcPackSelectDisabled && !isQcPackSelected ? "cursor-not-allowed opacity-50" : ""}`}
+                data-testid={`qc-pack-select-${group.key}`}
+              />
+              <span className="text-[10px] uppercase tracking-wider font-bold text-teal-700">Merge</span>
             </label>
           )}
           {isProc && (
@@ -3479,7 +3564,24 @@ function PackCartonDialog({ group, style, onClose, load }) {
 // ═══════════════════════════════════════════════════════════
 //  DispatchDialog — invoice + packing list + carton labels
 // ═══════════════════════════════════════════════════════════
-function DispatchDialog({ group, onClose, load }) {
+function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
+  const activeGroups = useMemo(() => {
+    if (groups && Array.isArray(groups) && groups.length > 0) return groups;
+    if (group) return [group];
+    return [];
+  }, [group, groups]);
+
+  const isMerged = activeGroups.length > 1;
+  const primaryGroup = activeGroups[0] || {};
+  const poNumber = primaryGroup.po_number || "";
+  const clientName = primaryGroup.client_name || "";
+  const poId = primaryGroup.po_id || primaryGroup.rows?.[0]?.po_id || "";
+
+  const allRows = useMemo(() => activeGroups.flatMap(g => g.rows || []), [activeGroups]);
+  const jobIds = useMemo(() => allRows.map(r => r.id).filter(Boolean), [allRows]);
+  const totalPairs = allRows.reduce((s, r) => s + (r.quantity || 0), 0);
+  const sizes = Array.from(new Set(allRows.map(r => String(r.size || "—")))).sort(sortSizes).join(", ");
+
   const [form, setForm] = useState({
     transport_mode: "",
     vehicle_no: "",
@@ -3493,7 +3595,7 @@ function DispatchDialog({ group, onClose, load }) {
   });
   const [dispatchQuantities, setDispatchQuantities] = useState(() => {
     const init = {};
-    (group.rows || []).forEach(r => {
+    allRows.forEach(r => {
       init[r.id] = r.completed_qty != null ? r.completed_qty : (r.quantity || 0);
     });
     return init;
@@ -3501,6 +3603,29 @@ function DispatchDialog({ group, onClose, load }) {
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(null);
   const [err, setErr] = useState(null);
+  const [unpackedCards, setUnpackedCards] = useState([]);
+
+  useEffect(() => {
+    if (!jobIds.length) return;
+    http.get(`/packing/cartons?job_ids=${jobIds.join(",")}`)
+      .then(res => {
+        const cartons = res.data || [];
+        const cartonsWithJobId = cartons.filter(c => c && c.job_id);
+        if (cartonsWithJobId.length > 0 && isMerged) {
+          const packedJobIds = new Set(cartonsWithJobId.map(c => String(c.job_id)));
+          const missing = [];
+          activeGroups.forEach(g => {
+            const gJobIds = (g.rows || []).map(r => String(r.id));
+            const hasPacked = gJobIds.some(jid => packedJobIds.has(jid));
+            if (!hasPacked) missing.push(g);
+          });
+          setUnpackedCards(missing);
+        } else {
+          setUnpackedCards([]);
+        }
+      })
+      .catch(() => {});
+  }, [jobIds, activeGroups, isMerged]);
 
   const downloadFile = async (type, filename, mimeType) => {
     if (!done?.dispatch_record_id) return;
@@ -3519,21 +3644,20 @@ function DispatchDialog({ group, onClose, load }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const totalPairs = group.rows?.reduce((s, r) => s + (r.quantity || 0), 0) || 0;
-  const sizes = group.rows?.map(r => r.size).join(", ") || "";
-  const poId = group.po_id || group.rows?.[0]?.po_id || "";
-  const jobIds = useMemo(() => group.rows?.map(r => r.id).filter(Boolean) || [], [group.rows]);
-
   const totalDispatchPairs = useMemo(() => {
-    return (group.rows || []).reduce((acc, r) => {
+    return allRows.reduce((acc, r) => {
       const q = dispatchQuantities[r.id];
       return acc + (q !== "" && q !== undefined ? Number(q) : (r.completed_qty || r.quantity || 0));
     }, 0);
-  }, [group.rows, dispatchQuantities]);
+  }, [allRows, dispatchQuantities]);
 
   const handleDispatch = useCallback(async () => {
     if (!poId) { setErr("Cannot find PO for this group — contact admin."); return; }
     if (!jobIds.length) { setErr("No job IDs available."); return; }
+    if (isMerged && unpackedCards.length > 0) {
+      setErr(`Please pack cartons for all selected cards before dispatching: ${unpackedCards.map(g => `${g.style_code} (${g.color})`).join(", ")}`);
+      return;
+    }
     setLoading(true); setErr(null);
     try {
       const payload = {
@@ -3557,6 +3681,7 @@ function DispatchDialog({ group, onClose, load }) {
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       setDone({ dispatch_record_id: drId, invoice_no: invoiceNo });
+      onSuccess?.();
       await load();
     } catch (e) {
       let msg = "Dispatch failed — check server logs.";
@@ -3569,7 +3694,7 @@ function DispatchDialog({ group, onClose, load }) {
       } catch {}
       setErr(msg);
     } finally { setLoading(false); }
-  }, [form, poId, jobIds, dispatchQuantities, load]);
+  }, [form, poId, jobIds, dispatchQuantities, unpackedCards, onSuccess, load]);
 
   const Field = ({ label, children }) => (
     <div className="space-y-1">
@@ -3580,13 +3705,27 @@ function DispatchDialog({ group, onClose, load }) {
   const ic = "w-full border border-slate-300 px-2.5 py-2.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none min-h-[44px]";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4 overflow-y-auto" data-testid="dispatch-dialog">
       <div className="bg-white shadow-2xl w-full sm:max-w-xl flex flex-col max-h-[100dvh]">
         {/* Header */}
         <div className="bg-[#0D9488] px-6 py-4 shrink-0 flex items-start justify-between gap-3">
           <div>
-            <div className="text-[10px] uppercase tracking-widest text-teal-100 font-bold">Generate Dispatch Documents</div>
-            <div className="text-white font-bold text-lg mt-0.5">{group.style_code} · {group.color}</div>
+            <div className="text-[10px] uppercase tracking-widest text-teal-100 font-bold">
+              {isMerged ? "Generate Merged Dispatch Documents" : "Generate Dispatch Documents"}
+            </div>
+            {isMerged ? (
+              <>
+                <div className="text-white font-bold text-lg mt-0.5" data-testid="dispatch-dialog-title">
+                  PO: {poNumber} · Merged Dispatch ({activeGroups.length} Cards)
+                </div>
+                <div className="text-xs text-teal-100 mt-0.5 font-medium flex items-center gap-1 flex-wrap" data-testid="dispatch-dialog-subtitle">
+                  {clientName && <span>{clientName} • </span>}
+                  <span>{activeGroups.map(g => `${g.style_code} (${g.color})`).join(", ")}</span>
+                </div>
+              </>
+            ) : (
+              <div className="text-white font-bold text-lg mt-0.5" data-testid="dispatch-dialog-title">{primaryGroup.style_code} · {primaryGroup.color}</div>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -3600,16 +3739,40 @@ function DispatchDialog({ group, onClose, load }) {
         <div className="overflow-y-auto flex-1 p-6 space-y-5">
           {/* Summary strip */}
           <div className="bg-slate-50 border border-slate-200 p-4 rounded">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Dispatch Summary</div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">
+              {isMerged ? "Merged Dispatch Summary" : "Dispatch Summary"}
+            </div>
             <div className="grid grid-cols-3 gap-3 text-center">
               <div><div className="text-2xl font-black text-teal-700" data-testid="dispatch-total-pairs">{totalDispatchPairs}</div><div className="text-[10px] text-slate-400 uppercase">Dispatch Pairs</div></div>
               <div><div className="text-2xl font-black text-[#0F172A]">{jobIds.length}</div><div className="text-[10px] text-slate-400 uppercase">Job Lines</div></div>
-              <div><div className="text-sm font-bold text-[#0F172A]">{sizes || "—"}</div><div className="text-[10px] text-slate-400 uppercase">Sizes</div></div>
+              <div>
+                <div className="text-sm font-bold text-[#0F172A] truncate" title={isMerged ? activeGroups.map(g => `${g.style_code} (${g.color})`).join(", ") : sizes}>
+                  {isMerged ? `${activeGroups.length} Cards` : (sizes || "—")}
+                </div>
+                <div className="text-[10px] text-slate-400 uppercase">{isMerged ? "Cards Merged" : "Sizes"}</div>
+              </div>
             </div>
             <p className="mt-3 pt-3 border-t border-slate-200 text-[11px] text-slate-500">
-              Box numbers assigned 1..N (sorted by size). Invoice uses actual packed qty from carton rows.
+              {isMerged
+                ? "Single invoice will be created containing 1 line item per style & color. Cartons sequentially numbered 1..N across all cards."
+                : "Box numbers assigned 1..N (sorted by size). Invoice uses actual packed qty from carton rows."
+              }
             </p>
           </div>
+
+          {unpackedCards.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded text-xs space-y-1" data-testid="unpacked-warning">
+              <div className="font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                Missing Packed Cartons
+              </div>
+              <div>
+                The following card(s) do not have packed cartons yet:{" "}
+                <strong>{unpackedCards.map(g => `${g.style_code} (${g.color})`).join(", ")}</strong>.
+                Please click <em>Pack Carton</em> for these cards in QC &amp; Pack before dispatching.
+              </div>
+            </div>
+          )}
 
           {/* Dispatch Quantities & Partial Split Section */}
           <div className="bg-slate-50 border border-slate-200 p-4 rounded space-y-3" data-testid="dispatch-quantities-section">
@@ -3622,58 +3785,122 @@ function DispatchDialog({ group, onClose, load }) {
               </span>
             </div>
 
-            <div className="space-y-2">
-              {(group.rows || []).map((r) => {
-                const fullQty = r.quantity || 0;
-                const completedQty = r.completed_qty != null ? r.completed_qty : fullQty;
-                const currentVal = dispatchQuantities[r.id] !== undefined ? dispatchQuantities[r.id] : completedQty;
-                const nowQty = currentVal === "" ? 0 : Number(currentVal);
-                const remainder = Math.max(0, fullQty - nowQty);
-                const stageObj = STAGES.find(s => s.key === r.stage);
-                const stageLabel = stageObj?.label || r.stage || "Production";
-
-                return (
-                  <div key={r.id} className="bg-white border border-slate-200 p-3 rounded space-y-2">
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="space-y-3">
+              {isMerged ? (
+                activeGroups.map((g) => (
+                  <div key={g.key} className="bg-white border border-slate-200 rounded p-3 space-y-2 shadow-sm">
+                    <div className="flex items-center justify-between border-b pb-1.5 border-slate-100 flex-wrap gap-1">
                       <div>
-                        <span className="font-mono font-bold text-sm text-slate-900 mr-2">Size {r.size || "—"}</span>
-                        <span className="text-xs text-slate-500">Full Job Qty: <strong className="font-mono text-slate-700">{fullQty} prs</strong></span>
-                        {r.completed_qty != null && (
-                          <span className="text-xs text-slate-400 ml-2">({r.completed_qty} completed)</span>
-                        )}
+                        <span className="font-mono font-bold text-sm text-slate-900 mr-2">{g.style_code}</span>
+                        <span className="text-xs font-bold text-[#C27842]">{g.color}</span>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Dispatch now:</label>
-                        <input
-                          type="number"
-                          min="0"
-                          max={fullQty}
-                          data-testid={`dispatch-qty-input-${r.id}`}
-                          value={currentVal}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setDispatchQuantities(prev => ({
-                              ...prev,
-                              [r.id]: v === "" ? "" : Math.max(0, Math.min(fullQty, parseInt(v, 10) || 0))
-                            }));
-                          }}
-                          className="w-24 border-2 border-slate-300 px-2.5 py-1.5 font-mono text-sm text-right font-bold text-slate-900 focus:border-[#0D9488] outline-none"
-                        />
-                        <span className="text-xs font-mono text-slate-500">prs</span>
-                      </div>
+                      <span className="text-xs font-mono text-slate-500 font-bold">{g.totalQty} pairs</span>
                     </div>
+                    <div className="space-y-2 pt-1">
+                      {(g.rows || []).map((r) => {
+                        const fullQty = r.quantity || 0;
+                        const completedQty = r.completed_qty != null ? r.completed_qty : fullQty;
+                        const currentVal = dispatchQuantities[r.id] !== undefined ? dispatchQuantities[r.id] : completedQty;
+                        const nowQty = currentVal === "" ? 0 : Number(currentVal);
+                        const remainder = Math.max(0, fullQty - nowQty);
+                        const stageObj = STAGES.find(s => s.key === r.stage);
+                        const stageLabel = stageObj?.label || r.stage || "Production";
 
-                    {remainder > 0 && (
-                      <div className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-1 rounded flex items-center gap-1.5" data-testid={`remainder-indicator-${r.id}`}>
-                        <span>⚠️</span>
-                        <span>
-                          <strong>{remainder} pairs</strong> will remain active in <strong>{stageLabel}</strong> stage
-                        </span>
-                      </div>
-                    )}
+                        return (
+                          <div key={r.id} className="bg-slate-50 border border-slate-200 p-2.5 rounded space-y-1.5">
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                              <div>
+                                <span className="font-mono font-bold text-sm text-slate-900 mr-2">Size {r.size || "—"}</span>
+                                <span className="text-xs text-slate-500">Full: <strong className="font-mono text-slate-700">{fullQty} prs</strong></span>
+                                {r.completed_qty != null && (
+                                  <span className="text-xs text-slate-400 ml-2">({r.completed_qty} completed)</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Dispatch now:</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max={fullQty}
+                                  data-testid={`dispatch-qty-input-${r.id}`}
+                                  value={currentVal}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setDispatchQuantities(prev => ({
+                                      ...prev,
+                                      [r.id]: v === "" ? "" : Math.max(0, Math.min(fullQty, parseInt(v, 10) || 0))
+                                    }));
+                                  }}
+                                  className="w-24 border-2 border-slate-300 px-2.5 py-1.5 font-mono text-sm text-right font-bold text-slate-900 focus:border-[#0D9488] outline-none bg-white"
+                                />
+                                <span className="text-xs font-mono text-slate-500">prs</span>
+                              </div>
+                            </div>
+                            {remainder > 0 && (
+                              <div className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-2 py-0.5 rounded flex items-center gap-1.5" data-testid={`remainder-indicator-${r.id}`}>
+                                <span>⚠️</span>
+                                <span><strong>{remainder} pairs</strong> will remain active in <strong>{stageLabel}</strong></span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                );
-              })}
+                ))
+              ) : (
+                (primaryGroup.rows || []).map((r) => {
+                  const fullQty = r.quantity || 0;
+                  const completedQty = r.completed_qty != null ? r.completed_qty : fullQty;
+                  const currentVal = dispatchQuantities[r.id] !== undefined ? dispatchQuantities[r.id] : completedQty;
+                  const nowQty = currentVal === "" ? 0 : Number(currentVal);
+                  const remainder = Math.max(0, fullQty - nowQty);
+                  const stageObj = STAGES.find(s => s.key === r.stage);
+                  const stageLabel = stageObj?.label || r.stage || "Production";
+
+                  return (
+                    <div key={r.id} className="bg-white border border-slate-200 p-3 rounded space-y-2">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                          <span className="font-mono font-bold text-sm text-slate-900 mr-2">Size {r.size || "—"}</span>
+                          <span className="text-xs text-slate-500">Full Job Qty: <strong className="font-mono text-slate-700">{fullQty} prs</strong></span>
+                          {r.completed_qty != null && (
+                            <span className="text-xs text-slate-400 ml-2">({r.completed_qty} completed)</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Dispatch now:</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max={fullQty}
+                            data-testid={`dispatch-qty-input-${r.id}`}
+                            value={currentVal}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setDispatchQuantities(prev => ({
+                                ...prev,
+                                [r.id]: v === "" ? "" : Math.max(0, Math.min(fullQty, parseInt(v, 10) || 0))
+                              }));
+                            }}
+                            className="w-24 border-2 border-slate-300 px-2.5 py-1.5 font-mono text-sm text-right font-bold text-slate-900 focus:border-[#0D9488] outline-none"
+                          />
+                          <span className="text-xs font-mono text-slate-500">prs</span>
+                        </div>
+                      </div>
+
+                      {remainder > 0 && (
+                        <div className="text-[11px] bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-1 rounded flex items-center gap-1.5" data-testid={`remainder-indicator-${r.id}`}>
+                          <span>⚠️</span>
+                          <span>
+                            <strong>{remainder} pairs</strong> will remain active in <strong>{stageLabel}</strong> stage
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
 
@@ -3691,10 +3918,12 @@ function DispatchDialog({ group, onClose, load }) {
 
           {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded">{err}</div>}
           {done && (
-            <div className="bg-teal-50 border border-teal-200 text-teal-800 text-sm px-4 py-4 rounded space-y-3">
+            <div className="bg-teal-50 border border-teal-200 text-teal-800 text-sm px-4 py-4 rounded space-y-3" data-testid="dispatch-success-msg">
               <div>
                 <div className="font-bold">✅ Dispatched — Invoice {done.invoice_no}</div>
-                <div className="text-xs text-teal-700 mt-1">ZIP downloaded. Re-download individual documents:</div>
+                <div className="text-xs text-teal-700 mt-1">
+                  {isMerged ? `ZIP downloaded. Single invoice generated for ${activeGroups.length} production cards.` : "ZIP downloaded."} Re-download individual documents:
+                </div>
               </div>
               <div className="flex flex-wrap gap-2 pt-1">
                 <button
@@ -3734,11 +3963,16 @@ function DispatchDialog({ group, onClose, load }) {
         <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-between shrink-0">
           <button onClick={onClose} className="text-sm text-slate-600 hover:text-slate-900 font-medium">{done ? "Close" : "Cancel"}</button>
           {!done && (
-            <button type="button" disabled={loading || !poId} onClick={handleDispatch} data-testid="dispatch-confirm-btn"
-              className="px-6 py-2.5 bg-[#0D9488] hover:bg-[#0B7A70] text-white font-bold uppercase tracking-wider text-xs shadow-md disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2">
+            <button
+              type="button"
+              disabled={loading || !poId || (isMerged && unpackedCards.length > 0 && !done)}
+              onClick={handleDispatch}
+              data-testid="dispatch-confirm-btn"
+              className="px-6 py-2.5 bg-[#0D9488] hover:bg-[#0B7A70] text-white font-bold uppercase tracking-wider text-xs shadow-md disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            >
               {loading
                 ? <><svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Generating…</>
-                : <><FileDown className="w-4 h-4" /> Generate &amp; Download ZIP</>
+                : <><FileDown className="w-4 h-4" /> {isMerged ? "Generate Merged Docs & Download ZIP" : "Generate & Download ZIP"}</>
               }
             </button>
           )}

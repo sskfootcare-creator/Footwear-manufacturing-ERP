@@ -129,6 +129,10 @@ class MockInvoiceDB:
         self.sku_map = MagicMock()
         self.sku_map.find = MagicMock(return_value=MockCursor([]))
 
+        self.po_ean_codes = MagicMock()
+        self.po_ean_codes.find_one = AsyncMock(return_value=None)
+        self.po_ean_codes.find = MagicMock(return_value=MockCursor([]))
+
         self.audit_logs = MagicMock()
         self.audit_logs.insert_one = AsyncMock(return_value=MagicMock(inserted_id="audit_1"))
 
@@ -850,4 +854,193 @@ def test_two_phase_partial_and_final_dispatch_lifecycle(client, mock_invoice_env
     inv_quantities = sorted([inv["total_quantity"] for inv in inv_list])
     assert inv_quantities == [40, 60]  # Exactly 40 and 60 pairs
     assert sum(inv_quantities) == 100  # Exactly 100 pairs total
+
+
+def test_qc_pack_merge_dispatch_same_po(client, mock_invoice_env):
+    """Test merging multiple QC & Pack cards under the same PO:
+    - Rejects dispatch if any selected job is missing packed cartons (HTTP 400).
+    - Dispatches single consolidated invoice with 1 line item per style/color.
+    - Sequentially numbers carton boxes 1..N grouped naturally by style/color/size.
+    - Sets merged=True on invoice and marks all jobs dispatched.
+    """
+    po_id = "507f1f77bcf86cd799439099"
+    job_1 = "507f1f77bcf86cd799439091"
+    job_2 = "507f1f77bcf86cd799439092"
+    carton_1 = "507f1f77bcf86cd7994390c1"
+    carton_2 = "507f1f77bcf86cd7994390c2"
+    carton_3 = "507f1f77bcf86cd7994390c3"
+    carton_4 = "507f1f77bcf86cd7994390c4"
+
+    # 1. PO setup with 2 styles/colors
+    mock_invoice_env.pos_store[po_id] = {
+        "_id": ObjectId(po_id),
+        "id": po_id,
+        "po_number": "PO-MERGE-001",
+        "client_name": "Metro Brands Ltd",
+        "delivery_address": "Bhiwandi Hub, Maharashtra",
+        "line_items": [
+            {
+                "style_code": "OXFORD",
+                "color": "Black",
+                "description": "Oxford Classic Black",
+                "unit_price": 500.0,
+                "hsn_code": "64029990",
+            },
+            {
+                "style_code": "BROGUE",
+                "color": "Tan",
+                "description": "Brogue Wingtip Tan",
+                "unit_price": 600.0,
+                "hsn_code": "64029990",
+            },
+        ],
+    }
+
+    # 2. Production jobs in qc_pack
+    mock_invoice_env.production_jobs_store[job_1] = {
+        "_id": ObjectId(job_1),
+        "id": job_1,
+        "po_id": po_id,
+        "po_number": "PO-MERGE-001",
+        "client_name": "Metro Brands Ltd",
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "quantity": 50,
+        "completed_qty": 50,
+        "stage": "qc_pack",
+    }
+    mock_invoice_env.production_jobs_store[job_2] = {
+        "_id": ObjectId(job_2),
+        "id": job_2,
+        "po_id": po_id,
+        "po_number": "PO-MERGE-001",
+        "client_name": "Metro Brands Ltd",
+        "style_code": "BROGUE",
+        "color": "Tan",
+        "size": "9",
+        "quantity": 70,
+        "completed_qty": 70,
+        "stage": "qc_pack",
+    }
+
+    # 3. Only pack cartons for Job 1 initially
+    mock_invoice_env.packing_cartons_store[carton_1] = {
+        "_id": ObjectId(carton_1),
+        "id": carton_1,
+        "job_id": job_1,
+        "po_id": po_id,
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "qty": 25,
+        "status": "packed",
+    }
+    mock_invoice_env.packing_cartons_store[carton_2] = {
+        "_id": ObjectId(carton_2),
+        "id": carton_2,
+        "job_id": job_1,
+        "po_id": po_id,
+        "style_code": "OXFORD",
+        "color": "Black",
+        "size": "8",
+        "qty": 25,
+        "status": "packed",
+    }
+
+    # Attempt to dispatch both jobs when Job 2 has NO packed cartons -> must fail 400
+    res_fail = client.post("/api/dispatch", json={
+        "po_id": po_id,
+        "job_ids": [job_1, job_2],
+        "dispatch_quantities": {job_1: 50, job_2: 70},
+        "transport_mode": "Surface Express",
+    })
+    assert res_fail.status_code == 400
+    assert "Please pack cartons before dispatching" in res_fail.json().get("detail", "")
+
+    # 4. Now pack cartons for Job 2
+    mock_invoice_env.packing_cartons_store[carton_3] = {
+        "_id": ObjectId(carton_3),
+        "id": carton_3,
+        "job_id": job_2,
+        "po_id": po_id,
+        "style_code": "BROGUE",
+        "color": "Tan",
+        "size": "9",
+        "qty": 35,
+        "status": "packed",
+    }
+    mock_invoice_env.packing_cartons_store[carton_4] = {
+        "_id": ObjectId(carton_4),
+        "id": carton_4,
+        "job_id": job_2,
+        "po_id": po_id,
+        "style_code": "BROGUE",
+        "color": "Tan",
+        "size": "9",
+        "qty": 35,
+        "status": "packed",
+    }
+
+    # 5. Execute merged dispatch
+    res_success = client.post("/api/dispatch", json={
+        "po_id": po_id,
+        "job_ids": [job_1, job_2],
+        "dispatch_quantities": {job_1: 50, job_2: 70},
+        "transport_mode": "Surface Express",
+        "vehicle_no": "MH-04-SS-1234",
+    })
+    assert res_success.status_code == 200
+    assert res_success.headers.get("content-type") == "application/zip"
+    assert "x-invoice-no" in res_success.headers
+
+    # Verify ZIP contents
+    zip_bytes = io.BytesIO(res_success.content)
+    with zipfile.ZipFile(zip_bytes, "r") as zf:
+        namelist = zf.namelist()
+        assert any(n.startswith("Invoice-") and n.endswith(".pdf") for n in namelist)
+        assert any(n.startswith("PackingList-") and n.endswith(".xlsx") for n in namelist)
+        assert any(n.startswith("CartonLabels-") and n.endswith(".pdf") for n in namelist)
+        assert any(n.startswith("CartonList-") and n.endswith(".xlsx") for n in namelist)
+
+    # Verify single invoice generated
+    assert len(mock_invoice_env.invoices_store) == 1
+    invoice = list(mock_invoice_env.invoices_store.values())[0]
+    assert invoice["merged"] is True
+    assert invoice["total_quantity"] == 120
+    assert len(invoice["line_items_snapshot"]) == 2
+    # Verify line items breakdown
+    styles_in_inv = {li["style_code"]: li["quantity"] for li in invoice["line_items_snapshot"]}
+    assert styles_in_inv == {"OXFORD": 50, "BROGUE": 70}
+
+    # Verify sequential carton numbering (1..4)
+    c1 = mock_invoice_env.packing_cartons_store[carton_1]
+    c2 = mock_invoice_env.packing_cartons_store[carton_2]
+    c3 = mock_invoice_env.packing_cartons_store[carton_3]
+    c4 = mock_invoice_env.packing_cartons_store[carton_4]
+
+    assert c1["status"] == "dispatched"
+    assert c2["status"] == "dispatched"
+    assert c3["status"] == "dispatched"
+    assert c4["status"] == "dispatched"
+
+    # Sorted by style_code ('BROGUE' before 'OXFORD')
+    assert c3["box_number"] == 1
+    assert c4["box_number"] == 2
+    assert c1["box_number"] == 3
+    assert c2["box_number"] == 4
+
+    # Verify jobs were flagged dispatched
+    assert mock_invoice_env.production_jobs_store[job_1]["stage"] == "dispatched"
+    assert mock_invoice_env.production_jobs_store[job_2]["stage"] == "dispatched"
+    assert mock_invoice_env.production_jobs_store[job_1]["invoice_generated_at"] is not None
+    assert mock_invoice_env.production_jobs_store[job_2]["invoice_generated_at"] is not None
+
+    # Verify invoice links to both jobs and cartons link to invoice
+    assert set(invoice["job_ids"]) == {job_1, job_2}
+    assert c1["invoice_id"] == str(invoice["_id"])
+    assert c2["invoice_id"] == str(invoice["_id"])
+    assert c3["invoice_id"] == str(invoice["_id"])
+    assert c4["invoice_id"] == str(invoice["_id"])
+
 

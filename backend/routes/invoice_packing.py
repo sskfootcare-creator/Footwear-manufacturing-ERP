@@ -1956,6 +1956,30 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
 
     cartons = [stringify(c) for c in carton_docs]
 
+    # Verify that all effective jobs actually have packed cartons
+    packed_job_ids = {str(c.get("job_id")) for c in cartons if c.get("job_id")}
+    missing_jobs = [jid for jid in effective_job_ids if jid not in packed_job_ids]
+    if missing_jobs:
+        unpacked_docs = await db.production_jobs.find({"_id": {"$in": [oid(j) for j in missing_jobs]}}).to_list(100)
+        unpacked_labels = [f"{j.get('style_code')} ({j.get('color')} Sz {j.get('size')})" for j in unpacked_docs]
+        raise HTTPException(
+            400,
+            f"Some selected jobs do not have packed cartons. Please pack cartons before dispatching: {', '.join(unpacked_labels[:5])}"
+        )
+
+    # Sort cartons by style_code, color, numeric size, and ID so multi-card merged dispatches are sequentially numbered
+    def _carton_sort_key(c):
+        sc = str(c.get("style_code") or "")
+        co = str(c.get("color") or "")
+        sz = str(c.get("size") or "")
+        try:
+            sz_num = float(sz)
+        except ValueError:
+            sz_num = float("inf")
+        return (sc, co, sz_num, sz, str(c.get("id") or c.get("_id") or ""))
+
+    cartons.sort(key=_carton_sort_key)
+
     # 3. Assign box_number 1..N
     for idx, c in enumerate(cartons):
         c["box_number"] = idx + 1
@@ -2055,6 +2079,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     # 8. Store invoice record
     totals = _compute_invoice_totals(po, line_items)
     credit_days = _extract_credit_days(po.get("payment_terms", ""))
+    is_merged = len(set((c.get("style_code"), c.get("color")) for c in cartons)) > 1
     inv_doc = {
         "invoice_no": invoice_no,
         "invoice_date": invoice_date,
@@ -2076,7 +2101,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "by": u["email"],
         "created_at": now_iso(),
         "file_b64": base64.b64encode(invoice_pdf).decode("ascii"),
-        "merged": False,
+        "merged": is_merged,
     }
     inv_res = await db.invoices.insert_one(inv_doc)
     invoice_id = str(inv_res.inserted_id)
