@@ -653,6 +653,22 @@ export default function Production() {
     } catch (e) { alert("Bulk assignment failed: " + (e.response?.data?.detail || e.message)); }
   };
 
+  const archiveDispatchedJobs = async (jobIds, label = "card(s)") => {
+    if (!jobIds || jobIds.length === 0) return;
+    const ok = window.confirm(`Verify and move ${label} to Archive?`);
+    if (!ok) return;
+    try {
+      const res = await http.post("/production/jobs/archive", { job_ids: jobIds });
+      const count = res.data?.archived_count || jobIds.length;
+      setSelected({});
+      setQcPackSelected({});
+      await load();
+      alert(`Successfully verified and moved ${count} card(s) to Archive.`);
+    } catch (e) {
+      alert("Archiving failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
   const dispatchedCount = Object.keys(selected).length;
   const procSelectedCount = Object.keys(procSelected).length;
   const qcPackSelectedCount = Object.keys(qcPackSelected).length;
@@ -732,6 +748,21 @@ export default function Production() {
                 <FileDown className="w-3.5 h-3.5 inline" />
                 <span className="hidden sm:inline">{merging ? "..." : `Merge Carton List (${dispatchedCount})`}</span>
                 <span className="inline sm:hidden">({dispatchedCount})</span>
+              </BtnPrimary>
+            )}
+            {dispatchedCount > 0 && (
+              <BtnPrimary
+                onClick={() => {
+                  const sel = Object.values(selected);
+                  const allJids = sel.flatMap(g => (g.rows || []).map(r => r.id));
+                  archiveDispatchedJobs(allJids, `${sel.length} merged production card(s)`);
+                }}
+                data-testid="archive-selected-dispatched-btn"
+                className="bg-[#0F172A] border-[#0F172A] hover:bg-slate-800 text-white px-3 sm:px-4 flex items-center gap-1.5 shadow-sm"
+              >
+                <Archive className="w-3.5 h-3.5 inline text-amber-400" />
+                <span className="hidden sm:inline">Verify &amp; Move to Archive ({dispatchedCount})</span>
+                <span className="inline sm:hidden">Archive ({dispatchedCount})</span>
               </BtnPrimary>
             )}
           </div>
@@ -847,6 +878,7 @@ export default function Production() {
                         dispatchRecordByJobId={dispatchRecordByJobId}
                         onDownloadDispatchFile={downloadDispatchFile}
                         onOpenDispatchDetails={(group) => setDispatchDetailFor(group)}
+                        onArchiveDispatched={(jids, lbl) => archiveDispatchedJobs(jids, lbl)}
                       />
                     ))}
                   </div>
@@ -932,6 +964,7 @@ export default function Production() {
           styleByCode={styleByCode}
           onClose={() => setDispatchDetailFor(null)}
           onDownloadDispatchFile={downloadDispatchFile}
+          onArchive={archiveDispatchedJobs}
         />
       )}
 
@@ -1006,7 +1039,7 @@ function ColorGroupCard(props) {
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isPlanning, isProc, isDispatched,
     isQcPack, isQcPackSelected, onToggleQcPackSelect, isQcPackSelectDisabled, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
-    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails } = props;
+    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails, onArchiveDispatched } = props;
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -1410,6 +1443,19 @@ function ColorGroupCard(props) {
           {isDispatched && (
             <button onClick={() => onOpenDispatchDetails?.(group)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-3 py-1 flex items-center gap-1 transition-colors" data-testid={`dispatch-details-btn-${group.key}`}>
               <Truck className="w-3 h-3" /> View Dispatch Details
+            </button>
+          )}
+          {isDispatched && (
+            <button
+              onClick={() => {
+                const jids = (group.rows || []).map(r => r.id);
+                onArchiveDispatched?.(jids, `${group.style_code} (${group.color})`);
+              }}
+              className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-3 py-1 flex items-center gap-1 transition-colors shadow-sm"
+              data-testid={`archive-btn-${group.key}`}
+              title="Verify and move this card (and any merged constituent cards) to Archive"
+            >
+              <Archive className="w-3 h-3 text-amber-400" /> Move to Archive
             </button>
           )}
           {isDispatched && (
@@ -2500,7 +2546,7 @@ function DLPair({ label, value }) {
 
 
 /* -------------------- DISPATCH DETAILS MODAL -------------------- */
-function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [], styleByCode = {}, onClose, onDownloadDispatchFile }) {
+function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [], styleByCode = {}, onClose, onDownloadDispatchFile, onArchive }) {
   const [loading, setLoading] = useState(true);
   const [dispatchRecord, setDispatchRecord] = useState(null);
   const [cartons, setCartons] = useState([]);
@@ -2852,8 +2898,22 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3.5 flex justify-end shrink-0">
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3.5 flex items-center justify-between shrink-0 gap-3">
           <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+          {onArchive && (
+            <button
+              type="button"
+              onClick={async () => {
+                await onArchive(jobIds, `${groups.length} production card(s)`);
+                onClose();
+              }}
+              className="px-4 py-2 bg-[#0F172A] hover:bg-slate-800 text-white font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md transition-colors"
+              data-testid="dispatch-details-archive-btn"
+            >
+              <Archive className="w-3.5 h-3.5 text-amber-400" />
+              Verify &amp; Move to Archive
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -3564,6 +3624,15 @@ function PackCartonDialog({ group, style, onClose, load }) {
 // ═══════════════════════════════════════════════════════════
 //  DispatchDialog — invoice + packing list + carton labels
 // ═══════════════════════════════════════════════════════════
+function DispatchField({ label, children }) {
+  return (
+    <div className="space-y-1">
+      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-500">{label}</label>
+      {children}
+    </div>
+  );
+}
+
 function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
   const activeGroups = useMemo(() => {
     if (groups && Array.isArray(groups) && groups.length > 0) return groups;
@@ -3604,6 +3673,24 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
   const [done, setDone] = useState(null);
   const [err, setErr] = useState(null);
   const [unpackedCards, setUnpackedCards] = useState([]);
+  const [archiving, setArchiving] = useState(false);
+
+  const handleVerifyAndArchive = async () => {
+    if (!jobIds.length) return;
+    setArchiving(true);
+    try {
+      const res = await http.post("/production/jobs/archive", { job_ids: jobIds });
+      const count = res.data?.archived_count || jobIds.length;
+      alert(`Verified and moved ${count} production card(s) to Archive.`);
+      onSuccess?.();
+      await load();
+      onClose();
+    } catch (e) {
+      alert("Archiving failed: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setArchiving(false);
+    }
+  };
 
   useEffect(() => {
     if (!jobIds.length) return;
@@ -3696,12 +3783,6 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
     } finally { setLoading(false); }
   }, [form, poId, jobIds, dispatchQuantities, unpackedCards, onSuccess, load]);
 
-  const Field = ({ label, children }) => (
-    <div className="space-y-1">
-      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-500">{label}</label>
-      {children}
-    </div>
-  );
   const ic = "w-full border border-slate-300 px-2.5 py-2.5 text-sm text-slate-800 focus:border-[#0D9488] outline-none min-h-[44px]";
 
   return (
@@ -3906,14 +3987,14 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
 
           {/* Shipping fields */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Transport Mode"><input className={ic} value={form.transport_mode} placeholder="By Road" onChange={e => set("transport_mode", e.target.value)} /></Field>
-            <Field label="Vehicle No."><input className={ic} value={form.vehicle_no} placeholder="MH-01-AB-1234" onChange={e => set("vehicle_no", e.target.value)} /></Field>
-            <Field label="Transporter"><input className={ic} value={form.transporter} placeholder="Transporter name" onChange={e => set("transporter", e.target.value)} /></Field>
-            <Field label="Supply / Dispatch Date"><input type="date" className={ic} value={form.supply_date} onChange={e => set("supply_date", e.target.value)} /></Field>
-            <Field label="Carton Dimensions"><input className={ic} value={form.carton_dim} placeholder="60x50x30 CMS" onChange={e => set("carton_dim", e.target.value)} /></Field>
-            <Field label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" inputMode="decimal" onChange={e => set("net_wt_per_carton", e.target.value)} /></Field>
-            <Field label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" inputMode="decimal" onChange={e => set("gross_wt_per_carton", e.target.value)} /></Field>
-            <Field label="Notes"><input className={ic} value={form.notes} placeholder="Optional" onChange={e => set("notes", e.target.value)} /></Field>
+            <DispatchField label="Transport Mode"><input className={ic} value={form.transport_mode} placeholder="By Road" data-testid="dispatch-input-transport-mode" onChange={e => set("transport_mode", e.target.value)} /></DispatchField>
+            <DispatchField label="Vehicle No."><input className={ic} value={form.vehicle_no} placeholder="MH-01-AB-1234" data-testid="dispatch-input-vehicle-no" onChange={e => set("vehicle_no", e.target.value)} /></DispatchField>
+            <DispatchField label="Transporter"><input className={ic} value={form.transporter} placeholder="Transporter name" data-testid="dispatch-input-transporter" onChange={e => set("transporter", e.target.value)} /></DispatchField>
+            <DispatchField label="Supply / Dispatch Date"><input type="date" className={ic} value={form.supply_date} data-testid="dispatch-input-supply-date" onChange={e => set("supply_date", e.target.value)} /></DispatchField>
+            <DispatchField label="Carton Dimensions"><input className={ic} value={form.carton_dim} placeholder="60x50x30 CMS" data-testid="dispatch-input-carton-dim" onChange={e => set("carton_dim", e.target.value)} /></DispatchField>
+            <DispatchField label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" inputMode="decimal" data-testid="dispatch-input-net-wt" onChange={e => set("net_wt_per_carton", e.target.value)} /></DispatchField>
+            <DispatchField label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" inputMode="decimal" data-testid="dispatch-input-gross-wt" onChange={e => set("gross_wt_per_carton", e.target.value)} /></DispatchField>
+            <DispatchField label="Notes"><input className={ic} value={form.notes} placeholder="Optional" data-testid="dispatch-input-notes" onChange={e => set("notes", e.target.value)} /></DispatchField>
           </div>
 
           {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded">{err}</div>}
@@ -3955,14 +4036,41 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
                   Carton List XLSX
                 </button>
               </div>
+
+              <div className="pt-3 border-t border-teal-200/80 flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-xs text-teal-900 font-medium">
+                  Verified documents? Move dispatched cards to Archive:
+                </div>
+                <button
+                  type="button"
+                  onClick={handleVerifyAndArchive}
+                  disabled={archiving}
+                  className="px-4 py-2 bg-[#0F172A] hover:bg-slate-800 text-white font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md transition-all disabled:opacity-50"
+                  data-testid="dispatch-verify-archive-btn"
+                >
+                  <Archive className="w-3.5 h-3.5 text-amber-400" />
+                  {archiving ? "Archiving..." : `Verify & Move ${isMerged ? `All (${activeGroups.length} Cards)` : "Card"} to Archive`}
+                </button>
+              </div>
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-between shrink-0">
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 flex items-center justify-between shrink-0 gap-3">
           <button onClick={onClose} className="text-sm text-slate-600 hover:text-slate-900 font-medium">{done ? "Close" : "Cancel"}</button>
-          {!done && (
+          {done ? (
+            <button
+              type="button"
+              onClick={handleVerifyAndArchive}
+              disabled={archiving}
+              className="px-6 py-2.5 bg-[#0F172A] hover:bg-slate-800 text-white font-bold uppercase tracking-wider text-xs shadow-md transition-colors flex items-center gap-2 disabled:opacity-50"
+              data-testid="dispatch-dialog-archive-footer-btn"
+            >
+              <Archive className="w-4 h-4 text-amber-400" />
+              {archiving ? "Moving..." : `Verify & Move to Archive ${isMerged ? `(${activeGroups.length} Cards)` : ""}`}
+            </button>
+          ) : (
             <button
               type="button"
               disabled={loading || !poId || (isMerged && unpackedCards.length > 0 && !done)}

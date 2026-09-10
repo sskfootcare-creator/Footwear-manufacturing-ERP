@@ -16,7 +16,7 @@ from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
 
 from auth import get_current_user_factory, require_roles
-from models.orders import POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES
+from models.orders import POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES, ArchiveJobsRequest
 from models.materials import QuantityUpdate
 from models.components import ComponentUpdate
 from models.workers import AssignmentUpdate, BulkAssign
@@ -2565,6 +2565,73 @@ async def list_archive(request: Request):
     db = get_db()
     docs = await db.production_jobs.find({"archived": True}).sort("archived_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
+
+
+@pos_router.post("/production/jobs/archive")
+async def archive_jobs(payload: ArchiveJobsRequest, request: Request):
+    """Verify and move production jobs to archive.
+    If any job has an invoice_id or belongs to a merged dispatch, automatically includes all
+    sibling constituent jobs so that all merged production cards are moved to archive together."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production", "sales")(u)
+    db = get_db()
+
+    if not payload.job_ids:
+        raise HTTPException(400, "job_ids required")
+
+    target_oids = []
+    for jid in payload.job_ids:
+        try:
+            target_oids.append(oid(jid))
+        except HTTPException:
+            continue
+
+    if not target_oids:
+        raise HTTPException(400, "No valid job IDs provided")
+
+    jobs = await db.production_jobs.find({"_id": {"$in": target_oids}}).to_list(1000)
+    if not jobs:
+        raise HTTPException(404, "No matching production jobs found")
+
+    # If any job belongs to a merged dispatch (shared invoice_id), include all sibling jobs
+    all_job_oids = set(target_oids)
+    invoice_ids = [j.get("invoice_id") for j in jobs if j.get("invoice_id")]
+    if invoice_ids:
+        siblings = await db.production_jobs.find({"invoice_id": {"$in": invoice_ids}}).to_list(1000)
+        for s in siblings:
+            all_job_oids.add(s["_id"])
+
+    now = now_iso()
+    all_oids_list = list(all_job_oids)
+
+    await db.production_jobs.update_many(
+        {"_id": {"$in": all_oids_list}},
+        {"$set": {
+            "archived": True,
+            "archived_at": now,
+            "stage": "dispatched",
+            "invoice_generated_at": now,
+            "packing_generated_at": now,
+        }}
+    )
+
+    for o_id in all_oids_list:
+        await db.production_jobs.update_one(
+            {"_id": o_id},
+            {"$push": {"history": {
+                "stage": "archived",
+                "at": now,
+                "by": u.get("email", "system"),
+                "notes": "Verified and moved to archive",
+            }}}
+        )
+
+    return {
+        "status": "success",
+        "message": f"Successfully moved {len(all_oids_list)} card(s) to archive",
+        "archived_count": len(all_oids_list),
+        "job_ids": [str(o) for o in all_oids_list],
+    }
 
 
 @pos_router.patch("/production/jobs/{jid}")

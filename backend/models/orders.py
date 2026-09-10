@@ -82,3 +82,7 @@ class ProductionJobDoc(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     history: Optional[List[dict]] = None
+
+
+class ArchiveJobsRequest(BaseModel):
+    job_ids: List[str]

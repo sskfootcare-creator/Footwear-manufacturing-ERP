@@ -1133,5 +1133,77 @@ def test_client_ledger_and_ageing_contract(client, mock_pos_env):
     assert found["outstanding_balance"] == 50000.0
 
 
+def test_archive_production_jobs_endpoint(client, mock_pos_env):
+    """Test POST /api/production/jobs/archive:
+    - Archives target jobs.
+    - If jobs share an invoice_id (from merged dispatch), includes sibling jobs.
+    - Moves jobs to GET /api/production/archive and removes from active jobs.
+    """
+    job_1 = str(ObjectId())
+    job_2 = str(ObjectId())
+    job_3 = str(ObjectId())
+    inv_id = str(ObjectId())
+
+    # Job 1 & 2 are part of a merged dispatch (share inv_id)
+    mock_pos_env.production_jobs.store[job_1] = {
+        "_id": ObjectId(job_1),
+        "id": job_1,
+        "style_code": "SSK_00004",
+        "color": "BROWN",
+        "stage": "dispatched",
+        "invoice_id": inv_id,
+        "archived": False,
+    }
+    mock_pos_env.production_jobs.store[job_2] = {
+        "_id": ObjectId(job_2),
+        "id": job_2,
+        "style_code": "SSK_00007",
+        "color": "TAN",
+        "stage": "dispatched",
+        "invoice_id": inv_id,
+        "archived": False,
+    }
+    # Job 3 is an unrelated active job
+    mock_pos_env.production_jobs.store[job_3] = {
+        "_id": ObjectId(job_3),
+        "id": job_3,
+        "style_code": "SSK_00010",
+        "color": "BLACK",
+        "stage": "qc_pack",
+        "archived": False,
+    }
+
+    # Archive specifying only job_1 -> should automatically include sibling job_2 sharing inv_id
+    res = client.post("/api/production/jobs/archive", json={"job_ids": [job_1]})
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["archived_count"] == 2
+    assert job_1 in data["job_ids"]
+    assert job_2 in data["job_ids"]
+
+    # Verify both jobs are marked archived in store
+    assert mock_pos_env.production_jobs.store[job_1]["archived"] is True
+    assert mock_pos_env.production_jobs.store[job_2]["archived"] is True
+    assert mock_pos_env.production_jobs.store[job_3]["archived"] is False
+
+    # Check active jobs list excludes archived jobs
+    r_jobs = client.get("/api/production/jobs")
+    assert r_jobs.status_code == 200
+    active_ids = [j["id"] for j in r_jobs.json()]
+    assert job_1 not in active_ids
+    assert job_2 not in active_ids
+    assert job_3 in active_ids
+
+    # Check archive endpoint includes archived jobs
+    r_arch = client.get("/api/production/archive")
+    assert r_arch.status_code == 200
+    arch_ids = [j["id"] for j in r_arch.json()]
+    assert job_1 in arch_ids
+    assert job_2 in arch_ids
+    assert job_3 not in arch_ids
+
+
+
 
 

@@ -154,6 +154,20 @@ describe("QC & Pack Merged Dispatch Functionality", () => {
     expect(within(quantitiesSection).getByText("WINE")).toBeInTheDocument();
     expect(within(quantitiesSection).getByText("CREAM")).toBeInTheDocument();
 
+    // Verify typing in fields keeps focus and does not unmount elements
+    const transportModeInput = screen.getByTestId("dispatch-input-transport-mode");
+    transportModeInput.focus();
+    expect(document.activeElement).toBe(transportModeInput);
+    fireEvent.change(transportModeInput, { target: { value: "Road Express" } });
+    expect(transportModeInput).toHaveValue("Road Express");
+    expect(document.activeElement).toBe(transportModeInput);
+
+    const vehicleNoInput = screen.getByTestId("dispatch-input-vehicle-no");
+    vehicleNoInput.focus();
+    fireEvent.change(vehicleNoInput, { target: { value: "MH-01-AB-9999" } });
+    expect(vehicleNoInput).toHaveValue("MH-01-AB-9999");
+    expect(document.activeElement).toBe(vehicleNoInput);
+
     // Mock successful dispatch response
     http.post.mockResolvedValueOnce({
       data: new Uint8Array([80, 75, 3, 4]), // ZIP magic bytes
@@ -190,5 +204,118 @@ describe("QC & Pack Merged Dispatch Functionality", () => {
       expect(screen.getByTestId("dispatch-success-msg")).toHaveTextContent("Dispatched — Invoice SSK26-27-088");
       expect(screen.getByTestId("dispatch-success-msg")).toHaveTextContent("Single invoice generated for 2 production cards");
     });
+
+    // 9. Verify and click "Verify & Move to Archive" in DispatchDialog
+    const verifyArchiveBtn = screen.getByTestId("dispatch-verify-archive-btn");
+    expect(verifyArchiveBtn).toBeInTheDocument();
+    expect(verifyArchiveBtn).toHaveTextContent("Verify & Move All (2 Cards) to Archive");
+
+    const footerArchiveBtn = screen.getByTestId("dispatch-dialog-archive-footer-btn");
+    expect(footerArchiveBtn).toBeInTheDocument();
+
+    const alertSpy = jest.spyOn(window, "alert").mockImplementation(() => {});
+    http.post.mockResolvedValueOnce({
+      data: { ok: true, archived_count: 2, job_ids: ["job_wine_1", "job_cream_1"] },
+    });
+
+    fireEvent.click(verifyArchiveBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith("/production/jobs/archive", {
+        job_ids: expect.arrayContaining(["job_wine_1", "job_cream_1"]),
+      });
+      expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining("Verified and moved 2 production card(s) to Archive"));
+    });
+    alertSpy.mockRestore();
+  });
+
+  test("Dispatched column provides Move to Archive on cards and multi-select archive button", async () => {
+    const dispatchedJob1 = {
+      ...mockJobCard1,
+      stage: "dispatched",
+      invoice_id: "inv_merged_1",
+      invoice_number: "SSK26-27-088",
+    };
+    const dispatchedJob2 = {
+      ...mockJobCard2,
+      stage: "dispatched",
+      invoice_id: "inv_merged_1",
+      invoice_number: "SSK26-27-088",
+    };
+
+    http.get.mockImplementation((url) => {
+      if (url.startsWith("/production/jobs")) {
+        return Promise.resolve({ data: [dispatchedJob1, dispatchedJob2] });
+      }
+      if (url.startsWith("/workers")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/styles")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/production/archive")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/packing-lists")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/dispatch-records")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/invoices")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/packing/cartons")) return Promise.resolve({ data: mockCartons });
+      return Promise.resolve({ data: [] });
+    });
+
+    const confirmSpy = jest.spyOn(window, "confirm").mockImplementation(() => true);
+    const alertSpy = jest.spyOn(window, "alert").mockImplementation(() => {});
+
+    render(
+      <MemoryRouter>
+        <Production />
+      </MemoryRouter>
+    );
+
+    // Wait for dispatched cards to render
+    await waitFor(() => {
+      expect(screen.getByTestId("group-PO-100::SSK_00017::WINE")).toBeInTheDocument();
+      expect(screen.getByTestId("group-PO-100::SSK_00017::CREAM")).toBeInTheDocument();
+    });
+
+    // Verify each card has "Move to Archive" button
+    const card1ArchiveBtn = screen.getByTestId("archive-btn-PO-100::SSK_00017::WINE");
+    const card2ArchiveBtn = screen.getByTestId("archive-btn-PO-100::SSK_00017::CREAM");
+    expect(card1ArchiveBtn).toBeInTheDocument();
+    expect(card2ArchiveBtn).toBeInTheDocument();
+
+    // Click single card archive button
+    http.post.mockResolvedValueOnce({
+      data: { ok: true, archived_count: 2, job_ids: ["job_wine_1", "job_cream_1"] },
+    });
+    fireEvent.click(card1ArchiveBtn);
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalled();
+      expect(http.post).toHaveBeenCalledWith("/production/jobs/archive", {
+        job_ids: ["job_wine_1"],
+      });
+      expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining("Successfully verified and moved 2 card(s) to Archive"));
+    });
+
+    // Test multi-select archiving: Select both cards via standard card selection checkboxes
+    const select1 = screen.getByTestId("select-PO-100::SSK_00017::WINE");
+    const select2 = screen.getByTestId("select-PO-100::SSK_00017::CREAM");
+    fireEvent.click(select1);
+    fireEvent.click(select2);
+
+    // Header should now show "Verify & Move to Archive (2)"
+    const headerArchiveBtn = screen.getByTestId("archive-selected-dispatched-btn");
+    expect(headerArchiveBtn).toBeInTheDocument();
+    expect(headerArchiveBtn).toHaveTextContent("Verify & Move to Archive (2)");
+
+    http.post.mockResolvedValueOnce({
+      data: { ok: true, archived_count: 2, job_ids: ["job_wine_1", "job_cream_1"] },
+    });
+    fireEvent.click(headerArchiveBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith("/production/jobs/archive", {
+        job_ids: expect.arrayContaining(["job_wine_1", "job_cream_1"]),
+      });
+    });
+
+    confirmSpy.mockRestore();
+    alertSpy.mockRestore();
   });
 });
+
