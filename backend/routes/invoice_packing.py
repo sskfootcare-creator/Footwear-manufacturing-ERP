@@ -24,6 +24,8 @@ from packing_list import (
     build_dispatch_packing_list,
     build_carton_list_xlsx,
     build_packing_list_pdf,
+    _resolve_sizes,
+    _carton_po_style,
     VENDOR,
     DEFAULT_SIZES,
 )
@@ -572,40 +574,55 @@ async def _enrich_cartons_with_mapped_sku(cartons: list[dict], db=None) -> list[
     sku_map_by_style_id = {str(m.get("style_id")): m.get("external_sku") for m in sku_mappings if m.get("external_sku")}
 
     for c in cartons:
-        existing = c.get("mapped_from_sku") or c.get("external_sku")
+        existing = c.get("po_style_code") or c.get("mapped_from_sku") or c.get("external_sku")
         if existing:
+            c["po_style_code"] = existing
             c["mapped_from_sku"] = existing
             c["external_sku"] = existing
             continue
 
         job = job_map.get(str(c.get("job_id")))
         if job:
-            mapped_sku = job.get("mapped_from_sku") or job.get("external_sku") or job.get("po_style_code")
+            mapped_sku = job.get("po_style_code") or job.get("mapped_from_sku") or job.get("external_sku")
             if mapped_sku:
+                c["po_style_code"] = mapped_sku
                 c["mapped_from_sku"] = mapped_sku
                 c["external_sku"] = mapped_sku
                 continue
 
-            po = po_map.get(str(job.get("po_id") or c.get("po_id")))
-            if po and po.get("line_items"):
-                c_style = c.get("style_code")
-                c_color = c.get("color")
-                c_size = str(c.get("size", ""))
+        po = po_map.get(str((job.get("po_id") if job else None) or c.get("po_id")))
+        if po and po.get("line_items"):
+            c_style = c.get("style_code")
+            c_color = c.get("color")
+            c_size = str(c.get("size", ""))
+            # Pass 1: exact match with size
+            for li in po.get("line_items", []):
+                if li.get("style_code") == c_style and li.get("color") == c_color and str(li.get("size", "")) == c_size:
+                    li_mapped = li.get("po_style_code") or li.get("mapped_from_sku") or li.get("external_sku") or li.get("customer_style_code") or li.get("external_code") or li.get("raw_style_code")
+                    if li_mapped:
+                        c["po_style_code"] = li_mapped
+                        c["mapped_from_sku"] = li_mapped
+                        c["external_sku"] = li_mapped
+                        break
+            # Pass 2: match style and color
+            if not c.get("po_style_code"):
                 for li in po.get("line_items", []):
-                    if li.get("style_code") == c_style and li.get("color") == c_color and str(li.get("size", "")) == c_size:
-                        li_mapped = li.get("mapped_from_sku") or li.get("external_sku") or li.get("external_code") or li.get("raw_style_code")
+                    if li.get("style_code") == c_style and li.get("color") == c_color:
+                        li_mapped = li.get("po_style_code") or li.get("mapped_from_sku") or li.get("external_sku") or li.get("customer_style_code") or li.get("external_code") or li.get("raw_style_code")
                         if li_mapped:
+                            c["po_style_code"] = li_mapped
                             c["mapped_from_sku"] = li_mapped
                             c["external_sku"] = li_mapped
                             break
-                if c.get("mapped_from_sku"):
-                    continue
-
-            sid = str(job.get("style_id") or c.get("style_id") or "")
-            if sid in sku_map_by_style_id:
-                c["mapped_from_sku"] = sku_map_by_style_id[sid]
-                c["external_sku"] = sku_map_by_style_id[sid]
+            if c.get("po_style_code"):
                 continue
+
+        sid = str((job.get("style_id") if job else None) or c.get("style_id") or "")
+        if sid in sku_map_by_style_id:
+            c["po_style_code"] = sku_map_by_style_id[sid]
+            c["mapped_from_sku"] = sku_map_by_style_id[sid]
+            c["external_sku"] = sku_map_by_style_id[sid]
+            continue
 
     return cartons
 
@@ -708,6 +725,8 @@ async def _generate_packing_bytes(payload_po: dict, options: dict, template_id: 
     """Resolve template (explicit or auto) and produce the xlsx bytes."""
     if db is None:
         db = getattr(__import__("server"), "db")
+    if cartons is not None:
+        cartons = await _enrich_cartons_with_mapped_sku(cartons, db=db)
     tpl_id = template_id
     if not tpl_id:
         tpl_id = await _auto_pick_template(payload_po.get("client_name", ""), db=db)
@@ -1655,13 +1674,14 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
             raise HTTPException(400, f"Size {size} not found in color group jobs")
         ean_code = ean_map.get(size, "")
         target_job = job_obj_map.get(job_id, job_objs[0])
-        mapped_sku = target_job.get("mapped_from_sku") or target_job.get("external_sku")
+        mapped_sku = target_job.get("po_style_code") or target_job.get("mapped_from_sku") or target_job.get("external_sku")
         
         carton_docs.append({
             "job_id": job_id,
             "po_id": str(po_id),
             "style_id": str(style_id),
             "style_code": style_code,
+            "po_style_code": mapped_sku or style_code,
             "mapped_from_sku": mapped_sku,
             "external_sku": mapped_sku,
             "color": color,
@@ -1997,8 +2017,10 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
             li_src = next((li for li in po_items if (li.get("style_code") or "").strip() == sc and (li.get("color") or "").strip() == color), {})
             desc = (li_src.get("description") or "").strip()
             clean_desc = re.sub(r'(\s+\d+|\s*/?\s*Sz\s*\d+)+$', '', desc, flags=re.IGNORECASE).strip()
+            po_style = c.get("po_style_code") or c.get("mapped_from_sku") or c.get("external_sku") or li_src.get("po_style_code") or li_src.get("external_sku") or li_src.get("mapped_from_sku") or li_src.get("customer_style_code") or sc
             qty_agg[key] = {
                 "style_code": sc,
+                "po_style_code": po_style,
                 "color": color,
                 "qty": 0,
                 "unit_price": float(li_src.get("unit_price") or 0),
@@ -2011,6 +2033,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     line_items = [
         {
             "style_code": v["style_code"],
+            "po_style_code": v.get("po_style_code", v["style_code"]),
             "description": v["description"],
             "color": v["color"],
             "hsn_code": v["hsn_code"],
@@ -2338,6 +2361,8 @@ async def generate_packing_list(payload: PackingListGenerate, request: Request):
     options = _packing_options_from_payload(payload)
     cartons = await db.packing_cartons.find({"job_id": {"$in": [oid(j) for j in payload.job_ids or []]}}).sort([("box_number", 1), ("_id", 1)]).to_list(1000)
     cartons = [stringify(c) for c in cartons] if cartons else None
+    if cartons:
+        cartons = await _enrich_cartons_with_mapped_sku(cartons, db=db)
     xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id, cartons=cartons, db=db)
 
     rec = {
@@ -2404,6 +2429,8 @@ async def generate_merged_packing_list(payload: MergedPackingListGenerate, reque
     options = _packing_options_from_payload(payload)
     cartons = await db.packing_cartons.find({"job_id": {"$in": [oid(j) for j in job_ids_str]}}).sort([("box_number", 1), ("_id", 1)]).to_list(1000)
     cartons = [stringify(c) for c in cartons] if cartons else None
+    if cartons:
+        cartons = await _enrich_cartons_with_mapped_sku(cartons, db=db)
     xlsx_bytes = await _generate_packing_bytes(payload_po, options, payload.template_id, cartons=cartons, db=db)
 
     rec = {
@@ -2480,11 +2507,13 @@ async def preview_packing_list(payload: dict, request: Request):
     gross_wt_unit = float(payload.get("gross_wt_per_carton") or 12.0)
     carton_dim = payload.get("carton_dim") or po.get("carton_dim") or "60x50x30 CMS"
 
+    sizes = _resolve_sizes([], po)
+
     agg = {}
     for li in line_items:
-        st = str(li.get("style_code") or "").strip()
+        st = str(li.get("po_style_code") or li.get("mapped_from_sku") or li.get("external_sku") or li.get("customer_style_code") or li.get("style_code") or "").strip()
         co = str(li.get("color") or "").strip()
-        slot = agg.setdefault((st, co), {"style": st, "color": co, "by_size": {s: 0 for s in DEFAULT_SIZES}, "total": 0})
+        slot = agg.setdefault((st, co), {"style": st, "color": co, "by_size": {s: 0 for s in sizes}, "total": 0})
         sz = str(li.get("size") or "").strip()
         q = int(li.get("quantity") or 0)
         if sz in slot["by_size"]:
@@ -2523,20 +2552,20 @@ async def preview_packing_list(payload: dict, request: Request):
         total_net_wt += r_net
         total_gross_wt += r_gross
 
-    order_qty_map = {s: 0 for s in DEFAULT_SIZES}
+    order_qty_map = {s: 0 for s in sizes}
     for li in line_items:
         sz = str(li.get("size") or "").strip()
         if sz in order_qty_map:
             order_qty_map[sz] += int(li.get("quantity") or 0)
 
-    pack_qty_map = {s: 0 for s in DEFAULT_SIZES}
+    pack_qty_map = {s: 0 for s in sizes}
     for r in rows:
-        for s in DEFAULT_SIZES:
+        for s in sizes:
             pack_qty_map[s] += r["by_size"].get(s, 0)
 
-    excess_short_map = {s: pack_qty_map[s] - order_qty_map[s] for s in DEFAULT_SIZES}
+    excess_short_map = {s: pack_qty_map[s] - order_qty_map[s] for s in sizes}
     excess_short_pct_map = {}
-    for s in DEFAULT_SIZES:
+    for s in sizes:
         ord_q = order_qty_map[s]
         excess_short_pct_map[s] = f"{((excess_short_map[s] / ord_q) * 100):.2f}%" if ord_q > 0 else "0.00%"
 
@@ -2559,7 +2588,7 @@ async def preview_packing_list(payload: dict, request: Request):
             "total_cartons": total_cartons,
             "carton_dimension": carton_dim,
         },
-        "sizes": DEFAULT_SIZES,
+        "sizes": sizes,
         "rows": rows,
         "grand_total": {
             "size_totals": pack_qty_map,

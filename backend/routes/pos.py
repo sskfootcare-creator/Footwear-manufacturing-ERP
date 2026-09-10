@@ -1517,15 +1517,26 @@ async def create_po(payload: POIn, request: Request):
         else:
             match_status = "unmatched"
 
+        mapped_sku = (
+            (sku_meta.get("mapped_from_sku") if sku_meta else None) or
+            li.get("external_sku") or
+            li.get("mapped_from_sku") or
+            li.get("customer_style_code") or
+            li.get("raw_style_code") or
+            ""
+        )
+
         jobs.append({
             "source_type": "b2b_client",
             "po_id": doc["id"],
             "po_number": doc["po_number"],
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
+            "po_style_code": mapped_sku or li["style_code"],
             "style_id": style_id,
             "style_match_status": match_status,
-            **(({"mapped_from_sku": sku_meta["mapped_from_sku"], "sku_mapping_id": sku_meta["mapping_id"]}) if sku_meta else {}),
+            **(({"mapped_from_sku": sku_meta["mapped_from_sku"], "sku_mapping_id": sku_meta["mapping_id"]}) if sku_meta else ({"mapped_from_sku": mapped_sku} if mapped_sku else {})),
+            "external_sku": mapped_sku or "",
             "description": li.get("description", ""),
             "color": li.get("color", ""),
             "size": li.get("size", ""),
