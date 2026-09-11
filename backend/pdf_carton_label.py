@@ -103,13 +103,15 @@ def _draw_label(c: canvas.Canvas, x: float, y: float, carton: dict,
     for i in (1, 2, 3):
         c.line(x + i * qcol, goods_y, x + i * qcol, ean_y)
 
+    c_style = str(carton.get("style_code") or "").strip()
     style_val = (
         carton.get("mapped_from_sku") or
         carton.get("external_sku") or
+        (carton.get("po_style_code") if str(carton.get("po_style_code") or "").strip() != c_style else None) or
+        (carton.get("customer_style_code") if str(carton.get("customer_style_code") or "").strip() != c_style else None) or
+        (carton.get("buyer_style_code") if str(carton.get("buyer_style_code") or "").strip() != c_style else None) or
         carton.get("po_style_code") or
-        carton.get("customer_style_code") or
-        carton.get("buyer_style_code") or
-        carton.get("style_code") or
+        c_style or
         "—"
     )
     style_str = str(style_val)

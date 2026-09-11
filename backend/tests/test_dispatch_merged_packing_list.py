@@ -195,3 +195,75 @@ async def test_enrich_cartons_with_mapped_sku_fallback():
     enriched = await _enrich_cartons_with_mapped_sku(cartons, db=mock_db)
     assert enriched[0].get("po_style_code") == "BUYER-SKU-99"
     assert enriched[1].get("po_style_code") == "BUYER-SKU-99"
+
+
+def test_carton_po_style_ignores_internal_erp_code():
+    """If carton has po_style_code equal to internal style_code, it should still resolve the external SKU from PO."""
+    po = {
+        "line_items": [
+            {"style_code": "SSK_00034", "color": "CREAM", "size": "4", "external_sku": "5ZE1026WFFLT-0-0602"},
+            {"style_code": "SSK_00034", "color": "CREAM", "size": "5", "external_sku": "5ZE1026WFFLT-0-0602"},
+        ]
+    }
+    # Carton whose po_style_code was erroneously set to ERP code SSK_00034
+    c = {"style_code": "SSK_00034", "po_style_code": "SSK_00034", "color": "CREAM", "size": "4"}
+    assert _carton_po_style(c, po) == "5ZE1026WFFLT-0-0602"
+
+
+def test_order_summary_filtered_to_dispatched_color_and_style():
+    """In a PO with multiple colors (e.g. BROWN and CREAM), Order Summary for CREAM dispatch must only count CREAM orders."""
+    po = {
+        "po_number": "2220011455",
+        "line_items": [
+            # BROWN line items
+            {"style_code": "SSK_00034", "color": "BROWN", "size": "4", "quantity": 65, "external_sku": "5ZE1026WFFLT-0-0602"},
+            {"style_code": "SSK_00034", "color": "BROWN", "size": "5", "quantity": 130, "external_sku": "5ZE1026WFFLT-0-0602"},
+            # CREAM line items
+            {"style_code": "SSK_00034", "color": "CREAM", "size": "4", "quantity": 65, "external_sku": "5ZE1026WFFLT-0-0602"},
+            {"style_code": "SSK_00034", "color": "CREAM", "size": "5", "quantity": 130, "external_sku": "5ZE1026WFFLT-0-0602"},
+        ]
+    }
+    # Cartons only for CREAM
+    cartons = [
+        {"box_number": 1, "style_code": "SSK_00034", "color": "CREAM", "size": "4", "qty": 65},
+        {"box_number": 2, "style_code": "SSK_00034", "color": "CREAM", "size": "5", "qty": 130},
+    ]
+
+    xlsx_bytes = build_dispatch_packing_list(cartons, po, invoice_no="SSK26-27-020")
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
+    ws = wb.active
+
+    # Data row 11 should have mapped style
+    assert ws["B11"].value == "5ZE1026WFFLT-0-0602"
+    assert ws["C11"].value == "CREAM"
+
+    # Row 12 is Grand Total
+    # Row 15 is Order Summary headers: Size, 4, 5, TOTAL
+    # Row 16 is Order Qty: Size 4 should be 65 (not 130!), Size 5 should be 130 (not 260!)
+    assert ws["F16"].value == 65
+    assert ws["G16"].value == 130
+
+
+@pytest.mark.anyio
+async def test_enrich_cartons_overrides_erp_style_code_with_po_external_sku():
+    """Verify _enrich_cartons_with_mapped_sku ignores po_style_code when it matches style_code and pulls the PO external SKU."""
+    mock_db = MagicMock()
+    mock_db.production_jobs.find.return_value.to_list = AsyncMock(return_value=[])
+    mock_db.sku_map.find.return_value.to_list = AsyncMock(return_value=[])
+
+    po_id = ObjectId()
+    mock_po = {
+        "_id": po_id,
+        "line_items": [
+            {"style_code": "SSK_00034", "color": "CREAM", "size": "4", "external_sku": "5ZE1026WFFLT-0-0602"},
+        ]
+    }
+    mock_db.pos.find.return_value.to_list = AsyncMock(return_value=[mock_po])
+
+    cartons = [
+        {"po_id": str(po_id), "style_code": "SSK_00034", "po_style_code": "SSK_00034", "color": "CREAM", "size": "4", "qty": 65},
+    ]
+
+    enriched = await _enrich_cartons_with_mapped_sku(cartons, db=mock_db)
+    assert enriched[0]["po_style_code"] == "5ZE1026WFFLT-0-0602"
+    assert enriched[0]["external_sku"] == "5ZE1026WFFLT-0-0602"

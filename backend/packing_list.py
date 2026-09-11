@@ -53,51 +53,58 @@ def _carton_po_style(carton: dict, po: dict | None = None) -> str:
     """Resolve PO style code from carton attributes, matching PO line items, or fallback to carton style_code."""
     if not carton:
         return ""
-    # 1. Direct carton attributes
-    val = (
-        carton.get("po_style_code") or
-        carton.get("mapped_from_sku") or
-        carton.get("external_sku") or
-        carton.get("customer_style_code") or
-        carton.get("buyer_style_code")
-    )
-    if val and str(val).strip():
-        return str(val).strip()
-
     c_style = str(carton.get("style_code") or "").strip()
     c_color = str(carton.get("color") or "").strip()
     c_size = str(carton.get("size") or "").strip()
 
-    # 2. Match in po line_items
-    if po and isinstance(po.get("line_items"), list):
-        # Exact match on style_code, color, size
-        for li in po["line_items"]:
-            if (str(li.get("style_code") or "").strip() == c_style and
-                str(li.get("color") or "").strip() == c_color and
-                str(li.get("size") or "").strip() == c_size):
-                cand = (
-                    li.get("po_style_code") or
-                    li.get("external_sku") or
-                    li.get("mapped_from_sku") or
-                    li.get("raw_style_code") or
-                    li.get("external_code")
-                )
-                if cand and str(cand).strip():
-                    return str(cand).strip()
+    # 1. Direct carton attributes (priority: po_style_code > mapped_from_sku > external_sku > customer_style_code > buyer_style_code)
+    # Must be non-empty and NOT identical to internal ERP style code
+    for attr in ("po_style_code", "mapped_from_sku", "external_sku", "customer_style_code", "buyer_style_code"):
+        val = carton.get(attr)
+        if val and str(val).strip() and str(val).strip() != c_style:
+            return str(val).strip()
 
-        # Match on style_code and color
-        for li in po["line_items"]:
+    # 2. Match in po line_items (check original_line_items first if present, then line_items)
+    po_items = []
+    if po and isinstance(po, dict):
+        po_items = po.get("original_line_items") or po.get("line_items") or []
+
+    if isinstance(po_items, list):
+        def _extract_li_mapped(li):
+            for attr in ("po_style_code", "external_sku", "mapped_from_sku", "customer_style_code", "buyer_style_code", "raw_style_code", "external_code"):
+                v = li.get(attr)
+                if v and str(v).strip() and str(v).strip() != c_style:
+                    return str(v).strip()
+            return None
+
+        # Pass 1: Exact match on style_code, color, size
+        for li in po_items:
             if (str(li.get("style_code") or "").strip() == c_style and
-                str(li.get("color") or "").strip() == c_color):
-                cand = (
-                    li.get("po_style_code") or
-                    li.get("external_sku") or
-                    li.get("mapped_from_sku") or
-                    li.get("raw_style_code") or
-                    li.get("external_code")
-                )
-                if cand and str(cand).strip():
-                    return str(cand).strip()
+                str(li.get("color") or "").strip().upper() == c_color.upper() and
+                str(li.get("size") or "").strip() == c_size):
+                m = _extract_li_mapped(li)
+                if m:
+                    return m
+
+        # Pass 2: Match on style_code and color
+        for li in po_items:
+            if (str(li.get("style_code") or "").strip() == c_style and
+                str(li.get("color") or "").strip().upper() == c_color.upper()):
+                m = _extract_li_mapped(li)
+                if m:
+                    return m
+
+        # Pass 3: Match on style_code only
+        for li in po_items:
+            if str(li.get("style_code") or "").strip() == c_style:
+                m = _extract_li_mapped(li)
+                if m:
+                    return m
+
+    # 3. Direct carton po_style_code fallback (if any non-empty value present)
+    val = carton.get("po_style_code")
+    if val and str(val).strip():
+        return str(val).strip()
 
     return c_style
 
@@ -240,15 +247,15 @@ def build_default_packing_list(po: dict, options: dict | None = None) -> bytes:
     # 5. Group Line Items by (Style, Colour)
     agg: dict[tuple[str, str], dict] = {}
     for li in po.get("line_items", []):
-        style = str(
-            li.get("po_style_code") or
-            li.get("external_sku") or
-            li.get("mapped_from_sku") or
-            li.get("customer_style_code") or
-            li.get("buyer_style_code") or
-            li.get("raw_style_code") or
-            li.get("style_code") or ""
-        ).strip()
+        li_sc = str(li.get("style_code") or "").strip()
+        style = ""
+        for attr in ("po_style_code", "external_sku", "mapped_from_sku", "customer_style_code", "buyer_style_code", "raw_style_code"):
+            v = li.get(attr)
+            if v and str(v).strip() and str(v).strip() != li_sc:
+                style = str(v).strip()
+                break
+        if not style:
+            style = str(li.get("po_style_code") or li_sc).strip()
         color = str(li.get("color") or "").strip()
         key = (style, color)
         slot = agg.setdefault(key, {
@@ -633,11 +640,33 @@ def build_dispatch_packing_list(cartons: list[dict], po: dict, invoice_no: str, 
     total_summary_col = get_column_letter(6 + num_sizes)
     _set_cell(ws, f"{total_summary_col}{summary_start_row}", "TOTAL", bold=True, size=9, align="center", fill=_HEADER_FILL)
 
+    po_items = po.get("original_line_items") or po.get("line_items") or []
+    if not any(li.get("size") for li in po_items) and po.get("original_line_items"):
+        po_items = po["original_line_items"]
+
+    dispatched_styles = {str(c.get("style_code") or "").strip() for c in cartons if c.get("style_code")}
+    dispatched_mapped = {_carton_po_style(c, po).strip() for c in cartons}
+    dispatched_colors = {str(c.get("color") or "").strip().upper() for c in cartons if c.get("color")}
+
     size_order_map = {s: 0 for s in sizes}
-    for li in po.get("line_items", []):
-        sz = str(li.get("size") or "").strip()
-        if sz in size_order_map:
-            size_order_map[sz] += int(li.get("quantity") or 0)
+    for li in po_items:
+        li_sc = str(li.get("style_code") or "").strip()
+        li_mapped = str(li.get("external_sku") or li.get("mapped_from_sku") or li.get("po_style_code") or "").strip()
+        li_color = str(li.get("color") or "").strip().upper()
+
+        matches_style = (not dispatched_styles and not dispatched_mapped) or (li_sc in dispatched_styles) or (li_mapped in dispatched_mapped)
+        matches_color = (not dispatched_colors) or (li_color in dispatched_colors)
+        if matches_style and matches_color:
+            sz = str(li.get("size") or "").strip()
+            if sz in size_order_map:
+                size_order_map[sz] += int(li.get("quantity") or 0)
+
+    # Fallback: if filtered map is all zeros but po_items has quantities for sizes, include all
+    if all(v == 0 for v in size_order_map.values()):
+        for li in po_items:
+            sz = str(li.get("size") or "").strip()
+            if sz in size_order_map:
+                size_order_map[sz] += int(li.get("quantity") or 0)
 
     first_sum_col = get_column_letter(6)
     last_sum_col = get_column_letter(5 + num_sizes)
@@ -979,11 +1008,32 @@ def build_packing_list_pdf(po: dict, options: dict | None = None, cartons: list[
     elements.append(Spacer(1, 10))
 
     # 5. Order Summary & Signature Table
+    po_items = po.get("original_line_items") or po.get("line_items") or []
+    if not any(li.get("size") for li in po_items) and po.get("original_line_items"):
+        po_items = po["original_line_items"]
+
+    dispatched_styles = {str(c.get("style_code") or "").strip() for c in (cartons or []) if c.get("style_code")}
+    dispatched_mapped = {_carton_po_style(c, po).strip() for c in (cartons or [])}
+    dispatched_colors = {str(c.get("color") or "").strip().upper() for c in (cartons or []) if c.get("color")}
+
     order_qty_map = {s: 0 for s in sizes}
-    for li in po.get("line_items", []):
-        sz = str(li.get("size") or "").strip()
-        if sz in order_qty_map:
-            order_qty_map[sz] += int(li.get("quantity") or 0)
+    for li in po_items:
+        li_sc = str(li.get("style_code") or "").strip()
+        li_mapped = str(li.get("external_sku") or li.get("mapped_from_sku") or li.get("po_style_code") or "").strip()
+        li_color = str(li.get("color") or "").strip().upper()
+
+        matches_style = (not dispatched_styles and not dispatched_mapped) or (li_sc in dispatched_styles) or (li_mapped in dispatched_mapped)
+        matches_color = (not dispatched_colors) or (li_color in dispatched_colors)
+        if matches_style and matches_color:
+            sz = str(li.get("size") or "").strip()
+            if sz in order_qty_map:
+                order_qty_map[sz] += int(li.get("quantity") or 0)
+
+    if all(v == 0 for v in order_qty_map.values()):
+        for li in po_items:
+            sz = str(li.get("size") or "").strip()
+            if sz in order_qty_map:
+                order_qty_map[sz] += int(li.get("quantity") or 0)
 
     total_order_qty = sum(order_qty_map.values())
     total_pack_qty = grand_total_pcs
@@ -1135,7 +1185,7 @@ def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict]
     if cartons:
         grouped_cartons = []
         for c in sorted(cartons, key=lambda x: x.get("box_number") or 0):
-            sc = c.get("style_code") or ""
+            sc = _carton_po_style(c, po)
             col = c.get("color") or ""
             sz = str(c.get("size") or "")
             ean = c.get("ean_code") or ""
@@ -1183,7 +1233,15 @@ def _expand_lines(ws, po: dict, options: dict | None = None, cartons: list[dict]
     else:
         line_groups = {}
         for li in po.get("line_items", []):
-            sc = li.get("style_code") or ""
+            li_sc = str(li.get("style_code") or "").strip()
+            sc = ""
+            for attr in ("po_style_code", "external_sku", "mapped_from_sku", "customer_style_code", "buyer_style_code", "raw_style_code"):
+                v = li.get(attr)
+                if v and str(v).strip() and str(v).strip() != li_sc:
+                    sc = str(v).strip()
+                    break
+            if not sc:
+                sc = str(li.get("po_style_code") or li_sc).strip()
             col = li.get("color") or ""
             key = (sc, col)
             if key not in line_groups:

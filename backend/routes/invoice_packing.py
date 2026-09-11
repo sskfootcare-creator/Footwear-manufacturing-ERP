@@ -574,47 +574,79 @@ async def _enrich_cartons_with_mapped_sku(cartons: list[dict], db=None) -> list[
     sku_map_by_style_id = {str(m.get("style_id")): m.get("external_sku") for m in sku_mappings if m.get("external_sku")}
 
     for c in cartons:
-        existing = c.get("po_style_code") or c.get("mapped_from_sku") or c.get("external_sku")
-        if existing:
-            c["po_style_code"] = existing
-            c["mapped_from_sku"] = existing
-            c["external_sku"] = existing
+        c_style = str(c.get("style_code") or "").strip()
+        existing = (
+            c.get("mapped_from_sku") or
+            c.get("external_sku") or
+            (c.get("po_style_code") if str(c.get("po_style_code") or "").strip() != c_style else None) or
+            (c.get("customer_style_code") if str(c.get("customer_style_code") or "").strip() != c_style else None) or
+            (c.get("buyer_style_code") if str(c.get("buyer_style_code") or "").strip() != c_style else None)
+        )
+        if existing and str(existing).strip():
+            c["po_style_code"] = str(existing).strip()
+            c["mapped_from_sku"] = str(existing).strip()
+            c["external_sku"] = str(existing).strip()
             continue
 
         job = job_map.get(str(c.get("job_id")))
         if job:
-            mapped_sku = job.get("po_style_code") or job.get("mapped_from_sku") or job.get("external_sku")
+            j_style = str(job.get("style_code") or "").strip()
+            mapped_sku = (
+                job.get("mapped_from_sku") or
+                job.get("external_sku") or
+                (job.get("po_style_code") if str(job.get("po_style_code") or "").strip() != j_style else None) or
+                job.get("buyer_style")
+            )
+            if mapped_sku and str(mapped_sku).strip():
+                c["po_style_code"] = str(mapped_sku).strip()
+                c["mapped_from_sku"] = str(mapped_sku).strip()
+                c["external_sku"] = str(mapped_sku).strip()
+                continue
+
+        po = po_map.get(str((job.get("po_id") if job else None) or c.get("po_id")))
+        po_items = (po.get("original_line_items") or po.get("line_items")) if po else []
+        if po and po_items:
+            c_color = str(c.get("color") or "").strip().upper()
+            c_size = str(c.get("size", "")).strip()
+
+            def _extract_li(li):
+                for attr in ("external_sku", "mapped_from_sku", "customer_style_code", "buyer_style_code", "raw_style_code", "external_code", "po_style_code"):
+                    v = li.get(attr)
+                    if v and str(v).strip() and str(v).strip() != c_style:
+                        return str(v).strip()
+                return None
+
+            mapped_sku = None
+            # Pass 1: exact match with size
+            for li in po_items:
+                if (str(li.get("style_code") or "").strip() == c_style and
+                    str(li.get("color") or "").strip().upper() == c_color and
+                    str(li.get("size", "")).strip() == c_size):
+                    mapped_sku = _extract_li(li)
+                    if mapped_sku:
+                        break
+
+            # Pass 2: match style and color
+            if not mapped_sku:
+                for li in po_items:
+                    if (str(li.get("style_code") or "").strip() == c_style and
+                        str(li.get("color") or "").strip().upper() == c_color):
+                        mapped_sku = _extract_li(li)
+                        if mapped_sku:
+                            break
+
+            # Pass 3: match style only
+            if not mapped_sku:
+                for li in po_items:
+                    if str(li.get("style_code") or "").strip() == c_style:
+                        mapped_sku = _extract_li(li)
+                        if mapped_sku:
+                            break
+
             if mapped_sku:
                 c["po_style_code"] = mapped_sku
                 c["mapped_from_sku"] = mapped_sku
                 c["external_sku"] = mapped_sku
-                continue
-
-        po = po_map.get(str((job.get("po_id") if job else None) or c.get("po_id")))
-        if po and po.get("line_items"):
-            c_style = c.get("style_code")
-            c_color = c.get("color")
-            c_size = str(c.get("size", ""))
-            # Pass 1: exact match with size
-            for li in po.get("line_items", []):
-                if li.get("style_code") == c_style and li.get("color") == c_color and str(li.get("size", "")) == c_size:
-                    li_mapped = li.get("po_style_code") or li.get("mapped_from_sku") or li.get("external_sku") or li.get("customer_style_code") or li.get("external_code") or li.get("raw_style_code")
-                    if li_mapped:
-                        c["po_style_code"] = li_mapped
-                        c["mapped_from_sku"] = li_mapped
-                        c["external_sku"] = li_mapped
-                        break
-            # Pass 2: match style and color
-            if not c.get("po_style_code"):
-                for li in po.get("line_items", []):
-                    if li.get("style_code") == c_style and li.get("color") == c_color:
-                        li_mapped = li.get("po_style_code") or li.get("mapped_from_sku") or li.get("external_sku") or li.get("customer_style_code") or li.get("external_code") or li.get("raw_style_code")
-                        if li_mapped:
-                            c["po_style_code"] = li_mapped
-                            c["mapped_from_sku"] = li_mapped
-                            c["external_sku"] = li_mapped
-                            break
-            if c.get("po_style_code"):
                 continue
 
         sid = str((job.get("style_id") if job else None) or c.get("style_id") or "")
@@ -676,7 +708,9 @@ async def _build_packing_payload(po: dict, job_ids: list[str] | None, db=None) -
     """Build a PO-like dict suitable for the packing list generator."""
     po_aug, items = await _generate_invoice_payload(po, job_ids, db=db)
     out = dict(po_aug)
-    out["line_items"] = items
+    out["original_line_items"] = po.get("original_line_items") or po.get("line_items", [])
+    out["invoice_line_items"] = items
+    out["line_items"] = po.get("original_line_items") or po.get("line_items", [])
     out["total_quantity"] = sum((li.get("quantity") or 0) for li in items)
     return out
 
@@ -1664,6 +1698,15 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
         if e.get("size") and e["size"] not in ean_map:
             ean_map[e["size"]] = e["ean_code"]
 
+    po_doc = None
+    if po_id:
+        po_doc = await db.pos.find_one({"_id": oid(po_id) if ObjectId.is_valid(po_id) else po_id})
+    po_items = (po_doc.get("original_line_items") or po_doc.get("line_items")) if po_doc else []
+
+    sku_mapping_doc = None
+    if style_id:
+        sku_mapping_doc = await db.sku_map.find_one({"style_id": str(style_id)})
+
     job_by_size = {job.get("size"): str(job["_id"]) for job in job_objs}
 
     for c in payload.cartons:
@@ -1674,8 +1717,34 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
             raise HTTPException(400, f"Size {size} not found in color group jobs")
         ean_code = ean_map.get(size, "")
         target_job = job_obj_map.get(job_id, job_objs[0])
-        mapped_sku = target_job.get("po_style_code") or target_job.get("mapped_from_sku") or target_job.get("external_sku")
-        
+        j_style = str(target_job.get("style_code") or style_code or "").strip()
+        mapped_sku = (
+            target_job.get("mapped_from_sku") or
+            target_job.get("external_sku") or
+            (target_job.get("po_style_code") if str(target_job.get("po_style_code") or "").strip() != j_style else None)
+        )
+
+        if not mapped_sku and po_items:
+            for li in po_items:
+                if (str(li.get("style_code") or "").strip() == j_style and
+                    str(li.get("color") or "").strip().upper() == str(color).strip().upper() and
+                    str(li.get("size") or "").strip() == str(size).strip()):
+                    v = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or (li.get("po_style_code") if str(li.get("po_style_code") or "").strip() != j_style else None)
+                    if v and str(v).strip():
+                        mapped_sku = str(v).strip()
+                        break
+            if not mapped_sku:
+                for li in po_items:
+                    if (str(li.get("style_code") or "").strip() == j_style and
+                        str(li.get("color") or "").strip().upper() == str(color).strip().upper()):
+                        v = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or (li.get("po_style_code") if str(li.get("po_style_code") or "").strip() != j_style else None)
+                        if v and str(v).strip():
+                            mapped_sku = str(v).strip()
+                            break
+
+        if not mapped_sku and sku_mapping_doc and sku_mapping_doc.get("external_sku"):
+            mapped_sku = str(sku_mapping_doc["external_sku"]).strip()
+
         carton_docs.append({
             "job_id": job_id,
             "po_id": str(po_id),
@@ -2014,10 +2083,20 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         color = (c.get("color") or "").strip()
         key = (sc, color)
         if key not in qty_agg:
-            li_src = next((li for li in po_items if (li.get("style_code") or "").strip() == sc and (li.get("color") or "").strip() == color), {})
+            li_src = next((li for li in po_items if (li.get("style_code") or "").strip() == sc and (li.get("color") or "").strip().upper() == color.upper()), {})
             desc = (li_src.get("description") or "").strip()
             clean_desc = re.sub(r'(\s+\d+|\s*/?\s*Sz\s*\d+)+$', '', desc, flags=re.IGNORECASE).strip()
-            po_style = c.get("po_style_code") or c.get("mapped_from_sku") or c.get("external_sku") or li_src.get("po_style_code") or li_src.get("external_sku") or li_src.get("mapped_from_sku") or li_src.get("customer_style_code") or sc
+            po_style = (
+                c.get("mapped_from_sku") or
+                c.get("external_sku") or
+                (c.get("po_style_code") if str(c.get("po_style_code") or "").strip() != sc else None) or
+                li_src.get("external_sku") or
+                li_src.get("mapped_from_sku") or
+                li_src.get("customer_style_code") or
+                (li_src.get("po_style_code") if str(li_src.get("po_style_code") or "").strip() != sc else None) or
+                c.get("po_style_code") or
+                sc
+            )
             qty_agg[key] = {
                 "style_code": sc,
                 "po_style_code": po_style,
@@ -2069,7 +2148,9 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     total_qty = sum(li["quantity"] for li in line_items)
     total_cartons = len(cartons)
     payload_po = dict(po)
-    payload_po["line_items"] = line_items
+    payload_po["original_line_items"] = po.get("original_line_items") or po.get("line_items", [])
+    payload_po["invoice_line_items"] = line_items
+    payload_po["line_items"] = po.get("original_line_items") or po.get("line_items", [])
     payload_po["total_quantity"] = total_qty
     payload_po["total_cartons"] = total_cartons
     payload_po["po_number"] = po.get("po_number", "")
@@ -2422,7 +2503,9 @@ async def generate_merged_packing_list(payload: MergedPackingListGenerate, reque
         all_items.extend(items)
 
     payload_po = dict(parent)
-    payload_po["line_items"] = all_items
+    payload_po["original_line_items"] = parent.get("original_line_items") or parent.get("line_items", [])
+    payload_po["invoice_line_items"] = all_items
+    payload_po["line_items"] = parent.get("original_line_items") or parent.get("line_items", [])
     payload_po["total_quantity"] = sum((li.get("quantity") or 0) for li in all_items)
     payload_po["po_number"] = " + ".join(po_numbers)
 
