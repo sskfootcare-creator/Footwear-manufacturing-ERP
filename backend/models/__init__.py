@@ -16,7 +16,8 @@ from models.components import (
     ComponentMovementIn, StyleComponentMappingIn, StyleComponentMappingUpdate
 )
 from models.orders import (
-    PRODUCTION_STAGES, POLineItem, POIn, ProductionStageUpdate, ProductionJobDoc
+    PRODUCTION_STAGES, POLineItem, POIn, ProductionStageUpdate, ProductionJobDoc,
+    MaterialAllocationItem, GeneratePlanningVendorPOsIn
 )
 from models.workers import (
     WorkerIn, AssignmentUpdate, BulkAssign, AdvanceIn,

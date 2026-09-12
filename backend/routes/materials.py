@@ -284,6 +284,8 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
 
     materials = await db.materials.find({}).to_list(2000)
     mat_map = {str(m["_id"]): stringify(m) for m in materials}
+    vendors = await db.vendors.find({}).to_list(2000)
+    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
 
     requirements = {}
     color_requirements = defaultdict(dict)
@@ -339,11 +341,17 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             key = (code or mid, color)
             is_sole = (cat or "").strip().lower() == "sole"
             job_size = str(j.get("size", "") or "").strip()
+            mid_str = str(mat_info.get("_id") or mat_info.get("id") or mid or "")
+            pref_vid = str(mat_info.get("preferred_vendor_id") or "")
+            pref_vname = vendor_map.get(pref_vid, mat_info.get("preferred_vendor_name") or "")
 
             if key not in requirements:
                 requirements[key] = {
+                    "material_id": mid_str,
                     "code": code, "name": name, "category": cat, "unit": unit, "color": color,
                     "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
+                    "preferred_vendor_id": pref_vid, "preferred_vendor_name": pref_vname,
+                    "current_stock": float(mat_info.get("current_stock") or 0.0),
                 }
                 if is_sole:
                     requirements[key]["size_breakdown"] = {}
@@ -363,8 +371,11 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             c_dict = color_requirements[job_color]
             if key not in c_dict:
                 c_dict[key] = {
+                    "material_id": mid_str,
                     "code": code, "name": name, "category": cat, "unit": unit, "color": color,
                     "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
+                    "preferred_vendor_id": pref_vid, "preferred_vendor_name": pref_vname,
+                    "current_stock": float(mat_info.get("current_stock") or 0.0),
                 }
                 if is_sole:
                     c_dict[key]["size_breakdown"] = {}

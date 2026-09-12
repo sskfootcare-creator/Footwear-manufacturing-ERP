@@ -36,8 +36,15 @@ def stringify(doc: dict) -> dict:
 
 
 async def _get_user(request: Request):
-    from auth import get_current_user
-    return await get_current_user(request)
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
+    import server
+    if getattr(server, "get_current_user", None) is not None:
+        return await server.get_current_user(request)
+    from auth import get_current_user_factory
+    fn = await get_current_user_factory(_get_db(request))
+    return await fn(request)
 
 
 async def log_plm_audit(db, action: str, style_code: str, user_email: str, details: str, doc_id: str = None, prev_ver: str = None, curr_ver: str = None, ip: str = "127.0.0.1"):

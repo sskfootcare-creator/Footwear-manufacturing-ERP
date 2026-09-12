@@ -48,7 +48,7 @@ class MockVendorsDB:
         self.vendor_po_receives.insert_one = AsyncMock(side_effect=self._insert_receive)
 
         self.payments = MagicMock()
-        self.payments.find = MagicMock(return_value=MockCursor([]))
+        self.payments.find = MagicMock(side_effect=self._find_payments)
         self.payments.insert_one = AsyncMock(side_effect=self._insert_payment)
 
         self.inventory_movements = MagicMock()
@@ -118,8 +118,50 @@ class MockVendorsDB:
         return MagicMock(inserted_id="rec1")
 
     async def _insert_payment(self, doc):
+        oid = doc.get("_id") or ObjectId()
+        doc["_id"] = oid
         self.payments_store.append(doc)
-        return MagicMock(inserted_id="pay1")
+        return MagicMock(inserted_id=oid)
+
+    def _find_payments(self, query=None):
+        if not query:
+            return MockCursor(list(self.payments_store))
+        results = []
+        for p in self.payments_store:
+            if "$or" in query:
+                matched = False
+                for cond in query["$or"]:
+                    cond_match = True
+                    for k, v in cond.items():
+                        val = str(p.get(k) or "")
+                        if isinstance(v, dict) and "$in" in v:
+                            v_in = [str(x) for x in v["$in"]]
+                            if val not in v_in:
+                                cond_match = False
+                                break
+                        elif val != str(v):
+                            cond_match = False
+                            break
+                    if cond_match:
+                        matched = True
+                        break
+                if matched:
+                    results.append(p)
+            else:
+                match = True
+                for k, v in query.items():
+                    val = str(p.get(k) or "")
+                    if isinstance(v, dict) and "$in" in v:
+                        v_in = [str(x) for x in v["$in"]]
+                        if val not in v_in:
+                            match = False
+                            break
+                    elif val != str(v):
+                        match = False
+                        break
+                if match:
+                    results.append(p)
+        return MockCursor(results)
 
     def _find_materials(self, query=None):
         return MockCursor(list(self.materials_store.values()))
@@ -284,3 +326,99 @@ def test_vendor_po_flow(client, mock_vendors_env):
     res = client.delete(f"/api/vendor-pos/{poid}")
     assert res.status_code == 200
     assert res.json()["ok"] is True
+
+
+def test_vendor_po_payment_and_ledger_flow(client, mock_vendors_env):
+    vid = str(ObjectId())
+    mock_vendors_env.vendors_store[vid] = {
+        "_id": ObjectId(vid),
+        "name": "Global Leather Exports",
+        "payment_terms_days": 30,
+        "active": True
+    }
+    mid = str(ObjectId())
+    mock_vendors_env.materials_store[mid] = {
+        "_id": ObjectId(mid),
+        "code": "LEA-001",
+        "name": "Full Grain Leather",
+        "unit": "sqft",
+        "rate": 200.0
+    }
+
+    # 1. Create a PO with total amount = 10,000
+    res = client.post("/api/vendor-pos", json={
+        "vendor_id": vid,
+        "line_items": [
+            {
+                "material_id": mid,
+                "quantity": 50.0,
+                "rate": 200.0,
+                "amount": 10000.0,
+                "received_quantity": 0.0
+            }
+        ],
+        "total_amount": 10000.0,
+        "status": "sent"
+    })
+    assert res.status_code == 201
+    po = res.json()
+    poid = po["id"]
+    po_no = po["po_number"]
+
+    # 2. Verify list_vendor_pos returns initial unpaid status & full balance_due
+    res = client.get("/api/vendor-pos")
+    assert res.status_code == 200
+    po_item = next(p for p in res.json() if p["id"] == poid)
+    assert po_item["total_amount"] == 10000.0
+    assert po_item["paid_amount"] == 0.0
+    assert po_item["balance_due"] == 10000.0
+    assert po_item["payment_status"] == "unpaid"
+
+    # 3. Record partial payment of 4,000 against this PO
+    res = client.post(f"/api/vendor-pos/{poid}/payments", json={
+        "amount": 4000.0,
+        "payment_date": "2026-09-02",
+        "mode": "NEFT",
+        "reference": "UTR998877",
+        "notes": "Advance payment 40%"
+    })
+    assert res.status_code == 201
+    pay_doc = res.json()
+    assert pay_doc["amount"] == 4000.0
+    assert pay_doc["vendor_po_id"] == poid
+    assert pay_doc["vendor_po_number"] == po_no
+
+    # 4. Verify get_vendor_po reflects partial payment
+    res = client.get(f"/api/vendor-pos/{poid}")
+    assert res.status_code == 200
+    single_po = res.json()
+    assert single_po["paid_amount"] == 4000.0
+    assert single_po["balance_due"] == 6000.0
+    assert single_po["payment_status"] == "partially_paid"
+    assert len(single_po["payments"]) == 1
+
+    # 5. Record remaining payment of 6,000 against this PO
+    res = client.post(f"/api/vendor-pos/{poid}/payments", json={
+        "amount": 6000.0,
+        "payment_date": "2026-09-10",
+        "mode": "RTGS",
+        "reference": "UTR998878",
+        "notes": "Final settlement"
+    })
+    assert res.status_code == 201
+
+    # 6. Verify list_vendor_pos shows paid status and 0 balance due
+    res = client.get("/api/vendor-pos")
+    assert res.status_code == 200
+    po_item = next(p for p in res.json() if p["id"] == poid)
+    assert po_item["paid_amount"] == 10000.0
+    assert po_item["balance_due"] == 0.0
+    assert po_item["payment_status"] == "paid"
+
+    # 7. Check Vendor Ledger reflects the payments
+    res = client.get(f"/api/vendors/{vid}/ledger")
+    assert res.status_code == 200
+    ledger = res.json()
+    assert ledger["total_paid"] == 10000.0
+    assert len(ledger["transactions"]) == 2
+    assert ledger["transactions"][0]["po_number"] == po_no

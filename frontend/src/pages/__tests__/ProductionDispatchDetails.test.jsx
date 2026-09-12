@@ -140,6 +140,7 @@ describe("Production View Dispatch Details Modal", () => {
     expect(modalScope.getByTestId("dispatch-modal-download-packing")).toBeInTheDocument();
     expect(modalScope.getByTestId("dispatch-modal-download-labels")).toBeInTheDocument();
     expect(modalScope.getByTestId("dispatch-modal-download-cartonlist")).toBeInTheDocument();
+    expect(modalScope.getByTestId("dispatch-modal-download-ewaybill")).toBeInTheDocument();
 
     // 3. Verify Size-wise Quantity Breakdown table
     const sizeTable = modalScope.getByTestId("dispatch-size-breakdown-table");

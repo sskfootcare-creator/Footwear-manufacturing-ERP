@@ -2649,7 +2649,7 @@ async def archive_jobs(payload: ArchiveJobsRequest, request: Request):
 async def update_job(jid: str, payload: ProductionStageUpdate, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = get_db()
+    db = getattr(request.app, "mongodb", None) or get_db()
     job = await db.production_jobs.find_one({"_id": oid(jid)})
     if not job:
         raise HTTPException(404, "Not found")
@@ -2657,7 +2657,7 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     from routes.materials import _auto_consume_inventory
 
     # Material requirement gate before moving OUT of procurement stage
-    if job.get("stage") == "procurement" and payload.stage != "procurement":
+    if payload.stage is not None and job.get("stage") == "procurement" and payload.stage != "procurement":
         style = None
         if job.get("style_id") and ObjectId.is_valid(str(job["style_id"])):
             style = await db.styles.find_one({"_id": oid(job["style_id"])})
@@ -2702,7 +2702,12 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
             raise HTTPException(status_code=400, detail=msg)
 
     update = {"updated_at": now_iso()}
-    if job.get("stage") != payload.stage:
+    if getattr(payload, "planning_notes", None) is not None:
+        update["planning_notes"] = payload.planning_notes
+    if getattr(payload, "material_vendor_allocations", None) is not None:
+        update["material_vendor_allocations"] = payload.material_vendor_allocations
+
+    if payload.stage is not None and job.get("stage") != payload.stage:
         try:
             curr_idx = PRODUCTION_STAGES.index(job.get("stage", "procurement"))
             target_idx = PRODUCTION_STAGES.index(payload.stage)
@@ -2751,14 +2756,14 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
     if payload.qc_pass is not None:
         update["qc_pass"] = payload.qc_pass
     history_entry = {
-        "stage": payload.stage, "at": now_iso(), "by": u["email"],
-        "notes": payload.notes or "",
+        "stage": payload.stage or job.get("stage"), "at": now_iso(), "by": u["email"],
+        "notes": payload.notes or ("Updated planning notes" if getattr(payload, "planning_notes", None) is not None else ""),
         "qc_pass": payload.qc_pass, "rejected_qty": payload.rejected_qty,
         "completed_qty": payload.completed_qty,
         "completed_by": update.get("completed_by"),
     }
     mongo_update: dict = {"$set": update, "$push": {"history": history_entry}}
-    if job.get("stage") != payload.stage:
+    if payload.stage is not None and job.get("stage") != payload.stage:
         mongo_update["$unset"] = {"ready_for_pickup": ""}
     await db.production_jobs.update_one({"_id": oid(jid)}, mongo_update)
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))

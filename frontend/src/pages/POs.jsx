@@ -1300,6 +1300,15 @@ export default function POs() {
                               >
                                 <FileText className="w-3 h-3 text-[#F97316]" /> Carton Labels
                               </a>
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/ewaybill`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2 py-1 text-[11px] font-bold text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-300 rounded inline-flex items-center gap-1"
+                                data-testid={`dr-ewaybill-btn-${dr.id}`}
+                              >
+                                <FileText className="w-3 h-3 text-sky-600" /> E-Way Bill
+                              </a>
                             </div>
                           </div>
                         ))}
@@ -1557,6 +1566,16 @@ export default function POs() {
                                 title="Download Dispatch Invoice PDF"
                               >
                                 <FileDown className="w-3.5 h-3.5" /> Invoice PDF
+                              </a>
+                              <a
+                                href={`${API}/dispatch-records/${dr.id}/ewaybill`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-300 rounded inline-flex items-center gap-1 shadow-sm"
+                                title="Download E-Way Bill JSON"
+                                data-testid={`dr-detail-ewaybill-btn-${dr.id}`}
+                              >
+                                <FileText className="w-3.5 h-3.5 text-sky-600" /> E-Way Bill
                               </a>
                             </div>
                           </div>

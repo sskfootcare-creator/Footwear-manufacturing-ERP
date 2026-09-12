@@ -4,7 +4,7 @@ import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
-import { FileDown, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar } from "lucide-react";
+import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 
 const STAGES = [
@@ -239,6 +239,7 @@ export default function Production() {
   const [dispatchRecords, setDispatchRecords] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [dispatchDetailFor, setDispatchDetailFor] = useState(null);
+  const [planningAllocationFor, setPlanningAllocationFor] = useState(null);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
@@ -879,6 +880,7 @@ export default function Production() {
                         onDownloadDispatchFile={downloadDispatchFile}
                         onOpenDispatchDetails={(group) => setDispatchDetailFor(group)}
                         onArchiveDispatched={(jids, lbl) => archiveDispatchedJobs(jids, lbl)}
+                        onOpenPlanningAllocation={(group, req) => setPlanningAllocationFor({ group, req })}
                       />
                     ))}
                   </div>
@@ -1030,6 +1032,284 @@ export default function Production() {
           navigate={navigate}
         />
       )}
+
+      {planningAllocationFor && (
+        <PlanningVendorAllocationModal
+          group={planningAllocationFor.group}
+          req={planningAllocationFor.req}
+          onClose={() => setPlanningAllocationFor(null)}
+          onSuccess={() => {
+            setPlanningAllocationFor(null);
+            load();
+          }}
+          navigate={navigate}
+        />
+      )}
+    </div>
+  );
+}
+
+function PlanningVendorAllocationModal({ group, req, onClose, onSuccess, navigate }) {
+  const [vendors, setVendors] = useState([]);
+  const [loadingVendors, setLoadingVendors] = useState(true);
+  const [expectedDate, setExpectedDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return d.toISOString().split("T")[0];
+  });
+  const [notes, setNotes] = useState("");
+  const [allocations, setAllocations] = useState(() => {
+    return (req?.materials || []).map(m => ({
+      material_id: m.material_id || "",
+      code: m.code || "",
+      name: m.name || "",
+      color: m.color || "",
+      unit: m.unit || "",
+      category: m.category || "other",
+      total_qty_required: m.total_qty_required || 0,
+      rate: m.rate || 0,
+      vendor_id: m.preferred_vendor_id || "",
+    }));
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    http.get("/vendors?include_inactive=false")
+      .then(res => {
+        setVendors(res.data || []);
+      })
+      .catch(e => {
+        console.error("Failed to load vendors:", e);
+      })
+      .finally(() => setLoadingVendors(false));
+  }, []);
+
+  const updateItem = (idx, field, val) => {
+    setAllocations(prev => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: val };
+      return next;
+    });
+  };
+
+  const { totalAmount, vendorCount, unassignedCount } = useMemo(() => {
+    let total = 0;
+    const vSet = new Set();
+    let unassigned = 0;
+    for (const a of allocations) {
+      const amt = (parseFloat(a.total_qty_required) || 0) * (parseFloat(a.rate) || 0);
+      total += amt;
+      if (a.vendor_id) {
+        vSet.add(a.vendor_id);
+      } else {
+        unassigned++;
+      }
+    }
+    return {
+      totalAmount: Math.round(total * 100) / 100,
+      vendorCount: vSet.size,
+      unassignedCount: unassigned,
+    };
+  }, [allocations]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (unassignedCount > 0) {
+      setError(`Please select a vendor for all materials (${unassignedCount} unassigned).`);
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+
+    try {
+      const payload = {
+        job_ids: group.rows.map(r => r.id),
+        customer_po_number: group.po_number || "",
+        style_code: group.style_code || "",
+        color: group.color || "",
+        expected_delivery_date: expectedDate,
+        notes: notes.trim() || `Generated from Planning Stage for ${group.po_number} (${group.style_code} - ${group.color})`,
+        allocations: allocations.map(a => ({
+          material_id: a.material_id,
+          material_code: a.code,
+          material_name: a.name,
+          category: a.category,
+          unit: a.unit,
+          color: a.color || "",
+          quantity: parseFloat(a.total_qty_required) || 0,
+          rate: parseFloat(a.rate) || 0,
+          amount: Math.round((parseFloat(a.total_qty_required) || 0) * (parseFloat(a.rate) || 0) * 100) / 100,
+          vendor_id: a.vendor_id,
+          vendor_name: vendors.find(v => v.id === a.vendor_id)?.name || "",
+        })),
+      };
+
+      const { data } = await http.post("/production/planning/generate-vendor-pos", payload);
+      const poNos = data.vendor_po_numbers || [];
+      alert(`Success! Generated ${poNos.length} Vendor Purchase Order(s):\n${poNos.join(", ")}`);
+      onSuccess();
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || "Failed to generate Vendor POs");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4 overflow-y-auto" data-testid="planning-vendor-allocation-modal">
+      <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-y-auto border-2 border-slate-200 shadow-2xl flex flex-col">
+        <div className="bg-violet-800 text-white px-6 py-4 flex items-center justify-between shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-violet-200">Production Planning Stage</div>
+            <h3 className="text-lg font-bold">Allocate Materials to Vendors &amp; Generate POs</h3>
+            <div className="text-xs text-violet-200 mt-0.5">
+              PO: <span className="font-mono font-bold text-white">{group.po_number}</span> · Client: <span className="text-white font-bold">{group.client_name}</span> · Style: <span className="font-mono font-bold text-white">{group.style_code}</span> ({group.color}) · <span className="text-white font-bold">{group.totalQty}</span> pairs
+            </div>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/10 p-1 rounded transition-colors"><X className="w-5 h-5" /></button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 flex-1 overflow-y-auto flex flex-col">
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 text-xs flex items-center gap-2 rounded">
+              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="border border-slate-200 rounded overflow-hidden">
+            <div className="max-h-[350px] overflow-y-auto">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-100 text-slate-700 font-bold uppercase text-[10px] tracking-wider sticky top-0 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3">Material</th>
+                    <th className="py-2.5 px-3 text-right">Required Qty</th>
+                    <th className="py-2.5 px-3 text-right w-24">Rate (₹)</th>
+                    <th className="py-2.5 px-3">Assign Vendor</th>
+                    <th className="py-2.5 px-3 text-right">Est. Amount (₹)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {allocations.map((a, idx) => {
+                    const rowAmt = (parseFloat(a.total_qty_required) || 0) * (parseFloat(a.rate) || 0);
+                    return (
+                      <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                        <td className="py-2 px-3">
+                          <div className="font-mono font-bold text-slate-900">{a.code}</div>
+                          <div className="text-slate-500 text-[11px] truncate max-w-xs">{a.name}</div>
+                          {a.color && (
+                            <span className="inline-block text-[9px] font-bold px-1.5 py-0.2 bg-violet-50 text-violet-700 border border-violet-200 rounded mt-0.5">
+                              {a.color}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">
+                          {a.total_qty_required} <span className="text-slate-400 text-[10px]">{a.unit}</span>
+                        </td>
+                        <td className="py-2 px-3 text-right">
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={a.rate}
+                            onChange={(e) => updateItem(idx, "rate", e.target.value)}
+                            className="w-20 text-right font-mono px-1.5 py-1 border border-slate-300 rounded text-xs focus:outline-none focus:border-violet-500"
+                            data-testid={`alloc-rate-input-${idx}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <select
+                            value={a.vendor_id}
+                            onChange={(e) => updateItem(idx, "vendor_id", e.target.value)}
+                            className={`w-full max-w-xs px-2 py-1 border text-xs rounded focus:outline-none focus:border-violet-500 ${!a.vendor_id ? "border-amber-400 bg-amber-50/50" : "border-slate-300"}`}
+                            data-testid={`alloc-vendor-select-${idx}`}
+                          >
+                            <option value="">-- Select Vendor --</option>
+                            {vendors.map(v => (
+                              <option key={v.id} value={v.id}>
+                                {v.name} {v.city ? `(${v.city})` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-violet-900 whitespace-nowrap">
+                          ₹{rowAmt.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                Expected Vendor Delivery Date
+              </label>
+              <input
+                type="date"
+                value={expectedDate}
+                onChange={(e) => setExpectedDate(e.target.value)}
+                className="w-full text-xs px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:border-violet-500"
+                data-testid="alloc-expected-date"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                PO Notes / Special Instructions
+              </label>
+              <input
+                type="text"
+                placeholder="Optional notes for vendor purchase order…"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                className="w-full text-xs px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:border-violet-500"
+                data-testid="alloc-notes"
+              />
+            </div>
+          </div>
+
+          <div className="bg-violet-50 border border-violet-200 rounded p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div>
+              <div className="text-[10px] uppercase font-bold text-violet-700">Summary</div>
+              <div className="text-slate-700">
+                <span className="font-bold">{allocations.length}</span> materials · <span className="font-bold text-violet-800">{vendorCount}</span> distinct vendor(s)
+                {unassignedCount > 0 && (
+                  <span className="text-amber-700 font-bold ml-2">({unassignedCount} unassigned)</span>
+                )}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[10px] uppercase font-bold text-slate-500">Total Estimated Procurement</div>
+              <div className="text-lg font-mono font-bold text-violet-900">
+                ₹{totalAmount.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || unassignedCount > 0}
+              className="px-5 py-2 text-xs font-bold uppercase tracking-wider bg-violet-700 hover:bg-violet-800 disabled:opacity-50 text-white rounded flex items-center gap-1.5 shadow transition-all"
+              data-testid="alloc-submit-btn"
+            >
+              {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShoppingCart className="w-3.5 h-3.5" />}
+              <span>Generate {vendorCount > 0 ? `${vendorCount} Vendor PO(s)` : "Vendor POs"}</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1039,7 +1319,9 @@ function ColorGroupCard(props) {
     onOpenAssign, onOpenQty, onPrint, onWhatsApp, onPacking, isPlanning, isProc, isDispatched,
     isQcPack, isQcPackSelected, onToggleQcPackSelect, isQcPackSelectDisabled, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
-    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails, onArchiveDispatched } = props;
+    dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails, onArchiveDispatched,
+    onOpenPlanningAllocation } = props;
+  const navigate = useNavigate();
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
 
@@ -1102,6 +1384,14 @@ function ColorGroupCard(props) {
     } catch (e) { /* silent */ }
     finally { setPlanNotesSaving(false); }
   };
+
+  const linkedVpos = useMemo(() => {
+    const set = new Set();
+    (group.rows || []).forEach(r => {
+      (r.vendor_po_numbers || []).forEach(no => { if (no) set.add(no); });
+    });
+    return Array.from(set);
+  }, [group]);
 
   return (
     <Card
@@ -1168,6 +1458,30 @@ function ColorGroupCard(props) {
               </button>
             )}
           </div>
+
+          {/* Linked Vendor POs */}
+          {linkedVpos.length > 0 && (
+            <div className="flex items-center justify-between px-3 py-1.5 bg-violet-100/90 border-b border-violet-200 flex-wrap gap-1" data-testid={`linked-vpos-panel-${group.key}`}>
+              <div className="flex items-center gap-1 text-[10px] font-bold text-violet-900">
+                <ShoppingCart className="w-3 h-3 text-violet-700" />
+                <span>Vendor PO(s):</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {linkedVpos.map(vpo => (
+                  <button
+                    key={vpo}
+                    type="button"
+                    onClick={() => navigate("/vendor-pos", { state: { search: vpo } })}
+                    className="text-[9px] font-mono font-bold bg-white text-violet-800 hover:bg-violet-700 hover:text-white border border-violet-300 px-1.5 py-0.5 rounded shadow-xs transition-colors"
+                    title="View in Vendor POs"
+                    data-testid={`linked-vpo-badge-${vpo}`}
+                  >
+                    {vpo}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Color BOM warning */}
           {!hasColorBom && (
@@ -1246,6 +1560,22 @@ function ColorGroupCard(props) {
                 {planMatReq.materials.length === 0 && (
                   <div className="text-[10px] text-slate-400 italic text-center py-2">No materials in BOM</div>
                 )}
+              </div>
+            )}
+
+            {planMatReq && !planMatLoading && planMatReq.materials?.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-violet-200 flex items-center justify-between gap-2">
+                <div className="text-[10px] text-violet-700 font-semibold">
+                  {planMatReq.materials.length} material(s)
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenPlanningAllocation?.(group, planMatReq)}
+                  className="text-[10px] font-bold bg-violet-600 hover:bg-violet-700 text-white px-2.5 py-1 rounded flex items-center gap-1 shadow-sm transition-all whitespace-nowrap"
+                  data-testid={`allocate-vendors-btn-${group.key}`}
+                >
+                  <ShoppingCart className="w-3 h-3" /> Allocate &amp; Raise POs
+                </button>
               </div>
             )}
           </div>
@@ -2118,6 +2448,14 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
                                     >
                                       <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
                                     </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "ewaybill", `EWayBill-${drec.invoice_no}.json`, "application/json")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-sky-700 border border-sky-300 hover:bg-sky-700 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                      title="Download E-Way Bill JSON"
+                                      data-testid={`archive-download-ewaybill-${drec.id}`}
+                                    >
+                                      <FileText className="w-2.5 h-2.5" /> Orig. E-Way Bill
+                                    </button>
                                   </>
                                 ) : (
                                   <>
@@ -2245,6 +2583,14 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
                           className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
                         >
                           <FileDown className="w-3 h-3" /> Carton List
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "ewaybill", `EWayBill-${drec.invoice_no}.json`, "application/json")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-sky-700 border border-sky-300 hover:bg-sky-700 hover:text-white px-2 py-1 flex items-center gap-1"
+                          title="Download E-Way Bill JSON"
+                          data-testid={`archive-card-download-ewaybill-${drec.id}`}
+                        >
+                          <FileText className="w-3 h-3" /> E-Way Bill
                         </button>
                       </>
                     ) : (
@@ -2697,6 +3043,13 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
       } catch (e) {
         alert("Download failed: " + (e.response?.data?.detail || e.message));
       }
+    } else if (invoiceData?.id && type === "ewaybill") {
+      try {
+        const res = await http.get(`/invoices/${invoiceData.id}/ewaybill`, { responseType: "blob" });
+        triggerDownload(res.data, filename, "application/json");
+      } catch (e) {
+        alert("Download failed: " + (e.response?.data?.detail || e.message));
+      }
     } else if (jobIds.length > 0) {
       if (type === "carton-labels") {
         try {
@@ -2794,6 +3147,13 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
                     data-testid="dispatch-modal-download-cartonlist"
                   >
                     <FileSpreadsheet className="w-4 h-4 text-amber-600" /> Carton List (XLSX)
+                  </button>
+                  <button
+                    onClick={() => downloadDoc("ewaybill", `EWayBill-${resolvedInvoiceNo}.json`, "application/json")}
+                    className="text-xs uppercase tracking-wider font-bold text-sky-800 bg-sky-50 hover:bg-sky-700 hover:text-white border border-sky-300 px-3 py-2 flex items-center gap-1.5 transition-colors"
+                    data-testid="dispatch-modal-download-ewaybill"
+                  >
+                    <FileText className="w-4 h-4 text-sky-600" /> E-Way Bill (JSON)
                   </button>
                 </div>
               </div>
@@ -3661,6 +4021,10 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
     net_wt_per_carton: "",
     gross_wt_per_carton: "",
     notes: "",
+    transporter_id: "",
+    trans_distance: "",
+    to_pincode: "",
+    to_place: "",
   });
   const [dispatchQuantities, setDispatchQuantities] = useState(() => {
     const init = {};
@@ -3754,6 +4118,10 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
           Object.entries(dispatchQuantities).map(([k, v]) => [k, v === "" ? 0 : Number(v)])
         ),
         ...form,
+        trans_distance: form.trans_distance ? parseFloat(form.trans_distance) : null,
+        transporter_id: form.transporter_id || "",
+        to_pincode: form.to_pincode || "",
+        to_place: form.to_place || "",
         net_wt_per_carton: form.net_wt_per_carton ? parseFloat(form.net_wt_per_carton) : null,
         gross_wt_per_carton: form.gross_wt_per_carton ? parseFloat(form.gross_wt_per_carton) : null,
       };
@@ -3990,7 +4358,11 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
             <DispatchField label="Transport Mode"><input className={ic} value={form.transport_mode} placeholder="By Road" data-testid="dispatch-input-transport-mode" onChange={e => set("transport_mode", e.target.value)} /></DispatchField>
             <DispatchField label="Vehicle No."><input className={ic} value={form.vehicle_no} placeholder="MH-01-AB-1234" data-testid="dispatch-input-vehicle-no" onChange={e => set("vehicle_no", e.target.value)} /></DispatchField>
             <DispatchField label="Transporter"><input className={ic} value={form.transporter} placeholder="Transporter name" data-testid="dispatch-input-transporter" onChange={e => set("transporter", e.target.value)} /></DispatchField>
+            <DispatchField label="Transporter ID / GSTIN"><input className={ic} value={form.transporter_id} placeholder="e.g. 27AABCT1234A1Z5" data-testid="dispatch-input-transporter-id" onChange={e => set("transporter_id", e.target.value)} /></DispatchField>
+            <DispatchField label="Approx Distance (KM)"><input type="number" className={ic} value={form.trans_distance} placeholder="e.g. 150" min="0" data-testid="dispatch-input-trans-distance" onChange={e => set("trans_distance", e.target.value)} /></DispatchField>
             <DispatchField label="Supply / Dispatch Date"><input type="date" className={ic} value={form.supply_date} data-testid="dispatch-input-supply-date" onChange={e => set("supply_date", e.target.value)} /></DispatchField>
+            <DispatchField label="Destination Pincode"><input className={ic} value={form.to_pincode} placeholder="Auto from PO if empty" data-testid="dispatch-input-to-pincode" onChange={e => set("to_pincode", e.target.value)} /></DispatchField>
+            <DispatchField label="Destination City"><input className={ic} value={form.to_place} placeholder="Auto from PO if empty" data-testid="dispatch-input-to-place" onChange={e => set("to_place", e.target.value)} /></DispatchField>
             <DispatchField label="Carton Dimensions"><input className={ic} value={form.carton_dim} placeholder="60x50x30 CMS" data-testid="dispatch-input-carton-dim" onChange={e => set("carton_dim", e.target.value)} /></DispatchField>
             <DispatchField label="Net Wt/Carton (kg)"><input type="number" className={ic} value={form.net_wt_per_carton} placeholder="10.8" inputMode="decimal" data-testid="dispatch-input-net-wt" onChange={e => set("net_wt_per_carton", e.target.value)} /></DispatchField>
             <DispatchField label="Gross Wt/Carton (kg)"><input type="number" className={ic} value={form.gross_wt_per_carton} placeholder="12.0" inputMode="decimal" data-testid="dispatch-input-gross-wt" onChange={e => set("gross_wt_per_carton", e.target.value)} /></DispatchField>
@@ -4034,6 +4406,14 @@ function DispatchDialog({ group, groups, onClose, load, onSuccess }) {
                   className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
                 >
                   Carton List XLSX
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadFile("ewaybill", `EWayBill-${done.invoice_no}.json`, "application/json")}
+                  className="px-3 py-1.5 bg-white border border-teal-600 text-teal-700 text-xs font-bold uppercase tracking-wider hover:bg-teal-50 transition-colors"
+                  data-testid="dispatch-download-ewaybill-btn"
+                >
+                  E-Way Bill JSON
                 </button>
               </div>
 

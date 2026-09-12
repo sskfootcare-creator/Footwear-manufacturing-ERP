@@ -41,6 +41,8 @@ class PaymentIn(BaseModel):
     bank_account_id: Optional[str] = None
     cash_account_id: Optional[str] = None
     notes: Optional[str] = ""
+    auto_create_expense: bool = True
+    expense_category: str = "Raw Materials"
 
 
 class VendorIn(BaseModel):
@@ -67,6 +69,10 @@ class VendorUpdate(BaseModel):
 
 class VendorPOLineItem(BaseModel):
     material_id: str
+    material_code: Optional[str] = ""
+    material_name: Optional[str] = ""
+    color: Optional[str] = ""
+    unit: Optional[str] = ""
     quantity: float
     rate: float
     amount: float
@@ -79,6 +85,10 @@ class VendorPOIn(BaseModel):
     status: Literal["draft", "sent", "partially_received", "received", "cancelled"] = "draft"
     expected_delivery_date: Optional[str] = ""
     notes: Optional[str] = ""
+    customer_po_number: Optional[str] = ""
+    production_job_ids: Optional[List[str]] = None
+    style_code: Optional[str] = ""
+    total_amount: Optional[float] = 0.0
 
 
 class VendorPOUpdate(BaseModel):
@@ -87,6 +97,10 @@ class VendorPOUpdate(BaseModel):
     status: Optional[Literal["draft", "sent", "partially_received", "received", "cancelled"]] = None
     expected_delivery_date: Optional[str] = None
     notes: Optional[str] = None
+    customer_po_number: Optional[str] = None
+    production_job_ids: Optional[List[str]] = None
+    style_code: Optional[str] = None
+    total_amount: Optional[float] = None
 
 
 class VendorPOReceiveItem(BaseModel):

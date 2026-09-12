@@ -1,6 +1,7 @@
 """Unit & End-to-End Tests for Invoice, Packing List, Carton Labels & Dispatch Domain."""
 
 import io
+import json
 import zipfile
 import base64
 import pytest
@@ -474,6 +475,7 @@ def test_end_to_end_dispatch_invoice_carton_flow(client, mock_invoice_env):
         assert any(f.startswith("PackingList-") and f.endswith(".xlsx") for f in file_list)
         assert any(f.startswith("CartonLabels-") and f.endswith(".pdf") for f in file_list)
         assert any(f.startswith("CartonList-") and f.endswith(".xlsx") for f in file_list)
+        assert any(f.startswith("EWayBill-") and f.endswith(".json") for f in file_list)
 
     # 5. Verify database updates post-dispatch
     # A. Cartons marked dispatched with sequential box numbers
@@ -489,8 +491,10 @@ def test_end_to_end_dispatch_invoice_carton_flow(client, mock_invoice_env):
     # C. Invoices collection populated
     assert len(mock_invoice_env.invoices_store) == 1
     inv_doc = list(mock_invoice_env.invoices_store.values())[0]
+    inv_id = str(inv_doc["_id"])
     assert inv_doc["invoice_no"] == inv_no
     assert inv_doc["grand_total"] == 22400.0  # 40 * 500 = 20,000 + 12% GST = 22,400
+    assert "ewaybill_file_b64" in inv_doc
 
     # D. Dispatch records populated
     assert dr_id in mock_invoice_env.dispatch_records_store
@@ -506,9 +510,36 @@ def test_end_to_end_dispatch_invoice_carton_flow(client, mock_invoice_env):
     res_cl = client.get(f"/api/dispatch-records/{dr_id}/carton-labels")
     assert res_cl.status_code == 200
 
+    res_ew = client.get(f"/api/dispatch-records/{dr_id}/ewaybill")
+    assert res_ew.status_code == 200
+    assert res_ew.headers["content-type"] == "application/json"
+    ew_data = json.loads(res_ew.content.decode("utf-8"))
+    assert ew_data["version"] == "1.0.0621"
+    bill0 = ew_data["billLists"][0]
+    assert bill0["docNo"] == inv_no
+    assert bill0["subSupplyType"] == 1
+    assert bill0["subSupplyDesc"] == ""
+    assert bill0["transType"] == 1
+    assert bill0["actualFromStateCode"] == 27
+    assert bill0["TotNonAdvolVal"] == 0
+    assert bill0["OthValue"] == 0
+    assert bill0["itemList"][0]["sgstRate"] == -1
+    assert bill0["itemList"][0]["cgstRate"] == -1
+    assert bill0["itemList"][0]["igstRate"] == -1
+    assert bill0["itemList"][0]["cessRate"] == -1
+    assert bill0["itemList"][0]["cessNonAdvol"] == -1
+
+    res_inv_ew = client.get(f"/api/invoices/{inv_id}/ewaybill")
+    assert res_inv_ew.status_code == 200
+    assert res_inv_ew.headers["content-type"] == "application/json"
+
     res_reprint = client.post(f"/api/dispatch-records/{dr_id}/reprint")
     assert res_reprint.status_code == 200
     assert res_reprint.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(res_reprint.content), "r") as zf:
+        reprint_files = zf.namelist()
+        assert any(f.startswith("EWayBill-") and f.endswith(".json") for f in reprint_files)
+
 
 
 def test_merged_invoice_flow(client, mock_invoice_env):

@@ -51,7 +51,7 @@ http.interceptors.response.use(
       (originalRequest.url.includes("/my/") || originalRequest.url.includes("/auth/worker-login"));
     const isKarigarPage =
       typeof window !== "undefined" &&
-      (window.location.pathname.startsWith("/karigar") || window.location.pathname === "/karigar-login");
+      (window.location?.pathname?.startsWith("/karigar") || window.location?.pathname === "/karigar-login");
 
     if (
       error.response &&

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from auth import require_roles
 from rate_limiter import pdf_rate_limiter, upload_rate_limiter
 from pdf_docs import generate_dispatch_challan_pdf, build_invoice
+from eway_bill import generate_eway_bill_bytes
 from packing_list import (
     build_default_packing_list,
     build_from_template,
@@ -1546,6 +1547,54 @@ async def download_invoice_carton_labels(iid: str, request: Request):
     )
 
 
+@invoice_packing_router.get("/invoices/{iid}/ewaybill", dependencies=[Depends(pdf_rate_limiter)])
+async def download_invoice_ewaybill(iid: str, request: Request):
+    """Download the E-Way Bill JSON stored on an invoice (or generated from PO data)."""
+    await _get_user(request)
+    db = _get_db(request)
+    doc = await db.invoices.find_one({"_id": oid(iid)})
+    if not doc:
+        raise HTTPException(404, "Invoice not found")
+    inv_no = doc.get("invoice_no", "invoice")
+    raw = base64.b64decode(doc.get("ewaybill_file_b64") or "")
+    if not raw:
+        # Legacy fallback: generate on-the-fly
+        po_id = doc.get("po_id")
+        po = None
+        if po_id:
+            po_doc = await db.pos.find_one({"_id": oid(po_id)})
+            if po_doc:
+                po = stringify(po_doc)
+        if not po:
+            raise HTTPException(404, "PO not found for E-Way Bill generation")
+        li = doc.get("line_items_snapshot") or []
+        totals = _compute_invoice_totals(po, li)
+        inv_date = doc.get("invoice_date") or doc.get("created_at", "")[:10]
+        raw = generate_eway_bill_bytes(
+            po=po, line_items=li, totals=totals,
+            invoice_no=inv_no, invoice_date=inv_date,
+            transport_mode=doc.get("transport_mode", ""),
+            vehicle_no=doc.get("vehicle_no", ""),
+            transporter=doc.get("transporter") or doc.get("transporter_name", ""),
+            transporter_id=doc.get("transporter_id", ""),
+            trans_distance=doc.get("trans_distance", 0),
+            vehicle_type=doc.get("vehicle_type", "R"),
+            to_pincode=doc.get("to_pincode", ""),
+            to_place=doc.get("to_place", ""),
+            supply_date=doc.get("supply_date", ""),
+        )
+        await db.invoices.update_one(
+            {"_id": oid(iid)},
+            {"$set": {"ewaybill_file_b64": base64.b64encode(raw).decode("ascii")}},
+        )
+
+    return StreamingResponse(
+        BytesIO(raw), media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="EWayBill-{inv_no}.json"'},
+    )
+
+
+
 # ── EAN Codes & Packing Cartons ──────────────────────────────────────────
 @invoice_packing_router.get("/packing/ean-codes")
 async def get_ean_codes(style_id: str, request: Request, color: str | None = None):
@@ -2180,8 +2229,26 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     labels_pdf = build_carton_labels(cartons, po.get("po_number", ""), invoice_no)
     carton_list_xlsx = build_carton_list_xlsx(cartons, po, invoice_no, pl_options)
 
-    # 8. Store invoice record
+    # 7b. E-Way Bill JSON
     totals = _compute_invoice_totals(po, line_items)
+    eway_json = generate_eway_bill_bytes(
+        po=po,
+        line_items=line_items,
+        totals=totals,
+        invoice_no=invoice_no,
+        invoice_date=invoice_date,
+        transport_mode=payload.trans_mode or payload.transport_mode or "",
+        vehicle_no=payload.vehicle_no or "",
+        transporter=payload.transporter or "",
+        transporter_id=payload.transporter_id or "",
+        trans_distance=payload.trans_distance or 0,
+        vehicle_type=payload.vehicle_type or "R",
+        to_pincode=payload.to_pincode or "",
+        to_place=payload.to_place or "",
+        supply_date=payload.supply_date or "",
+    )
+
+    # 8. Store invoice record
     credit_days = _extract_credit_days(po.get("payment_terms", ""))
     is_merged = len(set((c.get("style_code"), c.get("color")) for c in cartons)) > 1
     inv_doc = {
@@ -2205,6 +2272,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "by": u["email"],
         "created_at": now_iso(),
         "file_b64": base64.b64encode(invoice_pdf).decode("ascii"),
+        "ewaybill_file_b64": base64.b64encode(eway_json).decode("ascii"),
         "merged": is_merged,
     }
     inv_res = await db.invoices.insert_one(inv_doc)
@@ -2251,6 +2319,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "packing_list_file_b64": base64.b64encode(packing_xlsx).decode("ascii"),
         "carton_labels_file_b64": base64.b64encode(labels_pdf).decode("ascii"),
         "carton_list_file_b64": base64.b64encode(carton_list_xlsx).decode("ascii"),
+        "ewaybill_file_b64": base64.b64encode(eway_json).decode("ascii"),
     }
     dr_res = await db.dispatch_records.insert_one(dispatch_doc)
     dispatch_record_id = str(dr_res.inserted_id)
@@ -2266,6 +2335,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         zf.writestr(f"PackingList-{invoice_no}-{date_tag}.xlsx", packing_xlsx)
         zf.writestr(f"CartonLabels-{invoice_no}.pdf", labels_pdf)
         zf.writestr(f"CartonList-{invoice_no}-{date_tag}.xlsx", carton_list_xlsx)
+        zf.writestr(f"EWayBill-{invoice_no}.json", eway_json)
     zip_buf.seek(0)
 
     return StreamingResponse(
@@ -2302,6 +2372,7 @@ async def list_dispatch_records(
         "packing_list_file_b64": 0,
         "carton_labels_file_b64": 0,
         "carton_list_file_b64": 0,
+        "ewaybill_file_b64": 0,
     }
     docs = await db.dispatch_records.find(q, proj).sort("dispatched_at", -1).to_list(limit)
     return [stringify(d) for d in docs]
@@ -2314,7 +2385,7 @@ async def get_dispatch_record(dr_id: str, request: Request):
     db = _get_db(request)
     doc = await db.dispatch_records.find_one(
         {"_id": oid(dr_id)},
-        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0},
+        {"invoice_file_b64": 0, "packing_list_file_b64": 0, "carton_labels_file_b64": 0, "carton_list_file_b64": 0, "ewaybill_file_b64": 0},
     )
     if not doc:
         raise HTTPException(404, "Dispatch record not found")
@@ -2395,6 +2466,60 @@ async def download_dispatch_carton_list(dr_id: str, request: Request):
     )
 
 
+@invoice_packing_router.get("/dispatch-records/{dr_id}/ewaybill", dependencies=[Depends(pdf_rate_limiter)])
+async def download_dispatch_ewaybill(dr_id: str, request: Request):
+    """Download the E-Way Bill JSON for a dispatch record.
+
+    For legacy records that pre-date E-Way Bill integration, the JSON is
+    generated on-the-fly from stored invoice and PO data.
+    """
+    await _get_user(request)
+    db = _get_db(request)
+    doc = await db.dispatch_records.find_one({"_id": oid(dr_id)})
+    if not doc:
+        raise HTTPException(404, "Dispatch record not found")
+    inv_no = doc.get("invoice_no", "dispatch")
+
+    raw = base64.b64decode(doc.get("ewaybill_file_b64") or "")
+    if not raw:
+        # Legacy fallback: generate on-the-fly
+        inv = await db.invoices.find_one({"invoice_no": inv_no})
+        po_ids = doc.get("po_ids", [])
+        po = None
+        if po_ids:
+            po_doc = await db.pos.find_one({"_id": oid(po_ids[0])})
+            if po_doc:
+                po = stringify(po_doc)
+        if not po:
+            raise HTTPException(404, "PO not found for legacy E-Way Bill generation")
+        li = (inv or {}).get("line_items_snapshot") or []
+        totals = _compute_invoice_totals(po, li)
+        inv_date = (inv or {}).get("invoice_date") or doc.get("dispatched_at", "")[:10]
+        raw = generate_eway_bill_bytes(
+            po=po, line_items=li, totals=totals,
+            invoice_no=inv_no, invoice_date=inv_date,
+            transport_mode=doc.get("transport_mode") or (inv or {}).get("transport_mode", ""),
+            vehicle_no=doc.get("vehicle_no") or (inv or {}).get("vehicle_no", ""),
+            transporter=doc.get("transporter") or (inv or {}).get("transporter") or (inv or {}).get("transporter_name", ""),
+            transporter_id=doc.get("transporter_id") or (inv or {}).get("transporter_id", ""),
+            trans_distance=doc.get("trans_distance") or (inv or {}).get("trans_distance", 0),
+            vehicle_type=doc.get("vehicle_type") or (inv or {}).get("vehicle_type", "R"),
+            to_pincode=doc.get("to_pincode") or (inv or {}).get("to_pincode", ""),
+            to_place=doc.get("to_place") or (inv or {}).get("to_place", ""),
+            supply_date=doc.get("supply_date") or (inv or {}).get("supply_date", ""),
+        )
+        # Backfill for future requests
+        await db.dispatch_records.update_one(
+            {"_id": oid(dr_id)},
+            {"$set": {"ewaybill_file_b64": base64.b64encode(raw).decode("ascii")}},
+        )
+
+    return StreamingResponse(
+        BytesIO(raw), media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="EWayBill-{inv_no}.json"'},
+    )
+
+
 @invoice_packing_router.post("/dispatch-records/{dr_id}/reprint", dependencies=[Depends(pdf_rate_limiter)])
 async def reprint_dispatch_zip(dr_id: str, request: Request):
     """Re-download all dispatch documents as a ZIP (for reprinting)."""
@@ -2408,6 +2533,7 @@ async def reprint_dispatch_zip(dr_id: str, request: Request):
     packing_xlsx = base64.b64decode(doc.get("packing_list_file_b64") or "")
     labels_pdf = base64.b64decode(doc.get("carton_labels_file_b64") or "")
     carton_list_xlsx = base64.b64decode(doc.get("carton_list_file_b64") or "")
+    eway_json = base64.b64decode(doc.get("ewaybill_file_b64") or "")
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if invoice_pdf:
@@ -2418,6 +2544,8 @@ async def reprint_dispatch_zip(dr_id: str, request: Request):
             zf.writestr(f"CartonLabels-{inv_no}.pdf", labels_pdf)
         if carton_list_xlsx:
             zf.writestr(f"CartonList-{inv_no}.xlsx", carton_list_xlsx)
+        if eway_json:
+            zf.writestr(f"EWayBill-{inv_no}.json", eway_json)
     zip_buf.seek(0)
     return StreamingResponse(
         zip_buf,

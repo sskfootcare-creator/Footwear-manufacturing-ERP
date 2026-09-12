@@ -34,6 +34,13 @@ class DispatchCreate(BaseModel):
     destination: Optional[str] = ""
     port: Optional[str] = ""
     notes: Optional[str] = ""
+    # E-Way Bill fields
+    to_pincode: Optional[str] = None
+    to_place: Optional[str] = None
+    trans_distance: Optional[float] = None
+    transporter_id: Optional[str] = None
+    trans_mode: Optional[str] = None
+    vehicle_type: Optional[str] = "R"
 
 
 class PackingListGenerate(BaseModel):

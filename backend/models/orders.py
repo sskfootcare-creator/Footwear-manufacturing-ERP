@@ -1,6 +1,6 @@
 """B2B Purchase Orders & Production Job Stage Pydantic Models."""
 
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel
 
 PRODUCTION_STAGES = [
@@ -48,13 +48,15 @@ class POIn(BaseModel):
 
 
 class ProductionStageUpdate(BaseModel):
-    stage: Literal["planning", "procurement", "cutting", "folding", "attachment",
-                   "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched"]
+    stage: Optional[Literal["planning", "procurement", "cutting", "folding", "attachment",
+                   "stitching", "lasting", "sole_pasting", "finishing", "qc_pack", "dispatched"]] = None
     completed_qty: Optional[int] = None
     rejected_qty: Optional[int] = None
     qc_pass: Optional[bool] = None
     notes: Optional[str] = ""
     confirm_skip: bool = False
+    planning_notes: Optional[str] = None
+    material_vendor_allocations: Optional[Dict[str, Any]] = None
 
 
 class ProductionJobDoc(BaseModel):
@@ -79,6 +81,10 @@ class ProductionJobDoc(BaseModel):
     stage_deadline: Optional[str] = None
     split_from_job_id: Optional[str] = None   # set on a job created by a split, points to the original job's id
     split_history: Optional[List[dict]] = None # optional: track split lineage if a job gets split more than once
+    planning_notes: Optional[str] = None
+    material_vendor_allocations: Optional[Dict[str, Any]] = None
+    vendor_po_ids: Optional[List[str]] = None
+    vendor_po_numbers: Optional[List[str]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     history: Optional[List[dict]] = None
@@ -86,3 +92,27 @@ class ProductionJobDoc(BaseModel):
 
 class ArchiveJobsRequest(BaseModel):
     job_ids: List[str]
+
+
+class MaterialAllocationItem(BaseModel):
+    material_id: str
+    material_code: str
+    material_name: str
+    category: Optional[str] = "other"
+    unit: str
+    color: Optional[str] = ""
+    quantity: float
+    rate: float
+    amount: float
+    vendor_id: str
+    vendor_name: Optional[str] = ""
+
+
+class GeneratePlanningVendorPOsIn(BaseModel):
+    job_ids: List[str]
+    customer_po_number: str
+    style_code: str
+    color: Optional[str] = ""
+    expected_delivery_date: Optional[str] = ""
+    notes: Optional[str] = ""
+    allocations: List[MaterialAllocationItem]

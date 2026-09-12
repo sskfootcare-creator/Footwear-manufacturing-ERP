@@ -10,11 +10,13 @@ from pymongo.errors import DuplicateKeyError
 from models.vendors import (
     VendorIn,
     VendorUpdate,
+    VendorPOLineItem,
     VendorPOIn,
     VendorPOUpdate,
     VendorPOReceiveIn,
     PaymentIn,
 )
+from models.orders import GeneratePlanningVendorPOsIn
 from auth import require_roles
 
 vendors_router = APIRouter(prefix="/api", tags=["Vendors & Accounts Payable"])
@@ -164,12 +166,18 @@ async def _build_vendor_ledger(db, vid: str) -> dict:
     payments_list = []
     for p in pay_docs:
         amt = float(p.get("amount", 0))
+        po_num = p.get("vendor_po_number") or po_id_map.get(p.get("vendor_po_id"), "")
+        desc = f"Payment via {p.get('mode', 'Bank')} ({p.get('reference') or 'N/A'})"
+        if po_num:
+            desc += f" [PO: {po_num}]"
         payments_list.append({
             "type": "payment",
             "date": p.get("payment_date") or str(p.get("created_at", ""))[:10],
             "created_at": p.get("created_at", ""),
             "reference": p.get("payment_no") or p.get("reference") or "PAYMENT",
-            "description": f"Payment via {p.get('mode', 'Bank')} ({p.get('reference') or 'N/A'})",
+            "po_number": po_num,
+            "vendor_po_id": p.get("vendor_po_id", ""),
+            "description": desc,
             "credit": 0.0,
             "debit": round(amt, 2),
             "mode": p.get("mode"),
@@ -359,27 +367,131 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
     vendor = await db.vendors.find_one({"_id": oid(vid)})
     if not vendor:
         raise HTTPException(404, "Vendor not found")
+
+    vendor_po_id = payload.vendor_po_id or ""
+    vendor_po_number = ""
+    if vendor_po_id:
+        try:
+            po = await db.vendor_purchase_orders.find_one({"_id": oid(vendor_po_id)})
+            if po:
+                vendor_po_number = po.get("po_number", "")
+                await db.vendor_purchase_orders.update_one(
+                    {"_id": po["_id"]},
+                    {"$set": {"updated_at": now_iso()}}
+                )
+        except Exception:
+            pass
+
+    bank_account_id = payload.bank_account_id or ""
+    cash_account_id = getattr(payload, "cash_account_id", None) or ""
+    account_type = getattr(payload, "account_type", None) or ("cash" if payload.mode == "Cash" or cash_account_id else "bank")
+    bank_name = payload.bank or ""
+
+    # 1. If bank_account_id provided, lookup bank account details if bank_name is missing
+    if bank_account_id and hasattr(db, "bank_accounts") and db.bank_accounts is not None:
+        try:
+            b_doc = None
+            if ObjectId.is_valid(bank_account_id):
+                b_doc = await db.bank_accounts.find_one({"_id": oid(bank_account_id)})
+            if not b_doc:
+                b_doc = await db.bank_accounts.find_one({"_id": bank_account_id})
+            if b_doc and not bank_name:
+                bank_name = b_doc.get("bank_name") or b_doc.get("name") or ""
+        except Exception:
+            pass
+
+    # 2. If cash_account_id provided, lookup cash account & deduct from cash ledger pool
+    if account_type == "cash" and cash_account_id and hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+        try:
+            src_bank_id = None
+            if hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+                ca_doc = None
+                if ObjectId.is_valid(cash_account_id):
+                    ca_doc = await db.cash_accounts.find_one({"_id": oid(cash_account_id)})
+                if not ca_doc:
+                    ca_doc = await db.cash_accounts.find_one({"_id": cash_account_id})
+                if not ca_doc:
+                    ca_doc = await db.cash_accounts.find_one({"source_bank_account_id": cash_account_id})
+                if ca_doc:
+                    src_bank_id = str(ca_doc.get("source_bank_account_id") or "")
+                    if not bank_name:
+                        bank_name = ca_doc.get("name") or "Cash Account"
+
+            q_ids = [cash_account_id]
+            if src_bank_id:
+                q_ids.append(src_bank_id)
+                if ObjectId.is_valid(src_bank_id):
+                    q_ids.append(oid(src_bank_id))
+
+            cur = db.cash_ledger.find({"bank_account_id": {"$in": q_ids}, "remaining_balance": {"$gt": 0}}).sort("date", 1)
+            cl_entries = await cur.to_list(1000) if hasattr(cur, "to_list") else list(cur)
+            to_deduct = round(float(payload.amount), 2)
+            for entry in cl_entries:
+                rem = float(entry.get("remaining_balance") or 0.0)
+                if rem <= 0:
+                    continue
+                deduct = min(rem, to_deduct)
+                await db.cash_ledger.update_one(
+                    {"_id": entry["_id"], "remaining_balance": {"$gte": round(deduct, 2)}},
+                    {"$inc": {"remaining_balance": -round(deduct, 2)}}
+                )
+                to_deduct = round(to_deduct - deduct, 2)
+                if to_deduct <= 0:
+                    break
+        except Exception:
+            pass
+
     payment_no = await next_payment_no(db)
     doc = {
         "payment_no": payment_no,
         "payment_date": payload.payment_date,
         "amount": round(float(payload.amount), 2),
         "mode": payload.mode,
-        "reference": payload.reference,
-        "bank": payload.bank,
-        "bank_account_id": payload.bank_account_id,
-        "notes": payload.notes,
+        "reference": payload.reference or "",
+        "bank": bank_name,
+        "bank_account_id": bank_account_id,
+        "account_type": account_type,
+        "cash_account_id": cash_account_id,
+        "notes": payload.notes or "",
         "type": "vendor_payment",
         "vendor_id": str(vendor["_id"]),
         "vendor_name": vendor.get("name"),
-        "vendor_po_id": payload.vendor_po_id or "",
+        "vendor_po_id": vendor_po_id,
+        "vendor_po_number": vendor_po_number,
         "by": u.get("email") or u.get("name", ""),
         "created_at": now_iso(),
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
-    await log_activity_db(db, "create_vendor_payment", "vendor_payments", f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}", u.get("email", ""))
+
+    # 3. Synchronize live bank account balance if paying from bank
+    if bank_account_id:
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, bank_account_id)
+        except Exception:
+            pass
+
+    detail_msg = f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}"
+    if vendor_po_number:
+        detail_msg += f" against PO {vendor_po_number}"
+    if bank_name:
+        detail_msg += f" via account '{bank_name}'"
+    await log_activity_db(db, "create_vendor_payment", "vendor_payments", detail_msg, u.get("email", ""))
     return stringify(doc)
+
+
+@vendors_router.post("/vendor-pos/{id}/payments", status_code=201)
+async def create_vendor_po_payment(id: str, payload: PaymentIn, request: Request):
+    """Direct convenience endpoint to record a payment against a specific Vendor Purchase Order."""
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    po = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    if not po:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+    vid = str(po.get("vendor_id"))
+    payload.vendor_po_id = id
+    return await create_vendor_payment(vid=vid, payload=payload, request=request)
+
 
 
 @vendors_router.get("/vendors/{vid}")
@@ -438,14 +550,61 @@ async def list_vendor_pos(request: Request, vendor_id: Optional[str] = None, sta
     
     vendors = await db.vendors.find({}).to_list(2000)
     vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
+
+    po_ids = [str(d["_id"]) for d in docs]
+    po_numbers = [d.get("po_number") for d in docs if d.get("po_number")]
+
+    # Fetch payments linked to these POs
+    pay_docs = []
+    if po_ids or po_numbers:
+        pay_or = []
+        if po_ids:
+            pay_or.append({"vendor_po_id": {"$in": po_ids}})
+        if po_numbers:
+            pay_or.append({"vendor_po_number": {"$in": po_numbers}})
+        pay_docs = await db.payments.find({"$or": pay_or}).to_list(5000)
+
+    # Group paid amounts by PO ID and PO Number without double counting
+    paid_by_po = defaultdict(float)
+    for p in pay_docs:
+        amt = float(p.get("amount", 0) or 0)
+        v_po_id = str(p.get("vendor_po_id") or "")
+        v_po_no = str(p.get("vendor_po_number") or "")
+        key = v_po_id or v_po_no
+        if key:
+            paid_by_po[key] += amt
     
     out = []
     for d in docs:
         d = stringify(d)
+        d_id = str(d.get("id") or "")
+        d_po_no = str(d.get("po_number") or "")
+
         d["vendor_name"] = vendor_map.get(d.get("vendor_id", ""), "Unknown Vendor")
         for li in d.get("line_items", []):
             if "received_quantity" not in li:
                 li["received_quantity"] = 0.0
+
+        # Calculate financial amounts
+        total_amt = float(d.get("total_amount") or 0)
+        if total_amt <= 0 and d.get("line_items"):
+            total_amt = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in d.get("line_items", []))
+        total_amt = round(total_amt, 2)
+        d["total_amount"] = total_amt
+
+        paid_amt = round(paid_by_po.get(d_id, 0.0) or paid_by_po.get(d_po_no, 0.0), 2)
+        d["paid_amount"] = paid_amt
+
+        balance_due = max(0.0, round(total_amt - paid_amt, 2))
+        d["balance_due"] = balance_due
+
+        if total_amt > 0 and paid_amt >= total_amt:
+            d["payment_status"] = "paid"
+        elif paid_amt > 0:
+            d["payment_status"] = "partially_paid"
+        else:
+            d["payment_status"] = "unpaid"
+
         out.append(d)
     return out
 
@@ -474,6 +633,115 @@ async def create_vendor_po(payload: VendorPOIn, request: Request):
     return stringify(doc)
 
 
+@vendors_router.post("/production/planning/generate-vendor-pos", status_code=201)
+@vendors_router.post("/vendor-pos/bulk-generate-planning", status_code=201)
+async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    if not payload.job_ids:
+        raise HTTPException(400, "job_ids cannot be empty")
+    if not payload.allocations:
+        raise HTTPException(400, "allocations cannot be empty")
+
+    job_obj_ids = [oid(jid) for jid in payload.job_ids]
+    jobs = await db.production_jobs.find({"_id": {"$in": job_obj_ids}}).to_list(len(job_obj_ids) + 10)
+    if not jobs:
+        raise HTTPException(404, "No matching production jobs found")
+
+    vendor_groups = defaultdict(list)
+    for alloc in payload.allocations:
+        if not alloc.vendor_id:
+            raise HTTPException(400, f"Vendor ID missing for material '{alloc.material_code}'")
+        vendor_groups[alloc.vendor_id].append(alloc)
+
+    created_vpos = []
+    for vid, items in vendor_groups.items():
+        vendor = await db.vendors.find_one({"_id": oid(vid)})
+        if not vendor:
+            raise HTTPException(404, f"Vendor '{vid}' not found")
+
+        po_no = await next_vendor_po_no(db)
+        line_items = []
+        total_amt = 0.0
+        for it in items:
+            amt = round(float(it.quantity) * float(it.rate), 2)
+            total_amt += amt
+            line_items.append({
+                "material_id": it.material_id,
+                "material_code": it.material_code,
+                "material_name": it.material_name,
+                "color": it.color or "",
+                "unit": it.unit,
+                "quantity": float(it.quantity),
+                "rate": float(it.rate),
+                "amount": amt,
+                "received_quantity": 0.0,
+            })
+
+        vpo_doc = {
+            "vendor_id": str(vendor["_id"]),
+            "vendor_name": vendor.get("name", ""),
+            "po_number": po_no,
+            "customer_po_number": payload.customer_po_number or (jobs[0].get("po_number") if jobs else ""),
+            "style_code": payload.style_code or (jobs[0].get("style_code") if jobs else ""),
+            "production_job_ids": payload.job_ids,
+            "line_items": line_items,
+            "status": "draft",
+            "expected_delivery_date": payload.expected_delivery_date or "",
+            "total_amount": round(total_amt, 2),
+            "notes": payload.notes or f"Generated from Planning Stage for {payload.customer_po_number} ({payload.style_code})",
+            "by": u.get("email") or u.get("name", ""),
+            "processed_receipt_ids": [],
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        res = await db.vendor_purchase_orders.insert_one(vpo_doc)
+        vpo_doc["_id"] = res.inserted_id
+        await log_activity_db(db, "create_vendor_po", "vendor_pos", f"Auto-generated Vendor PO '{po_no}' from Planning Stage", u.get("email", ""))
+        created_vpos.append(vpo_doc)
+
+    alloc_map = {}
+    for a in payload.allocations:
+        key = f"{a.material_code}_{a.color or 'all'}"
+        alloc_map[key] = a.model_dump()
+
+    vpo_ids = [str(v["_id"]) for v in created_vpos]
+    vpo_numbers = [v["po_number"] for v in created_vpos]
+
+    await db.production_jobs.update_many(
+        {"_id": {"$in": job_obj_ids}},
+        {
+            "$set": {
+                "material_vendor_allocations": alloc_map,
+                "updated_at": now_iso(),
+            },
+            "$addToSet": {
+                "vendor_po_ids": {"$each": vpo_ids},
+                "vendor_po_numbers": {"$each": vpo_numbers},
+            },
+            "$push": {
+                "history": {
+                    "stage": "planning",
+                    "at": now_iso(),
+                    "by": u.get("email") or u.get("name", ""),
+                    "notes": f"Generated Vendor PO(s): {', '.join(vpo_numbers)}",
+                }
+            }
+        }
+    )
+
+    return {
+        "ok": True,
+        "vendor_pos": [stringify(v) for v in created_vpos],
+        "count": len(created_vpos),
+        "job_ids": payload.job_ids,
+        "vendor_po_numbers": vpo_numbers,
+    }
+
+
+
 @vendors_router.get("/vendor-pos/{id}")
 async def get_vendor_po(id: str, request: Request):
     await _get_user(request)
@@ -487,6 +755,36 @@ async def get_vendor_po(id: str, request: Request):
     for li in out.get("line_items", []):
         if "received_quantity" not in li:
             li["received_quantity"] = 0.0
+
+    po_id = str(doc["_id"])
+    po_no = doc.get("po_number", "")
+    matching_payments = await db.payments.find({
+        "$or": [
+            {"vendor_po_id": po_id},
+            {"vendor_po_number": po_no}
+        ]
+    }).to_list(500)
+    matching_payments.sort(key=lambda p: (p.get("payment_date", ""), p.get("created_at", "")), reverse=True)
+
+    total_amt = float(out.get("total_amount") or 0)
+    if total_amt <= 0 and out.get("line_items"):
+        total_amt = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in out.get("line_items", []))
+    total_amt = round(total_amt, 2)
+    out["total_amount"] = total_amt
+
+    paid_amt = round(sum(float(p.get("amount", 0) or 0) for p in matching_payments), 2)
+    out["paid_amount"] = paid_amt
+    balance_due = max(0.0, round(total_amt - paid_amt, 2))
+    out["balance_due"] = balance_due
+
+    if total_amt > 0 and paid_amt >= total_amt:
+        out["payment_status"] = "paid"
+    elif paid_amt > 0:
+        out["payment_status"] = "partially_paid"
+    else:
+        out["payment_status"] = "unpaid"
+
+    out["payments"] = [stringify(p) for p in matching_payments]
     return out
 
 
