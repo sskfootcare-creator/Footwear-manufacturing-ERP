@@ -52,7 +52,19 @@ class MockExpensesDB:
         self.online_settlements.find = MagicMock(return_value=MockCursor(list(self.online_settlements_store.values())))
 
         self.vendor_pos = MagicMock()
-        self.vendor_pos.find = MagicMock(return_value=MockCursor(list(self.vendor_pos_store.values())))
+        self.vendor_pos.find = MagicMock(side_effect=lambda *a, **kw: MockCursor(list(self.vendor_pos_store.values())))
+
+        self.vendor_purchase_orders = MagicMock()
+        self.vendor_purchase_orders.find = MagicMock(side_effect=lambda *a, **kw: MockCursor(list(self.vendor_pos_store.values())))
+
+        self.vendors = MagicMock()
+        self.vendors.find = MagicMock(side_effect=lambda *a, **kw: MockCursor([]))
+
+        self.bank_accounts = MagicMock()
+        self.bank_accounts.find = MagicMock(side_effect=lambda *a, **kw: MockCursor([]))
+
+        self.cash_accounts = MagicMock()
+        self.cash_accounts.find = MagicMock(side_effect=lambda *a, **kw: MockCursor([]))
 
         self.audit_logs = MagicMock()
         self.audit_logs.insert_one = AsyncMock(return_value=MagicMock(inserted_id="audit_1"))
@@ -327,3 +339,64 @@ def test_pnl_report(client, mock_expenses_env):
     assert "gross_profit" in pnl
     assert "net_profit" in pnl
     assert "monthly_breakdown" in pnl
+
+
+def test_export_expenses_and_purchases(client, mock_expenses_env):
+    # 1. Create an expense
+    exp_res = client.post("/api/expenses", json={
+        "category": "Rent & Utilities",
+        "payee": "Agra Power Corp",
+        "amount": 12500.0,
+        "date": "2026-03-01",
+        "notes": "Factory electricity bill",
+        "paid_via": "bank"
+    })
+    assert exp_res.status_code == 200
+
+    # 2. Add a vendor PO into mock_expenses_env.vendor_pos_store
+    mock_expenses_env.vendor_pos_store["po_exp_1"] = {
+        "_id": "po_exp_1",
+        "po_number": "PO-2026-0099",
+        "vendor_name": "Apex Synthetic Leather",
+        "status": "received",
+        "created_at": "2026-03-02T10:00:00Z",
+        "total_amount": 45000.0,
+        "paid_amount": 20000.0,
+        "balance_due": 25000.0,
+        "line_items": [
+            {"material_name": "PU Leather Roll", "quantity": 100, "received_quantity": 100, "amount": 45000.0}
+        ]
+    }
+
+    # 3. Test export_type="all"
+    res_all = client.get("/api/expenses/export-data?export_type=all")
+    assert res_all.status_code == 200
+    data_all = res_all.json()
+    assert "expenses" in data_all
+    assert "purchases" in data_all
+    assert "summary" in data_all
+    assert len(data_all["expenses"]) >= 1
+    assert len(data_all["purchases"]) >= 1
+    assert data_all["summary"]["total_outflow_amount"] >= 57500.0
+
+    # 4. Test export_type="expenses"
+    res_exp = client.get("/api/expenses/export-data?export_type=expenses")
+    assert res_exp.status_code == 200
+    data_exp = res_exp.json()
+    assert len(data_exp["expenses"]) >= 1
+    assert len(data_exp["purchases"]) == 0
+
+    # 5. Test export_type="purchases"
+    res_pur = client.get("/api/expenses/export-data?export_type=purchases")
+    assert res_pur.status_code == 200
+    data_pur = res_pur.json()
+    assert len(data_pur["expenses"]) == 0
+    assert len(data_pur["purchases"]) >= 1
+
+    # 6. Test search filter
+    res_search = client.get("/api/expenses/export-data?export_type=all&search=electricity")
+    assert res_search.status_code == 200
+    data_search = res_search.json()
+    assert len(data_search["expenses"]) == 1
+    assert data_search["expenses"][0]["payee"] == "Agra Power Corp"
+

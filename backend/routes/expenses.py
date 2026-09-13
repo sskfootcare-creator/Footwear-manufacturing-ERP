@@ -408,6 +408,174 @@ async def delete_recurring_expense(rid: str, request: Request):
     return {"ok": True}
 
 
+# ---------- EXPORT DATA (EXPENSES & PURCHASES) ----------
+
+@expenses_router.get("/expenses/export-data")
+async def export_expenses_and_purchases(
+    request: Request,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    export_type: Optional[str] = "all",
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    # 1. Fetch Expenses
+    exp_q = {}
+    if category and str(category).lower() != "all":
+        exp_q["category"] = str(category)
+    if from_date or to_date:
+        date_q = {}
+        if from_date:
+            date_q["$gte"] = str(from_date)
+        if to_date:
+            date_q["$lte"] = str(to_date)
+        exp_q["date"] = date_q
+    if search:
+        s_regex = {"$regex": re.escape(str(search)), "$options": "i"}
+        exp_q["$or"] = [
+            {"payee": s_regex},
+            {"category": s_regex},
+            {"notes": s_regex},
+        ]
+
+    # Build lookup maps for bank & cash accounts
+    banks_map = {}
+    if getattr(db, "bank_accounts", None) is not None:
+        try:
+            b_list = await db.bank_accounts.find({}).to_list(1000)
+            for b in b_list:
+                bid = str(b.get("_id", ""))
+                bname = b.get("name") or b.get("bank_name") or "Bank"
+                if b.get("account_number_last4"):
+                    bname += f" (••{b.get('account_number_last4')})"
+                banks_map[bid] = bname
+        except Exception:
+            pass
+
+    cash_map = {}
+    if getattr(db, "cash_accounts", None) is not None:
+        try:
+            c_list = await db.cash_accounts.find({}).to_list(1000)
+            for c in c_list:
+                cid = str(c.get("_id", ""))
+                cash_map[cid] = c.get("name") or "Cash Account"
+                if c.get("source_bank_account_id"):
+                    cash_map[str(c["source_bank_account_id"])] = c.get("name") or "Cash Account"
+        except Exception:
+            pass
+
+    expenses_docs = []
+    if export_type in ["expenses", "all"]:
+        raw_expenses = await db.expenses.find(exp_q).sort([("date", -1), ("created_at", -1)]).to_list(10000)
+        for e in raw_expenses:
+            b_id = str(e.get("bank_account_id") or "")
+            c_id = str(e.get("cash_account_id") or e.get("cash_ledger_id") or "")
+            b_name = e.get("bank_account_name") or e.get("bank_name") or banks_map.get(b_id) or "—"
+            c_name = e.get("cash_account_name") or cash_map.get(c_id) or "—"
+            expenses_docs.append({
+                "id": str(e.get("_id", "")),
+                "date": e.get("date") or str(e.get("created_at", ""))[:10],
+                "category": e.get("category", "General"),
+                "payee": e.get("payee", "—"),
+                "amount": float(e.get("amount", 0) or 0),
+                "paid_via": e.get("paid_via", "bank"),
+                "bank_account_name": b_name,
+                "cash_account_name": c_name,
+                "status": e.get("status", "paid"),
+                "notes": e.get("notes", "") or "—",
+                "is_recurring": bool(e.get("recurring_expense_id") or e.get("is_recurring")),
+            })
+
+    # 2. Fetch Purchases / Vendor POs
+    purchases_docs = []
+    if export_type in ["purchases", "all"]:
+        po_q = {"status": {"$ne": "cancelled"}}
+        if from_date or to_date:
+            date_q = {}
+            if from_date:
+                date_q["$gte"] = str(from_date)
+            if to_date:
+                date_q["$lte"] = f"{to_date}T23:59:59.999Z" if len(to_date) == 10 else str(to_date)
+            po_q["$or"] = [
+                {"created_at": date_q},
+                {"expected_delivery_date": {"$gte": from_date or "2000-01-01", "$lte": to_date or "2099-12-31"}},
+            ]
+
+        raw_pos = []
+        if getattr(db, "vendor_purchase_orders", None) is not None:
+            raw_pos = await db.vendor_purchase_orders.find(po_q).sort([("created_at", -1)]).to_list(10000)
+        if not raw_pos and getattr(db, "vendor_pos", None) is not None:
+            raw_pos = await db.vendor_pos.find(po_q).sort([("created_at", -1)]).to_list(10000)
+
+        vendors_map = {}
+        if getattr(db, "vendors", None) is not None:
+            v_list = await db.vendors.find({}).to_list(1000)
+            vendors_map = {str(v["_id"]): v.get("name", "") for v in v_list}
+
+        for po in raw_pos:
+            vid = str(po.get("vendor_id", ""))
+            vname = po.get("vendor_name") or vendors_map.get(vid) or "Unknown Vendor"
+
+            line_items = po.get("line_items", [])
+            mat_names = [li.get("material_name") or li.get("material_id", "") for li in line_items if li.get("material_name") or li.get("material_id")]
+            items_desc = ", ".join(mat_names[:4]) + (f" (+{len(mat_names) - 4} more)" if len(mat_names) > 4 else "")
+            if not items_desc:
+                items_desc = "Materials Procurement"
+
+            tot_qty = sum(float(li.get("quantity", 0) or 0) for li in line_items)
+            rec_qty = sum(float(li.get("received_quantity", 0) or 0) for li in line_items)
+
+            amt = float(po.get("total_amount") or po.get("grand_total") or sum(float(li.get("amount", 0) or 0) for li in line_items))
+            paid = float(po.get("paid_amount", 0) or 0)
+            bal = float(po.get("balance_due") if po.get("balance_due") is not None else max(0.0, amt - paid))
+            created_date = str(po.get("created_at", ""))[:10] or "—"
+
+            purchases_docs.append({
+                "id": str(po.get("_id", "")),
+                "po_number": po.get("po_number") or "—",
+                "date": created_date,
+                "vendor_name": vname,
+                "items_description": items_desc,
+                "total_quantity": round(tot_qty, 2),
+                "received_quantity": round(rec_qty, 2),
+                "total_amount": round(amt, 2),
+                "paid_amount": round(paid, 2),
+                "balance_due": round(bal, 2),
+                "status": po.get("status", "sent"),
+                "expected_delivery_date": po.get("expected_delivery_date") or "—",
+            })
+
+        if search:
+            s_lower = str(search).lower()
+            purchases_docs = [
+                p for p in purchases_docs
+                if s_lower in p["vendor_name"].lower()
+                or s_lower in p["po_number"].lower()
+                or s_lower in p["items_description"].lower()
+            ]
+
+    total_exp_amt = sum(e["amount"] for e in expenses_docs)
+    total_pur_amt = sum(p["total_amount"] for p in purchases_docs)
+
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "export_type": export_type,
+        "expenses": expenses_docs,
+        "purchases": purchases_docs,
+        "summary": {
+            "expenses_count": len(expenses_docs),
+            "expenses_amount": round(total_exp_amt, 2),
+            "purchases_count": len(purchases_docs),
+            "purchases_amount": round(total_pur_amt, 2),
+            "total_outflow_amount": round(total_exp_amt + total_pur_amt, 2),
+        }
+    }
+
+
 # ---------- SIMPLE P&L ----------
 
 @expenses_router.get("/reports/pnl")
@@ -467,7 +635,11 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
             {"created_at": date_q},
             {"expected_delivery_date": date_q}
         ]
-    vendor_pos = await db.vendor_pos.find(ven_po_q).to_list(5000)
+    vendor_pos = []
+    if getattr(db, "vendor_purchase_orders", None) is not None:
+        vendor_pos = await db.vendor_purchase_orders.find(ven_po_q).to_list(5000)
+    if not vendor_pos and getattr(db, "vendor_pos", None) is not None:
+        vendor_pos = await db.vendor_pos.find(ven_po_q).to_list(5000)
     material_cost = 0.0
     for po in vendor_pos:
         tot = po.get("total_amount") or po.get("grand_total")

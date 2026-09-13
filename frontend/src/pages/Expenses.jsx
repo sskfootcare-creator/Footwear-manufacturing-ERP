@@ -25,6 +25,10 @@ import {
   PauseCircle,
   PlayCircle,
   Coins,
+  Download,
+  FileSpreadsheet,
+  Layers,
+  ShoppingBag,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -57,6 +61,22 @@ const EXPENSE_CATEGORIES = [
 ];
 
 const TODAY = new Date().toISOString().split("T")[0];
+
+function downloadCsv(filename, headers, rows) {
+  const content =
+    "data:text/csv;charset=utf-8," +
+    [
+      headers.map((h) => `"${String(h ?? "").replace(/"/g, '""')}"`).join(","),
+      ...rows.map((r) => r.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")),
+    ].join("\n");
+  const encodedUri = encodeURI(content);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute("download", filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 
 export default function Expenses() {
   // Navigation tab
@@ -106,6 +126,16 @@ export default function Expenses() {
   const [editingItem, setEditingItem] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+  // Export Outflow modal state
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exportType, setExportType] = useState("all"); // "all" | "expenses" | "purchases"
+  const [exportFromDate, setExportFromDate] = useState("");
+  const [exportToDate, setExportToDate] = useState("");
+  const [exportCategory, setExportCategory] = useState("all");
+  const [exportSearch, setExportSearch] = useState("");
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportData, setExportData] = useState(null);
 
   // Confirm due expense modal
   const [confirmModalItem, setConfirmModalItem] = useState(null);
@@ -190,6 +220,176 @@ export default function Expenses() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Export Outflow handlers
+  const openExportModal = () => {
+    setExportFromDate(fromDate);
+    setExportToDate(toDate);
+    setExportCategory(categoryFilter);
+    setExportSearch(search);
+    setExportType("all");
+    setExportModalOpen(true);
+  };
+
+  const handleExportPreset = (preset) => {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    if (preset === "all") {
+      setExportFromDate("");
+      setExportToDate("");
+    } else if (preset === "this_month") {
+      const first = new Date(now.getFullYear(), now.getMonth(), 1);
+      setExportFromDate(fmt(first));
+      setExportToDate(fmt(now));
+    } else if (preset === "last_30") {
+      const past = new Date();
+      past.setDate(past.getDate() - 30);
+      setExportFromDate(fmt(past));
+      setExportToDate(fmt(now));
+    } else if (preset === "quarter") {
+      const qMonth = Math.floor(now.getMonth() / 3) * 3;
+      const first = new Date(now.getFullYear(), qMonth, 1);
+      setExportFromDate(fmt(first));
+      setExportToDate(fmt(now));
+    } else if (preset === "fy") {
+      const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+      const first = new Date(fyStartYear, 3, 1);
+      setExportFromDate(fmt(first));
+      setExportToDate(fmt(now));
+    }
+  };
+
+  const fetchExportPreview = useCallback(async () => {
+    setExportLoading(true);
+    try {
+      const params = {
+        export_type: exportType,
+      };
+      if (exportFromDate) params.from_date = exportFromDate;
+      if (exportToDate) params.to_date = exportToDate;
+      if (exportCategory && exportCategory !== "all") params.category = exportCategory;
+      if (exportSearch) params.search = exportSearch;
+
+      const res = await http.get("/expenses/export-data", { params });
+      setExportData(res.data);
+    } catch (err) {
+      console.error("Failed to load export preview data:", err);
+    } finally {
+      setExportLoading(false);
+    }
+  }, [exportType, exportFromDate, exportToDate, exportCategory, exportSearch]);
+
+  useEffect(() => {
+    if (exportModalOpen) {
+      fetchExportPreview();
+    }
+  }, [exportModalOpen, fetchExportPreview]);
+
+  const handleDownloadCsv = (type = "consolidated") => {
+    if (!exportData) return;
+    const dateTag = TODAY;
+
+    if (type === "expenses" || (type === "consolidated" && exportType === "expenses")) {
+      const headers = [
+        "Expense ID",
+        "Date",
+        "Category",
+        "Payee",
+        "Amount (INR)",
+        "Paid Via",
+        "Bank Account",
+        "Cash Account",
+        "Status",
+        "Recurring",
+        "Notes",
+      ];
+      const rows = (exportData.expenses || []).map((e) => [
+        e.id,
+        e.date,
+        e.category,
+        e.payee,
+        e.amount,
+        e.paid_via,
+        e.bank_account_name,
+        e.cash_account_name,
+        e.status,
+        e.is_recurring ? "Yes" : "No",
+        e.notes,
+      ]);
+      downloadCsv(`SSK_ERP_Expenses_${dateTag}.csv`, headers, rows);
+    } else if (type === "purchases" || (type === "consolidated" && exportType === "purchases")) {
+      const headers = [
+        "PO ID",
+        "PO Number",
+        "Date",
+        "Vendor Name",
+        "Materials Description",
+        "Total Qty",
+        "Received Qty",
+        "Total Amount (INR)",
+        "Paid Amount (INR)",
+        "Balance Due (INR)",
+        "Status",
+        "Expected Delivery",
+      ];
+      const rows = (exportData.purchases || []).map((p) => [
+        p.id,
+        p.po_number,
+        p.date,
+        p.vendor_name,
+        p.items_description,
+        p.total_quantity,
+        p.received_quantity,
+        p.total_amount,
+        p.paid_amount,
+        p.balance_due,
+        p.status,
+        p.expected_delivery_date,
+      ]);
+      downloadCsv(`SSK_ERP_Vendor_Purchases_${dateTag}.csv`, headers, rows);
+    } else {
+      // Consolidated
+      const headers = [
+        "Record Type",
+        "Reference ID / PO #",
+        "Date",
+        "Party (Payee / Vendor)",
+        "Category / Description",
+        "Amount (INR)",
+        "Payment Mode / Terms",
+        "Account / Delivery Info",
+        "Status",
+        "Notes / Remarks",
+      ];
+      const expRows = (exportData.expenses || []).map((e) => [
+        "OPERATING EXPENSE",
+        e.id,
+        e.date,
+        e.payee,
+        e.category,
+        e.amount,
+        (e.paid_via || "bank").toUpperCase(),
+        e.paid_via === "cash" ? e.cash_account_name : e.bank_account_name,
+        (e.status || "paid").toUpperCase(),
+        e.notes,
+      ]);
+      const purRows = (exportData.purchases || []).map((p) => [
+        "MATERIAL PURCHASE PO",
+        p.po_number || p.id,
+        p.date,
+        p.vendor_name,
+        p.items_description,
+        p.total_amount,
+        `Paid: ₹${p.paid_amount} | Due: ₹${p.balance_due}`,
+        `Exp Delivery: ${p.expected_delivery_date}`,
+        (p.status || "sent").toUpperCase(),
+        `Qty: ${p.total_quantity} (Recv: ${p.received_quantity})`,
+      ]);
+      downloadCsv(`SSK_ERP_Consolidated_Outflows_${dateTag}.csv`, headers, [...expRows, ...purRows]);
+    }
+  };
 
   // Modal Handlers
   const openNewModal = () => {
@@ -561,6 +761,13 @@ export default function Expenses() {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={openExportModal}
+              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-900 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-slate-800 shadow-sm transition-colors"
+              data-testid="export-outflows-btn"
+            >
+              <Download className="w-3.5 h-3.5 text-[#C27842]" /> Export Outflows
+            </button>
+            <button
               onClick={() => setShowCashWithdrawalModal(true)}
               className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-amber-600 shadow-sm transition-colors"
               data-testid="record-cash-withdrawal-btn"
@@ -686,6 +893,15 @@ export default function Expenses() {
                     </button>
                   )}
                 </div>
+
+                <button
+                  type="button"
+                  onClick={openExportModal}
+                  data-testid="filter-bar-export-btn"
+                  className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-700 hover:text-slate-900 border border-slate-300 hover:border-slate-400 bg-white hover:bg-slate-50 px-3 py-1.5 transition-colors self-start md:self-auto"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#C27842]" /> Export Outflow
+                </button>
               </div>
             </div>
 
@@ -1635,6 +1851,285 @@ export default function Expenses() {
             }
           }}
         />
+      )}
+
+      {/* ── EXPORT OUTFLOWS MODAL (EXPENSES & PURCHASES) ──────────────────── */}
+      {exportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4"
+          role="dialog"
+          data-testid="export-outflows-modal"
+        >
+          <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[92vh]">
+            {/* Modal Header */}
+            <div className="bg-[#0F172A] text-white px-5 py-4 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded bg-amber-500/20 text-[#C27842] grid place-items-center border border-amber-500/40">
+                  <Download className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm uppercase tracking-wider text-white">
+                    Export Financial Outflow Data
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Consolidated Operating Expenses & Vendor Material Purchases (PO Outflows)
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setExportModalOpen(false)}
+                className="text-slate-400 hover:text-white transition-colors p-1"
+                data-testid="close-export-modal-btn"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-5 overflow-y-auto flex-1 text-xs">
+              {/* 1. Scope Selector Tabs */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                  Export Scope / Record Type
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setExportType("all")}
+                    data-testid="export-scope-all"
+                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
+                      exportType === "all"
+                        ? "border-[#C27842] bg-amber-50/50 text-[#C27842] shadow-sm"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    <Layers className="w-4 h-4" /> All Outflow
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExportType("expenses")}
+                    data-testid="export-scope-expenses"
+                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
+                      exportType === "expenses"
+                        ? "border-[#C27842] bg-amber-50/50 text-[#C27842] shadow-sm"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    <ReceiptIndianRupee className="w-4 h-4" /> Expenses Only
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExportType("purchases")}
+                    data-testid="export-scope-purchases"
+                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
+                      exportType === "purchases"
+                        ? "border-[#C27842] bg-amber-50/50 text-[#C27842] shadow-sm"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    <ShoppingBag className="w-4 h-4" /> Purchases Only
+                  </button>
+                </div>
+              </div>
+
+              {/* 2. Date Filter & Presets */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                    Date Range Period
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleExportPreset("all")}
+                      data-testid="export-preset-all"
+                      className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportPreset("this_month")}
+                      data-testid="export-preset-this-month"
+                      className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+                    >
+                      This Month
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportPreset("last_30")}
+                      data-testid="export-preset-last-30"
+                      className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+                    >
+                      Last 30D
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportPreset("quarter")}
+                      data-testid="export-preset-quarter"
+                      className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+                    >
+                      Quarter
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportPreset("fy")}
+                      data-testid="export-preset-fy"
+                      className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200"
+                    >
+                      FY to Date
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <span className="block text-[10px] text-slate-500 font-bold uppercase mb-1">From Date</span>
+                    <input
+                      type="date"
+                      value={exportFromDate}
+                      onChange={(e) => setExportFromDate(e.target.value)}
+                      data-testid="export-from-date"
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <span className="block text-[10px] text-slate-500 font-bold uppercase mb-1">To Date</span>
+                    <input
+                      type="date"
+                      value={exportToDate}
+                      onChange={(e) => setExportToDate(e.target.value)}
+                      data-testid="export-to-date"
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Category & Search Filters */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {exportType !== "purchases" && (
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                      Expense Category
+                    </label>
+                    <select
+                      value={exportCategory}
+                      onChange={(e) => setExportCategory(e.target.value)}
+                      data-testid="export-category-select"
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 bg-white"
+                    >
+                      <option value="all">All Categories</option>
+                      {EXPENSE_CATEGORIES.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className={exportType === "purchases" ? "sm:col-span-2" : ""}>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Search Filter (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Filter by payee, notes, vendor, or PO..."
+                    value={exportSearch}
+                    onChange={(e) => setExportSearch(e.target.value)}
+                    data-testid="export-search-input"
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
+                  />
+                </div>
+              </div>
+
+              {/* 4. Live Outflow Preview KPI Cards */}
+              <div className="border border-slate-200 bg-slate-50 p-4 rounded-sm space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                    <TrendingDown className="w-3.5 h-3.5 text-red-500" /> Outflow Summary Preview
+                  </span>
+                  {exportLoading && (
+                    <span className="text-[10px] text-slate-500 font-semibold flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin text-[#C27842]" /> Updating...
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="bg-white p-3 border-2 border-slate-800 shadow-sm" data-testid="export-total-outflow-kpi">
+                    <div className="text-[10px] uppercase font-bold text-slate-500">Total Outflow Amount</div>
+                    <div className="text-lg font-black text-slate-900 mt-1">
+                      {inr(exportData?.summary?.total_outflow_amount || 0)}
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {(exportData?.summary?.expenses_count || 0) + (exportData?.summary?.purchases_count || 0)} total records
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-3 border border-slate-200 shadow-sm" data-testid="export-expenses-kpi">
+                    <div className="text-[10px] uppercase font-bold text-blue-700">Operating Expenses</div>
+                    <div className="text-lg font-black text-blue-900 mt-1">
+                      {inr(exportData?.summary?.expenses_amount || 0)}
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {exportData?.summary?.expenses_count || 0} expense entries
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-3 border border-slate-200 shadow-sm" data-testid="export-purchases-kpi">
+                    <div className="text-[10px] uppercase font-bold text-amber-700">Vendor Material Purchases</div>
+                    <div className="text-lg font-black text-amber-900 mt-1">
+                      {inr(exportData?.summary?.purchases_amount || 0)}
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {exportData?.summary?.purchases_count || 0} purchase orders
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer / Download Actions */}
+            <div className="bg-slate-100 px-5 py-3.5 border-t-2 border-slate-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
+              <BtnSecondary onClick={() => setExportModalOpen(false)}>
+                Cancel
+              </BtnSecondary>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {exportType === "all" && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadCsv("expenses")}
+                      data-testid="download-expenses-csv"
+                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
+                    >
+                      <ReceiptIndianRupee className="w-3.5 h-3.5 text-blue-600" /> Expenses CSV
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadCsv("purchases")}
+                      data-testid="download-purchases-csv"
+                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
+                    >
+                      <ShoppingBag className="w-3.5 h-3.5 text-amber-600" /> Purchases CSV
+                    </button>
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleDownloadCsv("consolidated")}
+                  data-testid="download-consolidated-csv"
+                  className="bg-[#C27842] hover:bg-[#a66232] text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-[#C27842] shadow-sm flex items-center gap-1.5 transition-colors"
+                >
+                  <FileSpreadsheet className="w-4 h-4" /> Download Consolidated CSV
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
