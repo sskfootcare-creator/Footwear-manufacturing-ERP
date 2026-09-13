@@ -82,6 +82,7 @@ from routes.settings import settings_router
 from routes.workers import workers_router
 from routes.vendors import vendors_router
 from routes.banking import banking_router
+from routes.reports import reports_router
 from routes.notifications import notifications_router
 from routes.components import (
     components_router,
@@ -980,6 +981,7 @@ app.include_router(online_orders_router)
 app.include_router(styles_router)
 app.include_router(banking_router)
 app.include_router(po_ean_router)
+app.include_router(reports_router)
 
 
 

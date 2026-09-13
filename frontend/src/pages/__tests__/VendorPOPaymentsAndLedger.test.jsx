@@ -237,4 +237,81 @@ describe("VendorPOs Payment Tracking & Vendor Ledger Integration", () => {
     expect(screen.getByText("Accounts Payable & Vendor Ageing Analysis")).toBeInTheDocument();
     expect(http.get).toHaveBeenCalledWith("/vendors/ageing");
   });
+
+  test("Expands PO row to reveal delivery progress and material line item breakdown", async () => {
+    render(
+      <MemoryRouter>
+        <VendorPOs />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("vendor-po-row-vpo_1")).toBeInTheDocument();
+    });
+
+    // Expand toggle button
+    const toggleBtn = screen.getByTestId("toggle-expand-vpo_1");
+    expect(toggleBtn).toBeInTheDocument();
+    expect(screen.queryByTestId("expanded-row-vpo_1")).not.toBeInTheDocument();
+
+    // Click to expand
+    fireEvent.click(toggleBtn);
+    expect(screen.getByTestId("expanded-row-vpo_1")).toBeInTheDocument();
+    expect(screen.getByText("Material Delivery Breakdown")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  test("GRN Receive modal validates remaining quantity and supports auto-filling remaining", async () => {
+    render(
+      <MemoryRouter>
+        <VendorPOs />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("receive-po-btn-vpo_1")).toBeInTheDocument();
+    });
+
+    // Open Receive Modal
+    fireEvent.click(screen.getByTestId("receive-po-btn-vpo_1"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/GRN Material Inward/i)).toBeInTheDocument();
+      expect(screen.getByText(/Receive Against: PO-VEN-2026-0010/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText("Remaining: 50")).toBeInTheDocument();
+
+    // Fill Remaining button
+    const fillBtn = screen.getByRole("button", { name: /fill remaining/i });
+    expect(fillBtn).toBeInTheDocument();
+    fireEvent.click(fillBtn);
+
+    // Quantity input should now be 50
+    const qtyInput = screen.getByPlaceholderText("Max 50");
+    expect(qtyInput.value).toBe("50");
+
+    // Over-receiving attempt: enter 60
+    fireEvent.change(qtyInput, { target: { value: "60" } });
+    expect(
+      screen.getByText(/Cannot receive more than remaining balance \(50\)\./i)
+    ).toBeInTheDocument();
+
+    // Post Receipt button should be disabled when over remaining
+    const postBtn = screen.getByRole("button", { name: /post receipt/i });
+    expect(postBtn).toBeDisabled();
+
+    // Change back to 25 and submit
+    fireEvent.change(qtyInput, { target: { value: "25" } });
+    expect(postBtn).not.toBeDisabled();
+    fireEvent.click(postBtn);
+
+    await waitFor(() => {
+      expect(http.post).toHaveBeenCalledWith(
+        "/vendor-pos/vpo_1/receive",
+        expect.objectContaining({
+          items: [{ material_id: "mat_1", quantity: 25 }],
+        })
+      );
+    });
+  });
 });

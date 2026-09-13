@@ -619,8 +619,12 @@ async def create_vendor_po(payload: VendorPOIn, request: Request):
         raise HTTPException(404, "Vendor not found")
         
     po_no = await next_vendor_po_no(db)
+    po_data = payload.model_dump()
+    for li in po_data.get("line_items", []):
+        if li.get("received_quantity") is None:
+            li["received_quantity"] = 0.0
     doc = {
-        **payload.model_dump(),
+        **po_data,
         "po_number": po_no,
         "by": u.get("email") or u.get("name", ""),
         "processed_receipt_ids": [],
@@ -797,10 +801,38 @@ async def update_vendor_po(id: str, payload: VendorPOUpdate, request: Request):
     if not updates:
         raise HTTPException(400, "Nothing to update")
     
+    existing_po = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    if not existing_po:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+
     if "vendor_id" in updates:
         vendor = await db.vendors.find_one({"_id": oid(updates["vendor_id"])})
         if not vendor:
             raise HTTPException(404, "Vendor not found")
+
+    if "line_items" in updates and updates["line_items"]:
+        existing_lines = {li.get("material_id"): li for li in existing_po.get("line_items", [])}
+        for li in updates["line_items"]:
+            mid = li.get("material_id")
+            if mid in existing_lines and (li.get("received_quantity") is None or (li.get("received_quantity") == 0.0 and existing_lines[mid].get("received_quantity", 0.0) > 0)):
+                li["received_quantity"] = existing_lines[mid].get("received_quantity", 0.0)
+            elif li.get("received_quantity") is None:
+                li["received_quantity"] = 0.0
+
+        all_received = True
+        any_received = False
+        for li in updates["line_items"]:
+            req_qty = float(li.get("quantity", 0) or 0)
+            rec_qty = float(li.get("received_quantity", 0) or 0)
+            if rec_qty < req_qty:
+                all_received = False
+            if rec_qty > 0:
+                any_received = True
+        if updates.get("status") != "cancelled":
+            if all_received and updates["line_items"]:
+                updates["status"] = "received"
+            elif any_received:
+                updates["status"] = "partially_received"
 
     updates["updated_at"] = now_iso()
     r = await db.vendor_purchase_orders.update_one({"_id": oid(id)}, {"$set": updates})
@@ -849,7 +881,18 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             continue
             
         li = li_map[item.material_id]
-        li["received_quantity"] = round(li["received_quantity"] + item.quantity, 4)
+        ordered_qty = float(li.get("quantity") or 0.0)
+        curr_rec = float(li.get("received_quantity") or 0.0)
+        rem_qty = round(max(0.0, ordered_qty - curr_rec), 4)
+
+        if round(item.quantity, 4) > rem_qty:
+            mat_name = (materials_map.get(item.material_id) or {}).get("name") or li.get("material_name") or item.material_id
+            raise HTTPException(
+                400,
+                f"Cannot receive {item.quantity} for '{mat_name}'. Only {rem_qty} remaining to be received."
+            )
+
+        li["received_quantity"] = round(curr_rec + item.quantity, 4)
         
         mat = materials_map.get(item.material_id)
         if not mat:
@@ -877,15 +920,15 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
         all_received = True
         any_received = False
         for li in line_items:
-            req_qty = li.get("quantity", 0)
-            rec_qty = li.get("received_quantity", 0)
+            req_qty = float(li.get("quantity", 0) or 0)
+            rec_qty = float(li.get("received_quantity", 0) or 0)
             if rec_qty < req_qty:
                 all_received = False
             if rec_qty > 0:
                 any_received = True
                 
         new_status = po.get("status", "draft")
-        if all_received:
+        if all_received and line_items:
             new_status = "received"
         elif any_received:
             new_status = "partially_received"
@@ -912,6 +955,8 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
                         await db.materials.update_one(
                             {"_id": oid(mid)},
                             {"$set": {
+                                "balance": round(summary.get("balance", 0.0), 2),
+                                "current_stock": round(summary.get("balance", 0.0), 2),
                                 "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
                                 "last_purchase_rate": round(summary["last_rate"], 2),
                                 "updated_at": now_iso(),

@@ -76,7 +76,7 @@ class VendorPOLineItem(BaseModel):
     quantity: float
     rate: float
     amount: float
-    received_quantity: float = 0.0
+    received_quantity: Optional[float] = None
 
 
 class VendorPOIn(BaseModel):

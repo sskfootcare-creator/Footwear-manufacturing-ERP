@@ -422,3 +422,103 @@ def test_vendor_po_payment_and_ledger_flow(client, mock_vendors_env):
     assert ledger["total_paid"] == 10000.0
     assert len(ledger["transactions"]) == 2
     assert ledger["transactions"][0]["po_number"] == po_no
+
+
+def test_vendor_po_receiving_and_status_transitions(client, mock_vendors_env):
+    vid = str(ObjectId())
+    mock_vendors_env.vendors_store[vid] = {
+        "_id": ObjectId(vid),
+        "name": "Prime Materials Ltd",
+        "payment_terms_days": 30,
+        "active": True
+    }
+    mid = str(ObjectId())
+    mock_vendors_env.materials_store[mid] = {
+        "_id": ObjectId(mid),
+        "code": "LEA-PRIME",
+        "name": "Prime Bovine Leather",
+        "unit": "sqft",
+        "rate": 150.0
+    }
+
+    # 1. Create a PO with 50.0 quantity
+    res = client.post("/api/vendor-pos", json={
+        "vendor_id": vid,
+        "line_items": [
+            {
+                "material_id": mid,
+                "quantity": 50.0,
+                "rate": 150.0,
+                "amount": 7500.0,
+                "received_quantity": 0.0
+            }
+        ],
+        "total_amount": 7500.0,
+        "status": "sent"
+    })
+    assert res.status_code == 201
+    po = res.json()
+    poid = po["id"]
+
+    # 2. Over-receiving validation: Attempt to receive 60.0
+    res = client.post(f"/api/vendor-pos/{poid}/receive", json={
+        "receipt_id": "rcpt_over_1",
+        "items": [{"material_id": mid, "quantity": 60.0}]
+    })
+    assert res.status_code == 400
+    assert "Only 50.0 remaining to be received" in res.json()["detail"]
+
+    # 3. Partial receipt: Receive 20.0
+    res = client.post(f"/api/vendor-pos/{poid}/receive", json={
+        "receipt_id": "rcpt_partial_1",
+        "items": [{"material_id": mid, "quantity": 20.0}]
+    })
+    assert res.status_code == 200
+
+    # Verify PO status is partially_received
+    res = client.get(f"/api/vendor-pos/{poid}")
+    assert res.status_code == 200
+    po_data = res.json()
+    assert po_data["status"] == "partially_received"
+    assert po_data["line_items"][0]["received_quantity"] == 20.0
+
+    # 4. Update PO notes without passing received_quantity
+    res = client.patch(f"/api/vendor-pos/{poid}", json={
+        "notes": "Updated delivery remarks",
+        "line_items": [
+            {
+                "material_id": mid,
+                "quantity": 50.0,
+                "rate": 150.0,
+                "amount": 7500.0
+            }
+        ]
+    })
+    assert res.status_code == 200
+    updated_po = res.json()
+    # received_quantity must be preserved and status remains partially_received
+    assert updated_po["line_items"][0]["received_quantity"] == 20.0
+    assert updated_po["status"] == "partially_received"
+
+    # 5. Over-receiving on remaining: Attempt to receive 35.0 when only 30.0 remaining
+    res = client.post(f"/api/vendor-pos/{poid}/receive", json={
+        "receipt_id": "rcpt_over_2",
+        "items": [{"material_id": mid, "quantity": 35.0}]
+    })
+    assert res.status_code == 400
+    assert "Only 30.0 remaining to be received" in res.json()["detail"]
+
+    # 6. Complete receipt: Receive remaining 30.0
+    res = client.post(f"/api/vendor-pos/{poid}/receive", json={
+        "receipt_id": "rcpt_full_1",
+        "items": [{"material_id": mid, "quantity": 30.0}]
+    })
+    assert res.status_code == 200
+
+    # Verify PO status transitions to received
+    res = client.get(f"/api/vendor-pos/{poid}")
+    assert res.status_code == 200
+    po_data = res.json()
+    assert po_data["status"] == "received"
+    assert po_data["line_items"][0]["received_quantity"] == 50.0
+

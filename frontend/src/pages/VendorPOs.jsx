@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
 import {
@@ -25,6 +25,8 @@ import {
   CheckCircle2,
   Wallet,
   Filter,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 
@@ -75,6 +77,15 @@ export default function VendorPOs() {
   // Modal for Receiving Materials
   const [receiveModal, setReceiveModal] = useState(null); // null | po
   const [receiveForm, setReceiveForm] = useState({ receipt_id: "", items: [] });
+
+  // Expandable PO Table Rows for Material Delivery Breakdown
+  const [expandedRows, setExpandedRows] = useState({});
+  const toggleRowExpand = (poId) => {
+    setExpandedRows((prev) => ({
+      ...prev,
+      [poId]: !prev[poId],
+    }));
+  };
 
   // Modal for Recording Payment
   const [paymentModal, setPaymentModal] = useState(null); // null | { po?: {}, vendor_id: string, vendor_name: string, balance_due?: number, total_amount?: number }
@@ -278,22 +289,46 @@ export default function VendorPOs() {
       Math.random().toString(36).substring(2, 7);
     setReceiveForm({
       receipt_id: rId,
-      items: (po.line_items || []).map((li) => ({
-        material_id: li.material_id,
-        quantity: 0.0,
-        material_code:
-          materials.find((m) => m.id === li.material_id)?.code || "",
-        material_name:
-          materials.find((m) => m.id === li.material_id)?.name || "",
-        ordered: li.quantity || 0,
-        received: li.received_quantity || 0,
-      })),
+      items: (po.line_items || []).map((li) => {
+        const mat = materials.find((m) => m.id === li.material_id);
+        const ordered = Number(li.quantity || 0);
+        const received = Number(li.received_quantity || 0);
+        const remaining = Math.max(
+          0,
+          Math.round((ordered - received) * 10000) / 10000
+        );
+        return {
+          material_id: li.material_id,
+          quantity: 0,
+          material_code:
+            mat?.code || li.material_code || "",
+          material_name:
+            mat?.name || li.material_name || "",
+          ordered,
+          received,
+          remaining,
+        };
+      }),
     });
     setReceiveModal(po);
     setError("");
   };
 
   const handleReceive = async () => {
+    for (const item of receiveForm.items) {
+      const remaining = Math.max(
+        0,
+        Math.round((Number(item.ordered) - Number(item.received)) * 10000) / 10000
+      );
+      const qty = Number(item.quantity || 0);
+      if (qty > remaining) {
+        setError(
+          `Cannot receive ${qty} for '${item.material_name || item.material_code}'. Maximum receivable is ${remaining}.`
+        );
+        return;
+      }
+    }
+
     const validItems = receiveForm.items.filter(
       (item) => Number(item.quantity) > 0,
     );
@@ -579,6 +614,7 @@ export default function VendorPOs() {
           quantity: Number(li.quantity),
           rate: Number(li.rate),
           amount: Number(li.amount),
+          received_quantity: Number(li.received_quantity || 0),
         })),
       };
 
@@ -761,126 +797,267 @@ export default function VendorPOs() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map((po) => (
-                      <tr
-                        key={po.id}
-                        data-testid={`vendor-po-row-${po.id}`}
-                        className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
-                      >
-                        <td className="px-4 py-3">
-                          <div className="font-mono font-bold">{po.po_number}</div>
-                          {po.customer_po_number && (
-                            <div
-                              className="text-[10px] text-violet-700 font-semibold flex items-center gap-1 mt-0.5"
-                              data-testid={`vpo-cust-po-${po.id}`}
-                            >
-                              <span>Order: {po.customer_po_number}</span>
-                              {po.style_code && (
-                                <span className="text-slate-500">· {po.style_code}</span>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="font-bold text-slate-800">{po.vendor_name}</div>
-                          <button
-                            onClick={() => openVendorLedger(po.vendor_id, po.vendor_name)}
-                            className="text-[11px] text-[#C27842] hover:underline flex items-center gap-0.5 mt-0.5 font-medium"
-                            title="View Vendor Ledger"
+                    {filtered.map((po) => {
+                      const totalOrdered = (po.line_items || []).reduce(
+                        (sum, li) => sum + Number(li.quantity || 0),
+                        0
+                      );
+                      const totalReceived = (po.line_items || []).reduce(
+                        (sum, li) => sum + Number(li.received_quantity || 0),
+                        0
+                      );
+                      const deliveryPct =
+                        totalOrdered > 0
+                          ? Math.min(100, Math.round((totalReceived / totalOrdered) * 100))
+                          : 0;
+                      const hasPendingItems = (po.line_items || []).some(
+                        (li) => Number(li.quantity || 0) - Number(li.received_quantity || 0) > 0
+                      );
+                      const isExpanded = !!expandedRows[po.id];
+
+                      return (
+                        <Fragment key={po.id}>
+                          <tr
+                            data-testid={`vendor-po-row-${po.id}`}
+                            className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
                           >
-                            <BookOpen className="w-3 h-3" /> View Ledger
-                          </button>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-slate-600">
-                          {(po.line_items || []).length} lines
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono font-bold text-slate-900">
-                          {inr(po.total_amount || 0)}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-green-700 font-semibold">
-                          {inr(po.paid_amount || 0)}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono font-bold text-red-700">
-                          {inr(po.balance_due ?? po.total_amount ?? 0)}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <Badge color={PAYMENT_STATUS_COLOR[po.payment_status || "unpaid"]}>
-                            {(po.payment_status || "unpaid").replace("_", " ")}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-slate-600 text-xs">
-                          {po.expected_delivery_date ? (
-                            <span className="flex items-center gap-1">
-                              <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                              {po.expected_delivery_date}
-                            </span>
-                          ) : (
-                            "—"
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <Badge color={STATUS_COLOR[po.status]}>
-                            {po.status.replace("_", " ")}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="flex items-center gap-1.5 justify-end">
-                            {/* Pay PO button */}
-                            {canWrite && (
-                              <button
-                                onClick={() => openPayModal(po)}
-                                data-testid={`pay-po-btn-${po.id}`}
-                                className={`px-2.5 py-1 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-1 rounded ${
-                                  po.payment_status === "paid"
-                                    ? "bg-slate-100 text-slate-400 hover:bg-slate-200"
-                                    : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
-                                }`}
-                                title="Record Outgoing Payment for this PO"
-                              >
-                                <CreditCard className="w-3 h-3" />
-                                <span>Pay</span>
-                              </button>
-                            )}
-
-                            {/* Receive materials button */}
-                            {canWrite &&
-                              ["sent", "partially_received"].includes(po.status) && (
-                                <button
-                                  onClick={() => openReceive(po)}
-                                  className="text-[#16A34A] border border-[#16A34A] px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#16A34A] hover:text-white transition-colors flex items-center gap-1 rounded"
-                                  data-testid={`receive-po-btn-${po.id}`}
-                                  title="Receive Materials against PO"
+                            <td className="px-4 py-3">
+                              <div className="font-mono font-bold">{po.po_number}</div>
+                              {po.customer_po_number && (
+                                <div
+                                  className="text-[10px] text-violet-700 font-semibold flex items-center gap-1 mt-0.5"
+                                  data-testid={`vpo-cust-po-${po.id}`}
                                 >
-                                  <Plus className="w-3 h-3" />
-                                  <span>Receive</span>
-                                </button>
+                                  <span>Order: {po.customer_po_number}</span>
+                                  {po.style_code && (
+                                    <span className="text-slate-500">· {po.style_code}</span>
+                                  )}
+                                </div>
                               )}
-
-                            {/* Edit PO */}
-                            {canWrite && (
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-bold text-slate-800">{po.vendor_name}</div>
                               <button
-                                onClick={() => openEdit(po)}
-                                className="text-[#2563EB] border border-[#2563EB] px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#2563EB] hover:text-white transition-colors flex items-center gap-1 rounded"
-                                title="Edit PO"
+                                onClick={() => openVendorLedger(po.vendor_id, po.vendor_name)}
+                                className="text-[11px] text-[#C27842] hover:underline flex items-center gap-0.5 mt-0.5 font-medium"
+                                title="View Vendor Ledger"
                               >
-                                <Pencil className="w-3 h-3" />
+                                <BookOpen className="w-3 h-3" /> View Ledger
                               </button>
-                            )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div
+                                className="flex items-center gap-2 cursor-pointer select-none group"
+                                onClick={() => toggleRowExpand(po.id)}
+                                data-testid={`toggle-expand-${po.id}`}
+                                title={isExpanded ? "Collapse item breakdown" : "Expand item breakdown"}
+                              >
+                                <span className="p-0.5 text-slate-400 group-hover:text-slate-700 rounded transition-colors">
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-4 h-4 text-slate-700" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-slate-700" />
+                                  )}
+                                </span>
+                                <div>
+                                  <div className="font-mono text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                                    <span>{(po.line_items || []).length} lines</span>
+                                    <span className="text-[10px] text-slate-500 font-normal">
+                                      ({totalReceived}/{totalOrdered})
+                                    </span>
+                                  </div>
+                                  <div className="w-24 bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1">
+                                    <div
+                                      className={`h-full transition-all ${
+                                        deliveryPct >= 100
+                                          ? "bg-emerald-500"
+                                          : deliveryPct > 0
+                                          ? "bg-amber-500"
+                                          : "bg-slate-300"
+                                      }`}
+                                      style={{ width: `${deliveryPct}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono font-bold text-slate-900">
+                              {inr(po.total_amount || 0)}
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono text-green-700 font-semibold">
+                              {inr(po.paid_amount || 0)}
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono font-bold text-red-700">
+                              {inr(po.balance_due ?? po.total_amount ?? 0)}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <Badge color={PAYMENT_STATUS_COLOR[po.payment_status || "unpaid"]}>
+                                {(po.payment_status || "unpaid").replace("_", " ")}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-600 text-xs">
+                              {po.expected_delivery_date ? (
+                                <span className="flex items-center gap-1">
+                                  <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                                  {po.expected_delivery_date}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <Badge color={STATUS_COLOR[po.status]}>
+                                {po.status.replace("_", " ")}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center gap-1.5 justify-end">
+                                {/* Pay PO button */}
+                                {canWrite && (
+                                  <button
+                                    onClick={() => openPayModal(po)}
+                                    data-testid={`pay-po-btn-${po.id}`}
+                                    className={`px-2.5 py-1 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-1 rounded ${
+                                      po.payment_status === "paid"
+                                        ? "bg-slate-100 text-slate-400 hover:bg-slate-200"
+                                        : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                                    }`}
+                                    title="Record Outgoing Payment for this PO"
+                                  >
+                                    <CreditCard className="w-3 h-3" />
+                                    <span>Pay</span>
+                                  </button>
+                                )}
 
-                            {/* Delete PO */}
-                            {canWrite && (
-                              <button
-                                onClick={() => handleDelete(po)}
-                                className="text-red-600 border border-red-300 px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-red-600 hover:text-white hover:border-red-600 transition-colors flex items-center gap-1 rounded"
-                                title="Delete PO"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                                {/* Receive materials button */}
+                                {canWrite &&
+                                  ["draft", "sent", "partially_received"].includes(po.status) &&
+                                  hasPendingItems && (
+                                    <button
+                                      onClick={() => openReceive(po)}
+                                      className="text-[#16A34A] border border-[#16A34A] px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#16A34A] hover:text-white transition-colors flex items-center gap-1 rounded"
+                                      data-testid={`receive-po-btn-${po.id}`}
+                                      title="Receive Materials against PO"
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>Receive</span>
+                                    </button>
+                                  )}
+
+                                {/* Edit PO */}
+                                {canWrite && (
+                                  <button
+                                    onClick={() => openEdit(po)}
+                                    className="text-[#2563EB] border border-[#2563EB] px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-[#2563EB] hover:text-white transition-colors flex items-center gap-1 rounded"
+                                    title="Edit PO"
+                                  >
+                                    <Pencil className="w-3 h-3" />
+                                  </button>
+                                )}
+
+                                {/* Delete PO */}
+                                {canWrite && (
+                                  <button
+                                    onClick={() => handleDelete(po)}
+                                    className="text-red-600 border border-red-300 px-2 py-1 text-xs font-bold uppercase tracking-wider hover:bg-red-600 hover:text-white hover:border-red-600 transition-colors flex items-center gap-1 rounded"
+                                    title="Delete PO"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+
+                          {/* Expanded Line Items Detail Row */}
+                          {isExpanded && (
+                            <tr
+                              className="bg-slate-50/90 border-b border-slate-200"
+                              data-testid={`expanded-row-${po.id}`}
+                            >
+                              <td colSpan={10} className="px-6 py-3">
+                                <div className="bg-white border border-slate-200 rounded p-3 shadow-sm">
+                                  <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center justify-between">
+                                    <span>Material Delivery Breakdown</span>
+                                    <span className="text-slate-500 font-mono text-[10px]">
+                                      {deliveryPct}% fulfilled ({totalReceived} of {totalOrdered})
+                                    </span>
+                                  </div>
+                                  <table className="w-full text-xs">
+                                    <thead>
+                                      <tr className="text-slate-500 border-b border-slate-100 text-left font-medium">
+                                        <th className="pb-1.5 font-bold">Material Code & Name</th>
+                                        <th className="pb-1.5 text-right font-bold">Ordered</th>
+                                        <th className="pb-1.5 text-right font-bold">Received</th>
+                                        <th className="pb-1.5 text-right font-bold">Remaining</th>
+                                        <th className="pb-1.5 text-center font-bold">Progress</th>
+                                        <th className="pb-1.5 text-center font-bold">Status</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                      {(po.line_items || []).map((li, idx) => {
+                                        const mat = materials.find((m) => m.id === li.material_id);
+                                        const matCode = mat?.code || li.material_code || "—";
+                                        const matName = mat?.name || li.material_name || "Unknown Material";
+                                        const ord = Number(li.quantity || 0);
+                                        const rec = Number(li.received_quantity || 0);
+                                        const rem = Math.max(0, Math.round((ord - rec) * 10000) / 10000);
+                                        const linePct =
+                                          ord > 0 ? Math.min(100, Math.round((rec / ord) * 100)) : 0;
+                                        const statusColor =
+                                          rem === 0 ? "green" : rec > 0 ? "yellow" : "slate";
+                                        const statusLabel =
+                                          rem === 0 ? "Completed" : rec > 0 ? "Partial" : "Pending";
+
+                                        return (
+                                          <tr key={idx} className="hover:bg-slate-50/50">
+                                            <td className="py-1.5 pr-2">
+                                              <span className="font-mono font-bold text-slate-700">
+                                                [{matCode}]
+                                              </span>{" "}
+                                              <span className="text-slate-800">{matName}</span>
+                                            </td>
+                                            <td className="py-1.5 text-right font-mono">{ord}</td>
+                                            <td className="py-1.5 text-right font-mono font-semibold text-emerald-700">
+                                              {rec}
+                                            </td>
+                                            <td className="py-1.5 text-right font-mono font-bold text-amber-700">
+                                              {rem}
+                                            </td>
+                                            <td className="py-1.5 px-4">
+                                              <div className="flex items-center gap-1.5">
+                                                <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                                                  <div
+                                                    className={`h-full transition-all ${
+                                                      linePct >= 100
+                                                        ? "bg-emerald-500"
+                                                        : linePct > 0
+                                                        ? "bg-amber-500"
+                                                        : "bg-slate-300"
+                                                    }`}
+                                                    style={{ width: `${linePct}%` }}
+                                                  />
+                                                </div>
+                                                <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                                                  {linePct}%
+                                                </span>
+                                              </div>
+                                            </td>
+                                            <td className="py-1.5 text-center">
+                                              <Badge color={statusColor}>{statusLabel}</Badge>
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1771,7 +1948,7 @@ export default function VendorPOs() {
                   GRN Material Inward
                 </div>
                 <div className="text-base font-bold text-white mt-0.5">
-                  Receive Against: {receiveModal.po_number}
+                  {`Receive Against: ${receiveModal.po_number}`}
                 </div>
               </div>
               <button
@@ -1796,54 +1973,112 @@ export default function VendorPOs() {
               </div>
 
               <div className="space-y-3">
-                {receiveForm.items.map((item, idx) => (
-                  <div
-                    key={item.material_id}
-                    className="bg-slate-50 p-3 border border-slate-200 rounded flex flex-col gap-2 font-sans"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <div className="font-bold text-sm">
-                          [{item.material_code}] {item.material_name}
-                        </div>
-                        <div className="text-xs text-slate-500">
-                          Ordered: <span className="font-mono">{item.ordered}</span> ·
-                          Received So Far:{" "}
-                          <span className="font-mono font-bold text-green-700">
-                            {item.received}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="text-xs font-mono text-slate-500 bg-slate-200/60 px-1.5 py-0.5 rounded">
-                        Remaining: {Math.max(0, item.ordered - item.received)}
-                      </div>
-                    </div>
+                {receiveForm.items.map((item, idx) => {
+                  const rem = Math.max(
+                    0,
+                    Math.round((Number(item.ordered) - Number(item.received)) * 10000) / 10000
+                  );
+                  const enteredQty = Number(item.quantity || 0);
+                  const isOver = enteredQty > rem;
+                  const isComplete = rem === 0;
+                  const isPartial = Number(item.received) > 0 && rem > 0;
 
-                    <div className="flex items-center gap-2 mt-1">
-                      <label className="text-xs font-bold text-slate-600 shrink-0">
-                        Receive Now:
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        placeholder="Qty"
-                        value={item.quantity || ""}
-                        onChange={(e) => {
-                          const val = Number(e.target.value);
-                          setReceiveForm((f) => {
-                            const nextItems = [...f.items];
-                            nextItems[idx] = {
-                              ...nextItems[idx],
-                              quantity: val,
-                            };
-                            return { ...f, items: nextItems };
-                          });
-                        }}
-                        className="w-full border border-slate-300 px-3 py-1 text-sm font-mono focus:border-[#16A34A] outline-none rounded"
-                      />
+                  return (
+                    <div
+                      key={item.material_id}
+                      className={`p-3 border rounded flex flex-col gap-2 font-sans transition-colors ${
+                        isOver
+                          ? "bg-red-50/70 border-red-300"
+                          : isComplete
+                          ? "bg-emerald-50/40 border-emerald-200"
+                          : "bg-slate-50 border-slate-200"
+                      }`}
+                    >
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <div className="font-bold text-sm text-slate-800">
+                            [{item.material_code}] {item.material_name}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-0.5">
+                            Ordered: <span className="font-mono font-medium text-slate-700">{item.ordered}</span> ·
+                            Received So Far:{" "}
+                            <span className="font-mono font-bold text-emerald-700">
+                              {item.received}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Badge color={isComplete ? "green" : isPartial ? "yellow" : "slate"}>
+                            {isComplete ? "Completed" : isPartial ? "Partial" : "Pending"}
+                          </Badge>
+                          <div className="text-xs font-mono font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
+                            {`Remaining: ${rem}`}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 mt-1">
+                        <label className="text-xs font-bold text-slate-600 shrink-0">
+                          Receive Now:
+                        </label>
+                        <div className="flex items-center gap-2 flex-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max={rem}
+                            step="any"
+                            disabled={rem === 0}
+                            placeholder={rem === 0 ? "Fully received" : `Max ${rem}`}
+                            value={item.quantity === 0 && !item.hasTyped ? "" : item.quantity}
+                            onChange={(e) => {
+                              const val = e.target.value === "" ? 0 : Number(e.target.value);
+                              setReceiveForm((f) => {
+                                const nextItems = [...f.items];
+                                nextItems[idx] = {
+                                  ...nextItems[idx],
+                                  quantity: val,
+                                  hasTyped: true,
+                                };
+                                return { ...f, items: nextItems };
+                              });
+                            }}
+                            className={`w-full border px-3 py-1 text-sm font-mono outline-none rounded transition-colors ${
+                              isOver
+                                ? "border-red-500 focus:border-red-600 bg-red-50 text-red-700"
+                                : "border-slate-300 focus:border-[#16A34A]"
+                            } disabled:bg-slate-100 disabled:text-slate-400`}
+                          />
+                          {rem > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReceiveForm((f) => {
+                                  const nextItems = [...f.items];
+                                  nextItems[idx] = {
+                                    ...nextItems[idx],
+                                    quantity: rem,
+                                    hasTyped: true,
+                                  };
+                                  return { ...f, items: nextItems };
+                                });
+                              }}
+                              className="text-[11px] font-bold text-slate-600 hover:text-[#16A34A] border border-slate-300 hover:border-[#16A34A] px-2 py-1 rounded shrink-0 bg-white transition-colors"
+                              title="Auto-fill remaining quantity"
+                            >
+                              Fill Remaining
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {isOver && (
+                        <div className="text-[11px] text-red-600 font-semibold flex items-center gap-1">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span>{`Cannot receive more than remaining balance (${rem}).`}</span>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -1852,13 +2087,28 @@ export default function VendorPOs() {
               <BtnSecondary onClick={() => setReceiveModal(null)}>
                 Cancel
               </BtnSecondary>
-              <button
-                onClick={handleReceive}
-                disabled={saving}
-                className="bg-[#16A34A] hover:bg-[#15803d] text-white font-bold px-5 py-2 text-sm uppercase tracking-wider rounded transition-colors disabled:opacity-50"
-              >
-                {saving ? "Saving…" : "Post Receipt"}
-              </button>
+              {(() => {
+                const hasOverReceipt = receiveForm.items.some((item) => {
+                  const rem = Math.max(
+                    0,
+                    Math.round((Number(item.ordered) - Number(item.received)) * 10000) / 10000
+                  );
+                  return Number(item.quantity || 0) > rem;
+                });
+                const totalReceiving = receiveForm.items.reduce(
+                  (sum, item) => sum + Number(item.quantity || 0),
+                  0
+                );
+                return (
+                  <button
+                    onClick={handleReceive}
+                    disabled={saving || hasOverReceipt || totalReceiving <= 0}
+                    className="bg-[#16A34A] hover:bg-[#15803d] text-white font-bold px-5 py-2 text-sm uppercase tracking-wider rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {saving ? "Saving…" : "Post Receipt"}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         </div>
