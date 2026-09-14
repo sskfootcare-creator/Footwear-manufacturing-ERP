@@ -516,16 +516,21 @@ export default function BankReconciliation() {
           params.append("to_date", statementFilter.toDate);
         }
       }
-      const token = localStorage.getItem("token") || "";
-      const url = `/api/banking/reconciliation/export?${params.toString()}`;
-      
-      const res = await fetch(url, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      const queryString = params.toString() ? `?${params.toString()}` : "";
+      const res = await http.get(`/banking/reconciliation/export${queryString}`, {
+        responseType: "blob",
       });
-      if (!res.ok) {
-        throw new Error("Failed to generate export file");
+
+      // Verify the response is not an error JSON packaged in a blob
+      if (res.data?.type === "application/json") {
+        const text = await res.data.text();
+        const json = JSON.parse(text);
+        throw new Error(json.detail || "Failed to generate export file");
       }
-      const blob = await res.blob();
+
+      const blob = new Blob([res.data], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = downloadUrl;
@@ -536,7 +541,11 @@ export default function BankReconciliation() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      window.URL.revokeObjectURL(downloadUrl);
+      setTimeout(() => {
+        if (typeof window !== "undefined" && window.URL && typeof window.URL.revokeObjectURL === "function") {
+          window.URL.revokeObjectURL(downloadUrl);
+        }
+      }, 200);
       notify("Reconciliation report exported successfully!", "success");
     } catch (e) {
       notify(e.message || "Failed to download export", "error");

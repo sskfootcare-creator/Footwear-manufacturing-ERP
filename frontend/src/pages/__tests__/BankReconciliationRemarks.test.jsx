@@ -571,4 +571,49 @@ describe("BankReconciliation Remarks Editable Column", () => {
       });
     });
   });
+
+  test("exports accountant excel reconciliation report using http client with responseType blob", async () => {
+    http.get.mockImplementation((url) => {
+      if (url.includes("/banking/accounts")) {
+        return Promise.resolve({ data: mockAccounts });
+      }
+      if (url.includes("/banking/summary")) {
+        return Promise.resolve({ data: mockSummary });
+      }
+      if (url.includes("/banking/reconciliation/export")) {
+        return Promise.resolve({
+          data: new Uint8Array([80, 75, 3, 4]),
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    const mockClick = jest.fn();
+    const origCreateElement = document.createElement.bind(document);
+    jest.spyOn(document, "createElement").mockImplementation((tag) => {
+      const el = origCreateElement(tag);
+      if (tag === "a") {
+        el.click = mockClick;
+      }
+      return el;
+    });
+
+    render(<BankReconciliation />);
+
+    const exportBtn = await screen.findByTestId("export-reconciliation-btn");
+    expect(exportBtn).toBeInTheDocument();
+
+    fireEvent.click(exportBtn);
+
+    await waitFor(() => {
+      expect(http.get).toHaveBeenCalledWith(
+        expect.stringContaining("/banking/reconciliation/export"),
+        expect.objectContaining({ responseType: "blob" })
+      );
+      expect(mockClick).toHaveBeenCalled();
+    });
+
+    document.createElement.mockRestore();
+  });
 });
+
