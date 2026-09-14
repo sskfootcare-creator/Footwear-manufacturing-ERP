@@ -383,10 +383,41 @@ async def my_task_production_card_pdf(job_id: str, request: Request, variant: st
         "bottom_done": all((j.get("components") or {}).get("bottom_done") for j in sibling_jobs),
         "sole_done": all((j.get("components") or {}).get("sole_done") for j in sibling_jobs),
     }
+    po_style_code = next(
+        (
+            j.get("po_style_code") or j.get("mapped_from_sku") or j.get("external_sku") or j.get("customer_style_code")
+            for j in sibling_jobs
+            if (j.get("po_style_code") or j.get("mapped_from_sku") or j.get("external_sku") or j.get("customer_style_code"))
+        ),
+        ""
+    )
+    if not po_style_code and j0.get("po_number"):
+        po_doc = await db.pos.find_one({"po_number": j0.get("po_number")}, {"line_items": 1})
+        if po_doc and po_doc.get("line_items"):
+            for li in po_doc["line_items"]:
+                if li.get("style_code") == j0.get("style_code") and (
+                    not j0.get("color") or not li.get("color") or str(li.get("color")).strip().lower() == str(j0.get("color")).strip().lower()
+                ):
+                    po_style_code = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or li.get("raw_style_code") or li.get("po_style_code") or ""
+                    if po_style_code:
+                        break
+            if not po_style_code:
+                for li in po_doc["line_items"]:
+                    if li.get("style_code") == j0.get("style_code"):
+                        po_style_code = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or li.get("raw_style_code") or li.get("po_style_code") or ""
+                        if po_style_code:
+                            break
+
+    created_at = j0.get("created_at") or (
+        j0.get("_id").generation_time.isoformat() if hasattr(j0.get("_id"), "generation_time") else ""
+    ) or j0.get("stage_entered_at") or ""
+
     group = {
         "po_number": j0.get("po_number", ""),
         "client_name": j0.get("client_name", ""),
         "style_code": j0.get("style_code", ""),
+        "po_style_code": po_style_code,
+        "created_at": created_at,
         "color": j0.get("color", ""),
         "description": j0.get("description", ""),
         "delivery_date": j0.get("delivery_date", ""),

@@ -1523,6 +1523,7 @@ async def create_po(payload: POIn, request: Request):
             li.get("mapped_from_sku") or
             li.get("customer_style_code") or
             li.get("raw_style_code") or
+            li.get("po_style_code") or
             ""
         )
 
@@ -1532,7 +1533,7 @@ async def create_po(payload: POIn, request: Request):
             "po_number": doc["po_number"],
             "client_name": doc["client_name"],
             "style_code": li["style_code"],
-            "po_style_code": mapped_sku or li["style_code"],
+            "po_style_code": mapped_sku or li.get("po_style_code") or li["style_code"],
             "style_id": style_id,
             "style_match_status": match_status,
             **(({"mapped_from_sku": sku_meta["mapped_from_sku"], "sku_mapping_id": sku_meta["mapping_id"]}) if sku_meta else ({"mapped_from_sku": mapped_sku} if mapped_sku else {})),
@@ -2552,6 +2553,50 @@ async def report_karigar_output(request: Request,
 
 # ── Production Jobs Endpoints ───────────────────────────────────────────────
 
+async def _enrich_jobs(docs: list, db) -> list:
+    if not docs:
+        return docs
+
+    missing_styles = [
+        d for d in docs
+        if not d.get("po_style_code") and not d.get("mapped_from_sku") and not d.get("external_sku")
+    ]
+    if missing_styles:
+        po_nums = list({d.get("po_number") for d in missing_styles if d.get("po_number")})
+        if po_nums:
+            po_docs = await db.pos.find(
+                {"po_number": {"$in": po_nums}},
+                {"po_number": 1, "line_items": 1}
+            ).to_list(len(po_nums) + 50)
+            po_map = {p.get("po_number"): p for p in po_docs if p.get("po_number")}
+            for d in missing_styles:
+                po_doc = po_map.get(d.get("po_number"))
+                if po_doc and po_doc.get("line_items"):
+                    for li in po_doc["line_items"]:
+                        if li.get("style_code") == d.get("style_code") and (
+                            not d.get("color") or not li.get("color") or str(li.get("color")).strip().lower() == str(d.get("color")).strip().lower()
+                        ):
+                            ext = (
+                                li.get("external_sku") or
+                                li.get("mapped_from_sku") or
+                                li.get("customer_style_code") or
+                                li.get("raw_style_code") or
+                                li.get("po_style_code")
+                            )
+                            if ext:
+                                d["po_style_code"] = ext
+                                break
+
+    for d in docs:
+        if not d.get("created_at"):
+            if "_id" in d and hasattr(d["_id"], "generation_time"):
+                d["created_at"] = d["_id"].generation_time.isoformat()
+            elif d.get("stage_entered_at"):
+                d["created_at"] = d["stage_entered_at"]
+
+    return docs
+
+
 @pos_router.get("/production/jobs")
 async def list_jobs(request: Request, include_archived: bool = False, source_type: Optional[str] = "b2b_client"):
     u = await _get_user(request)
@@ -2566,6 +2611,7 @@ async def list_jobs(request: Request, include_archived: bool = False, source_typ
         else:
             q["source_type"] = str(source_type)
     docs = await db.production_jobs.find(q).sort("created_at", -1).to_list(2000)
+    await _enrich_jobs(docs, db)
     return [stringify(d) for d in docs]
 
 
@@ -2575,6 +2621,7 @@ async def list_archive(request: Request):
     require_roles("admin", "manager", "production")(u)
     db = get_db()
     docs = await db.production_jobs.find({"archived": True}).sort("archived_at", -1).to_list(2000)
+    await _enrich_jobs(docs, db)
     return [stringify(d) for d in docs]
 
 
@@ -3531,10 +3578,41 @@ async def production_card_pdf(payload: dict, request: Request, variant: str = Qu
         "bottom_done": all((j.get("components") or {}).get("bottom_done") for j in jobs),
         "sole_done": all((j.get("components") or {}).get("sole_done") for j in jobs),
     }
+    po_style_code = next(
+        (
+            j.get("po_style_code") or j.get("mapped_from_sku") or j.get("external_sku") or j.get("customer_style_code")
+            for j in jobs
+            if (j.get("po_style_code") or j.get("mapped_from_sku") or j.get("external_sku") or j.get("customer_style_code"))
+        ),
+        ""
+    )
+    if not po_style_code and j0.get("po_number"):
+        po_doc = await db.pos.find_one({"po_number": j0.get("po_number")}, {"line_items": 1})
+        if po_doc and po_doc.get("line_items"):
+            for li in po_doc["line_items"]:
+                if li.get("style_code") == j0.get("style_code") and (
+                    not j0.get("color") or not li.get("color") or str(li.get("color")).strip().lower() == str(j0.get("color")).strip().lower()
+                ):
+                    po_style_code = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or li.get("raw_style_code") or li.get("po_style_code") or ""
+                    if po_style_code:
+                        break
+            if not po_style_code:
+                for li in po_doc["line_items"]:
+                    if li.get("style_code") == j0.get("style_code"):
+                        po_style_code = li.get("external_sku") or li.get("mapped_from_sku") or li.get("customer_style_code") or li.get("raw_style_code") or li.get("po_style_code") or ""
+                        if po_style_code:
+                            break
+
+    created_at = j0.get("created_at") or (
+        j0.get("_id").generation_time.isoformat() if hasattr(j0.get("_id"), "generation_time") else ""
+    ) or j0.get("stage_entered_at") or ""
+
     group = {
         "po_number": j0.get("po_number", ""),
         "client_name": j0.get("client_name", ""),
         "style_code": j0.get("style_code", ""),
+        "po_style_code": po_style_code,
+        "created_at": created_at,
         "color": j0.get("color", ""),
         "description": j0.get("description", ""),
         "delivery_date": j0.get("delivery_date", ""),

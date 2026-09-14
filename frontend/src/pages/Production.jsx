@@ -64,22 +64,58 @@ function groupJobsByColor(jobs) {
     if (!groups[key]) {
       groups[key] = {
         key, po_number: j.po_number, po_id: j.po_id, style_id: j.style_id, style_code: j.style_code,
+        po_style_code: j.po_style_code || j.mapped_from_sku || j.customer_style_code || j.external_sku || "",
+        created_at: j.created_at || j.stage_entered_at || "",
         client_name: j.client_name, description: j.description, delivery_date: j.delivery_date,
         color, rows: [], sizes: new Set(),
       };
     }
     groups[key].rows.push(j);
     groups[key].sizes.add(String(j.size || "—"));
+    if (!groups[key].po_style_code && (j.po_style_code || j.mapped_from_sku || j.customer_style_code || j.external_sku)) {
+      groups[key].po_style_code = j.po_style_code || j.mapped_from_sku || j.customer_style_code || j.external_sku;
+    }
+    if (!groups[key].created_at && (j.created_at || j.stage_entered_at)) {
+      groups[key].created_at = j.created_at || j.stage_entered_at;
+    }
   }
-  return Object.values(groups).map(g => ({
-    ...g,
-    stage: g.rows[0]?.stage,
-    sizes: Array.from(g.sizes).sort(sortSizes),
-    totalQty: g.rows.reduce((s, r) => s + (r.quantity || 0), 0),
-    components: aggregateComponents(g.rows),
-    assignments: aggregateAssignments(g.rows),
-    overdueHours: aggregateOverdue(g.rows),
-  }));
+  return Object.values(groups).map(g => {
+    const poStyleCode = g.po_style_code || g.rows.find(r => r.po_style_code || r.mapped_from_sku || r.customer_style_code || r.external_sku)?.po_style_code || g.rows.find(r => r.mapped_from_sku)?.mapped_from_sku || g.rows.find(r => r.customer_style_code)?.customer_style_code || g.rows.find(r => r.external_sku)?.external_sku || "";
+    const hasMappedCode = !!(poStyleCode && String(poStyleCode).trim() && String(poStyleCode).trim().toUpperCase() !== String(g.style_code || "").trim().toUpperCase());
+    const styleDisplay = hasMappedCode ? `${g.style_code}/${poStyleCode}` : (g.style_code || "—");
+
+    const rawCreated = g.created_at || g.rows.find(r => r.created_at)?.created_at || g.rows[0]?.created_at || g.rows[0]?.stage_entered_at || "";
+    let cardCreatedDate = "";
+    if (rawCreated) {
+      try {
+        const d = new Date(rawCreated);
+        if (!isNaN(d.getTime())) {
+          const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+          const day = String(d.getDate()).padStart(2, "0");
+          const mon = months[d.getMonth()];
+          const yr = d.getFullYear();
+          cardCreatedDate = `${day} ${mon} ${yr}`;
+        }
+      } catch (e) {
+        cardCreatedDate = String(rawCreated).slice(0, 10);
+      }
+    }
+
+    return {
+      ...g,
+      po_style_code: poStyleCode,
+      has_mapped_code: hasMappedCode,
+      style_display: styleDisplay,
+      created_at: rawCreated,
+      card_created_date: cardCreatedDate,
+      stage: g.rows[0]?.stage,
+      sizes: Array.from(g.sizes).sort(sortSizes),
+      totalQty: g.rows.reduce((s, r) => s + (r.quantity || 0), 0),
+      components: aggregateComponents(g.rows),
+      assignments: aggregateAssignments(g.rows),
+      overdueHours: aggregateOverdue(g.rows),
+    };
+  });
 }
 
 /**
@@ -384,9 +420,10 @@ export default function Production() {
       const lines = [
         `SSK FOOTCARE - Production Card`,
         `PO: ${group.po_number}`,
-        `Style: ${group.style_code}  Color: ${group.color}`,
+        `Style: ${group.style_display || group.style_code}  Color: ${group.color}`,
         `Total: ${group.totalQty} pairs`,
         `Sizes: ${sizeBreak}`,
+        group.card_created_date ? `Created: ${group.card_created_date}` : "",
         group.delivery_date ? `Delivery: ${group.delivery_date}` : "",
         ``,
         `Please process as per the attached production card PDF (auto-downloaded).`,
@@ -1445,7 +1482,7 @@ function ColorGroupCard(props) {
               <Layers className="w-3.5 h-3.5" />
               <div>
                 <div className="text-[9px] uppercase tracking-[0.2em] font-bold opacity-80">Planning Stage</div>
-                <div className="text-[11px] font-bold">{group.style_code} · <span className="text-violet-200">{group.color}</span></div>
+                <div className="text-[11px] font-bold">{group.style_display || group.style_code} · <span className="text-violet-200">{group.color}</span></div>
               </div>
             </div>
             {canEdit && (
@@ -1610,7 +1647,7 @@ function ColorGroupCard(props) {
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <div className="font-mono font-bold text-sm">{group.style_code}</div>
+            <div className="font-mono font-bold text-sm" title={group.style_display || group.style_code} data-testid={`style-code-${group.key}`}>{group.style_display || group.style_code}</div>
             <div className="text-xs">
               <span className="font-bold text-[#C27842]">{group.color}</span>
               <span className="text-slate-400 mx-1">·</span>
@@ -1736,7 +1773,14 @@ function ColorGroupCard(props) {
       </div>
 
       <div className="px-3 pb-3 flex items-center justify-between gap-2 flex-wrap">
-        {group.delivery_date && <div className="text-[10px] text-slate-500">Deliver: {group.delivery_date}</div>}
+        <div className="flex flex-col gap-0.5">
+          {group.card_created_date && (
+            <div className="text-[10px] text-slate-400 font-medium" data-testid={`created-date-${group.key}`}>
+              Created: {group.card_created_date}
+            </div>
+          )}
+          {group.delivery_date && <div className="text-[10px] text-slate-500">Deliver: {group.delivery_date}</div>}
+        </div>
         <div className="flex gap-2 ml-auto items-center flex-wrap">
           {effectiveCanEdit && (
             <button onClick={onPrint} title="Print production card" data-testid={`print-${group.key}`}
@@ -2732,7 +2776,7 @@ function DetailModal({ group, onClose }) {
         <div className="bg-[#0F172A] text-white px-6 py-4 flex items-baseline justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold">Production Card · Archive</div>
-            <div className="text-xl font-bold">{group.style_code} · {group.color} · {group.totalQty} pairs</div>
+            <div className="text-xl font-bold">{group.style_display || group.style_code} · {group.color} · {group.totalQty} pairs</div>
           </div>
           <button onClick={onClose} className="hover:bg-white/10 p-1" data-testid="detail-close"><X className="w-5 h-5" /></button>
         </div>
@@ -2740,8 +2784,9 @@ function DetailModal({ group, onClose }) {
           <div className="grid grid-cols-2 gap-3 text-sm">
             <DLPair label="PO Number" value={group.po_number} />
             <DLPair label="Client" value={group.client_name} />
-            <DLPair label="Style" value={group.style_code} />
+            <DLPair label="Style" value={group.style_display || group.style_code} />
             <DLPair label="Color" value={group.color} />
+            <DLPair label="Created" value={group.card_created_date || "—"} />
             <DLPair label="Delivery" value={group.delivery_date || "—"} />
             <DLPair label="Total Pairs" value={group.totalQty} />
           </div>

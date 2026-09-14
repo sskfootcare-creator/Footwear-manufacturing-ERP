@@ -133,11 +133,35 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
 
+    style_code = job_group.get("style_code", "—")
+    po_style_code = job_group.get("po_style_code")
+    has_mapped = (
+        po_style_code and
+        str(po_style_code).strip() and
+        str(po_style_code).strip().upper() != str(style_code).strip().upper()
+    )
+    style_display = f"{style_code}/{po_style_code}" if has_mapped else style_code
+
+    created_raw = job_group.get("created_at") or ""
+    try:
+        if created_raw:
+            created_dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+            card_created_date = created_dt.strftime("%d %b %Y")
+        else:
+            card_created_date = "—"
+    except Exception:
+        card_created_date = str(created_raw)[:10] or "—"
+
+    h_style_fs = (8.5 if compact else 13) if len(style_display) > 16 else (11 if compact else 18)
+    h_style_lead = h_style_fs + 2
+    h_style_p = Paragraph(f"<b>{style_display}</b>", ParagraphStyle("hst_dyn", fontName="Helvetica-Bold", fontSize=h_style_fs, leading=h_style_lead, textColor=BLACK))
+
     info_rows = [
         [Paragraph("PO NUMBER", S["lab"]), Paragraph(job_group.get("po_number", "—"), S["valb"])],
         [Paragraph("CLIENT", S["lab"]), Paragraph(job_group.get("client_name", "—"), S["val"])],
-        [Paragraph("STYLE", S["lab"]), Paragraph(f"<b>{job_group.get('style_code','—')}</b>", S["h_style"])],
+        [Paragraph("STYLE", S["lab"]), h_style_p],
         [Paragraph("ARTICLE", S["lab"]), Paragraph((style or {}).get("name", "") or job_group.get("description", "—"), S["val"])],
+        [Paragraph("CREATED", S["lab"]), Paragraph(card_created_date, S["val"])],
         [Paragraph("DELIVERY", S["lab"]), Paragraph(job_group.get("delivery_date", "—"), S["valb"])],
     ]
     info_col1 = 18 if compact else 20
