@@ -325,7 +325,7 @@ export default function Vendors() {
           data-testid="vendor-drawer"
         >
           <div className="absolute inset-0 bg-black/40" onClick={closeDrawer} />
-          <div className="relative bg-white w-full max-w-lg h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-y-auto">
+          <div className="relative bg-white w-full max-w-lg h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-y-auto no-scrollbar">
             <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between shrink-0">
               <div>
                 <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#C27842]">

@@ -1491,7 +1491,7 @@ export default function VendorPOs() {
             className="absolute inset-0 bg-black/40"
             onClick={() => setLedgerDrawer(null)}
           />
-          <div className="relative bg-white w-full max-w-3xl h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-hidden font-sans">
+          <div className="relative bg-white w-full max-w-4xl xl:max-w-5xl h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-hidden font-sans">
             {/* Header */}
             <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between shrink-0">
               <div>
@@ -1528,7 +1528,7 @@ export default function VendorPOs() {
             </div>
 
             {/* Body */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+            <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-5">
               {ledgerLoading ? (
                 <div className="p-16 text-center text-slate-400 text-sm">
                   Loading vendor transactions and ledger balance...
@@ -1619,21 +1619,21 @@ export default function VendorPOs() {
                       No matching transactions found for this vendor.
                     </div>
                   ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded">
-                      <table className="w-full text-xs font-sans">
+                    <div className="overflow-x-auto no-scrollbar border border-slate-200 rounded">
+                      <table className="w-full text-xs font-sans table-auto">
                         <thead className="bg-slate-100 border-b border-slate-200">
                           <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                            <th className="px-3 py-2 font-bold">Date</th>
-                            <th className="px-3 py-2 font-bold text-center">Type</th>
-                            <th className="px-3 py-2 font-bold">Ref / PO #</th>
-                            <th className="px-3 py-2 font-bold">Description</th>
-                            <th className="px-3 py-2 font-bold text-right text-emerald-700">
+                            <th className="px-2.5 py-2 font-bold whitespace-nowrap">Date</th>
+                            <th className="px-2 py-2 font-bold text-center whitespace-nowrap">Type</th>
+                            <th className="px-2.5 py-2 font-bold whitespace-nowrap">Ref / PO #</th>
+                            <th className="px-2.5 py-2 font-bold">Description</th>
+                            <th className="px-2.5 py-2 font-bold text-right text-emerald-700 whitespace-nowrap">
                               Debit (Paid)
                             </th>
-                            <th className="px-3 py-2 font-bold text-right text-blue-700">
+                            <th className="px-2.5 py-2 font-bold text-right text-blue-700 whitespace-nowrap">
                               Credit (Bill)
                             </th>
-                            <th className="px-3 py-2 font-bold text-right">Balance</th>
+                            <th className="px-2.5 py-2 font-bold text-right whitespace-nowrap">Balance</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1642,10 +1642,10 @@ export default function VendorPOs() {
                               key={idx}
                               className="border-b border-slate-100 hover:bg-slate-50 transition-colors"
                             >
-                              <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap">
+                              <td className="px-2.5 py-2 font-mono text-slate-600 whitespace-nowrap text-[11px]">
                                 {tx.date}
                               </td>
-                              <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                              <td className="px-2 py-2 text-center whitespace-nowrap">
                                 {tx.type === "receive" ? (
                                   <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
                                     <ArrowDownLeft className="w-3 h-3 text-blue-600" /> Receipt
@@ -1656,13 +1656,17 @@ export default function VendorPOs() {
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-2.5 font-mono font-semibold text-slate-700">
-                                <div>{tx.reference || tx.po_number || "—"}</div>
+                              <td className="px-2.5 py-2 font-mono font-semibold text-slate-700 text-[11px]">
+                                <div className="truncate max-w-[150px]" title={tx.reference || tx.po_number || "—"}>
+                                  {tx.reference || tx.po_number || "—"}
+                                </div>
                                 {tx.po_number && tx.po_number !== tx.reference && (
-                                  <div className="text-[10px] text-slate-500 font-normal">{tx.po_number}</div>
+                                  <div className="text-[10px] text-slate-500 font-normal truncate max-w-[150px]">
+                                    {tx.po_number}
+                                  </div>
                                 )}
                               </td>
-                              <td className="px-3 py-2.5 text-slate-600 max-w-xs truncate" title={tx.description}>
+                              <td className="px-2.5 py-2 text-slate-600 max-w-[200px] truncate" title={tx.description}>
                                 {tx.description}
                                 {tx.mode && (
                                   <span className="ml-1 text-[10px] font-mono text-slate-400">
@@ -1670,13 +1674,13 @@ export default function VendorPOs() {
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-2.5 text-right font-mono font-semibold text-emerald-700">
+                              <td className="px-2.5 py-2 text-right font-mono font-semibold text-emerald-700 whitespace-nowrap text-[11px]">
                                 {tx.debit > 0 ? inr(tx.debit) : "—"}
                               </td>
-                              <td className="px-3 py-2.5 text-right font-mono font-semibold text-blue-700">
+                              <td className="px-2.5 py-2 text-right font-mono font-semibold text-blue-700 whitespace-nowrap text-[11px]">
                                 {tx.credit > 0 ? inr(tx.credit) : "—"}
                               </td>
-                              <td className="px-3 py-2.5 text-right font-mono font-bold text-slate-900">
+                              <td className="px-2.5 py-2 text-right font-mono font-bold text-slate-900 whitespace-nowrap text-[11px]">
                                 {inr(tx.running_balance)}
                               </td>
                             </tr>
@@ -1699,7 +1703,7 @@ export default function VendorPOs() {
           data-testid="vendor-po-drawer"
         >
           <div className="absolute inset-0 bg-black/40" onClick={closeDrawer} />
-          <div className="relative bg-white w-full max-w-2xl h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-y-auto">
+          <div className="relative bg-white w-full max-w-2xl h-full flex flex-col shadow-2xl border-l-2 border-slate-200 overflow-y-auto no-scrollbar">
             {/* Header */}
             <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between shrink-0">
               <div>
@@ -1960,7 +1964,7 @@ export default function VendorPOs() {
             </div>
 
             {/* Content */}
-            <div className="p-6 space-y-4 flex-1 overflow-y-auto max-h-[400px]">
+            <div className="p-6 space-y-4 flex-1 overflow-y-auto no-scrollbar max-h-[400px]">
               {error && (
                 <div className="bg-red-50 border-2 border-red-200 px-4 py-3 flex items-start gap-2 text-sm text-red-700">
                   <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
