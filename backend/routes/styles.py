@@ -332,6 +332,23 @@ def get_effective_bom(style: dict, color: Optional[str] = None) -> List[BomItem]
 
             line_id = ov_dict.get("line_id")
             if not line_id:
+                if ov_dict.get("material_id") or ov_dict.get("material_code") or ov_dict.get("material_name"):
+                    new_item_dict = {
+                        "material_id": ov_dict.get("material_id") or "",
+                        "material_name": ov_dict.get("material_name") or "",
+                        "material_code": ov_dict.get("material_code") or "",
+                        "unit": ov_dict.get("unit") or "",
+                        "rate": float(ov_dict.get("rate") if ov_dict.get("rate") is not None else 0.0),
+                        "quantity": float(ov_dict.get("quantity") if ov_dict.get("quantity") is not None else 0.0),
+                        "yield_per_unit": float(ov_dict.get("yield_per_unit") if ov_dict.get("yield_per_unit") is not None else 1.0),
+                        "waste_pct": float(ov_dict.get("waste_pct") if ov_dict.get("waste_pct") is not None else 0.0),
+                        "section": ov_dict.get("section") or "Other",
+                        "component": ov_dict.get("component"),
+                        "with_eva": ov_dict.get("with_eva"),
+                        "color": ov_dict.get("color") or "",
+                    }
+                    result_lines.append(BomItem(**new_item_dict))
+                    continue
                 log.warning(
                     f"Style '{style.get('code') or style.get('name') or 'unknown'}': "
                     f"override missing line_id for color '{color}' skipped"

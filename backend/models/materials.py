@@ -110,7 +110,7 @@ class ColorMaterialOverride(BaseModel):
 
 
 class ColorBomOverride(BaseModel):
-    line_id: str   # which base BOM line this override applies to
+    line_id: Optional[str] = None   # which base BOM line this override applies to (None for new added line)
     # all fields below optional — only set what actually differs for this color,
     # anything left None inherits the base line's value
     material_id: Optional[str] = None

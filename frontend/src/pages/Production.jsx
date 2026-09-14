@@ -629,9 +629,16 @@ export default function Production() {
   const downloadMaterialRequirement = async (groups, label, splitByColor = true) => {
     const job_ids = [];
     groups.forEach(g => g.rows.forEach(r => job_ids.push(r.id)));
+    const isMerged = groups.length > 1;
     try {
       const res = await http.post("/procurement/requirement.pdf",
-        { job_ids, scope_label: label || `${groups.length} card(s)`, split_by_color: splitByColor }, { responseType: "blob" });
+        {
+          job_ids,
+          scope_label: label || (isMerged ? `${groups.length} procurement cards` : `${groups.length} card(s)`),
+          split_by_color: isMerged ? false : splitByColor,
+          is_merged: isMerged,
+        },
+        { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
     } catch (e) { alert("Material requirement failed: " + friendlyAxiosError(e)); }
   };
@@ -734,7 +741,7 @@ export default function Production() {
             </button>
             {procSelectedCount > 0 && (
               <>
-                <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`); setProcSelected({}); }} data-testid="merged-mr-btn" className="px-3 sm:px-4 flex items-center gap-1">
+                <BtnPrimary onClick={() => { downloadMaterialRequirement(Object.values(procSelected), `${procSelectedCount} procurement cards`, false); setProcSelected({}); }} data-testid="merged-mr-btn" className="px-3 sm:px-4 flex items-center gap-1">
                   <ClipboardList className="w-3.5 h-3.5 inline" />
                   <span className="hidden sm:inline">Material Requirement ({procSelectedCount})</span>
                   <span className="inline sm:hidden">({procSelectedCount})</span>

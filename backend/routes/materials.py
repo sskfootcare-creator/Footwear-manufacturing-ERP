@@ -2,6 +2,7 @@
 
 import re
 import logging
+import inspect
 from collections import defaultdict
 from datetime import datetime, timezone
 from io import BytesIO
@@ -284,8 +285,19 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
 
     materials = await db.materials.find({}).to_list(2000)
     mat_map = {str(m["_id"]): stringify(m) for m in materials}
-    vendors = await db.vendors.find({}).to_list(2000)
-    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
+    vendors = []
+    try:
+        if hasattr(db, "vendors") and hasattr(db.vendors, "find"):
+            v_find = db.vendors.find({})
+            if hasattr(v_find, "to_list"):
+                v_res = v_find.to_list(2000)
+                if inspect.isawaitable(v_res):
+                    vendors = await v_res
+                elif isinstance(v_res, list):
+                    vendors = v_res
+    except Exception:
+        vendors = []
+    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors if isinstance(v, dict)}
 
     requirements = {}
     color_requirements = defaultdict(dict)
@@ -908,15 +920,28 @@ async def procurement_requirement_pdf(payload: dict, request: Request):
         raise HTTPException(400, "job_ids required")
     scope_label = payload.get("scope_label") or f"{len(job_ids)} production card(s)"
     notes = payload.get("notes", "")
-    split_by_color = bool(payload.get("split_by_color", False))
     data = await _compute_material_requirement(job_ids, db=db)
+
+    jobs = data.get("jobs", [])
+    scope_str = str(scope_label).lower()
+    has_multi_card_scope = (
+        bool(re.search(r'\b\d+\s+(?:procurement\s+)?cards?\b', scope_str))
+        or "merged" in scope_str
+        or "consolidated" in scope_str
+    )
+    distinct_pos = {j.get("po_number") for j in jobs if isinstance(j, dict) and j.get("po_number")}
+    is_merged = bool(payload.get("is_merged", False)) or has_multi_card_scope or len(distinct_pos) > 1
+
+    split_by_color = False if is_merged else bool(payload.get("split_by_color", False))
+
     pdf_bytes = build_material_requirement(
         scope_label,
-        data["jobs"],
+        jobs,
         data["materials"],
         notes,
         split_by_color=split_by_color,
-        by_color=data.get("by_color")
+        by_color=data.get("by_color"),
+        is_merged=is_merged,
     )
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
