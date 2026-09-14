@@ -420,7 +420,9 @@ async def export_expenses_and_purchases(
     search: Optional[str] = None,
 ):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        db = getattr(__import__("server"), "db")
 
     # 1. Fetch Expenses
     exp_q = {}
@@ -582,7 +584,9 @@ async def export_expenses_and_purchases(
 @expenses_router.get("/expenses/pnl")
 async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_date: Optional[str] = None):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        db = getattr(__import__("server"), "db")
     
     # 1. Invoices Revenue
     inv_q = {}

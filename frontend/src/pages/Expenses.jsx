@@ -63,19 +63,34 @@ const EXPENSE_CATEGORIES = [
 const TODAY = new Date().toISOString().split("T")[0];
 
 function downloadCsv(filename, headers, rows) {
-  const content =
-    "data:text/csv;charset=utf-8," +
+  const BOM = "\uFEFF";
+  const csvContent =
+    BOM +
     [
       headers.map((h) => `"${String(h ?? "").replace(/"/g, '""')}"`).join(","),
       ...rows.map((r) => r.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")),
-    ].join("\n");
-  const encodedUri = encodeURI(content);
+    ].join("\r\n");
+
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url =
+    typeof window !== "undefined" && window.URL && typeof window.URL.createObjectURL === "function"
+      ? window.URL.createObjectURL(blob)
+      : "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent);
+
   const link = document.createElement("a");
-  link.setAttribute("href", encodedUri);
+  link.setAttribute("href", url);
   link.setAttribute("download", filename);
+  link.style.display = "none";
   document.body.appendChild(link);
   link.click();
-  document.body.removeChild(link);
+  setTimeout(() => {
+    if (link.parentNode) {
+      link.parentNode.removeChild(link);
+    }
+    if (typeof window !== "undefined" && window.URL && typeof window.URL.revokeObjectURL === "function" && typeof url === "string" && url.startsWith("blob:")) {
+      window.URL.revokeObjectURL(url);
+    }
+  }, 200);
 }
 
 export default function Expenses() {
@@ -353,7 +368,7 @@ export default function Expenses() {
       // Consolidated
       const headers = [
         "Record Type",
-        "Reference ID / PO #",
+        "Reference ID / PO Number",
         "Date",
         "Party (Payee / Vendor)",
         "Category / Description",
@@ -371,7 +386,7 @@ export default function Expenses() {
         e.category,
         e.amount,
         (e.paid_via || "bank").toUpperCase(),
-        e.paid_via === "cash" ? e.cash_account_name : e.bank_account_name,
+        e.paid_via === "cash" ? (e.cash_account_name || "Cash") : (e.bank_account_name || "Bank"),
         (e.status || "paid").toUpperCase(),
         e.notes,
       ]);
@@ -382,10 +397,10 @@ export default function Expenses() {
         p.vendor_name,
         p.items_description,
         p.total_amount,
-        `Paid: ₹${p.paid_amount} | Due: ₹${p.balance_due}`,
-        `Exp Delivery: ${p.expected_delivery_date}`,
+        `Paid: ₹${p.paid_amount || 0} | Due: ₹${p.balance_due || 0}`,
+        `Exp Delivery: ${p.expected_delivery_date || "—"}`,
         (p.status || "sent").toUpperCase(),
-        `Qty: ${p.total_quantity} (Recv: ${p.received_quantity})`,
+        `Qty: ${p.total_quantity || 0} (Recv: ${p.received_quantity || 0})`,
       ]);
       downloadCsv(`SSK_ERP_Consolidated_Outflows_${dateTag}.csv`, headers, [...expRows, ...purRows]);
     }
@@ -2103,7 +2118,8 @@ export default function Expenses() {
                       type="button"
                       onClick={() => handleDownloadCsv("expenses")}
                       data-testid="download-expenses-csv"
-                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
+                      disabled={exportLoading || !exportData}
+                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
                     >
                       <ReceiptIndianRupee className="w-3.5 h-3.5 text-blue-600" /> Expenses CSV
                     </button>
@@ -2111,7 +2127,8 @@ export default function Expenses() {
                       type="button"
                       onClick={() => handleDownloadCsv("purchases")}
                       data-testid="download-purchases-csv"
-                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
+                      disabled={exportLoading || !exportData}
+                      className="px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 border border-slate-300 flex items-center gap-1.5 transition-colors"
                     >
                       <ShoppingBag className="w-3.5 h-3.5 text-amber-600" /> Purchases CSV
                     </button>
@@ -2122,9 +2139,17 @@ export default function Expenses() {
                   type="button"
                   onClick={() => handleDownloadCsv("consolidated")}
                   data-testid="download-consolidated-csv"
-                  className="bg-[#C27842] hover:bg-[#a66232] text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-[#C27842] shadow-sm flex items-center gap-1.5 transition-colors"
+                  disabled={exportLoading || !exportData}
+                  className="bg-[#C27842] hover:bg-[#a66232] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-[#C27842] shadow-sm flex items-center gap-1.5 transition-colors"
                 >
-                  <FileSpreadsheet className="w-4 h-4" /> Download Consolidated CSV
+                  <FileSpreadsheet className="w-4 h-4" />{" "}
+                  {exportLoading
+                    ? "Loading..."
+                    : exportType === "expenses"
+                    ? "Download Expenses CSV"
+                    : exportType === "purchases"
+                    ? "Download Purchases CSV"
+                    : "Download Consolidated CSV"}
                 </button>
               </div>
             </div>

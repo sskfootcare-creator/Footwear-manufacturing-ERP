@@ -60,19 +60,34 @@ const TABS = [
 ];
 
 function downloadCsv(filename, headers, rows) {
-  const content =
-    "data:text/csv;charset=utf-8," +
+  const BOM = "\uFEFF";
+  const csvContent =
+    BOM +
     [
-      headers.map((h) => `"${h}"`).join(","),
+      headers.map((h) => `"${String(h ?? "").replace(/"/g, '""')}"`).join(","),
       ...rows.map((r) => r.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")),
-    ].join("\n");
-  const encodedUri = encodeURI(content);
+    ].join("\r\n");
+
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url =
+    typeof window !== "undefined" && window.URL && typeof window.URL.createObjectURL === "function"
+      ? window.URL.createObjectURL(blob)
+      : "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent);
+
   const link = document.createElement("a");
-  link.setAttribute("href", encodedUri);
+  link.setAttribute("href", url);
   link.setAttribute("download", filename);
+  link.style.display = "none";
   document.body.appendChild(link);
   link.click();
-  document.body.removeChild(link);
+  setTimeout(() => {
+    if (link.parentNode) {
+      link.parentNode.removeChild(link);
+    }
+    if (typeof window !== "undefined" && window.URL && typeof window.URL.revokeObjectURL === "function" && typeof url === "string" && url.startsWith("blob:")) {
+      window.URL.revokeObjectURL(url);
+    }
+  }, 200);
 }
 
 export default function Reports() {
