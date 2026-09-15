@@ -569,3 +569,5 @@ mongodb-portable/mongod.log
 backend/tests/fixtures/uco_statement_real.xls
 scratch/
 backend/scratch_*.py
+frontend/public/company/black_derby.jpg
+frontend/public/company/classic_oxford.jpg

@@ -805,6 +805,18 @@ function GroupCard({ group, decision, onDecide, styles, onRefreshStyles, onCreat
       {/* Card header */}
       <div className="flex items-start gap-3 p-3">
         <span className={`mt-1.5 w-2.5 h-2.5 rounded-full flex-shrink-0 ${statusDot}`} />
+        {(() => {
+          const groupImg = group.image_url || selectedStyle?.image_thumbnail_url || selectedStyle?.image_display_url || selectedStyle?.image_url;
+          if (!groupImg) return null;
+          return (
+            <img
+              src={groupImg}
+              alt=""
+              className="w-10 h-10 object-cover rounded border border-slate-200 flex-shrink-0 bg-slate-50"
+              onError={(e) => { e.target.style.display = "none"; }}
+            />
+          );
+        })()}
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -1589,7 +1601,7 @@ export default function SkuMap() {
     setForm({
       style_id: m.style_id, source_type: m.source_type, source_name: m.source_name,
       external_sku: m.external_sku, external_style_name: m.external_style_name || "",
-      image_url: m.image_url || "",
+      image_url: m.image_url || m.internal_image_thumbnail_url || m.internal_image_display_url || m.internal_image_url || "",
       color_map: dictToRows(m.color_map), size_map: dictToRows(m.size_map),
     });
     setFormError(""); setOpen(true);
@@ -1763,26 +1775,29 @@ export default function SkuMap() {
                         <tr key={m.id} className={`hover:bg-slate-50 transition-colors ${m.needs_style_code ? "bg-amber-50/30" : ""}`}>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-3">
-                              {m.image_url ? (
-                                <a
-                                  href={m.image_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="w-10 h-10 rounded border border-slate-200 overflow-hidden bg-slate-100 flex-shrink-0 flex items-center justify-center hover:opacity-80 transition-opacity"
-                                  title="View full image"
-                                >
-                                  <img
-                                    src={m.image_url}
-                                    alt={m.style_code || m.external_style_name}
-                                    className="w-full h-full object-cover"
-                                    onError={(e) => { e.target.style.display = "none"; }}
-                                  />
-                                </a>
-                              ) : (
-                                <div className="w-10 h-10 rounded border border-slate-200 bg-slate-50 flex-shrink-0 flex items-center justify-center text-slate-300">
-                                  <ImageIcon className="w-4 h-4" />
-                                </div>
-                              )}
+                              {(() => {
+                                const displayImg = m.image_url || m.internal_image_thumbnail_url || m.internal_image_display_url || m.internal_image_url;
+                                return displayImg ? (
+                                  <a
+                                    href={displayImg}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="w-10 h-10 rounded border border-slate-200 overflow-hidden bg-slate-100 flex-shrink-0 flex items-center justify-center hover:opacity-80 transition-opacity"
+                                    title="View full image"
+                                  >
+                                    <img
+                                      src={displayImg}
+                                      alt={m.style_code || m.external_style_name}
+                                      className="w-full h-full object-cover"
+                                      onError={(e) => { e.target.style.display = "none"; }}
+                                    />
+                                  </a>
+                                ) : (
+                                  <div className="w-10 h-10 rounded border border-slate-200 bg-slate-50 flex-shrink-0 flex items-center justify-center text-slate-300">
+                                    <ImageIcon className="w-4 h-4" />
+                                  </div>
+                                );
+                              })()}
                               <div>
                                 {m.needs_style_code ? (
                                   <>
@@ -1913,15 +1928,35 @@ export default function SkuMap() {
                 <SearchableSelect
                   options={styles}
                   value={form.style_id}
-                  onChange={(val) => setForm({ ...form, style_id: val || "" })}
+                  onChange={(val) => {
+                    const matched = styles.find((s) => (s.id || s._id) === val);
+                    const matchedImg = matched?.image_thumbnail_url || matched?.image_display_url || matched?.image_url || "";
+                    setForm((prev) => ({
+                      ...prev,
+                      style_id: val || "",
+                      image_url: prev.image_url || matchedImg,
+                    }));
+                  }}
                   getKey={(s) => s.id}
                   getLabel={(s) => `${s.code} — ${s.name}`}
-                  renderOption={(s) => (
-                    <span className="flex flex-col">
-                      <span className="font-mono font-bold text-slate-900">{s.code}</span>
-                      <span className="text-[11px] text-slate-500">{s.name}</span>
-                    </span>
-                  )}
+                  renderOption={(s) => {
+                    const sImg = s.image_thumbnail_url || s.image_display_url || s.image_url;
+                    return (
+                      <span className="flex items-center gap-2">
+                        {sImg ? (
+                          <img src={sImg} alt="" className="w-6 h-6 object-cover rounded border border-slate-200 flex-shrink-0" />
+                        ) : (
+                          <span className="w-6 h-6 rounded border border-slate-200 bg-slate-100 flex items-center justify-center text-slate-400 flex-shrink-0">
+                            <ImageIcon className="w-3.5 h-3.5" />
+                          </span>
+                        )}
+                        <span className="flex flex-col min-w-0">
+                          <span className="font-mono font-bold text-slate-900 truncate">{s.code}</span>
+                          <span className="text-[11px] text-slate-500 truncate">{s.name}</span>
+                        </span>
+                      </span>
+                    );
+                  }}
                   placeholder="— Search & select internal style —"
                   testId="form-style-select"
                   onRefresh={fetchStyles}

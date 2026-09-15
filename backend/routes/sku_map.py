@@ -581,12 +581,15 @@ async def list_sku_map(
     for d in docs:
         st = style_map.get(d.get("style_id")) or style_map.get(d.get("style_code"))
         if st:
+            st_img = st.get("image_thumbnail_url") or st.get("image_display_url") or st.get("image_url") or ""
             d["internal_style_name"] = st.get("name") or ""
             d["internal_style_code"] = st.get("code") or d.get("style_code") or ""
             d["internal_image_url"] = st.get("image_url") or st.get("image_display_url") or ""
             d["internal_image_display_url"] = st.get("image_display_url") or st.get("image_url") or ""
             d["internal_image_thumbnail_url"] = st.get("image_thumbnail_url") or st.get("image_url") or ""
             d["internal_category"] = st.get("category") or ""
+            if not d.get("image_url"):
+                d["image_url"] = st_img
         res_list.append(stringify(d))
     return res_list
 
@@ -637,7 +640,10 @@ async def create_sku_map(payload: SkuMapIn, request: Request):
     doc["source_name_key"] = _norm_marketplace(src_name)
     doc["external_sku_key"] = _norm_key(ext_sku)
     doc["style_code"] = style["code"]
-    doc["image_url"] = normalize_image_url(payload.image_url or "")
+    norm_img = normalize_image_url(payload.image_url or "")
+    if not norm_img and style:
+        norm_img = style.get("image_thumbnail_url") or style.get("image_display_url") or style.get("image_url") or ""
+    doc["image_url"] = norm_img
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
     doc["created_by"] = u.get("email") or u.get("name", "")
@@ -1049,8 +1055,11 @@ async def listing_import_parse(
 
     ALIAS_MAP = {
         "style_id": "external_style_id", "myntra_style_id": "external_style_id",
+        "style_code": "external_style_id", "product_id": "external_style_id",
         "style_name": "external_style_name", "product_name": "external_style_name",
-        "color": "color", "colour": "color", "size": "size", "sku": "external_sku",
+        "color": "color", "colour": "color", "primary_color": "color", "primarycolor": "color",
+        "size": "size", "standard_size": "size", "standardsize": "size",
+        "sku": "external_sku", "sku_code": "external_sku", "skucode": "external_sku",
         "sellerskucode": "external_sku", "seller_sku_code": "external_sku",
         "image_url": "image_url", "image": "image_url",
     }
@@ -1276,6 +1285,8 @@ async def listing_import_commit(
                 "color_key":                color_key,
             })
 
+        style_img = (style_doc.get("image_thumbnail_url") or style_doc.get("image_display_url") or style_doc.get("image_url") or "") if style_doc else ""
+        norm_group_img = normalize_image_url(group.get("image_url", ""))
         doc_base = {
             "source_type":        source_type,
             "source_name":        source_name,
@@ -1289,7 +1300,7 @@ async def listing_import_commit(
             "external_sku_key":   _norm_key(group_ext_sku),
             "size_map":           size_sku_map,
             "color_map":          {},
-            "image_url":          normalize_image_url(group.get("image_url", "")),
+            "image_url":          norm_group_img or style_img,
             "needs_style_code":   style_id is None,
             "listing_session_id": session_id,
             "updated_at":         now_iso(),
