@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { http, formatApiError } from "../lib/api";
+import { broadcastSync, useCrossTabSync } from "../lib/sync";
 import {
   PageHeader,
   Card,
@@ -154,6 +155,7 @@ function UnmappedTab({ styles, onDone }) {
           gst_pct: Number(newStyleForm.gst_pct),
         });
         styleId = styleRes.data.id;
+        broadcastSync("styles", { action: "create", data: styleRes.data });
       }
 
       if (!styleId) {
@@ -769,7 +771,7 @@ const SOURCE_TYPE_BY_PLATFORM = {
 };
 
 /** A single group card inside Stage 2. */
-function GroupCard({ group, decision, onDecide, styles }) {
+function GroupCard({ group, decision, onDecide, styles, onRefreshStyles, onCreateStyle }) {
   const [expanded, setExpanded] = useState(false);
 
   const linked    = decision?.style_id != null;
@@ -862,24 +864,38 @@ function GroupCard({ group, decision, onDecide, styles }) {
           )}
 
           {/* Suggestion hint */}
-          {group.suggested_base_match && !linked && (
-            <div className="mt-2 text-[11px] text-slate-500 flex items-center gap-1.5">
-              <span className="text-slate-400">Suggestion:</span>
-              <span className="font-mono font-bold text-slate-700">{group.suggested_base_match}</span>
-              <button
-                type="button"
-                onClick={() => {
-                  const s = styles.find(
-                    (st) => st.code?.toUpperCase() === group.suggested_base_match?.toUpperCase()
-                  );
-                  if (s) onDecide(group.group_key, s.id);
-                }}
-                className="text-blue-600 hover:text-blue-800 underline text-[11px]"
-              >
-                Use this?
-              </button>
-            </div>
-          )}
+          {group.suggested_base_match && !linked && (() => {
+            const s = styles.find(
+              (st) => st.code?.toUpperCase() === group.suggested_base_match?.toUpperCase()
+            );
+            return (
+              <div className="mt-2 text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400">Suggestion:</span>
+                <span className="font-mono font-bold text-slate-700">{group.suggested_base_match}</span>
+                {s ? (
+                  <button
+                    type="button"
+                    onClick={() => onDecide(group.group_key, s.id)}
+                    className="inline-flex items-center gap-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold px-2 py-0.5 rounded text-[11px] transition-colors border border-emerald-300 shadow-sm"
+                  >
+                    <Check className="w-3 h-3" /> Match found ({s.code}) — Link Now
+                  </button>
+                ) : (
+                  <span className="text-slate-400 text-[10px]">
+                    (Not in Style Master yet. Add in other tab or{" "}
+                    <button
+                      type="button"
+                      onClick={() => onRefreshStyles && onRefreshStyles()}
+                      className="underline font-bold text-blue-600 hover:text-blue-800"
+                    >
+                      Sync ↻
+                    </button>
+                    )
+                  </span>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Expanded size map */}
           {expanded && sizeEntries.length > 0 && (
@@ -915,9 +931,11 @@ function GroupCard({ group, decision, onDecide, styles }) {
               )}
               placeholder="Search internal style code…"
               testId={`link-style-${group.group_key}`}
+              onRefresh={onRefreshStyles}
+              refreshLabel="Sync from Style Master"
             />
           </div>
-          {decision?.style_id && (
+          {decision?.style_id ? (
             <button
               type="button"
               onClick={() => onDecide(group.group_key, null)}
@@ -926,6 +944,17 @@ function GroupCard({ group, decision, onDecide, styles }) {
             >
               <X className="w-4 h-4" />
             </button>
+          ) : (
+            onCreateStyle && (
+              <button
+                type="button"
+                onClick={() => onCreateStyle(group)}
+                className="inline-flex items-center gap-1 text-[11px] font-bold bg-white hover:bg-slate-100 text-slate-700 px-2.5 py-2 border-2 border-slate-300 transition-colors flex-shrink-0 min-h-[44px]"
+                title="Quick Create Style Master for this SKU"
+              >
+                <Plus className="w-3.5 h-3.5 text-blue-600" /> New Style
+              </button>
+            )
           )}
         </div>
 
@@ -979,7 +1008,12 @@ function GroupCard({ group, decision, onDecide, styles }) {
   );
 }
 
-function ListingImportDrawer({ onClose, onDone, styles }) {
+function ListingImportDrawer({ onClose, onDone, styles, onRefreshStyles, stylesLoading }) {
+  // Live cross-tab sync subscription while drawer is open
+  useCrossTabSync("styles", () => {
+    if (onRefreshStyles) onRefreshStyles();
+  });
+
   // ── Stage 1 state ──────────────────────────────────────────
   const [stage, setStage]       = useState(1);   // 1 = upload, 2 = link
   const [file, setFile]         = useState(null);
@@ -999,6 +1033,62 @@ function ListingImportDrawer({ onClose, onDone, styles }) {
   const [committing, setCommitting] = useState(false);
   const [commitResult, setCommitResult] = useState(null);
   const [commitError, setCommitError]   = useState("");
+
+  // In-drawer quick style creation
+  const [quickCreateGroup, setQuickCreateGroup] = useState(null);
+  const [quickStyleForm, setQuickStyleForm] = useState({
+    code: "", name: "", category: "Footwear", description: "", base_size: "7"
+  });
+  const [quickCreating, setQuickCreating] = useState(false);
+  const [quickError, setQuickError] = useState("");
+
+  function openQuickCreate(group) {
+    const rawCode = group?.suggested_base_match || group?.external_style_id || group?.base_key || "";
+    const cleanCode = rawCode.trim();
+    setQuickStyleForm({
+      code: cleanCode,
+      name: group?.external_style_name ? group.external_style_name : (cleanCode ? `Style ${cleanCode}` : ""),
+      category: "Footwear",
+      description: `Created from listing group ${group?.external_style_name || cleanCode}`,
+      base_size: "7",
+    });
+    setQuickError("");
+    setQuickCreateGroup(group || { isGeneral: true });
+  }
+
+  async function handleQuickCreateStyle() {
+    if (!quickStyleForm.code.trim() || !quickStyleForm.name.trim()) {
+      setQuickError("Style Code and Name are required.");
+      return;
+    }
+    setQuickCreating(true);
+    setQuickError("");
+    try {
+      const res = await http.post("/styles", {
+        code: quickStyleForm.code.trim(),
+        name: quickStyleForm.name.trim(),
+        category: quickStyleForm.category || "Footwear",
+        description: quickStyleForm.description || "",
+        base_size: quickStyleForm.base_size || "7",
+        overhead_pct: 8,
+        packing_cost: 12,
+        margin_pct: 25,
+        gst_pct: 5,
+      });
+      broadcastSync("styles", { action: "create", data: res.data });
+      if (onRefreshStyles) {
+        await onRefreshStyles();
+      }
+      if (quickCreateGroup?.group_key) {
+        onDecide(quickCreateGroup.group_key, res.data.id);
+      }
+      setQuickCreateGroup(null);
+    } catch (e) {
+      setQuickError(formatApiError(e.response?.data?.detail) || "Failed to create style.");
+    } finally {
+      setQuickCreating(false);
+    }
+  }
 
   // ── Helpers ────────────────────────────────────────────────
   function handleDrop(e) {
@@ -1231,17 +1321,48 @@ function ListingImportDrawer({ onClose, onDone, styles }) {
   // ── Render: Stage 2 ───────────────────────────────────────
   const renderStage2 = () => (
     <div className="space-y-4">
-      {/* Session summary bar */}
-      <div className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between gap-3 rounded">
-        <div>
-          <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Stage 2 — Link Groups to Internal Styles</div>
-          <div className="text-xs text-slate-300 mt-0.5">
-            {session.filename} · {totalGroups} group{totalGroups !== 1 ? "s" : ""} · {session.sku_count} SKUs total
+      {/* Session summary bar & live sync toolbar */}
+      <div className="bg-slate-900 text-white px-4 py-3 rounded space-y-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+              <span>Stage 2 — Link Groups to Internal Styles</span>
+              <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-700 px-1.5 py-0.5 rounded font-mono font-normal">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Multi-Tab Sync Active
+              </span>
+            </div>
+            <div className="text-xs text-slate-300 mt-0.5">
+              {session.filename} · {totalGroups} group{totalGroups !== 1 ? "s" : ""} · {session.sku_count} SKUs total
+            </div>
           </div>
-        </div>
-        <div className="text-right flex-shrink-0">
-          <div className="text-xs font-bold text-white">{decidedCount} / {totalGroups}</div>
-          <div className="text-[10px] text-slate-400">decided</div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              id="btn-sync-styles-listing"
+              onClick={onRefreshStyles}
+              disabled={stylesLoading}
+              className="inline-flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded text-xs font-semibold transition-all shadow-sm"
+              title="Sync latest styles from Style Master"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${stylesLoading ? "animate-spin text-amber-400" : "text-emerald-400"}`} />
+              <span>{stylesLoading ? "Syncing..." : "Sync Styles"}</span>
+              <span className="text-[10px] text-slate-400 font-mono">({styles.length})</span>
+            </button>
+            <button
+              type="button"
+              id="btn-quick-add-style-listing"
+              onClick={() => openQuickCreate(null)}
+              className="inline-flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1.5 rounded text-xs font-semibold transition-all shadow-sm"
+              title="Add a new Style Master item"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>New Style</span>
+            </button>
+            <div className="text-right flex-shrink-0 border-l border-slate-800 pl-3">
+              <div className="text-xs font-bold text-white">{decidedCount} / {totalGroups}</div>
+              <div className="text-[10px] text-slate-400">decided</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1278,9 +1399,83 @@ function ListingImportDrawer({ onClose, onDone, styles }) {
             decision={decisions[g.group_key]}
             onDecide={onDecide}
             styles={styles}
+            onRefreshStyles={onRefreshStyles}
+            onCreateStyle={openQuickCreate}
           />
         ))}
       </div>
+
+      {/* Quick Create Style Modal */}
+      {quickCreateGroup && (
+        <div className="fixed inset-0 z-[300] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 space-y-4 border border-slate-300">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <div className="font-bold text-slate-900 text-sm">Quick Add Style to Master</div>
+                <div className="text-xs text-slate-500">
+                  {quickCreateGroup?.group_key ? "Creates style in Style Master & links this group" : "Creates style in Style Master & syncs across tabs"}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickCreateGroup(null)}
+                className="text-slate-400 hover:text-slate-700 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {quickError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs p-2 rounded">
+                {quickError}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <Input
+                label="Style Code *"
+                value={quickStyleForm.code}
+                onChange={(e) => setQuickStyleForm({ ...quickStyleForm, code: e.target.value })}
+                placeholder="e.g. SSK-OXF-01"
+              />
+              <Input
+                label="Style Name *"
+                value={quickStyleForm.name}
+                onChange={(e) => setQuickStyleForm({ ...quickStyleForm, name: e.target.value })}
+                placeholder="e.g. Oxford Classic"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  label="Category"
+                  value={quickStyleForm.category}
+                  onChange={(e) => setQuickStyleForm({ ...quickStyleForm, category: e.target.value })}
+                />
+                <Input
+                  label="Base Size"
+                  value={quickStyleForm.base_size}
+                  onChange={(e) => setQuickStyleForm({ ...quickStyleForm, base_size: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t">
+              <BtnPrimary
+                onClick={handleQuickCreateStyle}
+                disabled={quickCreating}
+                className="flex-1"
+              >
+                {quickCreating ? "Creating..." : quickCreateGroup?.group_key ? "Create Style & Link Group" : "Create Style"}
+              </BtnPrimary>
+              <BtnSecondary
+                onClick={() => setQuickCreateGroup(null)}
+                disabled={quickCreating}
+              >
+                Cancel
+              </BtnSecondary>
+            </div>
+          </div>
+        </div>
+      )}
 
       {commitError && (
         <div className="bg-red-50 border-2 border-red-300 p-3 text-xs text-red-700 font-semibold flex items-start gap-2">
@@ -1322,6 +1517,7 @@ export default function SkuMap() {
   const [tab, setTab] = useState("mappings");
   const [mappings, setMappings] = useState([]);
   const [styles, setStyles] = useState([]);
+  const [stylesLoading, setStylesLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -1337,6 +1533,21 @@ export default function SkuMap() {
   const [filterNeedsStyle, setFilterNeedsStyle] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
+  const fetchStyles = useCallback(async () => {
+    setStylesLoading(true);
+    try {
+      const res = await http.get("/styles");
+      const list = res.data || [];
+      setStyles(list);
+      return list;
+    } catch (e) {
+      console.error("Failed to fetch styles:", e);
+      return [];
+    } finally {
+      setStylesLoading(false);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1346,22 +1557,30 @@ export default function SkuMap() {
       if (searchQuery.trim()) params.append("search", searchQuery.trim());
       if (filterNeedsStyle) params.append("needs_style_code", "true");
 
-      const [resMap, resStyles] = await Promise.all([
+      const [resMap] = await Promise.all([
         http.get(`/sku-map?${params.toString()}`),
-        http.get("/styles"),
+        fetchStyles(),
       ]);
-      setMappings(resMap.data);
-      setStyles(resStyles.data);
+      setMappings(resMap.data || []);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [filterType, filterSource, searchQuery, filterNeedsStyle]);
+  }, [filterType, filterSource, searchQuery, filterNeedsStyle, fetchStyles]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Synchronize in real time with changes from other open tabs (e.g. Style Master)
+  useCrossTabSync(["styles", "sku-map"], (event) => {
+    if (event.entity === "styles") {
+      fetchStyles();
+    } else if (event.entity === "sku-map") {
+      load();
+    }
+  });
 
   function openCreate() { setEditId(null); setActiveMapping(null); setForm(emptyForm); setFormError(""); setOpen(true); }
   function openEdit(m) {
@@ -1691,12 +1910,23 @@ export default function SkuMap() {
                   {selectedStyle ? `${selectedStyle.code} — ${selectedStyle.name}` : form.style_id}
                 </div>
               ) : (
-                <select id="form-style-id"
-                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                  value={form.style_id} onChange={(e) => setForm({ ...form, style_id: e.target.value })}>
-                  <option value="">— Select style —</option>
-                  {styles.map((s) => <option key={s.id} value={s.id}>{s.code} — {s.name}</option>)}
-                </select>
+                <SearchableSelect
+                  options={styles}
+                  value={form.style_id}
+                  onChange={(val) => setForm({ ...form, style_id: val || "" })}
+                  getKey={(s) => s.id}
+                  getLabel={(s) => `${s.code} — ${s.name}`}
+                  renderOption={(s) => (
+                    <span className="flex flex-col">
+                      <span className="font-mono font-bold text-slate-900">{s.code}</span>
+                      <span className="text-[11px] text-slate-500">{s.name}</span>
+                    </span>
+                  )}
+                  placeholder="— Search & select internal style —"
+                  testId="form-style-select"
+                  onRefresh={fetchStyles}
+                  refreshLabel="Sync latest from Style Master"
+                />
               )}
             </div>
 
@@ -1897,6 +2127,8 @@ export default function SkuMap() {
           onClose={() => setListingImportOpen(false)}
           onDone={() => load()}
           styles={styles}
+          onRefreshStyles={fetchStyles}
+          stylesLoading={stylesLoading}
         />
       )}
 

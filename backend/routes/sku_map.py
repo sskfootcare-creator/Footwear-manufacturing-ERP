@@ -283,6 +283,27 @@ async def resolve_style(
 
             resolved_color, color_exact = translate(color_map, ext_color)
             resolved_size,  size_exact  = translate(size_map,  ext_size)
+            matched_exact = color_exact and size_exact
+
+            if not matched_exact and mapping:
+                inc_fields = {}
+                if not color_exact and ext_color:
+                    safe_col = ext_color.replace(".", "_")
+                    inc_fields[f"unmapped_encountered.color.{safe_col}"] = 1
+                if not size_exact and ext_size:
+                    safe_sz = ext_size.replace(".", "_")
+                    inc_fields[f"unmapped_encountered.size.{safe_sz}"] = 1
+                if inc_fields:
+                    try:
+                        await db.sku_map.update_one(
+                            {"_id": mapping["_id"]},
+                            {
+                                "$inc": inc_fields,
+                                "$set": {"last_unmapped_at": datetime.now(timezone.utc).isoformat()},
+                            },
+                        )
+                    except Exception as err:
+                        log.warning("Failed to record unmapped encountered: %s", err)
 
             return {
                 "style_id":            str(style["_id"]),
@@ -290,7 +311,7 @@ async def resolve_style(
                 "color":               resolved_color,
                 "size":                resolved_size,
                 "matched":             True,
-                "matched_exact":       color_exact and size_exact,
+                "matched_exact":       matched_exact,
                 "color_matched_exact": color_exact,
                 "size_matched_exact":  size_exact,
                 "unmapped_color":      ext_color if not color_exact else None,
@@ -530,7 +551,44 @@ async def list_sku_map(
             {"style_code": {"$regex": re.escape(search), "$options": "i"}},
         ]
     docs = await db.sku_map.find(query).sort("created_at", -1).to_list(2000)
-    return [stringify(d) for d in docs]
+
+    # Enrich with internal style details & images
+    style_ids = {d["style_id"] for d in docs if d.get("style_id")}
+    style_codes = {d["style_code"] for d in docs if d.get("style_code")}
+    style_map = {}
+    if style_ids or style_codes:
+        oids = []
+        for sid in style_ids:
+            try:
+                oids.append(oid(sid))
+            except Exception:
+                pass
+        query_clauses = []
+        if oids:
+            query_clauses.append({"_id": {"$in": oids}})
+        if style_codes:
+            query_clauses.append({"code": {"$in": list(style_codes)}})
+        if query_clauses:
+            styles_list = await db.styles.find({"$or": query_clauses}).to_list(2000)
+            for s in styles_list:
+                sid_str = str(s["_id"])
+                s_code = s.get("code")
+                style_map[sid_str] = s
+                if s_code:
+                    style_map[s_code] = s
+
+    res_list = []
+    for d in docs:
+        st = style_map.get(d.get("style_id")) or style_map.get(d.get("style_code"))
+        if st:
+            d["internal_style_name"] = st.get("name") or ""
+            d["internal_style_code"] = st.get("code") or d.get("style_code") or ""
+            d["internal_image_url"] = st.get("image_url") or st.get("image_display_url") or ""
+            d["internal_image_display_url"] = st.get("image_display_url") or st.get("image_url") or ""
+            d["internal_image_thumbnail_url"] = st.get("image_thumbnail_url") or st.get("image_url") or ""
+            d["internal_category"] = st.get("category") or ""
+        res_list.append(stringify(d))
+    return res_list
 
 
 @sku_map_router.get("/sku-map/resolve")

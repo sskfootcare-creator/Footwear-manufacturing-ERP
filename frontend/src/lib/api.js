@@ -1,4 +1,5 @@
 import axios from "axios";
+import { broadcastSync } from "./sync";
 
 export const getBackendUrl = () => {
   // 1. Explicitly configured REACT_APP_BACKEND_URL takes priority if present
@@ -42,7 +43,24 @@ http.interceptors.request.use(
 );
 
 http.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    try {
+      const method = response?.config?.method?.toLowerCase();
+      if (method && ["post", "put", "patch", "delete"].includes(method)) {
+        const url = response?.config?.url || "";
+        if (url.includes("/styles")) broadcastSync("styles", { action: method });
+        else if (url.includes("/sku-map")) broadcastSync("sku-map", { action: method });
+        else if (url.includes("/materials")) broadcastSync("materials", { action: method });
+        else if (url.includes("/components")) broadcastSync("components", { action: method });
+        else if (url.includes("/pos")) broadcastSync("pos", { action: method });
+        else if (url.includes("/workers")) broadcastSync("workers", { action: method });
+        else if (url.includes("/inventory") || url.includes("/ready-stock")) broadcastSync("inventory", { action: method });
+      }
+    } catch {
+      // Non-blocking sync broadcast
+    }
+    return response;
+  },
   async (error) => {
     const originalRequest = error.config;
     const isKarigarReq =

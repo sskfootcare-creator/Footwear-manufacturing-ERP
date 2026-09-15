@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { http, inr, num, API } from "../lib/api";
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { http, inr, num, API, formatApiError } from "../lib/api";
+import { broadcastSync, useCrossTabSync } from "../lib/sync";
 import {
 
   PageHeader,
@@ -441,18 +442,64 @@ export default function Styles() {
     }
   };
 
+  const fetchMaterials = useCallback(async () => {
+    try {
+      const res = await http.get("/materials");
+      const list = res.data || [];
+      setMaterials(list);
+      return list;
+    } catch (e) {
+      console.error("Failed to fetch materials in Styles:", e);
+      return [];
+    }
+  }, []);
+
+  const [quickAddMaterialOpen, setQuickAddMaterialOpen] = useState(false);
+  const [quickMaterialForm, setQuickMaterialForm] = useState({
+    code: "", name: "", category: "upper", unit: "sqft", rate: 0,
+  });
+  const [quickMaterialSaving, setQuickMaterialSaving] = useState(false);
+  const [quickMaterialError, setQuickMaterialError] = useState("");
+
+  const handleQuickCreateMaterial = async () => {
+    if (!quickMaterialForm.name.trim() || !quickMaterialForm.code.trim()) {
+      setQuickMaterialError("Material Code and Name are required.");
+      return;
+    }
+    setQuickMaterialSaving(true);
+    setQuickMaterialError("");
+    try {
+      const res = await http.post("/materials", {
+        code: quickMaterialForm.code.trim(),
+        name: quickMaterialForm.name.trim(),
+        category: quickMaterialForm.category || "upper",
+        unit: quickMaterialForm.unit || "sqft",
+        rate: Number(quickMaterialForm.rate || 0),
+        color: "",
+      });
+      broadcastSync("materials", { action: "create", data: res.data });
+      await fetchMaterials();
+      addBomRow(res.data);
+      setQuickAddMaterialOpen(false);
+      setQuickMaterialForm({ code: "", name: "", category: "upper", unit: "sqft", rate: 0 });
+    } catch (e) {
+      setQuickMaterialError(formatApiError(e.response?.data?.detail) || "Failed to create material.");
+    } finally {
+      setQuickMaterialSaving(false);
+    }
+  };
+
   const load = async (filter = statusFilter, search = searchQuery) => {
     const queryParams = new URLSearchParams();
     if (filter) queryParams.append("status", filter);
     if (search) queryParams.append("search", search);
     const qs = queryParams.toString() ? `?${queryParams.toString()}` : "";
-    const [s, m, cm] = await Promise.all([
+    const [s, mList, cm] = await Promise.all([
       http.get(`/styles/summary${qs}`),
-      http.get("/materials"),
+      fetchMaterials(),
       http.get("/color-master?active=true").catch(() => ({ data: [] })),
     ]);
     setStyles(s.data);
-    setMaterials(m.data);
     setColorMasterList(cm.data || []);
 
     const params = new URLSearchParams(window.location.search);
@@ -477,6 +524,15 @@ export default function Styles() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, searchQuery]);
+
+  // Synchronize styles and materials when changes occur in other tabs (or when switching back to this tab)
+  useCrossTabSync(["styles", "materials"], (event) => {
+    if (event.entity === "materials") {
+      fetchMaterials();
+    } else {
+      load(statusFilter, searchQuery);
+    }
+  });
 
   const startNew = () => {
     setEditId(null);
@@ -588,6 +644,7 @@ export default function Styles() {
         // eslint-disable-next-line no-unused-vars
         const { code: _ignored, ...bodyNoCode } = body;
         await http.patch(`/styles/${editId}`, bodyNoCode);
+        broadcastSync("styles", { action: "update" });
         setOpen(false);
         load();
       } else {
@@ -595,6 +652,7 @@ export default function Styles() {
         // eslint-disable-next-line no-unused-vars
         const { code: _ignored, ...bodyNoCode } = body;
         const res = await http.post("/styles", bodyNoCode);
+        broadcastSync("styles", { action: "create", data: res.data });
         // Slide into edit-mode for the newly-created style so the user sees
         // the assigned SSK_XXXXX code and the Catalogue Codes panel.
         setEditId(res.data.id);
@@ -632,6 +690,7 @@ export default function Styles() {
         "Are you sure you want to delete this style from the Master catalog?",
       onConfirm: async () => {
         await http.delete(`/styles/${id}`);
+        broadcastSync("styles", { action: "delete", id });
         setConfirm(null);
         load();
       },
@@ -1814,19 +1873,31 @@ export default function Styles() {
                       </div>
 
                       {!selectedBomColor && (
-                        <div className="w-full sm:w-64">
-                          <SearchableSelect
-                            options={materials}
-                            value=""
-                            onChange={(id) => {
-                              const m = materials.find((x) => x.id === id);
-                              if (m) addBomRow(m);
-                            }}
-                            getKey={(m) => m.id}
-                            getLabel={(m) => `${m.code} — ${m.name}`}
-                            placeholder="+ Add material to Base BOM…"
-                            testId="bom-add-material"
-                          />
+                        <div className="w-full sm:w-80 flex items-center gap-2">
+                          <div className="flex-1">
+                            <SearchableSelect
+                              options={materials}
+                              value=""
+                              onChange={(id) => {
+                                const m = materials.find((x) => x.id === id);
+                                if (m) addBomRow(m);
+                              }}
+                              getKey={(m) => m.id}
+                              getLabel={(m) => `${m.code} — ${m.name}`}
+                              placeholder="+ Add material to Base BOM…"
+                              testId="bom-add-material"
+                              onRefresh={fetchMaterials}
+                              refreshLabel="Sync from Materials Master"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setQuickAddMaterialOpen(true)}
+                            className="inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-2 border-2 border-slate-300 rounded text-xs font-bold transition-colors min-h-[44px] flex-shrink-0"
+                            title="Quick Add Material to Master without leaving Style"
+                          >
+                            <Plus className="w-3.5 h-3.5 text-blue-600" /> Material
+                          </button>
                         </div>
                       )}
                     </div>
@@ -1924,6 +1995,8 @@ export default function Styles() {
                                             getLabel={(m) => `${m.code} — ${m.name}`}
                                             placeholder="Override material…"
                                             testId={`select-material-${b.line_id || i}`}
+                                            onRefresh={fetchMaterials}
+                                            refreshLabel="Sync from Materials Master"
                                           />
                                         </div>
                                       )}
@@ -3801,6 +3874,89 @@ export default function Styles() {
           style={bomStyle}
           onClose={() => setBomStyle(null)}
         />
+      )}
+      {quickAddMaterialOpen && (
+        <div className="fixed inset-0 z-[300] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 space-y-4 border border-slate-300">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <div className="font-bold text-slate-900 text-sm">Quick Add Material to Master</div>
+                <div className="text-xs text-slate-500">Creates material in Material Master & adds directly to this BOM</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickAddMaterialOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {quickMaterialError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs p-2 rounded">
+                {quickMaterialError}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <Input
+                label="Material Code *"
+                value={quickMaterialForm.code}
+                onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, code: e.target.value })}
+                placeholder="e.g. LEA-BRN-01"
+              />
+              <Input
+                label="Material Name *"
+                value={quickMaterialForm.name}
+                onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, name: e.target.value })}
+                placeholder="e.g. Brown Napa Leather"
+              />
+              <div className="grid grid-cols-3 gap-2">
+                <Select
+                  label="Category"
+                  value={quickMaterialForm.category}
+                  onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, category: e.target.value })}
+                >
+                  <option value="upper">Upper</option>
+                  <option value="sole">Sole</option>
+                  <option value="lining">Lining</option>
+                  <option value="accessory">Accessory</option>
+                  <option value="consumable">Consumable</option>
+                  <option value="packing">Packing</option>
+                  <option value="other">Other</option>
+                </Select>
+                <Input
+                  label="Unit"
+                  value={quickMaterialForm.unit}
+                  onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, unit: e.target.value })}
+                  placeholder="sqft"
+                />
+                <Input
+                  label="Rate (₹)"
+                  type="number"
+                  value={quickMaterialForm.rate}
+                  onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, rate: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t">
+              <BtnPrimary
+                onClick={handleQuickCreateMaterial}
+                disabled={quickMaterialSaving}
+                className="flex-1"
+              >
+                {quickMaterialSaving ? "Creating..." : "Save & Add to BOM"}
+              </BtnPrimary>
+              <BtnSecondary
+                onClick={() => setQuickAddMaterialOpen(false)}
+                disabled={quickMaterialSaving}
+              >
+                Cancel
+              </BtnSecondary>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

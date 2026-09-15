@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
+import { broadcastSync, useCrossTabSync } from "../lib/sync";
 import {
   PageHeader,
   Card,
@@ -93,6 +94,11 @@ export default function Materials() {
     load();
   }, []);
 
+  // Synchronize in real time with changes from other open tabs
+  useCrossTabSync("materials", () => {
+    load();
+  });
+
   const startNew = () => {
     setEdit(null);
     setForm(emptyForm);
@@ -135,8 +141,13 @@ export default function Materials() {
             ? Number(form.default_yield_per_unit)
             : null,
       };
-      if (edit) await http.patch(`/materials/${edit}`, body);
-      else await http.post("/materials", body);
+      if (edit) {
+        await http.patch(`/materials/${edit}`, body);
+        broadcastSync("materials", { action: "update" });
+      } else {
+        const res = await http.post("/materials", body);
+        broadcastSync("materials", { action: "create", data: res.data });
+      }
       setOpen(false);
       load();
     } catch (e) {
@@ -150,6 +161,7 @@ export default function Materials() {
         "Are you sure you want to delete this material? This will remove the material from catalog listings and history references.",
       onConfirm: async () => {
         await http.delete(`/materials/${id}`);
+        broadcastSync("materials", { action: "delete", id });
         setConfirm(null);
         load();
       },

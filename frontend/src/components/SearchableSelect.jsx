@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useId } from "react";
+import { RefreshCw } from "lucide-react";
 
 /**
  * SearchableSelect — drop-in replacement for long raw <select> lists.
@@ -15,6 +16,8 @@ import { useState, useRef, useEffect, useId } from "react";
  * disabled     {bool}
  * testId       {string}
  * className    {string}   Extra class on the root wrapper.
+ * onRefresh    {Function} Optional callback to re-fetch/sync options from server.
+ * refreshLabel {string}   Custom text for refresh action button.
  */
 export default function SearchableSelect({
   options = [],
@@ -27,6 +30,8 @@ export default function SearchableSelect({
   disabled = false,
   testId,
   className = "",
+  onRefresh,
+  refreshLabel = "Sync / Refresh options",
 }) {
   const [query, setQuery]       = useState("");
   const [open, setOpen]         = useState(false);
@@ -113,34 +118,69 @@ export default function SearchableSelect({
           style={{ top: "calc(100% + 2px)" }}
         >
           {filtered.length === 0 ? (
-            <li className="px-3 py-3 text-xs text-slate-400 italic">No matches.</li>
-          ) : (
-            filtered.map((opt) => {
-              const key = getKey(opt);
-              const isSelected = key === value;
-              return (
-                <li
-                  key={key}
-                  role="option"
-                  aria-selected={isSelected}
-                  onMouseDown={(e) => { e.preventDefault(); pick(opt); }}
-                  onTouchEnd={(e) => { e.preventDefault(); pick(opt); }}
-                  className={`px-3 py-2.5 text-xs cursor-pointer select-none flex items-center justify-between gap-2 min-h-[44px] ${
-                    isSelected
-                      ? "bg-[#0F172A] text-white"
-                      : "hover:bg-slate-100 active:bg-slate-200 text-slate-800"
-                  }`}
-                  data-testid={testId ? `${testId}-opt-${key}` : undefined}
+            <li className="px-3 py-3 text-xs text-slate-500 space-y-2">
+              <div className="text-slate-400 italic">No matches found{query ? ` for "${query}"` : ""}.</div>
+              {onRefresh && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onRefresh();
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:text-blue-800 underline cursor-pointer"
+                  data-testid={testId ? `${testId}-refresh-btn` : "searchable-select-refresh-btn"}
                 >
-                  {renderOption ? renderOption(opt) : (
-                    <span className="font-mono">{getLabel(opt)}</span>
-                  )}
-                  {isSelected && (
-                    <span className="text-[10px] font-bold shrink-0">✓</span>
-                  )}
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  {refreshLabel}
+                </button>
+              )}
+            </li>
+          ) : (
+            <>
+              {filtered.map((opt) => {
+                const key = getKey(opt);
+                const isSelected = key === value;
+                return (
+                  <li
+                    key={key}
+                    role="option"
+                    aria-selected={isSelected}
+                    onMouseDown={(e) => { e.preventDefault(); pick(opt); }}
+                    onTouchEnd={(e) => { e.preventDefault(); pick(opt); }}
+                    className={`px-3 py-2.5 text-xs cursor-pointer select-none flex items-center justify-between gap-2 min-h-[44px] ${
+                      isSelected
+                        ? "bg-[#0F172A] text-white"
+                        : "hover:bg-slate-100 active:bg-slate-200 text-slate-800"
+                    }`}
+                    data-testid={testId ? `${testId}-opt-${key}` : undefined}
+                  >
+                    {renderOption ? renderOption(opt) : (
+                      <span className="font-mono">{getLabel(opt)}</span>
+                    )}
+                    {isSelected && (
+                      <span className="text-[10px] font-bold shrink-0">✓</span>
+                    )}
+                  </li>
+                );
+              })}
+              {onRefresh && (
+                <li className="p-1.5 border-t border-slate-100 bg-slate-50 sticky bottom-0">
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onRefresh();
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 py-1 text-[11px] font-bold text-slate-600 hover:text-blue-700 hover:bg-slate-100 rounded transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    {refreshLabel}
+                  </button>
                 </li>
-              );
-            })
+              )}
+            </>
           )}
         </ul>
       )}
