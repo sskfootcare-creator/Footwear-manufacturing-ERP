@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import SkuMap from "../SkuMap";
 import { http } from "../../lib/api";
 
@@ -13,17 +13,17 @@ jest.mock("../../lib/api", () => ({
   formatApiError: (err) => err || "Error",
 }));
 
-describe("SkuMap Table Image Fallback Tests", () => {
+describe("SkuMap Table Image Fallback & Modal Preview Tests", () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  test("renders mapping with direct image_url, internal style fallback, or placeholder icon", async () => {
+  test("renders larger thumbnail and opens image in modal on click", async () => {
     http.get.mockImplementation((url) => {
       if (url === "/styles") {
         return Promise.resolve({
           data: [
-            { id: "s1", code: "SSK_00034", name: "V sandal", image_url: "/company/classic_oxford.jpg" },
+            { id: "s1", code: "SSK_00034", name: "V sandal 3 buckle", image_url: "/company/classic_oxford.jpg" },
           ],
         });
       }
@@ -72,14 +72,29 @@ describe("SkuMap Table Image Fallback Tests", () => {
       expect(screen.getByText("SSK_NO_IMG")).toBeInTheDocument();
     });
 
-    // Verify m1 image rendered
+    // Verify m1 image rendered in bigger thumbnail button
     const m1Img = screen.getByAltText("SSK_00034");
     expect(m1Img).toBeInTheDocument();
     expect(m1Img.getAttribute("src")).toBe("https://ik.imagekit.io/test.jpg");
+    const btn = m1Img.closest("button");
+    expect(btn).toHaveClass("w-16");
+    expect(btn).toHaveClass("h-16");
 
-    // Verify m2 fallback to internal image rendered
-    const m2Img = screen.getByAltText("SSK_TEST_OXFORD");
-    expect(m2Img).toBeInTheDocument();
-    expect(m2Img.getAttribute("src")).toBe("/company/classic_oxford.jpg");
+    // Click thumbnail to open image modal
+    fireEvent.click(btn);
+
+    // Verify modal is open with image and metadata
+    const modalDialog = screen.getByRole("dialog");
+    expect(modalDialog).toBeInTheDocument();
+    expect(modalDialog).toHaveTextContent("SSK_00034");
+    expect(modalDialog).toHaveTextContent("EXT-100");
+    expect(modalDialog).toHaveTextContent("SIYARAM");
+
+    // Close modal
+    const closeBtn = document.getElementById("btn-close-image-modal");
+    fireEvent.click(closeBtn);
+
+    // Verify modal is closed
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

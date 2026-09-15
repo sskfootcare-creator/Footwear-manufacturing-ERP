@@ -17,7 +17,7 @@ import {
   Plus, Trash2, Pencil, Save, X, ArrowLeftRight,
   Upload, AlertTriangle, CheckCircle2, ChevronDown, ChevronRight,
   Download, Copy, Check, FileSpreadsheet, RefreshCw, FileText, ExternalLink, Image as ImageIcon,
-  Link2, Unlink, Layers, ChevronUp, Info,
+  Link2, Unlink, Layers, ChevronUp, Info, Maximize2,
 } from "lucide-react";
 
 // ── constants ──────────────────────────────────────────────
@@ -1544,6 +1544,17 @@ export default function SkuMap() {
   const [filterSource, setFilterSource] = useState("");
   const [filterNeedsStyle, setFilterNeedsStyle] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [previewImage, setPreviewImage] = useState(null);
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "Escape" && previewImage) {
+        setPreviewImage(null);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewImage]);
 
   const fetchStyles = useCallback(async () => {
     setStylesLoading(true);
@@ -1778,23 +1789,31 @@ export default function SkuMap() {
                               {(() => {
                                 const displayImg = m.image_url || m.internal_image_thumbnail_url || m.internal_image_display_url || m.internal_image_url;
                                 return displayImg ? (
-                                  <a
-                                    href={displayImg}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="w-10 h-10 rounded border border-slate-200 overflow-hidden bg-slate-100 flex-shrink-0 flex items-center justify-center hover:opacity-80 transition-opacity"
-                                    title="View full image"
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewImage({
+                                      url: displayImg,
+                                      title: m.internal_style_code || m.style_code || m.external_style_name || "Style Image",
+                                      subtitle: m.internal_style_name || m.external_style_name || "",
+                                      sku: m.external_sku || "",
+                                      source: m.source_name || "",
+                                    })}
+                                    className="relative group w-16 h-16 rounded-lg border border-slate-200 overflow-hidden bg-slate-100 flex-shrink-0 flex items-center justify-center hover:border-slate-400 hover:shadow-md transition-all cursor-pointer text-left"
+                                    title="Click to view image in modal"
                                   >
                                     <img
                                       src={displayImg}
                                       alt={m.style_code || m.external_style_name}
-                                      className="w-full h-full object-cover"
+                                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-150"
                                       onError={(e) => { e.target.style.display = "none"; }}
                                     />
-                                  </a>
+                                    <div className="absolute inset-0 bg-slate-900/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                      <Maximize2 className="w-4 h-4 drop-shadow" />
+                                    </div>
+                                  </button>
                                 ) : (
-                                  <div className="w-10 h-10 rounded border border-slate-200 bg-slate-50 flex-shrink-0 flex items-center justify-center text-slate-300">
-                                    <ImageIcon className="w-4 h-4" />
+                                  <div className="w-16 h-16 rounded-lg border border-slate-200 bg-slate-50 flex-shrink-0 flex items-center justify-center text-slate-300">
+                                    <ImageIcon className="w-6 h-6" />
                                   </div>
                                 );
                               })()}
@@ -2165,6 +2184,82 @@ export default function SkuMap() {
           onRefreshStyles={fetchStyles}
           stylesLoading={stylesLoading}
         />
+      )}
+
+      {/* Full Image Preview Modal */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[400] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => setPreviewImage(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl max-w-2xl w-full overflow-hidden border border-slate-200 flex flex-col max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 bg-slate-50/90">
+              <div className="min-w-0 pr-4">
+                <div className="font-bold text-slate-900 text-base font-mono truncate">
+                  {previewImage.title}
+                </div>
+                {previewImage.subtitle && (
+                  <div className="text-xs text-slate-500 truncate mt-0.5">
+                    {previewImage.subtitle}
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <a
+                  href={previewImage.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-md transition-colors"
+                  title="Open raw image in new tab"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage(null)}
+                  className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-md transition-colors"
+                  title="Close (Esc)"
+                  id="btn-close-image-modal"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body / Image display */}
+            <div className="p-4 bg-slate-900/5 flex items-center justify-center overflow-auto flex-1 min-h-[320px] max-h-[calc(90vh-120px)]">
+              <img
+                src={previewImage.url}
+                alt={previewImage.title}
+                className="max-h-[65vh] w-auto max-w-full object-contain rounded-lg shadow-sm border border-slate-200 bg-white"
+              />
+            </div>
+
+            {/* Modal Footer with SKU and Source metadata */}
+            {(previewImage.sku || previewImage.source) && (
+              <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
+                {previewImage.sku ? (
+                  <div>
+                    <span className="text-slate-400 font-semibold uppercase text-[10px] mr-1.5">External SKU:</span>
+                    <span className="font-mono font-bold text-slate-800">{previewImage.sku}</span>
+                  </div>
+                ) : <div />}
+                {previewImage.source && (
+                  <div>
+                    <span className="text-slate-400 font-semibold uppercase text-[10px] mr-1.5">Source:</span>
+                    <span className="font-semibold text-slate-700">{previewImage.source}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       <ConfirmDialog open={!!confirm} title={confirm?.title} message={confirm?.message}
