@@ -1143,8 +1143,17 @@ async def pending_product_list(request: Request):
             "style_id": oid_val, "active": {"$ne": False},
         }).to_list(200)
         if not bom:
-            comp_stock_by_style[sid] = {"components_available": True, "shortages": [],
-                                         "note": "No BOM mapped"}
+            comp_stock_by_style[sid] = {
+                "components_available": False,
+                "has_bom": False,
+                "shortages": [{
+                    "component_code": "NO_BOM",
+                    "component_name": "No BOM Mapped",
+                    "available": 0,
+                    "per_pair": 0,
+                }],
+                "note": "No BOM mapped — components cannot be verified",
+            }
             continue
         shortages = []
         ok = True
@@ -1162,7 +1171,7 @@ async def pending_product_list(request: Request):
                     "available":      cur,
                     "per_pair":       need_per_pair,
                 })
-        comp_stock_by_style[sid] = {"components_available": ok, "shortages": shortages}
+        comp_stock_by_style[sid] = {"components_available": ok, "has_bom": True, "shortages": shortages}
 
     out = []
     style_lookup: dict = {}
@@ -1181,6 +1190,7 @@ async def pending_product_list(request: Request):
         sid = jd.get("style_id")
         info = comp_stock_by_style.get(sid, {"components_available": False, "shortages": []})
         jd["components_available"] = bool(info.get("components_available"))
+        jd["has_bom"]              = bool(info.get("has_bom", True))
         jd["component_shortages"]  = info.get("shortages", [])
         s_meta = style_lookup.get(sid, {})
         jd["image_url"]           = s_meta.get("image_url", "")

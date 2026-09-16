@@ -7,6 +7,7 @@ import csv
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any, Tuple
+from collections import defaultdict
 from io import BytesIO
 import inspect
 
@@ -57,6 +58,38 @@ def stringify(doc: dict) -> dict:
         elif isinstance(value, list):
             doc[key] = [stringify(item) if isinstance(item, dict) else (str(item) if isinstance(item, ObjectId) else item) for item in value]
     return doc
+
+
+async def _safe_find_one(collection, query):
+    if collection is None:
+        return None
+    try:
+        res = collection.find_one(query)
+        if inspect.isawaitable(res):
+            return await res
+        if isinstance(res, dict):
+            return res
+        return None
+    except Exception:
+        return None
+
+
+async def _safe_to_list(cursor, limit=500):
+    if cursor is None:
+        return []
+    try:
+        if inspect.isawaitable(cursor):
+            cursor = await cursor
+        if hasattr(cursor, "to_list"):
+            res = cursor.to_list(limit)
+            if inspect.isawaitable(res):
+                return await res
+            return res or []
+        if isinstance(cursor, list):
+            return cursor
+        return []
+    except Exception:
+        return []
 
 
 async def _get_user(request: Optional[Request] = None):
@@ -1312,6 +1345,8 @@ async def import_configured_online_orders(
     distinct_orders = set()
     derivation_failed = 0
     empty_leaf_sku = 0
+    in_flight_fg_claimed = {}
+    in_flight_comp_claimed = {}
 
     header_row_1_based = 1
     if hasattr(header_loc, "row") and header_loc.row is not None:
@@ -1426,15 +1461,154 @@ async def import_configured_online_orders(
             else:
                 exc_reason = f"SKU '{cleaned_leaf}' not found in Style Master or SKU Mappings"
 
+        covered_qty = 0
+        remaining_qty = qty
+        fulfillment_status = "produce_shortage"
+        components_available = False
+        has_bom = False
+        component_shortages = []
+
         if is_row_matched:
+            sid_val = result.get("style_id")
+            resolved_color = result.get("color", "") or color_val
+            resolved_size = result.get("size", "") or size_val
+
+            # Tier 1: Finished Goods Stock Check
+            if sid_val and hasattr(db, "fg_location_inventory"):
+                sid_str = str(sid_val)
+                c_clean = (resolved_color or "").strip()
+                s_clean = (resolved_size or "").strip()
+                fg_key = (sid_str, c_clean.lower(), s_clean.lower())
+
+                sid_oid = ObjectId(sid_str) if ObjectId.is_valid(sid_str) else sid_str
+                q_loc = {
+                    "$or": [{"style_id": sid_oid}, {"style_id": sid_str}],
+                    "qty": {"$gt": 0},
+                }
+                if c_clean:
+                    q_loc["color"] = {"$regex": f"^{re.escape(c_clean)}$", "$options": "i"}
+                if s_clean:
+                    q_loc["size"] = {"$regex": f"^{re.escape(s_clean)}$", "$options": "i"}
+
+                loc_docs = await _safe_to_list(db.fg_location_inventory.find(q_loc).sort([("created_at", 1), ("location_code", 1)]))
+                total_free_fg = 0
+                for loc in loc_docs:
+                    loc_code = loc.get("location_code")
+                    if loc_code and hasattr(db, "warehouse_locations"):
+                        wloc = await _safe_find_one(db.warehouse_locations, {"location_code": loc_code})
+                        if wloc and wloc.get("status") == "blocked":
+                            continue
+                    qty_val = int(loc.get("qty", 0) or 0)
+                    res_val = int(loc.get("reserved_qty", 0) or 0)
+                    total_free_fg += max(0, qty_val - res_val)
+
+                claimed_fg = in_flight_fg_claimed.get(fg_key, 0)
+                avail_fg = max(0, total_free_fg - claimed_fg)
+                covered_qty = min(qty, avail_fg)
+                remaining_qty = qty - covered_qty
+                in_flight_fg_claimed[fg_key] = claimed_fg + covered_qty
+            else:
+                covered_qty = 0
+                remaining_qty = qty
+
+            # Tier 2: BOM and Component Stock Check for uncovered remainder
+            if remaining_qty == 0:
+                fulfillment_status = "in_stock_picklist"
+                components_available = True
+                has_bom = True
+                component_shortages = []
+            else:
+                sid_str = str(sid_val)
+                sid_oid = ObjectId(sid_str) if ObjectId.is_valid(sid_str) else sid_str
+                bom = []
+                if sid_val and hasattr(db, "style_component_mapping"):
+                    bom = await _safe_to_list(db.style_component_mapping.find({
+                        "$or": [{"style_id": sid_oid}, {"style_id": sid_str}],
+                        "active": {"$ne": False},
+                    }))
+
+                if not bom:
+                    has_bom = False
+                    components_available = False
+                    component_shortages = [{
+                        "component_code": "NO_BOM",
+                        "component_name": "No BOM Mapped",
+                        "available": 0,
+                        "required": remaining_qty,
+                    }]
+                    fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_shortage"
+                else:
+                    has_bom = True
+                    comp_shortages = []
+                    needed_res = []
+                    all_comp_ok = True
+
+                    for b in bom:
+                        comp_id = b.get("component_id")
+                        comp = None
+                        if comp_id and hasattr(db, "component_master"):
+                            comp_oid = ObjectId(comp_id) if ObjectId.is_valid(str(comp_id)) else str(comp_id)
+                            comp = await _safe_find_one(db.component_master, {"$or": [{"_id": comp_oid}, {"_id": str(comp_id)}]})
+                        if not comp and b.get("component_code") and hasattr(db, "component_master"):
+                            comp = await _safe_find_one(db.component_master, {"component_code": b.get("component_code")})
+
+                        need_per_pair = float(b.get("quantity_per_pair", b.get("qty_per_pair", 1)) or 1)
+                        total_need = need_per_pair * remaining_qty
+
+                        if not comp:
+                            all_comp_ok = False
+                            comp_shortages.append({
+                                "component_code": b.get("component_code", "UNKNOWN"),
+                                "component_name": b.get("component_name", "Unknown Component"),
+                                "available": 0,
+                                "required": total_need,
+                                "shortage": total_need,
+                            })
+                            continue
+
+                        comp_key = str(comp.get("_id", comp.get("component_code")))
+                        c_stock = int(comp.get("current_stock", 0) or 0)
+                        r_stock = int(comp.get("reserved_stock", 0) or 0)
+                        free_c = max(0, c_stock - r_stock)
+                        already_c = in_flight_comp_claimed.get(comp_key, 0)
+                        effective_avail = max(0, free_c - already_c)
+
+                        if effective_avail < total_need:
+                            all_comp_ok = False
+                            comp_shortages.append({
+                                "component_code": comp.get("component_code", ""),
+                                "component_name": comp.get("component_name", ""),
+                                "available": effective_avail,
+                                "required": total_need,
+                                "shortage": total_need - effective_avail,
+                            })
+                        else:
+                            needed_res.append((comp_key, comp, total_need))
+
+                    component_shortages = comp_shortages
+                    if all_comp_ok:
+                        components_available = True
+                        fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_ready"
+                        for comp_key, comp, total_need in needed_res:
+                            in_flight_comp_claimed[comp_key] = in_flight_comp_claimed.get(comp_key, 0) + total_need
+                    else:
+                        components_available = False
+                        fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_shortage"
+
             matched_rows.append({
                 "row_index": r_idx,
                 "order_id": order_id or batch_name,
                 "style_code": result["style_code"],
                 "style_id": result["style_id"],
-                "color": result["color"],
-                "size": result["size"],
+                "color": resolved_color,
+                "size": resolved_size,
                 "quantity": qty,
+                "covered_qty": covered_qty,
+                "remaining_qty": remaining_qty,
+                "fulfillment_status": fulfillment_status,
+                "components_available": components_available,
+                "has_bom": has_bom,
+                "component_shortages": component_shortages,
                 "unit_price": float(r.get(resolved_cols.get("selling_price", ""), 0.0) or 0.0) if resolved_cols.get("selling_price") else 0.0,
             })
         else:
@@ -1465,15 +1639,63 @@ async def import_configured_online_orders(
             "qty": qty,
             "matched": is_row_matched,
             "match_via": result.get("match_via") or ("sku_map" if is_row_matched else None),
+            "covered_qty": covered_qty if is_row_matched else 0,
+            "remaining_qty": remaining_qty if is_row_matched else qty,
+            "fulfillment_status": fulfillment_status if is_row_matched else None,
+            "components_available": components_available if is_row_matched else False,
+            "has_bom": has_bom if is_row_matched else False,
+            "component_shortages": component_shortages if is_row_matched else [],
             "exception_reason": exc_reason,
         })
 
     if not dry_run and len(matched_rows) == 0:
         raise HTTPException(status_code=400, detail="Nothing to commit — no rows matched.")
 
+    created_picklists = []
+    jobs = []
+
     if not dry_run:
-        jobs = []
+        # Tier 1: Auto-generate ERP Picklists for covered quantities
+        order_lines_by_order = defaultdict(list)
         for m in matched_rows:
+            if m.get("covered_qty", 0) > 0:
+                order_lines_by_order[m["order_id"]].append({
+                    "style_id": m["style_id"],
+                    "style_code": m["style_code"],
+                    "color": m["color"],
+                    "size": m["size"],
+                    "quantity": m["covered_qty"],
+                })
+
+        for oid, lines in order_lines_by_order.items():
+            try:
+                from routes.wms import _generate_picklist_for_order
+                pl_doc, cov, unc = await _generate_picklist_for_order(
+                    order_id=oid,
+                    channel=platform_lc,
+                    order_lines=lines,
+                    user_email=u["email"],
+                    db=db,
+                )
+                if pl_doc and pl_doc.get("picklist_no") and pl_doc.get("items"):
+                    created_picklists.append({
+                        "picklist_no": pl_doc["picklist_no"],
+                        "order_id": oid,
+                        "total_qty": pl_doc.get("total_qty", 0),
+                        "items_count": len(pl_doc.get("items", [])),
+                    })
+            except Exception as e:
+                log.warning(f"Error generating picklist for order {oid}: {e}")
+
+        # Tier 2: Insert production jobs only for uncovered remaining quantities
+        for m in matched_rows:
+            rem_qty = m.get("remaining_qty", 0)
+            if rem_qty <= 0:
+                continue
+
+            stage = "cutting" if m.get("components_available") else "procurement"
+            stage_note = "Stock shortage, components available -> cutting" if m.get("components_available") else "Stock & component shortage -> procurement"
+
             jobs.append({
                 "po_id": None,
                 "po_number": m["order_id"],
@@ -1486,19 +1708,48 @@ async def import_configured_online_orders(
                 "style_match_status": "matched",
                 "color": m["color"],
                 "size": m["size"],
-                "quantity": m["quantity"],
+                "quantity": rem_qty,
+                "original_ordered_qty": m["quantity"],
+                "covered_from_stock_qty": m.get("covered_qty", 0),
+                "components_available": m.get("components_available", False),
+                "has_bom": m.get("has_bom", False),
+                "component_shortages": m.get("component_shortages", []),
                 "unit_price": m["unit_price"],
-                "amount": round(m["unit_price"] * m["quantity"], 2),
+                "amount": round(m["unit_price"] * rem_qty, 2),
                 "completed_qty": 0,
                 "rejected_qty": 0,
-                "stage": "procurement",
+                "stage": stage,
                 "stage_entered_at": entered,
                 "stage_deadline": deadline,
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
-                "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"],
-                             "notes": f"Configured import from {platform_lc}"}],
+                "history": [{"stage": stage, "at": now_iso(), "by": u["email"],
+                             "notes": f"Configured import from {platform_lc}: {stage_note}"}],
             })
+
+            # If stage is cutting, reserve component stock in component_master
+            if stage == "cutting" and hasattr(db, "component_master") and m.get("style_id"):
+                try:
+                    sid_oid = ObjectId(m["style_id"]) if ObjectId.is_valid(str(m["style_id"])) else str(m["style_id"])
+                    bom_items = await _safe_to_list(db.style_component_mapping.find({
+                        "$or": [{"style_id": sid_oid}, {"style_id": str(m["style_id"])}],
+                        "active": {"$ne": False},
+                    }))
+                    for b in bom_items:
+                        comp_id = b.get("component_id")
+                        need_per_pair = float(b.get("quantity_per_pair", b.get("qty_per_pair", 1)) or 1)
+                        tot_need = int(round(need_per_pair * rem_qty))
+                        if comp_id and tot_need > 0:
+                            c_oid = ObjectId(comp_id) if ObjectId.is_valid(str(comp_id)) else str(comp_id)
+                            c_up = db.component_master.update_one(
+                                {"$or": [{"_id": c_oid}, {"_id": str(comp_id)}]},
+                                {"$inc": {"reserved_stock": tot_need}, "$set": {"updated_at": now_iso()}}
+                            )
+                            if inspect.isawaitable(c_up):
+                                await c_up
+                except Exception as e:
+                    log.warning(f"Failed to reserve components for job {m['style_code']}: {e}")
+
         if jobs and hasattr(db, "production_jobs"):
             try:
                 p_res = db.production_jobs.insert_many(jobs)
@@ -1523,6 +1774,11 @@ async def import_configured_online_orders(
 
     order_style_rows = 0 if is_picklist else len(rows)
     picklist_rows = len(rows) if is_picklist else 0
+    pairs_fulfilled_from_stock = sum(m.get("covered_qty", 0) for m in matched_rows)
+    pairs_to_manufacture = sum(m.get("remaining_qty", 0) for m in matched_rows)
+    ready_to_produce_pairs = sum(m.get("remaining_qty", 0) for m in matched_rows if m.get("components_available"))
+    shortage_pairs = sum(m.get("remaining_qty", 0) for m in matched_rows if not m.get("components_available"))
+
     stats = {
         "total_rows_read": len(rows),
         "matched": len(matched_rows),
@@ -1532,6 +1788,10 @@ async def import_configured_online_orders(
         "distinct_orders": len(distinct_orders),
         "derivation_failed": derivation_failed,
         "empty_leaf_sku": empty_leaf_sku,
+        "pairs_fulfilled_from_stock": pairs_fulfilled_from_stock,
+        "pairs_to_manufacture": pairs_to_manufacture,
+        "ready_to_produce_pairs": ready_to_produce_pairs,
+        "shortage_pairs": shortage_pairs,
     }
 
     batch_id_str = f"IMP_{platform_lc}_{now_iso()[:19].replace('-', '').replace(':', '').replace('T', '_')}"
@@ -1551,9 +1811,13 @@ async def import_configured_online_orders(
         "rows": canonical_rows,
         "stats": stats,
         "committed": {
-            "jobs_created": len(matched_rows) if not dry_run else 0,
+            "jobs_created": len(jobs) if not dry_run else 0,
+            "picklists_created": len(created_picklists) if not dry_run else 0,
+            "picklist_details": created_picklists if not dry_run else [],
             "orders_created": (len(distinct_orders) if not is_picklist else (1 if matched_rows else 0)) if not dry_run else 0,
             "items_created": len(matched_rows) if not dry_run else 0,
+            "pairs_fulfilled_from_stock": pairs_fulfilled_from_stock if not dry_run else 0,
+            "pairs_to_manufacture": pairs_to_manufacture if not dry_run else 0,
             "exceptions_queued": len(unresolved_rows) if not dry_run else 0,
         },
     }

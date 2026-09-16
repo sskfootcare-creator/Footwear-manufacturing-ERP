@@ -29,6 +29,7 @@ function useMatrix(rows) {
           total:                0,
           any_shortage:         false,
           shortages:            [],
+          has_bom:              true,
           orders:               new Set(), // distinct PO/order numbers
         };
       }
@@ -44,7 +45,11 @@ function useMatrix(rows) {
       if (!r.components_available) {
         g.sizes[sz].ready = false;
         g.any_shortage     = true;
+        if (r.has_bom === false) {
+          g.has_bom = false;
+        }
         (r.component_shortages || []).forEach((s) => {
+          if (s.component_code === "NO_BOM") g.has_bom = false;
           const k = `${s.component_code}||${s.component_name}`;
           if (!g.shortages.some((x) => `${x.component_code}||${x.component_name}` === k)) {
             g.shortages.push(s);
@@ -373,9 +378,15 @@ export default function PendingProductList() {
                       <div className="text-2xl font-black font-mono">{g.total}</div>
                       <div className="text-[9px] uppercase text-slate-500">pairs</div>
                       {g.any_shortage ? (
-                        <Badge color="red" className="print:border print:bg-white print:text-red-700">
-                          <AlertTriangle className="w-3 h-3 inline mr-0.5" /> Shortage
-                        </Badge>
+                        g.has_bom === false ? (
+                          <Badge color="amber" className="print:border print:bg-white print:text-amber-800">
+                            <AlertTriangle className="w-3 h-3 inline mr-0.5" /> No BOM Mapped
+                          </Badge>
+                        ) : (
+                          <Badge color="red" className="print:border print:bg-white print:text-red-700">
+                            <AlertTriangle className="w-3 h-3 inline mr-0.5" /> Shortage
+                          </Badge>
+                        )
                       ) : (
                         <Badge color="green" className="print:border print:bg-white print:text-green-800">Ready</Badge>
                       )}
@@ -458,11 +469,13 @@ export default function PendingProductList() {
                     </table>
                   </div>
                   {g.any_shortage && g.shortages.length > 0 && (
-                    <div className="px-3 py-1.5 bg-red-50 border-t-2 border-red-500 text-[10px] text-red-800">
-                      <span className="font-bold uppercase tracking-wider">Missing components:</span>{" "}
+                    <div className={`px-3 py-1.5 border-t-2 text-[10px] ${g.has_bom === false ? "bg-amber-50 border-amber-500 text-amber-900" : "bg-red-50 border-red-500 text-red-800"}`}>
+                      <span className="font-bold uppercase tracking-wider">
+                        {g.has_bom === false ? "BOM Shortage:" : "Missing components:"}
+                      </span>{" "}
                       {g.shortages.slice(0, 4).map((s, i) => (
                         <span key={i} className="mr-2">
-                          {s.component_code} · {s.component_name} (avail {s.available})
+                          {s.component_code === "NO_BOM" ? "No BOM mapped — map components in Style Master to verify stock" : `${s.component_code} · ${s.component_name} (avail ${s.available ?? 0})`}
                           {i < Math.min(3, g.shortages.length - 1) ? "," : ""}
                         </span>
                       ))}

@@ -343,14 +343,30 @@ function ImportDrawer({ onClose, onDone }) {
           <div className="space-y-3">
             <div className="bg-green-50 border-2 border-green-300 px-4 py-4 text-sm text-green-900">
               <div className="font-bold flex items-center gap-2 text-base mb-1">
-                <CheckCircle2 className="w-5 h-5" /> Import committed
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" /> Import committed successfully
               </div>
               <div className="text-xs font-mono mb-1">batch: {committed.import_batch_id}</div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3">
-                <MiniStat label="orders" value={committed.committed?.orders_created ?? 0} accent="#0F172A" />
-                <MiniStat label="items" value={committed.committed?.items_created ?? 0} accent="#C27842" />
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
+                <MiniStat label="picklists" value={committed.committed?.picklists_created ?? 0} accent="#059669" />
+                <MiniStat label="stock fulfilled" value={committed.committed?.pairs_fulfilled_from_stock ?? 0} accent="#10B981" />
+                <MiniStat label="to manufacture" value={committed.committed?.pairs_to_manufacture ?? (committed.committed?.jobs_created ?? 0)} accent="#D97706" />
                 <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
               </div>
+
+              {committed.committed?.picklist_details?.length > 0 && (
+                <div className="mt-3 bg-white p-3 border border-emerald-300 rounded">
+                  <div className="font-bold text-xs uppercase tracking-wider text-emerald-900 mb-1.5">
+                    Generated ERP Picklists ({committed.committed.picklist_details.length}):
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {committed.committed.picklist_details.map((pl, idx) => (
+                      <span key={idx} className="font-mono text-xs bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 py-1 rounded font-bold">
+                        {pl.picklist_no} ({pl.total_qty} pairs)
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex gap-3">
               <BtnSecondary onClick={reset}>
@@ -418,6 +434,14 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
         <MiniStat label="order rows" value={stats.order_style_rows ?? 0} accent="#2563EB" />
         <MiniStat label="picklist rows" value={stats.picklist_rows ?? 0} accent="#7C3AED" />
         <MiniStat label="distinct orders" value={stats.distinct_orders ?? 0} accent="#C27842" />
+      </div>
+
+      {/* Two-tier fulfillment preview summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <MiniStat label="In-Stock (ERP Picklist)" value={stats.pairs_fulfilled_from_stock ?? 0} accent="#059669" />
+        <MiniStat label="To Manufacture" value={stats.pairs_to_manufacture ?? 0} accent="#D97706" />
+        <MiniStat label="Ready to Cut (BOM OK)" value={stats.ready_to_produce_pairs ?? 0} accent="#2563EB" />
+        <MiniStat label="Shortage / No BOM" value={stats.shortage_pairs ?? 0} accent="#DC2626" />
       </div>
 
       {(stats.derivation_failed > 0 || stats.empty_leaf_sku > 0) && (
@@ -492,7 +516,8 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                 <th className="text-left p-2 border-b">Group → size</th>
                 <th className="text-left p-2 border-b">Style code</th>
                 <th className="text-right p-2 border-b">Qty</th>
-                <th className="text-left p-2 border-b">Status</th>
+                <th className="text-left p-2 border-b">Mapping</th>
+                <th className="text-left p-2 border-b">Fulfillment Plan</th>
               </tr>
             </thead>
             <tbody>
@@ -543,12 +568,44 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                         </div>
                       )}
                     </td>
+                    <td className="p-2">
+                      {matched ? (
+                        r.fulfillment_status === "in_stock_picklist" ? (
+                          <Badge color="green">
+                            <CheckCircle2 className="w-3 h-3 inline mr-1" /> Stock Picklist ({r.covered_qty ?? r.qty} prs)
+                          </Badge>
+                        ) : r.fulfillment_status === "partial_stock" ? (
+                          <div className="space-y-0.5">
+                            <Badge color="amber">
+                              Partial ({r.covered_qty} stock / {r.remaining_qty} mfg)
+                            </Badge>
+                            <div className="text-[10px] text-slate-500">
+                              {r.components_available ? "Components OK -> cutting" : (r.has_bom === false ? "No BOM -> procurement" : "Comp shortage -> procurement")}
+                            </div>
+                          </div>
+                        ) : r.fulfillment_status === "produce_ready" ? (
+                          <Badge color="blue">
+                            Cutting ({r.remaining_qty ?? r.qty} prs - ready)
+                          </Badge>
+                        ) : (
+                          <div className="space-y-0.5">
+                            <Badge color="red">
+                              <AlertTriangle className="w-3 h-3 inline mr-1" />
+                              {r.has_bom === false ? "No BOM Mapped" : "Shortage"} ({r.remaining_qty ?? r.qty} prs)
+                            </Badge>
+                            <div className="text-[10px] text-red-600">Pending Shortage Queue</div>
+                          </div>
+                        )
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
               {paginatedRows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="p-6 text-center text-sm text-slate-400 italic">
+                  <td colSpan={9} className="p-6 text-center text-sm text-slate-400 italic">
                     {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
                   </td>
                 </tr>
