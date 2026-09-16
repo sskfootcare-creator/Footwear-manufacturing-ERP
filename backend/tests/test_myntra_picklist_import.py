@@ -119,7 +119,34 @@ def test_myntra_picklist_import_all_mapped_scenarios():
             assert res_preview["stats"]["total_rows_read"] == 3
             assert res_preview["stats"]["matched"] == 3
             assert res_preview["stats"]["unmatched"] == 0
+            assert res_preview["stats"]["picklist_rows"] == 3
+            assert res_preview["stats"]["order_style_rows"] == 0
+            assert res_preview["stats"]["distinct_orders"] == 1
+            assert res_preview["filename"] == "OP20625445.csv"
+            assert res_preview["is_picklist"] is True
+            assert res_preview["picklist_batch_id"] == "OP20625445"
+            assert res_preview["header_row_1_based"] == 1
             assert len(res_preview["matched"]) == 3
+
+            # Verify canonical preview rows for table rendering
+            assert "rows" in res_preview
+            assert len(res_preview["rows"]) == 3
+            p_rows = res_preview["rows"]
+            assert p_rows[0]["matched"] is True
+            assert p_rows[0]["style_code"] == "SSK_00034"
+            assert p_rows[0]["leaf_sku_raw"] == "CC-058-BR-38"
+            assert p_rows[0]["picklist_batch_id"] == "OP20625445"
+            assert p_rows[0]["qty"] == 2
+
+            assert p_rows[1]["matched"] is True
+            assert p_rows[1]["style_code"] == "SSK_00034"
+            assert p_rows[1]["leaf_sku_raw"] == "2412-FAKC-006-TN-39"
+            assert p_rows[1]["qty"] == 1
+
+            assert p_rows[2]["matched"] is True
+            assert p_rows[2]["style_code"] == "SSK_00034"
+            assert p_rows[2]["leaf_sku_raw"] == "CCE-047-TN-38"
+            assert p_rows[2]["qty"] == 1
 
             # Row 1 matched via group_id CC-058-BR
             r1 = res_preview["matched"][0]

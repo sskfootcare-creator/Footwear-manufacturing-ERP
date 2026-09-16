@@ -244,6 +244,8 @@ from routes.online_orders import (
     list_online_orders,
     _parse_and_resolve_order_row,
     import_online_orders_configured,
+    import_dispatch_configured,
+    import_settlement_report,
 )
 from routes.styles import (
     styles_router,

@@ -1308,18 +1308,24 @@ async def import_configured_online_orders(
 
     matched_rows = []
     unresolved_rows = []
+    canonical_rows = []
+    distinct_orders = set()
+    derivation_failed = 0
+    empty_leaf_sku = 0
+
+    header_row_1_based = 1
+    if hasattr(header_loc, "row") and header_loc.row is not None:
+        header_row_1_based = header_loc.row + 1
 
     for r_idx, r in enumerate(rows, start=1):
-        raw_leaf = r.get(leaf_sku_col, "").strip()
-        if not raw_leaf:
-            continue
+        raw_leaf = r.get(leaf_sku_col, "").strip() if leaf_sku_col else ""
+        raw_order_id = r.get(resolved_cols.get("order_id", ""), "") if resolved_cols.get("order_id") else ""
+        order_id = raw_order_id.strip()
+        if not order_id and is_picklist:
+            order_id = batch_name
 
-        # Prefix replacement & stripping
-        cleaned_leaf = raw_leaf
-        for wrong, right in prefix_replacements.items():
-            if cleaned_leaf.startswith(wrong):
-                cleaned_leaf = right + cleaned_leaf[len(wrong):]
-        cleaned_leaf = strip_known_prefixes(cleaned_leaf, prefixes_to_strip)
+        if order_id:
+            distinct_orders.add(order_id)
 
         qty_str = r.get(resolved_cols.get("qty", ""), "1") if resolved_cols.get("qty") else "1"
         try:
@@ -1331,10 +1337,67 @@ async def import_configured_online_orders(
         color_val = r.get(resolved_cols.get("color", ""), "") if resolved_cols.get("color") else ""
         size_val = r.get(resolved_cols.get("size", ""), "") if resolved_cols.get("size") else ""
 
-        if not color_val or not size_val:
-            group_id, size_token, _ = split_leaf_sku(cleaned_leaf)
-            if not size_val and size_token:
-                size_val = size_token
+        if not raw_leaf:
+            empty_leaf_sku += 1
+            unresolved_rows.append({
+                "row_index": r_idx,
+                "order_id": order_id or batch_name,
+                "raw_sku": "",
+                "cleaned_sku": "",
+                "color": color_val,
+                "size": size_val,
+                "quantity": qty,
+            })
+            canonical_rows.append({
+                "source_row_index": r_idx,
+                "order_id": None if is_picklist else (raw_order_id.strip() or None),
+                "picklist_batch_id": batch_name if is_picklist else None,
+                "leaf_sku_raw": "",
+                "leaf_sku_replaced_prefix": None,
+                "leaf_sku_stripped_prefix": None,
+                "leaf_sku": "",
+                "group_id": "—",
+                "derived_size": "—",
+                "size": "",
+                "color": "",
+                "style_code": "—",
+                "style_id": None,
+                "qty": qty,
+                "matched": False,
+                "match_via": None,
+                "flags": ["empty_leaf_sku"],
+                "exception_reason": "leaf_sku column is empty",
+            })
+            continue
+
+        # Prefix replacement & stripping
+        cleaned_leaf = raw_leaf
+        replaced_prefix = None
+        for wrong, right in prefix_replacements.items():
+            if cleaned_leaf.startswith(wrong):
+                cleaned_leaf = right + cleaned_leaf[len(wrong):]
+                replaced_prefix = wrong
+                break
+
+        stripped_prefix = None
+        for pfx in prefixes_to_strip:
+            pfx_clean = str(pfx or "").strip()
+            if not pfx_clean:
+                continue
+            for delim in ["-", "_", ""]:
+                full = f"{pfx_clean}{delim}"
+                if cleaned_leaf.upper().startswith(full.upper()):
+                    stripped_prefix = pfx_clean
+                    cleaned_leaf = cleaned_leaf[len(full):].strip()
+                    break
+            if stripped_prefix:
+                break
+
+        group_id, size_token, _ = split_leaf_sku(cleaned_leaf)
+        if not group_id:
+            derivation_failed += 1
+        if not size_val and size_token:
+            size_val = size_token
 
         sec_sku = ""
         if resolved_cols.get("myntra_sku_code"):
@@ -1352,11 +1415,16 @@ async def import_configured_online_orders(
             db=db,
         )
 
-        order_id = r.get(resolved_cols.get("order_id", ""), "") if resolved_cols.get("order_id") else ""
-        if not order_id and is_picklist:
-            order_id = batch_name
-
         is_row_matched = bool(result.get("matched")) and (result.get("matched_exact") is not False) and (not result.get("unmapped_size")) and (not result.get("unmapped_color"))
+
+        exc_reason = None
+        if not is_row_matched:
+            if result.get("unmapped_size") or result.get("size_matched_exact") is False:
+                exc_reason = f"Unmapped color/size: size '{size_val}' not in size_map for SKU '{cleaned_leaf}'"
+            elif result.get("unmapped_color") or result.get("color_matched_exact") is False:
+                exc_reason = f"Unmapped color/size: color '{color_val}' not in color_map for SKU '{cleaned_leaf}'"
+            else:
+                exc_reason = f"SKU '{cleaned_leaf}' not found in Style Master or SKU Mappings"
 
         if is_row_matched:
             matched_rows.append({
@@ -1379,6 +1447,26 @@ async def import_configured_online_orders(
                 "size": size_val,
                 "quantity": qty,
             })
+
+        canonical_rows.append({
+            "source_row_index": r_idx,
+            "order_id": None if is_picklist else (raw_order_id.strip() or None),
+            "picklist_batch_id": batch_name if is_picklist else None,
+            "leaf_sku_raw": raw_leaf,
+            "leaf_sku_replaced_prefix": replaced_prefix,
+            "leaf_sku_stripped_prefix": stripped_prefix,
+            "leaf_sku": cleaned_leaf,
+            "group_id": group_id or "—",
+            "derived_size": size_val or "—",
+            "size": size_val,
+            "color": color_val or result.get("color", ""),
+            "style_code": result.get("style_code") or "—",
+            "style_id": result.get("style_id"),
+            "qty": qty,
+            "matched": is_row_matched,
+            "match_via": result.get("match_via") or ("sku_map" if is_row_matched else None),
+            "exception_reason": exc_reason,
+        })
 
     if not dry_run and len(matched_rows) == 0:
         raise HTTPException(status_code=400, detail="Nothing to commit — no rows matched.")
@@ -1433,21 +1521,39 @@ async def import_configured_online_orders(
             except Exception:
                 pass
 
+    order_style_rows = 0 if is_picklist else len(rows)
+    picklist_rows = len(rows) if is_picklist else 0
+    stats = {
+        "total_rows_read": len(rows),
+        "matched": len(matched_rows),
+        "unmatched": len(unresolved_rows),
+        "order_style_rows": order_style_rows,
+        "picklist_rows": picklist_rows,
+        "distinct_orders": len(distinct_orders),
+        "derivation_failed": derivation_failed,
+        "empty_leaf_sku": empty_leaf_sku,
+    }
+
+    batch_id_str = f"IMP_{platform_lc}_{now_iso()[:19].replace('-', '').replace(':', '').replace('T', '_')}"
     return {
         "platform": platform_lc,
+        "filename": file.filename or "",
+        "is_picklist": is_picklist,
+        "picklist_batch_id": batch_name if is_picklist else None,
+        "header_row_1_based": header_row_1_based,
         "total_rows": len(rows),
         "matched_count": len(matched_rows),
         "unresolved_count": len(unresolved_rows),
         "dry_run": dry_run,
+        "import_batch_id": batch_id_str if not dry_run else None,
         "matched": matched_rows[:100],
         "unresolved": unresolved_rows[:100],
-        "stats": {
-            "total_rows_read": len(rows),
-            "matched": len(matched_rows),
-            "unmatched": len(unresolved_rows),
-        },
+        "rows": canonical_rows,
+        "stats": stats,
         "committed": {
             "jobs_created": len(matched_rows) if not dry_run else 0,
+            "orders_created": (len(distinct_orders) if not is_picklist else (1 if matched_rows else 0)) if not dry_run else 0,
+            "items_created": len(matched_rows) if not dry_run else 0,
             "exceptions_queued": len(unresolved_rows) if not dry_run else 0,
         },
     }
@@ -1472,8 +1578,8 @@ async def import_dispatch_orders(
         raise HTTPException(400, f"No active dispatch import format config found for platform '{platform_lc}'")
 
     content = await file.read()
-    sheet_loc = SheetLocator(**cfg_doc.get("sheet_locator", {"type": "first_sheet"}))
-    header_loc = HeaderLocator(**cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0}))
+    sheet_loc = SheetLocator(**_sanitize_sheet_loc(cfg_doc.get("sheet_locator", {"type": "first_sheet"})))
+    header_loc = HeaderLocator(**_sanitize_header_loc(cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0})))
     skip_rows = int(cfg_doc.get("skip_rows_after_header", 0) or 0)
 
     headers, rows = _parse_tabular_bytes(
@@ -1609,8 +1715,8 @@ async def import_monthly_report(
         raise HTTPException(400, f"No active monthly report config found for platform '{platform_lc}'")
 
     content = await file.read()
-    sheet_loc = SheetLocator(**cfg_doc.get("sheet_locator", {"type": "first_sheet"}))
-    header_loc = HeaderLocator(**cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0}))
+    sheet_loc = SheetLocator(**_sanitize_sheet_loc(cfg_doc.get("sheet_locator", {"type": "first_sheet"})))
+    header_loc = HeaderLocator(**_sanitize_header_loc(cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0})))
     skip_rows = int(cfg_doc.get("skip_rows_after_header", 0) or 0)
 
     headers, rows = _parse_tabular_bytes(
@@ -1708,8 +1814,8 @@ async def import_settlement(
         raise HTTPException(400, f"No active settlement import config found for platform '{platform_lc}'")
 
     content = await file.read()
-    sheet_loc = SheetLocator(**cfg_doc.get("sheet_locator", {"type": "first_sheet"}))
-    header_loc = HeaderLocator(**cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0}))
+    sheet_loc = SheetLocator(**_sanitize_sheet_loc(cfg_doc.get("sheet_locator", {"type": "first_sheet"})))
+    header_loc = HeaderLocator(**_sanitize_header_loc(cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0})))
     skip_rows = int(cfg_doc.get("skip_rows_after_header", 0) or 0)
 
     headers, rows = _parse_tabular_bytes(
@@ -1971,3 +2077,5 @@ async def _parse_and_resolve_order_row(
 # Backwards compatibility aliases
 _seed_order_import_configs = _seed_order_import_format_configs
 import_online_orders_configured = import_configured_online_orders
+import_dispatch_configured = import_dispatch_orders
+import_settlement_report = import_settlement

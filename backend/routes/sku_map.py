@@ -12,6 +12,7 @@ from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File
 from fastapi.responses import Response
 from pymongo.errors import DuplicateKeyError
+import inspect
 
 from models.sku_map import (
     SkuMapIn,
@@ -233,6 +234,20 @@ async def _update_unmatched_jobs_for_sku_mapping(mapping_id: str, mapping_doc: d
         )
 
 
+async def _safe_find_one(collection, query):
+    if collection is None:
+        return None
+    try:
+        res = collection.find_one(query)
+        if inspect.isawaitable(res):
+            return await res
+        if isinstance(res, dict):
+            return res
+        return None
+    except Exception:
+        return None
+
+
 async def resolve_style(
     source_type: str,
     source_name: str,
@@ -266,7 +281,7 @@ async def resolve_style(
     mapping = None
     matched_candidate = ext_sku
     for cand in sku_candidates:
-        mapping = await db.sku_map.find_one({
+        mapping = await _safe_find_one(db.sku_map, {
             "source_type": src_type,
             "source_name_key": _norm_marketplace(src_name),
             "external_sku_key": _norm_key(cand),
@@ -274,7 +289,7 @@ async def resolve_style(
         if mapping:
             matched_candidate = cand
             break
-        mapping = await db.sku_map.find_one({
+        mapping = await _safe_find_one(db.sku_map, {
             "source_type": src_type,
             "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
             "external_sku": {"$regex": f"^{re.escape(cand)}$",  "$options": "i"},
@@ -285,7 +300,7 @@ async def resolve_style(
 
     # If not found by external_sku, check if ext_sku is inside size_map values or sample_skus
     if not mapping and ext_sku:
-        mapping = await db.sku_map.find_one({
+        mapping = await _safe_find_one(db.sku_map, {
             "source_type": src_type,
             "source_name_key": _norm_marketplace(src_name),
             "$or": [
@@ -295,7 +310,7 @@ async def resolve_style(
             ]
         })
         if not mapping:
-            mapping = await db.sku_map.find_one({
+            mapping = await _safe_find_one(db.sku_map, {
                 "source_type": src_type,
                 "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
                 "$or": [
@@ -305,7 +320,8 @@ async def resolve_style(
             })
 
     if mapping:
-        style = await db.styles.find_one({"_id": ObjectId(mapping["style_id"])})
+        style_query = {"_id": ObjectId(mapping["style_id"]) if ObjectId.is_valid(str(mapping.get("style_id", ""))) else mapping.get("style_id")}
+        style = await _safe_find_one(db.styles, style_query)
         if style:
             color_map: dict = mapping.get("color_map") or {}
             size_map:  dict = mapping.get("size_map")  or {}
@@ -392,11 +408,12 @@ async def resolve_style(
                             resolved_size = rev_match
                             size_exact = True
                         else:
-                            size_exact = ext_size in [
-                                "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46",
-                                "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
-                                "XS", "S", "M", "L", "XL", "XXL", "Free Size", "FreeSize", "FS"
-                            ]
+                            rev_val = next((k for k, v in size_map.items() if v.lower() == val_lower), None)
+                            if rev_val:
+                                resolved_size = rev_val
+                                size_exact = True
+                            else:
+                                size_exact = False
 
             matched_exact = color_exact and size_exact
 
@@ -438,7 +455,7 @@ async def resolve_style(
 
     # Fallback: direct style code lookup
     for cand in sku_candidates:
-        style = await db.styles.find_one({
+        style = await _safe_find_one(db.styles, {
             "code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}
         })
         if style:
