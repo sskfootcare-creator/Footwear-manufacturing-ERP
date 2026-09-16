@@ -239,6 +239,7 @@ async def resolve_style(
     external_sku: str,
     external_color: Optional[str] = None,
     external_size: Optional[str] = None,
+    secondary_sku: Optional[str] = None,
     db=None,
 ) -> dict:
     """Canonical resolver: external SKU → internal style + translated color/size."""
@@ -250,39 +251,153 @@ async def resolve_style(
     ext_size   = (external_size  or "").strip()
     src_name   = (source_name    or "").strip()
     src_type   = (source_type    or "").strip()
+    sec_sku    = (secondary_sku  or "").strip()
 
-    mapping = await db.sku_map.find_one({
-        "source_type": src_type,
-        "source_name_key": _norm_marketplace(src_name),
-        "external_sku_key": _norm_key(ext_sku),
-    })
-    if not mapping:
+    group_id, derived_size, _ = split_leaf_sku(ext_sku)
+    if not ext_size and derived_size:
+        ext_size = derived_size
+
+    sku_candidates = [ext_sku]
+    if group_id and group_id != ext_sku:
+        sku_candidates.append(group_id)
+    if sec_sku and sec_sku not in sku_candidates:
+        sku_candidates.append(sec_sku)
+
+    mapping = None
+    matched_candidate = ext_sku
+    for cand in sku_candidates:
+        mapping = await db.sku_map.find_one({
+            "source_type": src_type,
+            "source_name_key": _norm_marketplace(src_name),
+            "external_sku_key": _norm_key(cand),
+        })
+        if mapping:
+            matched_candidate = cand
+            break
         mapping = await db.sku_map.find_one({
             "source_type": src_type,
             "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
-            "external_sku": {"$regex": f"^{re.escape(ext_sku)}$",  "$options": "i"},
+            "external_sku": {"$regex": f"^{re.escape(cand)}$",  "$options": "i"},
         })
+        if mapping:
+            matched_candidate = cand
+            break
+
+    # If not found by external_sku, check if ext_sku is inside size_map values or sample_skus
+    if not mapping and ext_sku:
+        mapping = await db.sku_map.find_one({
+            "source_type": src_type,
+            "source_name_key": _norm_marketplace(src_name),
+            "$or": [
+                {f"size_map.{ext_size}": ext_sku},
+                {"size_map": {"$in": [ext_sku]}},
+                {"sample_skus": ext_sku},
+            ]
+        })
+        if not mapping:
+            mapping = await db.sku_map.find_one({
+                "source_type": src_type,
+                "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
+                "$or": [
+                    {f"size_map.{ext_size}": {"$regex": f"^{re.escape(ext_sku)}$", "$options": "i"}},
+                    {"sample_skus": {"$regex": f"^{re.escape(ext_sku)}$", "$options": "i"}},
+                ]
+            })
 
     if mapping:
         style = await db.styles.find_one({"_id": ObjectId(mapping["style_id"])})
         if style:
             color_map: dict = mapping.get("color_map") or {}
             size_map:  dict = mapping.get("size_map")  or {}
+            doc_color = mapping.get("color") or ""
 
-            def translate(m: dict, val: str) -> tuple:
-                val = (val or "").strip()
-                if not m:
-                    return val, True
-                if val in m:
-                    return m[val], True
-                val_lower = val.lower()
-                for k, v in m.items():
-                    if k.lower() == val_lower:
-                        return v, True
-                return val, False
+            # Color resolution
+            resolved_color = ""
+            color_exact = True
 
-            resolved_color, color_exact = translate(color_map, ext_color)
-            resolved_size,  size_exact  = translate(size_map,  ext_size)
+            if ext_color:
+                if not color_map:
+                    resolved_color = ext_color
+                    color_exact = True
+                elif ext_color in color_map:
+                    resolved_color = color_map[ext_color]
+                    color_exact = True
+                else:
+                    val_lower = ext_color.lower()
+                    matched_k = next((v for k, v in color_map.items() if k.lower() == val_lower), None)
+                    if matched_k:
+                        resolved_color = matched_k
+                        color_exact = True
+                    elif doc_color and doc_color.lower() == val_lower:
+                        resolved_color = doc_color
+                        color_exact = True
+                    else:
+                        resolved_color = ext_color
+                        color_exact = False
+            else:
+                # No color in input (e.g. Myntra picklists where color is omitted or in SKU)
+                if doc_color:
+                    resolved_color = doc_color
+                    color_exact = True
+                elif len(color_map) == 1:
+                    resolved_color = next(iter(color_map.values()))
+                    color_exact = True
+                elif color_map:
+                    tokens = re.split(r"[-_]", ext_sku)
+                    matched_tok_val = None
+                    for tok in tokens:
+                        if not tok:
+                            continue
+                        if tok in color_map:
+                            matched_tok_val = color_map[tok]
+                            break
+                        for ck, cv in color_map.items():
+                            if ck.lower() == tok.lower():
+                                matched_tok_val = cv
+                                break
+                        if matched_tok_val:
+                            break
+                    if matched_tok_val:
+                        resolved_color = matched_tok_val
+                        color_exact = True
+                    else:
+                        resolved_color = next(iter(color_map.values()))
+                        color_exact = True
+                else:
+                    resolved_color = style.get("color") or style.get("primary_color") or ""
+                    color_exact = True
+
+            # Size resolution
+            resolved_size = ext_size
+            size_exact = True
+
+            if ext_size:
+                if not size_map:
+                    resolved_size = ext_size
+                    size_exact = True
+                elif ext_size in size_map:
+                    target = size_map[ext_size]
+                    resolved_size = target if (len(target) <= 4 or target.isdigit()) else ext_size
+                    size_exact = True
+                else:
+                    val_lower = ext_size.lower()
+                    matched_sz = next((v for k, v in size_map.items() if k.lower() == val_lower), None)
+                    if matched_sz:
+                        resolved_size = matched_sz if (len(matched_sz) <= 4 or matched_sz.isdigit()) else ext_size
+                        size_exact = True
+                    else:
+                        # Check reverse mapping (in case size_map maps size -> leaf_sku)
+                        rev_match = next((k for k, v in size_map.items() if v.lower() == ext_sku.lower()), None)
+                        if rev_match:
+                            resolved_size = rev_match
+                            size_exact = True
+                        else:
+                            size_exact = ext_size in [
+                                "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46",
+                                "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+                                "XS", "S", "M", "L", "XL", "XXL", "Free Size", "FreeSize", "FS"
+                            ]
+
             matched_exact = color_exact and size_exact
 
             if not matched_exact and mapping:
@@ -318,29 +433,30 @@ async def resolve_style(
                 "unmapped_size":       ext_size  if not size_exact  else None,
                 "match_via":           "sku_map",
                 "mapping_id":          str(mapping.get("_id") or mapping.get("id") or ""),
-                "mapped_from_sku":     ext_sku,
+                "mapped_from_sku":     matched_candidate,
             }
 
     # Fallback: direct style code lookup
-    style = await db.styles.find_one({
-        "code": {"$regex": f"^{re.escape(ext_sku)}$", "$options": "i"}
-    })
-    if style:
-        return {
-            "style_id":            str(style["_id"]),
-            "style_code":          style.get("code", ""),
-            "color":               ext_color,
-            "size":                ext_size,
-            "matched":             True,
-            "matched_exact":       True,
-            "color_matched_exact": True,
-            "size_matched_exact":  True,
-            "unmapped_color":      None,
-            "unmapped_size":       None,
-            "match_via":           "style_code",
-            "mapping_id":          None,
-            "mapped_from_sku":     None,
-        }
+    for cand in sku_candidates:
+        style = await db.styles.find_one({
+            "code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}
+        })
+        if style:
+            return {
+                "style_id":            str(style["_id"]),
+                "style_code":          style.get("code", ""),
+                "color":               ext_color or style.get("color") or "",
+                "size":                ext_size,
+                "matched":             True,
+                "matched_exact":       True,
+                "color_matched_exact": True,
+                "size_matched_exact":  True,
+                "unmapped_color":      None,
+                "unmapped_size":       None,
+                "match_via":           "style_code",
+                "mapping_id":          None,
+                "mapped_from_sku":     cand,
+            }
 
     return {
         "style_id":            None,

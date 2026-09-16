@@ -1336,12 +1336,19 @@ async def import_configured_online_orders(
             if not size_val and size_token:
                 size_val = size_token
 
+        sec_sku = ""
+        if resolved_cols.get("myntra_sku_code"):
+            sec_sku = r.get(resolved_cols.get("myntra_sku_code", ""), "").strip()
+        elif resolved_cols.get("channel_sku"):
+            sec_sku = r.get(resolved_cols.get("channel_sku", ""), "").strip()
+
         result = await resolve_style(
             source_type="online_channel",
             source_name=platform_lc,
             external_sku=cleaned_leaf,
             external_color=color_val or None,
             external_size=size_val or None,
+            secondary_sku=sec_sku or None,
             db=db,
         )
 
@@ -1515,12 +1522,19 @@ async def import_dispatch_orders(
         color_val = ""
         size_val = size_token or ""
 
+        sec_sku = ""
+        if resolved_cols.get("channel_sku"):
+            sec_sku = r.get(resolved_cols.get("channel_sku", ""), "").strip()
+        elif resolved_cols.get("myntra_sku_code"):
+            sec_sku = r.get(resolved_cols.get("myntra_sku_code", ""), "").strip()
+
         result = await resolve_style(
             source_type="online_channel",
             source_name=platform_lc,
             external_sku=cleaned_leaf,
             external_color=color_val or None,
             external_size=size_val or None,
+            secondary_sku=sec_sku or None,
             db=db,
         )
 
