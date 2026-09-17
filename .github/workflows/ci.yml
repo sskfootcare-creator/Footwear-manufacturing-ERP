@@ -24,9 +24,14 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt pytest pytest-asyncio anyio httpx
+          pip install -r backend/requirements.txt pytest pytest-asyncio pytest-xdist anyio httpx
 
       - name: Run Backend RBAC & Core Tests
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: ssk_test_db
+          JWT_SECRET: supersecretjwtkey12345!supersecretjwtkey12345!
+          ENVIRONMENT: test
         run: |
           pytest backend/tests/test_modular_rbac.py backend/tests/test_jwt_claims.py backend/tests/test_cors_security.py
 
