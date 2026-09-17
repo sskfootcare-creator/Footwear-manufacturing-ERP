@@ -26,87 +26,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _auto_post_vendor_bill_to_pg(receive_doc: dict, vendor_name: str, user_email: str):
-    """Auto-post Vendor PO Material Receipt (GRN) to PostgreSQL / Supabase Financial Core."""
-    try:
-        from db.postgres import get_session_factory
-        from services.financial_ledger_service import post_vendor_bill_voucher
-        session_factory = get_session_factory()
-        if not session_factory:
-            return
-        total_amt = float(receive_doc.get("total_amount") or 0.0)
-        if total_amt <= 0:
-            return
-
-        async with session_factory() as session:
-            rec_date_str = receive_doc.get("receipt_date") or receive_doc.get("created_at")
-            if rec_date_str and len(rec_date_str) >= 10:
-                bill_date = rec_date_str[:10]
-            else:
-                bill_date = datetime.now(timezone.utc).date().isoformat()
-
-            po_no = receive_doc.get("po_number") or "PO"
-            rec_id = receive_doc.get("receipt_id") or "1"
-            bill_no = f"GRN-{po_no}-{rec_id}"
-
-            await post_vendor_bill_voucher(
-                session,
-                {
-                    "bill_no": bill_no,
-                    "vendor_name": vendor_name or "Vendor Partner",
-                    "vendor_ref_id": receive_doc.get("vendor_id"),
-                    "bill_date": bill_date,
-                    "subtotal": total_amt,
-                    "cgst_amount": 0.0,
-                    "sgst_amount": 0.0,
-                    "igst_amount": 0.0,
-                    "posted_by": user_email or "system",
-                    "notes": f"Auto-posted from Vendor PO {po_no} Receipt {rec_id}",
-                },
-            )
-            await session.commit()
-    except Exception as exc:
-        pass
-
-
-async def _auto_post_vendor_payment_to_pg(payment_doc: dict, user_email: str):
-    """Auto-post Vendor Payment Voucher to PostgreSQL / Supabase Financial Core."""
-    try:
-        from db.postgres import get_session_factory
-        from services.financial_ledger_service import post_payment_voucher
-        session_factory = get_session_factory()
-        if not session_factory:
-            return
-        amt = float(payment_doc.get("amount") or 0.0)
-        if amt <= 0:
-            return
-
-        async with session_factory() as session:
-            p_date_str = payment_doc.get("payment_date") or payment_doc.get("created_at")
-            if p_date_str and len(p_date_str) >= 10:
-                p_date = p_date_str[:10]
-            else:
-                p_date = datetime.now(timezone.utc).date().isoformat()
-
-            await post_payment_voucher(
-                session,
-                {
-                    "voucher_type": "PAYMENT",
-                    "voucher_date": p_date,
-                    "amount": amt,
-                    "entity_name": payment_doc.get("vendor_name") or "Vendor Partner",
-                    "external_ref_id": payment_doc.get("vendor_id"),
-                    "payment_mode": payment_doc.get("mode") or "BANK",
-                    "reference_number": payment_doc.get("reference") or payment_doc.get("payment_no"),
-                    "notes": payment_doc.get("notes") or f"Payment to {payment_doc.get('vendor_name')}",
-                    "posted_by": user_email or "system",
-                },
-            )
-            await session.commit()
-    except Exception as exc:
-        pass
-
-
 def stringify(doc: dict) -> dict:
     if not doc:
         return {}
@@ -544,7 +463,6 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
-    await _auto_post_vendor_payment_to_pg(doc, u.get("email") or u.get("name", "system"))
 
     # 3. Synchronize live bank account balance if paying from bank
     if bank_account_id:
@@ -1070,7 +988,6 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             "created_at": now_iso(),
         }
         await db.vendor_po_receives.insert_one(receive_doc)
-        await _auto_post_vendor_bill_to_pg(receive_doc, vendor_name, u.get("email", "system"))
         po = await db.vendor_purchase_orders.find_one({"_id": po["_id"]})
         
     await log_activity_db(db, "receive_vendor_po", "vendor_pos", f"Received materials for PO {po.get('po_number')} (receipt: {receipt_id})", u.get("email", ""))

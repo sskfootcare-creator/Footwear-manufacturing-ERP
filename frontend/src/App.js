@@ -43,7 +43,6 @@ import StylePLM from "@/pages/StylePLM";
 import PatternManager from "@/pages/PatternManager";
 import ToolingLibrary from "@/pages/ToolingLibrary";
 import BankReconciliation from "@/pages/BankReconciliation";
-import FinanceLedgers from "@/pages/FinanceLedgers";
 import { Loader2 } from "lucide-react";
 
 function Protected({ children }) {
@@ -103,12 +102,6 @@ function App() {
             <Route path="invoices" element={<Invoices />} />
             <Route path="expenses" element={<Expenses />} />
             <Route path="bank-reconciliation" element={<BankReconciliation />} />
-            <Route path="finance" element={<FinanceLedgers />} />
-            <Route path="finance/chart-of-accounts" element={<FinanceLedgers />} />
-            <Route path="finance/general-ledger" element={<FinanceLedgers />} />
-            <Route path="finance/journal-entries" element={<FinanceLedgers />} />
-            <Route path="finance/trial-balance" element={<FinanceLedgers />} />
-            <Route path="finance/period-locks" element={<FinanceLedgers />} />
             <Route path="clients" element={<Clients />} />
             <Route path="vendors" element={<Vendors />} />
             <Route path="vendor-pos" element={<VendorPOs />} />

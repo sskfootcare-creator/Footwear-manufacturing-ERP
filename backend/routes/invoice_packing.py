@@ -57,55 +57,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _auto_post_sales_invoice_to_pg(inv_doc: dict, user_email: str):
-    """Auto-post B2B Sales Invoice to PostgreSQL / Supabase Financial Core."""
-    try:
-        from db.postgres import get_session_factory
-        from services.financial_ledger_service import post_sales_invoice_voucher
-        session_factory = get_session_factory()
-        if not session_factory:
-            return
-        inv_no = inv_doc.get("invoice_no")
-        if not inv_no:
-            return
-
-        async with session_factory() as session:
-            inv_date_str = inv_doc.get("invoice_iso_date") or inv_doc.get("created_at")
-            if inv_date_str and len(inv_date_str) >= 10:
-                inv_date = inv_date_str[:10]
-            else:
-                inv_date = datetime.now(timezone.utc).date().isoformat()
-
-            subtotal = float(inv_doc.get("subtotal") or inv_doc.get("total_amount") or 0.0)
-            cgst = float(inv_doc.get("cgst_amount") or 0.0)
-            sgst = float(inv_doc.get("sgst_amount") or 0.0)
-            igst = float(inv_doc.get("igst_amount") or 0.0)
-            tcs = float(inv_doc.get("tcs_amount") or 0.0)
-            grn_adj = float(inv_doc.get("grn_adjustment") or 0.0)
-
-            await post_sales_invoice_voucher(
-                session,
-                {
-                    "invoice_no": inv_no,
-                    "client_name": inv_doc.get("client_name") or "B2B Client",
-                    "client_ref_id": inv_doc.get("client_id") or inv_doc.get("po_id"),
-                    "invoice_date": inv_date,
-                    "po_number": inv_doc.get("po_number"),
-                    "subtotal": subtotal,
-                    "cgst_amount": cgst,
-                    "sgst_amount": sgst,
-                    "igst_amount": igst,
-                    "tcs_amount": tcs,
-                    "grn_adjustment": grn_adj,
-                    "posted_by": user_email or "system",
-                    "notes": f"Auto-posted from B2B Invoice {inv_no}",
-                },
-            )
-            await session.commit()
-    except Exception as exc:
-        log.warning(f"Financial core invoice auto-post skipped (non-fatal): {exc}")
-
-
 def oid(val):
     if isinstance(val, ObjectId):
         return val
@@ -1170,7 +1121,6 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         "merged": False,
     }
     res = await db.invoices.insert_one(inv_doc)
-    await _auto_post_sales_invoice_to_pg(inv_doc, u.get("email", "system"))
     cartons = await db.packing_cartons.find({"job_id": {"$in": payload.job_ids or []}, "status": "packed"}).to_list(10000)
     for idx, carton in enumerate(cartons):
         await db.packing_cartons.update_one(
@@ -1346,7 +1296,6 @@ async def merged_invoice(payload: dict, request: Request):
         "carton_labels_file_b64": merged_labels_b64,
     }
     res_m = await db.invoices.insert_one(inv_doc_m)
-    await _auto_post_sales_invoice_to_pg(inv_doc_m, u.get("email", "system"))
 
     for idx, carton in enumerate(cartons_list):
         await db.packing_cartons.update_one(

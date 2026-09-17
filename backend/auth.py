@@ -148,12 +148,6 @@ def validate_password(password: str) -> None:
 
 # ── ERP MODULE TAXONOMY & DISCRETE PERMISSIONS ────────────────────────────────
 ERP_MODULES = {
-    "finance": {
-        "key": "finance",
-        "name": "Financial Accounting & Ledgers",
-        "description": "Double-entry ledgers, Chart of Accounts, Trial Balance, Journal Entries, Bank Reconciliation, Expenses, Invoices, Vendor Bills, P&L",
-        "category": "Accounting",
-    },
     "production": {
         "key": "production",
         "name": "Production & Manufacturing",
@@ -206,8 +200,8 @@ ERP_MODULES = {
 
 ROLE_DEFAULT_MODULES = {
     "admin": list(ERP_MODULES.keys()),
-    "ca": ["finance", "orders_sales", "procurement", "reports"],
-    "accountant": ["finance", "orders_sales", "procurement"],
+    "ca": ["orders_sales", "procurement", "reports"],
+    "accountant": ["orders_sales", "procurement"],
     "production_manager": ["production", "inventory", "workers", "procurement"],
     "production": ["production", "inventory"],
     "inventory_manager": ["inventory", "procurement"],
