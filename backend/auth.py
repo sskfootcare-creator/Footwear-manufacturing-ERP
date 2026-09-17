@@ -338,6 +338,25 @@ async def get_current_user_factory(db):
         token = _extract_token(request)
         if not token:
             raise HTTPException(status_code=401, detail="Not authenticated")
+
+        # ── 1. Check Supabase Auth token ────────────────────────────────────
+        try:
+            from services.supabase_auth_service import verify_supabase_token
+            supa_user = verify_supabase_token(token)
+            if supa_user:
+                email = getattr(supa_user, "email", "").strip().lower()
+                user = await db.users.find_one({"email": email})
+                if user and user.get("active", True):
+                    user["id"] = str(user["_id"])
+                    user.pop("_id", None)
+                    user.pop("password_hash", None)
+                    user["supabase_uid"] = getattr(supa_user, "id", None)
+                    user["modules"] = get_user_modules(user)
+                    return user
+        except Exception as _supa_err:
+            log.debug("Supabase token verification fallback: %s", _supa_err)
+
+        # ── 2. Fallback to internal JWT decoding (workers & test suites) ────
         try:
             payload = jwt.decode(
                 token,
@@ -399,6 +418,13 @@ def require_roles(*allowed_roles: str):
 
 async def _upsert_admin(db, email: str, password: str, name: str, label: str) -> str:
     """Insert or re-sync one admin account. Returns 'seeded', 'updated', or 'exists'."""
+    # Ensure admin user is registered in Supabase Auth
+    try:
+        from services.supabase_auth_service import create_or_sync_supabase_user
+        create_or_sync_supabase_user(email, password, name, "admin")
+    except Exception as _supa_err:
+        log.warning("Supabase admin sync warning for %s: %s", email, _supa_err)
+
     existing = await db.users.find_one({"email": email})
     if existing is None:
         await db.users.insert_one({

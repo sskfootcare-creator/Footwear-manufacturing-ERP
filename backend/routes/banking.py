@@ -333,6 +333,11 @@ async def create_bank_account(payload: BankAccountIn, request: Request):
     }
     res = await db.bank_accounts.insert_one(doc)
     created = await db.bank_accounts.find_one({"_id": res.inserted_id})
+    try:
+        from services.supabase_banking_service import upsert_supabase_bank_account
+        upsert_supabase_bank_account(created)
+    except Exception as e:
+        log.warning(f"Failed to sync bank account to Supabase: {e}")
     return stringify(created)
 
 
@@ -382,6 +387,11 @@ async def update_bank_account(id: str, payload: BankAccountUpdate, request: Requ
         raise HTTPException(404, "Bank account not found")
 
     updated = await db.bank_accounts.find_one({"_id": _oid(id)})
+    try:
+        from services.supabase_banking_service import upsert_supabase_bank_account
+        upsert_supabase_bank_account(updated)
+    except Exception as e:
+        log.warning(f"Failed to sync updated bank account to Supabase: {e}")
     return stringify(updated)
 
 
@@ -733,6 +743,17 @@ async def create_statement_lines(lines: List[BankStatementLineIn], request: Requ
     if to_insert:
         res = await db.bank_statement_lines.insert_many(to_insert)
         inserted_ids = [str(i) for i in res.inserted_ids]
+        try:
+            from services.supabase_banking_service import insert_supabase_statement_lines
+            lines_by_acc_supabase = defaultdict(list)
+            for row in to_insert:
+                acc_key = str(row.get("bank_account_id") or "")
+                if acc_key:
+                    lines_by_acc_supabase[acc_key].append(row)
+            for acc_key, blist in lines_by_acc_supabase.items():
+                insert_supabase_statement_lines(blist, acc_key)
+        except Exception as e:
+            log.warning(f"Failed to sync statement lines to Supabase: {e}")
 
     summary_msg = f"{len(inserted_ids)} new, {skipped_count} skipped as duplicates." if skipped_count > 0 else f"{len(inserted_ids)} new lines inserted."
     return {
@@ -3442,6 +3463,27 @@ async def get_reconciliation_summary(
             acc_stat["total_erp_expenses"] = acc_stat["total_reconciled_debits"]
             total_erp_bank_balance += cur
 
+    # Sync reconciliation statements to Supabase PostgreSQL when dates are provided
+    if from_date and to_date:
+        for acc_id_key, acc_stat in per_account_stats.items():
+            if acc_id_key:
+                try:
+                    from services.supabase_banking_service import save_supabase_reconciliation_statement
+                    stmt_payload = {
+                        "bank_account_id": acc_id_key,
+                        "period_start_date": from_date,
+                        "period_end_date": to_date,
+                        "statement_closing_balance": float(acc_stat.get("erp_book_balance") or 0.0),
+                        "gl_closing_balance": float(acc_stat.get("erp_book_balance") or 0.0),
+                        "reconciled_balance": float(acc_stat.get("erp_book_balance") or 0.0),
+                        "unreconciled_difference": 0.0,
+                        "status": "balanced",
+                        "notes": f"Reconciliation snapshot {from_date} to {to_date}",
+                    }
+                    save_supabase_reconciliation_statement(stmt_payload)
+                except Exception as e:
+                    log.warning(f"Failed to record reconciliation statement in Supabase: {e}")
+
     # Cash in hand remaining balance from cash_ledger
     cash_docs = []
     if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
@@ -4710,6 +4752,31 @@ async def export_reconciliation_report(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Supabase Banking Direct Endpoints
+# ---------------------------------------------------------------------------
+
+@banking_router.get("/banking/supabase-accounts")
+async def get_supabase_bank_accounts(request: Request):
+    """Retrieve bank accounts directly from Supabase PostgreSQL."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    from services.supabase_banking_service import list_supabase_bank_accounts
+    accounts = list_supabase_bank_accounts()
+    return {"ok": True, "accounts": accounts}
+
+
+@banking_router.post("/banking/supabase-reconcile")
+async def create_supabase_reconciliation(payload: Dict[str, Any], request: Request):
+    """Record a verified reconciliation statement into Supabase PostgreSQL."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    from services.supabase_banking_service import save_supabase_reconciliation_statement
+    res = save_supabase_reconciliation_statement(payload)
+    return {"ok": True, "statement": res}
+
 
 
 

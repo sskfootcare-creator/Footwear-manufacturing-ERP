@@ -10,7 +10,7 @@ on:
 
 jobs:
   backend-test:
-    name: Backend Tests & Financial Core
+    name: Backend Tests & Core Verification
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -26,9 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pytest pytest-asyncio anyio httpx
 
-      - name: Run Financial Ledger Tests
+      - name: Run Backend RBAC & Core Tests
         run: |
-          pytest backend/tests/test_postgres_financial_ledgers.py
+          pytest backend/tests/test_modular_rbac.py backend/tests/test_jwt_claims.py backend/tests/test_cors_security.py
 
   frontend-build:
     name: Frontend Build Check

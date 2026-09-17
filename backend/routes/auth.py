@@ -271,9 +271,58 @@ async def login(payload: LoginInput, request: Request, response: Response):
     await check_rate_limit(client_ip)
 
     db = _get_db()
-    email = payload.email.lower()
+    email = payload.email.lower().strip()
+
+    # ── 1. Attempt Supabase Auth credential validation ───────────────────────
+    supa_auth_res = None
+    try:
+        from services.supabase_auth_service import authenticate_with_supabase
+        supa_auth_res = authenticate_with_supabase(email, payload.password)
+    except Exception as _supa_err:
+        log.warning("Supabase auth check fallback: %s", _supa_err)
+
     user = await db.users.find_one({"email": email})
-    if not user or not user.get("active", True) or not verify_password(payload.password, user["password_hash"]):
+    is_authenticated = False
+    access = None
+    refresh = None
+
+    if supa_auth_res and getattr(supa_auth_res, "session", None) is not None:
+        is_authenticated = True
+        access = supa_auth_res.session.access_token
+        refresh = supa_auth_res.session.refresh_token
+        if not user:
+            supa_u = getattr(supa_auth_res, "user", None)
+            meta = getattr(supa_u, "user_metadata", {}) or {}
+            user_doc = {
+                "email": email,
+                "name": meta.get("name", email.split("@")[0]),
+                "role": meta.get("role", "custom"),
+                "active": True,
+                "created_at": _now_iso(),
+            }
+            res_ins = await db.users.insert_one(user_doc)
+            user_doc["_id"] = res_ins.inserted_id
+            user = user_doc
+    elif user and user.get("active", True) and verify_password(payload.password, user.get("password_hash", "")):
+        is_authenticated = True
+        # Auto-sync user into Supabase Auth for seamless migration
+        try:
+            from services.supabase_auth_service import create_or_sync_supabase_user
+            create_or_sync_supabase_user(
+                email=email,
+                password=payload.password,
+                name=user.get("name", ""),
+                role=user.get("role", "custom"),
+                allowed_modules=user.get("allowed_modules"),
+            )
+        except Exception as _e:
+            log.debug("Auto-sync to Supabase warning: %s", _e)
+        uid = str(user["_id"])
+        allowed_modules = user.get("allowed_modules")
+        access = create_access_token(uid, email, user["role"], allowed_modules=allowed_modules)
+        refresh = create_refresh_token(uid)
+
+    if not is_authenticated or (user and not user.get("active", True)):
         attempt_count = await record_login_failure(client_ip)
         log.warning(
             "Failed login attempt for email=%s from ip=%s (attempt %d/%d)",
@@ -285,8 +334,6 @@ async def login(payload: LoginInput, request: Request, response: Response):
     uid = str(user["_id"])
     allowed_modules = user.get("allowed_modules")
     effective_modules = get_user_modules(user)
-    access = create_access_token(uid, email, user["role"], allowed_modules=allowed_modules)
-    refresh = create_refresh_token(uid)
     set_auth_cookies(response, access, refresh)
     return {
         "id": uid,
@@ -495,6 +542,23 @@ async def create_user(payload: UserCreate, request: Request):
     db = _get_db()
     if await db.users.find_one({"email": email}):
         raise HTTPException(409, "Email already exists")
+
+    # Sync into Supabase Auth
+    supa_uid = None
+    try:
+        from services.supabase_auth_service import create_or_sync_supabase_user
+        supa_user = create_or_sync_supabase_user(
+            email=email,
+            password=payload.password,
+            name=payload.name,
+            role=payload.role,
+            allowed_modules=payload.allowed_modules,
+        )
+        if supa_user:
+            supa_uid = getattr(supa_user, "id", None)
+    except Exception as _supa_err:
+        log.warning("Failed to provision user in Supabase Auth: %s", _supa_err)
+
     doc = {
         "email": email,
         "name": payload.name,
@@ -504,6 +568,7 @@ async def create_user(payload: UserCreate, request: Request):
         "department": payload.department or "general",
         "allowed_modules": payload.allowed_modules,
         "password_hash": hash_password(payload.password),
+        "supabase_uid": supa_uid,
         "active": True,
         "created_at": _now_iso(),
     }
@@ -532,6 +597,24 @@ async def update_user(user_id: str, payload: UserUpdate, request: Request):
         validate_password(update["password"])
         update["password_hash"] = hash_password(update.pop("password"))
     db = _get_db()
+    user_before = await db.users.find_one({"_id": _oid(user_id)})
+    if not user_before:
+        raise HTTPException(404, "User not found")
+
+    # Sync updates to Supabase Auth
+    try:
+        from services.supabase_auth_service import create_or_sync_supabase_user
+        raw_pw = payload.password if payload.password else None
+        create_or_sync_supabase_user(
+            email=user_before["email"],
+            password=raw_pw,
+            name=update.get("name", user_before.get("name", "")),
+            role=update.get("role", user_before.get("role", "custom")),
+            allowed_modules=update.get("allowed_modules", user_before.get("allowed_modules")),
+        )
+    except Exception as _supa_err:
+        log.warning("Failed to sync user update to Supabase Auth: %s", _supa_err)
+
     await db.users.update_one({"_id": _oid(user_id)}, {"$set": update})
     doc = await db.users.find_one({"_id": _oid(user_id)}, {"password_hash": 0})
     res = _stringify(doc)
