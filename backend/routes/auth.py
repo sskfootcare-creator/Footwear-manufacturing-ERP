@@ -41,6 +41,9 @@ from auth import (
     require_roles,
     JWT_ALGORITHM,
     get_jwt_secret,
+    ERP_MODULES,
+    ROLE_DEFAULT_MODULES,
+    get_user_modules,
 )
 from models.auth import (
     LoginInput,
@@ -247,8 +250,17 @@ def _stringify(doc: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Auth routes
+# Auth routes & Modules metadata
 # ---------------------------------------------------------------------------
+
+@auth_router.get("/auth/modules")
+async def get_modules_catalogue():
+    """Return all ERP modules with metadata and default role associations."""
+    return {
+        "modules": ERP_MODULES,
+        "role_defaults": ROLE_DEFAULT_MODULES,
+    }
+
 
 @auth_router.post("/auth/login")
 async def login(payload: LoginInput, request: Request, response: Response):
@@ -271,12 +283,21 @@ async def login(payload: LoginInput, request: Request, response: Response):
 
     await clear_login_failures(client_ip)
     uid = str(user["_id"])
-    access = create_access_token(uid, email, user["role"])
+    allowed_modules = user.get("allowed_modules")
+    effective_modules = get_user_modules(user)
+    access = create_access_token(uid, email, user["role"], allowed_modules=allowed_modules)
     refresh = create_refresh_token(uid)
     set_auth_cookies(response, access, refresh)
     return {
-        "id": uid, "email": email, "name": user["name"], "role": user["role"],
-        "access_token": access, "refresh_token": refresh,
+        "id": uid,
+        "email": email,
+        "name": user.get("name", ""),
+        "role": user["role"],
+        "role_title": user.get("role_title", ""),
+        "allowed_modules": allowed_modules,
+        "modules": effective_modules,
+        "access_token": access,
+        "refresh_token": refresh,
     }
 
 
@@ -321,7 +342,8 @@ async def refresh_token_route(request: Request, response: Response):
         if not user or not user.get("active", True):
             raise HTTPException(status_code=401, detail="User not found or inactive")
 
-        new_access = create_access_token(str(user["_id"]), user["email"], user["role"])
+        allowed_modules = user.get("allowed_modules")
+        new_access = create_access_token(str(user["_id"]), user["email"], user["role"], allowed_modules=allowed_modules)
         new_refresh = create_refresh_token(str(user["_id"]))
         set_auth_cookies(response, new_access, new_refresh)
         return {"ok": True, "access_token": new_access, "refresh_token": new_refresh}
@@ -456,7 +478,12 @@ async def list_users(request: Request):
     require_roles("admin")(user)
     db = _get_db()
     docs = await db.users.find({}, {"password_hash": 0}).to_list(500)
-    return [_stringify(d) for d in docs]
+    result = []
+    for d in docs:
+        item = _stringify(d)
+        item["modules"] = get_user_modules(d)
+        result.append(item)
+    return result
 
 
 @auth_router.post("/users")
@@ -469,16 +496,28 @@ async def create_user(payload: UserCreate, request: Request):
     if await db.users.find_one({"email": email}):
         raise HTTPException(409, "Email already exists")
     doc = {
-        "email": email, "name": payload.name, "role": payload.role,
+        "email": email,
+        "name": payload.name,
+        "full_name": payload.full_name or payload.name,
+        "role": payload.role,
+        "role_title": payload.role_title,
+        "department": payload.department or "general",
+        "allowed_modules": payload.allowed_modules,
         "password_hash": hash_password(payload.password),
-        "active": True, "created_at": _now_iso(),
+        "active": True,
+        "created_at": _now_iso(),
     }
     res = await db.users.insert_one(doc)
     return {
         "id": str(res.inserted_id),
         "email": email,
         "name": payload.name,
+        "full_name": doc["full_name"],
         "role": payload.role,
+        "role_title": payload.role_title,
+        "department": doc["department"],
+        "allowed_modules": payload.allowed_modules,
+        "modules": get_user_modules(doc),
         "active": True,
         "created_at": doc["created_at"],
     }
@@ -495,7 +534,9 @@ async def update_user(user_id: str, payload: UserUpdate, request: Request):
     db = _get_db()
     await db.users.update_one({"_id": _oid(user_id)}, {"$set": update})
     doc = await db.users.find_one({"_id": _oid(user_id)}, {"password_hash": 0})
-    return _stringify(doc)
+    res = _stringify(doc)
+    res["modules"] = get_user_modules(doc)
+    return res
 
 
 @auth_router.delete("/users/{user_id}")

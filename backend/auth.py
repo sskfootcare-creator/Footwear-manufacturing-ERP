@@ -146,8 +146,133 @@ def validate_password(password: str) -> None:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters long.")
 
 
+# ── ERP MODULE TAXONOMY & DISCRETE PERMISSIONS ────────────────────────────────
+ERP_MODULES = {
+    "finance": {
+        "key": "finance",
+        "name": "Financial Accounting & Ledgers",
+        "description": "Double-entry ledgers, Chart of Accounts, Trial Balance, Journal Entries, Bank Reconciliation, Expenses, Invoices, Vendor Bills, P&L",
+        "category": "Accounting",
+    },
+    "production": {
+        "key": "production",
+        "name": "Production & Manufacturing",
+        "description": "Kanban board, Stage tracking, Job cards, Style PLM, Pattern Manager, Tooling & Sole Moulds, Defects",
+        "category": "Manufacturing",
+    },
+    "inventory": {
+        "key": "inventory",
+        "name": "Raw Materials & Inventory",
+        "description": "Raw Material inventory, Stock receipts/issues, Component inventory, Ready Stock finished goods",
+        "category": "Supply Chain",
+    },
+    "workers": {
+        "key": "workers",
+        "name": "Workforce & Karigar Payroll",
+        "description": "Karigar master, skill assignment, piece-rate wages, attendance, weekly payroll calculations, advances",
+        "category": "Workforce",
+    },
+    "orders_sales": {
+        "key": "orders_sales",
+        "name": "B2B Sales & Customer Orders",
+        "description": "B2B Purchase Orders, Client master, Sales Invoices, Costing & BOM Calculator",
+        "category": "Commercial",
+    },
+    "procurement": {
+        "key": "procurement",
+        "name": "Vendors & Procurement",
+        "description": "Vendor directory, Vendor Purchase Orders, Material receiving (GRN), Vendor ledger",
+        "category": "Commercial",
+    },
+    "online": {
+        "key": "online",
+        "name": "E-Commerce & Warehouse WMS",
+        "description": "Marketplace sync (Myntra/Flipkart/Amazon/Ajio), SKU Mapping, Warehouse bins, Picklists, Packing validation",
+        "category": "Supply Chain",
+    },
+    "reports": {
+        "key": "reports",
+        "name": "Business Reports & Analytics",
+        "description": "Operational velocity, defect pareto, stock valuation, company P&L statements",
+        "category": "Analytics",
+    },
+    "settings_admin": {
+        "key": "settings_admin",
+        "name": "Settings & Access Control",
+        "description": "User creation, Role & Modular permissions matrix, Company profile, System setup",
+        "category": "Administration",
+    },
+}
+
+ROLE_DEFAULT_MODULES = {
+    "admin": list(ERP_MODULES.keys()),
+    "ca": ["finance", "orders_sales", "procurement", "reports"],
+    "accountant": ["finance", "orders_sales", "procurement"],
+    "production_manager": ["production", "inventory", "workers", "procurement"],
+    "production": ["production", "inventory"],
+    "inventory_manager": ["inventory", "procurement"],
+    "sales_manager": ["orders_sales", "online", "reports"],
+    "sales": ["orders_sales"],
+    "online_manager": ["online"],
+    "manager": ["production", "inventory", "workers", "orders_sales", "procurement", "online", "reports"],
+    "custom": [],
+}
+
+ROLE_ALIASES = {
+    "ca": ["ca", "accountant", "finance"],
+    "accountant": ["accountant", "finance"],
+    "production_manager": ["production_manager", "production", "manager"],
+    "production": ["production"],
+    "inventory_manager": ["inventory_manager", "inventory", "manager"],
+    "sales_manager": ["sales_manager", "sales", "manager"],
+    "sales": ["sales"],
+    "online_manager": ["online_manager", "sales", "manager"],
+    "manager": ["manager", "production", "sales"],
+}
+
+
+def get_user_modules(user: dict) -> list:
+    """Resolve effective allowed modules for a user."""
+    if not user:
+        return []
+    role = user.get("role", "")
+    if role == "admin":
+        return list(ERP_MODULES.keys())
+    
+    allowed = user.get("allowed_modules")
+    if allowed is not None and isinstance(allowed, list):
+        return allowed
+    return ROLE_DEFAULT_MODULES.get(role, [])
+
+
+def has_module_access(user: dict, module: str) -> bool:
+    """Check whether user has access to a specific module."""
+    if not user:
+        return False
+    if user.get("role") == "admin":
+        return True
+    return module in get_user_modules(user)
+
+
+def require_module(*modules: str):
+    """FastAPI dependency or checker ensuring user has at least one of the required modules."""
+    def checker(user: dict):
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        if user.get("role") == "admin":
+            return user
+        user_mods = set(get_user_modules(user))
+        if not any(m in user_mods for m in modules):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied: You do not have permission for the '{', '.join(modules)}' module."
+            )
+        return user
+    return checker
+
+
 def create_access_token(
-    user_id: str, email: str, role: str, worker_id: str | None = None
+    user_id: str, email: str, role: str, worker_id: str | None = None, allowed_modules: list | None = None
 ) -> str:
     payload = {
         "sub": user_id,
@@ -160,6 +285,8 @@ def create_access_token(
     }
     if worker_id is not None:
         payload["worker_id"] = worker_id
+    if allowed_modules is not None:
+        payload["allowed_modules"] = allowed_modules
     return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
@@ -241,6 +368,7 @@ async def get_current_user_factory(db):
                     "role": "worker",
                     "email": payload.get("email", ""),  # synthetic — phone used as email in token
                     "skill": worker.get("skill", ""),
+                    "modules": [],
                 }
 
             # ── Regular user token ────────────────────────────────────────────
@@ -250,6 +378,7 @@ async def get_current_user_factory(db):
             user["id"] = str(user["_id"])
             user.pop("_id", None)
             user.pop("password_hash", None)
+            user["modules"] = get_user_modules(user)
             return user
         except jwt.ExpiredSignatureError:
             raise HTTPException(status_code=401, detail="Token expired")
@@ -260,9 +389,17 @@ async def get_current_user_factory(db):
 
 def require_roles(*allowed_roles: str):
     def checker(user: dict):
-        if user.get("role") not in allowed_roles:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        user_role = user.get("role", "")
+        if user_role == "admin":
+            return user
+        if user_role in allowed_roles:
+            return user
+        aliases = ROLE_ALIASES.get(user_role, [])
+        if any(a in allowed_roles for a in aliases):
+            return user
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     return checker
 
 

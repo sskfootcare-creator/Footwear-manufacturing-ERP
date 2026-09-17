@@ -84,6 +84,7 @@ from routes.vendors import vendors_router
 from routes.banking import banking_router
 from routes.reports import reports_router
 from routes.notifications import notifications_router
+from routes.financial_ledgers import financial_ledgers_router
 from routes.components import (
     components_router,
     _serialize_component,
@@ -984,6 +985,7 @@ app.include_router(styles_router)
 app.include_router(banking_router)
 app.include_router(po_ean_router)
 app.include_router(reports_router)
+app.include_router(financial_ledgers_router)
 
 
 
@@ -1363,8 +1365,25 @@ async def on_startup():
     except Exception as e:
         log.warning(f"URL-rewrite migration failed (non-fatal): {e}")
 
+    # Financial Core DB initialization (PostgreSQL / Supabase)
+    try:
+        from db.postgres import init_postgres_db, get_session_factory
+        from scripts.seed_chart_of_accounts import seed_chart_of_accounts
+        await init_postgres_db()
+        session_factory = get_session_factory()
+        async with session_factory() as pg_sess:
+            await seed_chart_of_accounts(pg_sess)
+        log.info("Financial Core (PostgreSQL / Supabase) ready.")
+    except Exception as e:
+        log.warning(f"Financial Core initialization warning: {e}")
+
     log.info("Startup complete; admin seeded.")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     client.close()
+    try:
+        from db.postgres import close_postgres_db
+        await close_postgres_db()
+    except Exception:
+        pass

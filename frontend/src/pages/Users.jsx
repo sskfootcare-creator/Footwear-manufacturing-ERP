@@ -12,14 +12,20 @@ import {
 } from "../components/ui-kit";
 import { useNavigate } from "react-router-dom";
 import { Drawer } from "./Materials";
-import { Plus, Trash2, Pencil, Save, UserX, UserCheck, KeyRound, HardHat } from "lucide-react";
+import { Plus, Trash2, Pencil, Save, UserX, UserCheck, KeyRound, HardHat, ShieldCheck, CheckSquare, Square } from "lucide-react";
 
-const ROLES = ["admin", "manager", "production", "sales"];
-const empty = { email: "", name: "", role: "production", password: "" };
+const ROLES = [
+  "admin", "manager", "ca", "accountant",
+  "production_manager", "production",
+  "inventory_manager", "sales_manager", "sales",
+  "online_manager", "custom",
+];
+const empty = { email: "", name: "", role: "production", role_title: "", allowed_modules: null, password: "" };
 
 export default function Users() {
   const navigate = useNavigate();
   const [users, setUsers] = useState([]);
+  const [modulesData, setModulesData] = useState({ modules: {}, role_defaults: {} });
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(empty);
@@ -61,22 +67,56 @@ export default function Users() {
     const { data } = await http.get("/users");
     setUsers(data);
   };
+  const loadModules = async () => {
+    try {
+      const { data } = await http.get("/auth/modules");
+      if (data && data.modules) setModulesData(data);
+    } catch {}
+  };
   useEffect(() => {
     load();
+    loadModules();
   }, []);
+
+  const handleRoleChange = (newRole) => {
+    const defs = modulesData.role_defaults?.[newRole] || [];
+    setForm({
+      ...form,
+      role: newRole,
+      allowed_modules: newRole === "admin" ? null : [...defs],
+    });
+  };
+
+  const toggleModule = (modKey) => {
+    const current = form.allowed_modules !== null
+      ? form.allowed_modules
+      : (modulesData.role_defaults?.[form.role] || []);
+    let updated;
+    if (current.includes(modKey)) {
+      updated = current.filter((k) => k !== modKey);
+    } else {
+      updated = [...current, modKey];
+    }
+    setForm({ ...form, allowed_modules: updated });
+  };
 
   const startNew = () => {
     setEditId(null);
-    setForm({ ...empty, active: true });
+    setForm({ ...empty, active: true, allowed_modules: [...(modulesData.role_defaults?.["production"] || [])] });
     setError("");
     setOpen(true);
   };
   const startEdit = (u) => {
     setEditId(u.id);
+    const existingMods = u.allowed_modules !== undefined && u.allowed_modules !== null
+      ? u.allowed_modules
+      : (u.role === "admin" ? null : (modulesData.role_defaults?.[u.role] || []));
     setForm({
       email: u.email,
       name: u.name,
       role: u.role,
+      role_title: u.role_title || "",
+      allowed_modules: existingMods,
       active: u.active !== false,
       password: "",
     });
@@ -94,12 +134,23 @@ export default function Users() {
       return;
     }
     try {
+      const payloadMods = form.role === "admin" ? null : form.allowed_modules;
       if (editId) {
-        const body = { name: form.name, role: form.role, active: form.active };
+        const body = {
+          name: form.name,
+          role: form.role,
+          role_title: form.role_title,
+          allowed_modules: payloadMods,
+          active: form.active,
+        };
         if (form.password) body.password = form.password;
         await http.patch(`/users/${editId}`, body);
       } else {
-        await http.post("/users", form);
+        const body = {
+          ...form,
+          allowed_modules: payloadMods,
+        };
+        await http.post("/users", body);
       }
       setOpen(false);
       load();
@@ -132,8 +183,15 @@ export default function Users() {
   const roleColor = {
     admin: "red",
     manager: "orange",
+    ca: "purple",
+    accountant: "purple",
+    production_manager: "blue",
     production: "blue",
-    sales: "green",
+    inventory_manager: "amber",
+    sales_manager: "emerald",
+    sales: "emerald",
+    online_manager: "indigo",
+    custom: "slate",
   };
 
   return (
@@ -201,7 +259,30 @@ export default function Users() {
                     </td>
                     <td className="px-4 py-3 font-mono text-xs">{u.email}</td>
                     <td className="px-4 py-3">
-                      <Badge color={roleColor[u.role]}>{u.role}</Badge>
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <Badge color={roleColor[u.role] || "slate"}>{u.role}</Badge>
+                          {u.role_title && (
+                            <span className="text-[11px] font-medium text-slate-500 italic">
+                              ({u.role_title})
+                            </span>
+                          )}
+                        </div>
+                        {u.role !== "admin" && Array.isArray(u.modules) && (
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            {u.modules.slice(0, 3).map((m) => (
+                              <span key={m} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[9px] font-mono rounded">
+                                {m}
+                              </span>
+                            ))}
+                            {u.modules.length > 3 && (
+                              <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[9px] font-mono rounded">
+                                +{u.modules.length - 3}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <Badge color={u.active === false ? "red" : "green"}>
@@ -271,18 +352,89 @@ export default function Users() {
               disabled={!!editId}
               testId="form-user-email"
             />
+            <Input
+              label="Role Title / Designation (optional)"
+              placeholder="e.g. Chief Accountant, Store Supervisor"
+              value={form.role_title}
+              onChange={(e) => setForm({ ...form, role_title: e.target.value })}
+              testId="form-user-role-title"
+            />
             <Select
               label="Role"
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              onChange={(e) => handleRoleChange(e.target.value)}
               testId="form-user-role"
             >
               {ROLES.map((r) => (
                 <option key={r} value={r}>
-                  {r}
+                  {r.replace("_", " ").toUpperCase()}
                 </option>
               ))}
             </Select>
+
+            {/* Modular Permissions Matrix */}
+            <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-blue-600" /> Modular Permissions Matrix
+                </div>
+                {form.role !== "admin" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const defs = modulesData.role_defaults?.[form.role] || [];
+                      setForm({ ...form, allowed_modules: [...defs] });
+                    }}
+                    className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold underline"
+                  >
+                    Reset to Role Defaults
+                  </button>
+                )}
+              </div>
+
+              {form.role === "admin" ? (
+                <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 p-2.5 rounded font-medium">
+                  Administrator role has unrestricted access to all modules and system settings.
+                </div>
+              ) : (
+                <div className="space-y-1.5 pt-1">
+                  {Object.entries(modulesData.modules || {}).map(([key, mod]) => {
+                    const activeMods = form.allowed_modules !== null
+                      ? form.allowed_modules
+                      : (modulesData.role_defaults?.[form.role] || []);
+                    const isChecked = activeMods.includes(key);
+                    return (
+                      <div
+                        key={key}
+                        onClick={() => toggleModule(key)}
+                        className={`flex items-start gap-2.5 p-2 rounded cursor-pointer border text-left transition-colors duration-150 ${
+                          isChecked
+                            ? "bg-blue-50/80 border-blue-200 text-slate-900"
+                            : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50"
+                        }`}
+                      >
+                        <div className="mt-0.5">
+                          {isChecked ? (
+                            <CheckSquare className="w-4 h-4 text-blue-600 shrink-0" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-300 shrink-0" />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold">{mod.name}</span>
+                            <span className="text-[9px] px-1 bg-slate-200 text-slate-600 rounded uppercase font-mono">
+                              {mod.category}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate">{mod.description}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             <Input
               label={editId ? "New password (optional)" : "Password"}
               type="password"

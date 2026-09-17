@@ -18,6 +18,9 @@ node_modules/
 
 # Testing
 /coverage
+*.db
+*.sqlite
+*.sqlite3
 
 # Next.js
 /.next/

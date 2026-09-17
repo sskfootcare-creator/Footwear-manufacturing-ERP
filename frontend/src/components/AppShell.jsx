@@ -8,7 +8,7 @@ import {
   Warehouse, IndianRupee, Settings as SettingsIcon, ReceiptIndianRupee,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check, Bell, TrendingUp, Landmark,
+  Check, Bell, TrendingUp, Landmark, Scale,
 } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +69,21 @@ const NAV_GROUPS = [
       { to: "/picklists",            label: "Picklists",             icon: ClipboardList, roles: ["admin","manager","production"] },
       { to: "/warehouse/reports",    label: "Warehouse Reports",     icon: BarChart3,     roles: ["admin","manager"] },
       { to: "/pending-list",         label: "Pending Product List",  icon: PackageOpen,   roles: ["admin","manager","production"] },
+    ],
+  },
+  {
+    key: "finance",
+    title: "Finance & Accounts",
+    module: "finance",
+    workspaces: ["management", "b2b"],
+    items: [
+      { to: "/finance",               label: "Ledgers Overview",     icon: Landmark,        roles: ["admin","manager","ca","accountant"] },
+      { to: "/finance/chart-of-accounts", label: "Chart of Accounts",icon: BookOpen,        roles: ["admin","manager","ca","accountant"] },
+      { to: "/finance/general-ledger",label: "General Ledger",       icon: Scale,           roles: ["admin","manager","ca","accountant"] },
+      { to: "/finance/journal-entries",label: "Journal Entries",     icon: FileText,        roles: ["admin","manager","ca","accountant"] },
+      { to: "/finance/trial-balance", label: "Trial Balance & Locks",icon: Scale,           roles: ["admin","manager","ca","accountant"] },
+      { to: "/bank-reconciliation",   label: "Bank Reconciliation",  icon: Landmark,        roles: ["admin","manager","ca","accountant"] },
+      { to: "/expenses",              label: "Expenses & P&L",       icon: IndianRupee,     roles: ["admin","manager","ca","accountant"] },
     ],
   },
 ];
@@ -177,12 +192,23 @@ export function useWorkspace() {
 
 
 
-function visibleGroups(workspace, userRole) {
+function visibleGroups(workspace, user) {
+  const userRole = typeof user === "object" ? user?.role : user;
+  const userModules = typeof user === "object" && Array.isArray(user?.modules) ? user.modules : null;
+
   return NAV_GROUPS.map((g) => {
     if (!g.workspaces.includes(workspace)) return null;
-    const items = g.items.filter(
-      (n) => !userRole || n.roles.includes(userRole)
-    );
+    if (g.module && userRole !== "admin" && userModules) {
+      if (!userModules.includes(g.module)) return null;
+    }
+
+    const items = g.items.filter((n) => {
+      if (userRole === "admin") return true;
+      if (n.module && userModules) {
+        if (!userModules.includes(n.module)) return false;
+      }
+      return !userRole || n.roles?.includes(userRole);
+    });
     return items.length ? { ...g, items } : null;
   }).filter(Boolean);
 }
@@ -191,7 +217,7 @@ function visibleGroups(workspace, userRole) {
    SIDEBAR CONTENT (shared between mobile drawer + desktop sidebar)
    ───────────────────────────────────────────────────────────────────────────── */
 function SidebarContent({ workspace, onSwitch, onClose, user, onLogout }) {
-  const groups = visibleGroups(workspace, user?.role);
+  const groups = visibleGroups(workspace, user);
 
   return (
     <>
@@ -295,7 +321,7 @@ function SidebarContent({ workspace, onSwitch, onClose, user, onLogout }) {
    ───────────────────────────────────────────────────────────────────────────── */
 function MoreDrawer({ open, onClose, workspace, user }) {
   const drawerRef = useRef(null);
-  const groups = visibleGroups(workspace, user?.role);
+  const groups = visibleGroups(workspace, user);
 
   // Lock body scroll while open
   useEffect(() => {
