@@ -38,7 +38,12 @@ from models.invoice_packing import (
     MergedPackingListGenerate,
     PackingTemplateIn,
 )
-from models.clients import DirectInvoiceIn
+from models.clients import (
+    DirectInvoiceIn,
+    INDIAN_STATES_MAP,
+    extract_state_code,
+    determine_tax_mode,
+)
 
 
 log = logging.getLogger("erp")
@@ -1175,11 +1180,49 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     pan = (payload.pan or "").strip().upper()
     billing_address = (payload.billing_address or "").strip()
     shipping_address = (payload.shipping_address or billing_address).strip()
-    place_of_supply = (payload.place_of_supply or "09-Uttar Pradesh").strip()
-    
-    # Identify state code (default 09 for Uttar Pradesh)
-    client_state_code = (payload.client_state_code or ("09" if "09" in place_of_supply or "uttar pradesh" in place_of_supply.lower() else "00")).strip()
-    is_intra_state = (client_state_code == "09") or ("09" in place_of_supply) or ("uttar pradesh" in place_of_supply.lower())
+
+    # Determine supplier (seller) state code
+    supplier_state_code = None
+    if payload.supplier_state_code:
+        supplier_state_code = extract_state_code(state_code=payload.supplier_state_code, fallback="09")
+    else:
+        try:
+            profile = await db.settings.find_one({"_id": "company_profile"})
+            if profile and isinstance(profile, dict):
+                supplier_state_code = extract_state_code(
+                    state_code=profile.get("state_code"),
+                    gstin=profile.get("gstin"),
+                    place_of_supply=profile.get("state"),
+                    fallback="",
+                )
+        except Exception:
+            pass
+        if not supplier_state_code:
+            from pdf_docs import COMPANY
+            supplier_state_code = extract_state_code(
+                state_code=COMPANY.get("state_code"),
+                gstin=COMPANY.get("gstin"),
+                place_of_supply=COMPANY.get("state"),
+                fallback="09",
+            )
+
+    # Determine client (buyer) state code and place of supply
+    client_state_code = extract_state_code(
+        state_code=payload.client_state_code,
+        gstin=client_gstin,
+        place_of_supply=payload.place_of_supply,
+        address=billing_address,
+        fallback=supplier_state_code or "09",
+    )
+    client_state_name = INDIAN_STATES_MAP.get(client_state_code, "Uttar Pradesh")
+    place_of_supply = (payload.place_of_supply or f"{client_state_code}-{client_state_name}").strip()
+
+    # Determine tax mode and whether this transaction is intra-state (CGST + SGST) or inter-state (IGST)
+    is_intra_state, tax_mode = determine_tax_mode(
+        supplier_state_code=supplier_state_code,
+        client_state_code=client_state_code,
+        tax_mode=payload.tax_mode,
+    )
 
     payment_terms_days = int(payload.payment_terms_days or 30)
 
@@ -1222,24 +1265,22 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
                 client_master_id = str(c_res.inserted_id)
 
     # 2. Determine GST rates (Footwear norm: default 5% total -> 2.5% CGST + 2.5% SGST or 5% IGST)
-    if payload.cgst_rate is not None and payload.sgst_rate is not None:
-        cgst_rate = float(payload.cgst_rate)
-        sgst_rate = float(payload.sgst_rate)
-        igst_rate = float(payload.igst_rate or 0.0)
-    elif payload.igst_rate is not None and not is_intra_state:
+    total_gst = float(payload.gst_rate if payload.gst_rate is not None else 5.0)
+    if is_intra_state:
+        if payload.cgst_rate is not None and payload.sgst_rate is not None:
+            cgst_rate = float(payload.cgst_rate)
+            sgst_rate = float(payload.sgst_rate)
+        else:
+            cgst_rate = round(total_gst / 2.0, 2)
+            sgst_rate = round(total_gst / 2.0, 2)
+        igst_rate = 0.0
+    else:
+        if payload.igst_rate is not None:
+            igst_rate = float(payload.igst_rate)
+        else:
+            igst_rate = round(total_gst, 2)
         cgst_rate = 0.0
         sgst_rate = 0.0
-        igst_rate = float(payload.igst_rate)
-    else:
-        total_gst = float(payload.gst_rate if payload.gst_rate is not None else 5.0)
-        if is_intra_state:
-            cgst_rate = round(total_gst / 2.0, 2)  # default 2.5%
-            sgst_rate = round(total_gst / 2.0, 2)  # default 2.5%
-            igst_rate = 0.0
-        else:
-            cgst_rate = 0.0
-            sgst_rate = 0.0
-            igst_rate = round(total_gst, 2)        # default 5.0%
 
     # 3. Calculate line items and totals
     subtotal = 0.0
@@ -1308,6 +1349,9 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
         "client_gstin": client_gstin,
         "client_state": place_of_supply,
         "client_state_code": client_state_code,
+        "supplier_state_code": supplier_state_code,
+        "tax_mode": tax_mode,
+        "is_intra_state": is_intra_state,
         "cgst_rate": cgst_rate,
         "sgst_rate": sgst_rate,
         "igst_rate": igst_rate,
@@ -1344,6 +1388,9 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
         "shipping_address": shipping_address,
         "place_of_supply": place_of_supply,
         "client_state_code": client_state_code,
+        "supplier_state_code": supplier_state_code,
+        "tax_mode": tax_mode,
+        "is_intra_state": is_intra_state,
         "cgst_rate": cgst_rate,
         "cgst_amount": cgst_amount,
         "sgst_rate": sgst_rate,

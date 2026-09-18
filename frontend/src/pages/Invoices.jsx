@@ -2043,30 +2043,42 @@ function WeeklyCashInflowForecast({ forecast, onSelectInvoice, onRecordGRN }) {
 }
 
 const INDIAN_STATES = [
-  { code: "09", name: "09-Uttar Pradesh (Factory Home State)" },
-  { code: "07", name: "07-Delhi" },
-  { code: "27", name: "27-Maharashtra" },
-  { code: "08", name: "08-Rajasthan" },
-  { code: "06", name: "06-Haryana" },
-  { code: "03", name: "03-Punjab" },
-  { code: "23", name: "23-Madhya Pradesh" },
-  { code: "10", name: "10-Bihar" },
-  { code: "24", name: "24-Gujarat" },
-  { code: "19", name: "19-West Bengal" },
-  { code: "33", name: "33-Tamil Nadu" },
-  { code: "29", name: "29-Karnataka" },
-  { code: "36", name: "36-Telangana" },
-  { code: "37", name: "37-Andhra Pradesh" },
-  { code: "05", name: "05-Uttarakhand" },
-  { code: "02", name: "02-Himachal Pradesh" },
-  { code: "01", name: "01-Jammu and Kashmir" },
-  { code: "21", name: "21-Odisha" },
-  { code: "20", name: "20-Jharkhand" },
-  { code: "22", name: "22-Chhattisgarh" },
-  { code: "32", name: "32-Kerala" },
-  { code: "18", name: "18-Assam" },
-  { code: "30", name: "30-Goa" },
-  { code: "04", name: "04-Chandigarh" },
+  { code: "09", name: "Uttar Pradesh" },
+  { code: "07", name: "Delhi" },
+  { code: "27", name: "Maharashtra" },
+  { code: "08", name: "Rajasthan" },
+  { code: "06", name: "Haryana" },
+  { code: "03", name: "Punjab" },
+  { code: "23", name: "Madhya Pradesh" },
+  { code: "10", name: "Bihar" },
+  { code: "24", name: "Gujarat" },
+  { code: "19", name: "West Bengal" },
+  { code: "33", name: "Tamil Nadu" },
+  { code: "29", name: "Karnataka" },
+  { code: "36", name: "Telangana" },
+  { code: "37", name: "Andhra Pradesh" },
+  { code: "05", name: "Uttarakhand" },
+  { code: "02", name: "Himachal Pradesh" },
+  { code: "01", name: "Jammu and Kashmir" },
+  { code: "21", name: "Odisha" },
+  { code: "20", name: "Jharkhand" },
+  { code: "22", name: "Chhattisgarh" },
+  { code: "32", name: "Kerala" },
+  { code: "18", name: "Assam" },
+  { code: "30", name: "Goa" },
+  { code: "04", name: "Chandigarh" },
+  { code: "11", name: "Sikkim" },
+  { code: "12", name: "Arunachal Pradesh" },
+  { code: "13", name: "Nagaland" },
+  { code: "14", name: "Manipur" },
+  { code: "15", name: "Mizoram" },
+  { code: "16", name: "Tripura" },
+  { code: "17", name: "Meghalaya" },
+  { code: "26", name: "Dadra and Nagar Haveli and Daman and Diu" },
+  { code: "31", name: "Lakshadweep" },
+  { code: "34", name: "Puducherry" },
+  { code: "35", name: "Andaman and Nicobar Islands" },
+  { code: "38", name: "Ladakh" },
 ];
 
 function DirectInvoiceModal({ onClose, onCreated }) {
@@ -2074,6 +2086,10 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const [savedClients, setSavedClients] = useState([]);
   const [selectedClientId, setSelectedClientId] = useState("");
   const [sameAsBilling, setSameAsBilling] = useState(true);
+
+  // Supplier / Seller State (Fetched from company settings, default UP 09)
+  const [supplierStateCode, setSupplierStateCode] = useState("09");
+  const [supplierStateName, setSupplierStateName] = useState("Uttar Pradesh");
 
   // Client Details
   const [clientName, setClientName] = useState("");
@@ -2090,7 +2106,8 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
   const [saveClientToMaster, setSaveClientToMaster] = useState(true);
 
-  // GST Settings
+  // Tax Mode: 'auto' | 'intra' | 'inter'
+  const [taxMode, setTaxMode] = useState("auto");
   const [gstPreset, setGstPreset] = useState("5");
   const [customGstRate, setCustomGstRate] = useState(5.0);
 
@@ -2106,8 +2123,23 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Load saved clients
+  // Load saved clients & company profile
   useEffect(() => {
+    http.get("/settings/company")
+      .then((res) => {
+        const p = res.data || {};
+        let sCode = p.state_code;
+        if (!sCode && p.gstin && p.gstin.length >= 2 && /^\d{2}/.test(p.gstin)) {
+          sCode = p.gstin.slice(0, 2);
+        }
+        if (sCode) {
+          setSupplierStateCode(sCode);
+          const st = INDIAN_STATES.find((s) => s.code === sCode);
+          if (st) setSupplierStateName(st.name);
+        }
+      })
+      .catch(() => {});
+
     http.get("/clients/master")
       .then((res) => {
         const list = Array.isArray(res.data) ? res.data : [];
@@ -2136,10 +2168,21 @@ function DirectInvoiceModal({ onClose, onCreated }) {
       setBillingAddress(c.billing_address || "");
       setShippingAddress(c.shipping_address || c.billing_address || "");
       setSameAsBilling(Boolean(!c.shipping_address || c.shipping_address === c.billing_address));
-      if (c.state_code) {
-        setStateCode(c.state_code);
-        const st = INDIAN_STATES.find((s) => s.code === c.state_code);
-        if (st) setPlaceOfSupply(st.name);
+
+      let cCode = c.state_code;
+      if (c.gstin && c.gstin.length >= 2 && /^\d{2}/.test(c.gstin)) {
+        cCode = c.gstin.slice(0, 2);
+      }
+      if (cCode) {
+        setStateCode(cCode);
+        const st = INDIAN_STATES.find((s) => s.code === cCode);
+        if (st) setPlaceOfSupply(`${st.code}-${st.name}`);
+      } else if (c.state) {
+        setPlaceOfSupply(c.state);
+        const matched = INDIAN_STATES.find(
+          (s) => c.state.toLowerCase().includes(s.name.toLowerCase()) || c.state.startsWith(s.code)
+        );
+        if (matched) setStateCode(matched.code);
       }
       if (c.payment_terms_days) {
         setPaymentTermsDays(Number(c.payment_terms_days));
@@ -2151,12 +2194,12 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const handleGstinChange = (val) => {
     const clean = val.toUpperCase().trim();
     setGstin(clean);
-    if (clean.length >= 2) {
+    if (clean.length >= 2 && /^\d{2}/.test(clean)) {
       const code = clean.slice(0, 2);
       const matched = INDIAN_STATES.find((s) => s.code === code);
       if (matched) {
         setStateCode(matched.code);
-        setPlaceOfSupply(matched.name);
+        setPlaceOfSupply(`${matched.code}-${matched.name}`);
       }
     }
   };
@@ -2164,11 +2207,17 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const handleStateChange = (code) => {
     setStateCode(code);
     const matched = INDIAN_STATES.find((s) => s.code === code);
-    if (matched) setPlaceOfSupply(matched.name);
+    if (matched) setPlaceOfSupply(`${matched.code}-${matched.name}`);
   };
 
-  // GST Calculation
-  const isIntraState = stateCode === "09" || placeOfSupply.includes("09") || placeOfSupply.toLowerCase().includes("uttar pradesh");
+  // Dynamic GST Determination: Compare client state code with supplier state code unless forced
+  const isIntraState =
+    taxMode === "intra"
+      ? true
+      : taxMode === "inter"
+      ? false
+      : stateCode === supplierStateCode;
+
   const effectiveGstRate = gstPreset === "custom" ? Number(customGstRate) || 0 : Number(gstPreset);
   const cgstRate = isIntraState ? effectiveGstRate / 2 : 0;
   const sgstRate = isIntraState ? effectiveGstRate / 2 : 0;
@@ -2242,6 +2291,8 @@ function DirectInvoiceModal({ onClose, onCreated }) {
         shipping_address: sameAsBilling ? billingAddress.trim() : shippingAddress.trim(),
         place_of_supply: placeOfSupply,
         client_state_code: stateCode,
+        supplier_state_code: supplierStateCode,
+        tax_mode: taxMode,
         payment_terms_days: Number(paymentTermsDays),
         invoice_date: invoiceDate,
         gst_rate: effectiveGstRate,
@@ -2401,7 +2452,7 @@ function DirectInvoiceModal({ onClose, onCreated }) {
                 >
                   {INDIAN_STATES.map((s) => (
                     <option key={s.code} value={s.code}>
-                      {s.name}
+                      {`${s.code}-${s.name}${s.code === supplierStateCode ? " (Factory Home State)" : ""}`}
                     </option>
                   ))}
                 </select>
@@ -2519,61 +2570,109 @@ function DirectInvoiceModal({ onClose, onCreated }) {
               </Field>
             </div>
 
-            {/* GST Selector */}
-            <div className="pt-2">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
-                  GST Rate Selection (Default: Footwear Norm 5%)
-                </label>
-                <div className="text-xs font-semibold flex items-center gap-1.5">
-                  {isIntraState ? (
-                    <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                      {`🟢 Intra-State (Within UP): ${cgstRate}% CGST + ${sgstRate}% SGST`}
-                    </span>
-                  ) : (
-                    <span className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                      {`🔵 Inter-State: ${igstRate}% IGST`}
-                    </span>
-                  )}
+            {/* GST & Tax Mode Selector */}
+            <div className="pt-2 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block">
+                    Tax Billing Mode
+                  </label>
+                  <div className="flex items-center gap-1 bg-slate-200/80 p-0.5 rounded-lg text-xs mt-1">
+                    <button
+                      type="button"
+                      onClick={() => setTaxMode("auto")}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                        taxMode === "auto"
+                          ? "bg-white text-slate-900 shadow-xs font-semibold"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Auto Match
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTaxMode("intra")}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                        taxMode === "intra"
+                          ? "bg-white text-emerald-700 shadow-xs font-semibold"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Intra-State (CGST+SGST)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTaxMode("inter")}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                        taxMode === "inter"
+                          ? "bg-white text-blue-700 shadow-xs font-semibold"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Inter-State (IGST)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block">
+                    Seller: {supplierStateCode}-{supplierStateName}
+                  </span>
+                  <div className="text-xs font-semibold inline-flex items-center gap-1.5 mt-1">
+                    {isIntraState ? (
+                      <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        {`🟢 Intra-State (Within ${supplierStateCode === "09" ? "UP" : supplierStateName}): ${cgstRate}% CGST + ${sgstRate}% SGST`}
+                      </span>
+                    ) : (
+                      <span className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                        {`🔵 Inter-State: ${igstRate}% IGST`}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {[
-                  { label: "5% (Default Footwear: 2.5% + 2.5%)", val: "5" },
-                  { label: "12% (Higher Value / 6% + 6%)", val: "12" },
-                  { label: "18% (Accessories / 9% + 9%)", val: "18" },
-                  { label: "0% (Exempt)", val: "0" },
-                  { label: "Custom %", val: "custom" },
-                ].map((preset) => (
-                  <button
-                    key={preset.val}
-                    type="button"
-                    onClick={() => setGstPreset(preset.val)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                      gstPreset === preset.val
-                        ? "bg-[#16A34A] border-[#16A34A] text-white shadow-sm"
-                        : "bg-white border-slate-300 text-slate-700 hover:border-slate-400"
-                    }`}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
+              <div>
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1.5">
+                  GST Rate Selection (Default: Footwear Norm 5%)
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    { label: "5% (Default Footwear: 2.5% + 2.5%)", val: "5" },
+                    { label: "12% (Higher Value / 6% + 6%)", val: "12" },
+                    { label: "18% (Accessories / 9% + 9%)", val: "18" },
+                    { label: "0% (Exempt)", val: "0" },
+                    { label: "Custom %", val: "custom" },
+                  ].map((preset) => (
+                    <button
+                      key={preset.val}
+                      type="button"
+                      onClick={() => setGstPreset(preset.val)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                        gstPreset === preset.val
+                          ? "bg-[#16A34A] border-[#16A34A] text-white shadow-sm"
+                          : "bg-white border-slate-300 text-slate-700 hover:border-slate-400"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
 
-                {gstPreset === "custom" && (
-                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-1">
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0"
-                      max="100"
-                      value={customGstRate}
-                      onChange={(e) => setCustomGstRate(e.target.value)}
-                      className="w-16 text-sm font-mono outline-none text-right"
-                    />
-                    <span className="text-xs text-slate-500 font-bold">%</span>
-                  </div>
-                )}
+                  {gstPreset === "custom" && (
+                    <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-1">
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="0"
+                        max="100"
+                        value={customGstRate}
+                        onChange={(e) => setCustomGstRate(e.target.value)}
+                        className="w-16 text-sm font-mono outline-none text-right"
+                      />
+                      <span className="text-xs text-slate-500 font-bold">%</span>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

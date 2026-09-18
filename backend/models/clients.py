@@ -1,6 +1,7 @@
-"""Pydantic models for Client Master and Direct Invoice creation."""
+"""Pydantic models for Client Master and Direct Invoice creation with Indian GST state logic."""
 
-from typing import Optional, List, Dict, Any
+import re
+from typing import Optional, List, Dict, Any, Tuple
 from pydantic import BaseModel, Field
 
 
@@ -49,8 +50,8 @@ class DirectInvoiceIn(BaseModel):
     pan: Optional[str] = ""
     billing_address: Optional[str] = ""
     shipping_address: Optional[str] = ""
-    place_of_supply: Optional[str] = "09-Uttar Pradesh"
-    client_state_code: Optional[str] = "09"
+    place_of_supply: Optional[str] = None
+    client_state_code: Optional[str] = None
 
     # Invoice parameters
     invoice_date: Optional[str] = None  # DD/MM/YYYY or YYYY-MM-DD
@@ -63,7 +64,9 @@ class DirectInvoiceIn(BaseModel):
     supply_date: Optional[str] = ""
     notes: Optional[str] = ""
 
-    # Tax configuration (Norms: Footwear 5% default: 2.5% CGST + 2.5% SGST or 5% IGST)
+    # Tax configuration (Footwear 5% default: 2.5% CGST + 2.5% SGST or 5% IGST)
+    supplier_state_code: Optional[str] = None  # Seller state code (e.g. 27 for Maharashtra, 09 for UP)
+    tax_mode: Optional[str] = "auto"          # 'auto' | 'intra' | 'inter'
     gst_rate: Optional[float] = 5.0
     cgst_rate: Optional[float] = None
     sgst_rate: Optional[float] = None
@@ -74,3 +77,138 @@ class DirectInvoiceIn(BaseModel):
 
     # Master saving option
     save_client_to_master: Optional[bool] = True
+
+
+INDIAN_STATES_MAP: Dict[str, str] = {
+    "01": "Jammu and Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "26": "Dadra and Nagar Haveli and Daman and Diu",
+    "27": "Maharashtra",
+    "29": "Karnataka",
+    "30": "Goa",
+    "31": "Lakshadweep",
+    "32": "Kerala",
+    "33": "Tamil Nadu",
+    "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands",
+    "36": "Telangana",
+    "37": "Andhra Pradesh",
+    "38": "Ladakh",
+}
+
+# Name aliases to state codes
+REVERSE_STATES_MAP: Dict[str, str] = {
+    v.lower(): k for k, v in INDIAN_STATES_MAP.items()
+}
+REVERSE_STATES_MAP.update({
+    "up": "09",
+    "uttar pradesh": "09",
+    "mh": "27",
+    "maharashtra": "27",
+    "dl": "07",
+    "delhi": "07",
+    "nct of delhi": "07",
+    "orissa": "21",
+    "pondicherry": "34",
+    "uttaranchal": "05",
+})
+
+
+def extract_state_code(
+    state_code: Optional[str] = None,
+    gstin: Optional[str] = None,
+    place_of_supply: Optional[str] = None,
+    address: Optional[str] = None,
+    fallback: str = "09",
+) -> str:
+    """
+    Robustly extract a valid 2-digit Indian GST state code from:
+    1. GSTIN (first 2 digits are the authoritative state code under GST Act)
+    2. Explicit state_code string (e.g. '09', '27', '9')
+    3. Place of supply string (e.g. '09-Uttar Pradesh', '27-Maharashtra', 'Delhi')
+    4. Address text containing a state name
+    5. Fallback state code
+    """
+    # 1. Authoritative check: GSTIN
+    if gstin:
+        clean_gst = re.sub(r"[^A-Z0-9]", "", str(gstin).strip().upper())
+        if len(clean_gst) >= 2 and clean_gst[:2].isdigit():
+            c = clean_gst[:2]
+            if c in INDIAN_STATES_MAP:
+                return c
+
+    # 2. Explicit state_code
+    if state_code:
+        clean_code = re.sub(r"[^0-9]", "", str(state_code).strip())
+        if clean_code:
+            clean_code = clean_code.zfill(2)
+            if clean_code in INDIAN_STATES_MAP:
+                return clean_code
+
+    # 3. Place of supply
+    if place_of_supply:
+        pos_str = str(place_of_supply).strip()
+        m = re.match(r"^(\d{1,2})", pos_str)
+        if m:
+            c = m.group(1).zfill(2)
+            if c in INDIAN_STATES_MAP:
+                return c
+        pos_lower = pos_str.lower()
+        for name_lower, code in REVERSE_STATES_MAP.items():
+            if name_lower in pos_lower:
+                return code
+
+    # 4. Address scan
+    if address:
+        addr_lower = str(address).lower()
+        for name_lower, code in REVERSE_STATES_MAP.items():
+            if name_lower in addr_lower:
+                return code
+
+    return fallback.zfill(2) if fallback else "09"
+
+
+def determine_tax_mode(
+    supplier_state_code: Optional[str],
+    client_state_code: Optional[str],
+    tax_mode: Optional[str] = "auto",
+) -> Tuple[bool, str]:
+    """
+    Determine whether billing is intra-state (CGST+SGST) or inter-state (IGST).
+    Returns: (is_intra_state: bool, resolved_tax_mode: 'intra' | 'inter')
+    """
+    mode = (tax_mode or "auto").strip().lower()
+    if mode == "intra":
+        return True, "intra"
+    if mode == "inter":
+        return False, "inter"
+
+    # 'auto': Compare supplier state vs client state
+    s_code = str(supplier_state_code or "").strip().zfill(2)
+    c_code = str(client_state_code or "").strip().zfill(2)
+
+    if s_code and c_code and s_code == c_code:
+        return True, "intra"
+    return False, "inter"

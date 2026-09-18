@@ -37,8 +37,25 @@ Write-Host "==========================================================" -Foregro
 Write-Host "Starting SSK Footwear ERP (Live Consolidated Logs)..." -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
+# Ensure local Supabase via Docker is running
+Write-Host "[0/4] Checking local Supabase (Docker)..." -ForegroundColor Yellow
+$supaRunning = $false
+try {
+    $supaCheck = cmd.exe /c "npx supabase status 2>&1"
+    if ($LASTEXITCODE -eq 0 -and $supaCheck -match "API URL:") {
+        $supaRunning = $true
+    }
+} catch {}
+
+if (!$supaRunning) {
+    Write-Host "Starting local Supabase via Docker..." -ForegroundColor Yellow
+    cmd.exe /c "npx supabase start"
+} else {
+    Write-Host "Local Supabase is already running." -ForegroundColor Green
+}
+
 # Start MongoDB job
-Write-Host "[1/3] Launching local MongoDB..." -ForegroundColor Yellow
+Write-Host "[1/4] Launching local MongoDB..." -ForegroundColor Yellow
 $MongoJob = Start-Job -ScriptBlock {
     param($path)
     $exe = "$path/mongodb-portable/mongodb-win32-x86_64-windows-7.0.6/bin/mongod.exe"
@@ -49,7 +66,7 @@ $MongoJob = Start-Job -ScriptBlock {
 } -ArgumentList $ScriptDir
 
 # Start Backend job (listening on 0.0.0.0 for LAN/WiFi access)
-Write-Host "[2/3] Launching backend FastAPI job (0.0.0.0:8000)..." -ForegroundColor Yellow
+Write-Host "[2/4] Launching backend FastAPI job (0.0.0.0:8000)..." -ForegroundColor Yellow
 $BackendJob = Start-Job -ScriptBlock {
     param($path)
     Set-Location "$path/backend"
@@ -57,7 +74,7 @@ $BackendJob = Start-Job -ScriptBlock {
 } -ArgumentList $ScriptDir
 
 # Start Frontend job (listening on 0.0.0.0 for LAN/WiFi access)
-Write-Host "[3/3] Launching frontend React job (0.0.0.0:3000)..." -ForegroundColor Yellow
+Write-Host "[3/4] Launching frontend React job (0.0.0.0:3000)..." -ForegroundColor Yellow
 $FrontendJob = Start-Job -ScriptBlock {
     param($path)
     $env:HOST = "0.0.0.0"

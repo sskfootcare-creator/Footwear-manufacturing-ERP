@@ -21,6 +21,7 @@ from models.materials import QuantityUpdate
 from models.components import ComponentUpdate
 from models.workers import AssignmentUpdate, BulkAssign
 from models.vendors import GRNIn, GRNLineItem, DefectIn, PaymentIn
+from models.clients import extract_state_code, INDIAN_STATES_MAP
 from rate_limiter import upload_rate_limiter, pdf_rate_limiter
 from po_extractor import extract_po_from_pdf, extract_po_from_xlsx
 from pdf_card import build_production_card, build_production_card_dual_a4
@@ -2181,18 +2182,29 @@ async def create_or_update_client_master(request: Request):
         raise HTTPException(400, "Company name is required")
 
     cid = data.get("id") or data.get("_id")
+    client_gstin = (data.get("gstin") or data.get("client_gstin") or "").strip().upper()
+    client_billing_address = (data.get("billing_address") or "").strip()
+    client_state_code = extract_state_code(
+        state_code=data.get("state_code"),
+        gstin=client_gstin,
+        place_of_supply=data.get("state"),
+        address=client_billing_address,
+        fallback="09",
+    )
+    client_state_name = INDIAN_STATES_MAP.get(client_state_code, (data.get("state") or "Uttar Pradesh").strip())
+
     client_doc = {
         "company_name": company_name,
         "name": company_name,
         "contact_person": (data.get("contact_person") or "").strip(),
         "phone": (data.get("phone") or "").strip(),
         "email": (data.get("email") or "").strip(),
-        "gstin": (data.get("gstin") or data.get("client_gstin") or "").strip().upper(),
+        "gstin": client_gstin,
         "pan": (data.get("pan") or "").strip().upper(),
-        "billing_address": (data.get("billing_address") or "").strip(),
-        "shipping_address": (data.get("shipping_address") or data.get("billing_address") or "").strip(),
-        "state": (data.get("state") or "Uttar Pradesh").strip(),
-        "state_code": (data.get("state_code") or "09").strip(),
+        "billing_address": client_billing_address,
+        "shipping_address": (data.get("shipping_address") or client_billing_address).strip(),
+        "state": client_state_name,
+        "state_code": client_state_code,
         "payment_terms_days": int(data.get("payment_terms_days") or 30),
         "notes": (data.get("notes") or "").strip(),
         "is_active": bool(data.get("is_active", True)),
