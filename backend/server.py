@@ -236,6 +236,7 @@ from routes.online_orders import (
     import_configured_online_orders,
     import_dispatch_orders,
     import_monthly_report,
+    _classify_monthly_row,
     import_settlement,
     list_settlements,
     settlement_summary,

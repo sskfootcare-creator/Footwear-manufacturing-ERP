@@ -60,16 +60,34 @@ def stringify(doc: dict) -> dict:
     return doc
 
 
-async def _safe_find_one(collection, query):
+async def _safe_find_one(collection, *args, **kwargs):
     if collection is None:
         return None
+    fn = getattr(collection, "find_one", None)
+    if not fn:
+        return None
     try:
-        res = collection.find_one(query)
+        res = fn(*args, **kwargs)
         if inspect.isawaitable(res):
             return await res
         if isinstance(res, dict):
             return res
         return None
+    except Exception:
+        return None
+
+
+async def _safe_update_one(collection, *args, **kwargs):
+    if collection is None:
+        return None
+    fn = getattr(collection, "update_one", None)
+    if not fn:
+        return None
+    try:
+        res = fn(*args, **kwargs)
+        if inspect.isawaitable(res):
+            return await res
+        return res
     except Exception:
         return None
 
@@ -1960,6 +1978,408 @@ async def import_dispatch_orders(
     }
 
 
+def strip_excel_apostrophe(val: Any) -> str:
+    s = str(val or "").strip()
+    if s.startswith("'") or s.startswith("`"):
+        return s[1:].strip()
+    return s
+
+
+def apply_prefix_replacements(sku: str, replacements: Dict[str, str]) -> Tuple[str, Optional[str]]:
+    s = (sku or "").strip()
+    if not s or not replacements:
+        return s, None
+    for wrong in sorted(replacements.keys(), key=len, reverse=True):
+        if not wrong:
+            continue
+        right = str(replacements.get(wrong) or "")
+        if s.startswith(wrong):
+            rest = s[len(wrong):]
+            if not rest or rest[0] in "_-":
+                return right + rest, wrong
+    return s, None
+
+
+def _has_val(v: Any) -> bool:
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    if s.lower() in ("null", "nan", "none", "n/a", "na", "-"):
+        return False
+    return True
+
+
+async def _check_internal_dispatch_record(canon: dict, platform: str, db=None) -> bool:
+    if db is None:
+        db = get_db()
+    order_release_id = canon.get("order_release_id")
+    order_id = canon.get("order_id")
+    leaf_sku = canon.get("leaf_sku") or canon.get("leaf_sku_raw")
+    platform_lc = (platform or "").strip().lower()
+
+    item_or_conditions = []
+    if order_release_id:
+        item_or_conditions.append({"order_release_id": order_release_id})
+    if order_id:
+        if leaf_sku:
+            item_or_conditions.append({
+                "order_id": order_id,
+                "$or": [{"leaf_sku": leaf_sku}, {"leaf_sku_raw": leaf_sku}]
+            })
+        else:
+            item_or_conditions.append({"order_id": order_id})
+
+    if item_or_conditions:
+        item = await db.online_order_items.find_one({
+            "platform": platform_lc,
+            "$or": item_or_conditions,
+            "$and": [
+                {
+                    "$or": [
+                        {"stage": "dispatched"},
+                        {"dispatched_at": {"$ne": None}},
+                        {"was_packed": True},
+                        {"packed_on": {"$ne": None}},
+                    ]
+                }
+            ]
+        })
+        if item:
+            return True
+    return False
+
+
+async def _classify_monthly_row(canon: dict, platform: str = "", db=None) -> dict:
+    status = (canon.get("order_status") or "").strip().upper()
+
+    was_packed = _has_val(canon.get("packed_on"))
+    has_rto    = _has_val(canon.get("rto_creation_date"))
+    has_return = _has_val(canon.get("return_creation_date"))
+    cancelled_post_pack = (status == "F" and was_packed)
+
+    was_returned_to_stock = has_rto or has_return or cancelled_post_pack
+    is_pending    = status in ("SH", "PK")
+    is_net_sold   = was_packed and not was_returned_to_stock and not is_pending
+
+    has_dispatch_discrepancy = False
+    discrepancy_reason = None
+    never_touched = False
+
+    if not was_packed:
+        has_internal_dispatch = await _check_internal_dispatch_record(canon, platform, db=db)
+        if has_internal_dispatch:
+            never_touched = False
+            has_dispatch_discrepancy = True
+            discrepancy_reason = "Monthly report lacks packed_on date, but internal system records show unit was dispatched."
+            if "flags" not in canon:
+                canon["flags"] = []
+            canon["flags"].append("dispatch_discrepancy")
+            disc_text = "Discrepancy: source file lacks packed_on, but internal records confirm dispatch"
+            existing_reason = canon.get("exception_reason")
+            canon["exception_reason"] = f"{existing_reason} [{disc_text}]" if existing_reason else disc_text
+        else:
+            never_touched = True
+    else:
+        never_touched = False
+
+    if was_returned_to_stock:
+        if has_rto:
+            reason = "rto"
+        elif has_return:
+            reason = "customer_return"
+        elif cancelled_post_pack:
+            reason = "cancelled_after_pack"
+        else:
+            reason = "unknown"
+    else:
+        reason = None
+
+    canon["was_packed"]                = was_packed
+    canon["was_returned_to_stock"]     = was_returned_to_stock
+    canon["is_pending"]                = is_pending
+    canon["is_net_sold"]               = is_net_sold
+    canon["never_touched_inventory"]   = never_touched
+    canon["has_dispatch_discrepancy"]  = has_dispatch_discrepancy
+    canon["discrepancy_reason"]        = discrepancy_reason
+    canon["return_reason"]             = reason
+    return canon
+
+
+def _return_ref_id(platform: str, order_release_id: Optional[str],
+                   order_id: Optional[str], leaf_sku: str) -> str:
+    key = order_release_id or order_id or "no-order"
+    return f"monthly_return:{platform}:{key}:{leaf_sku}"
+
+
+async def _get_settlement_return_type(order_release_id: Optional[str],
+                                      leaf_sku: str, db=None) -> Optional[str]:
+    if db is None:
+        db = get_db()
+    if not order_release_id:
+        return None
+    try:
+        doc = await db.settlement_reverse.find_one({
+            "order_release_id": order_release_id,
+            "$or": [{"leaf_sku": leaf_sku}, {"sku_id": leaf_sku}],
+        })
+    except Exception:
+        return None
+    if not doc:
+        return None
+    rt = str(doc.get("return_type") or "").strip().lower()
+    if rt in ("damaged", "damage", "unsellable", "not_returnable"):
+        return "damaged"
+    return None
+
+
+async def _record_monthly_return(
+    *,
+    canon: dict,
+    platform: str,
+    batch_id: str,
+    user_email: str,
+    db=None,
+) -> dict:
+    if db is None:
+        db = get_db()
+    style_id   = canon.get("style_id")
+    style_code = canon.get("style_code")
+    color      = canon.get("color")
+    size       = canon.get("size") or canon.get("derived_size")
+    order_id   = canon.get("order_id")
+    order_release_id = canon.get("order_release_id")
+    leaf_sku   = canon.get("leaf_sku")
+
+    ref_id = _return_ref_id(platform, order_release_id, order_id, leaf_sku)
+
+    prior = await db.fg_stock_movements.find_one({
+        "reference_id":  ref_id,
+        "movement_type": {"$in": ["return_in", "return_restocked", "return_damaged"]},
+    })
+    if prior:
+        return {"skipped": True, "reason": "prior_movement_exists"}
+
+    settlement_flag = await _get_settlement_return_type(order_release_id, leaf_sku, db=db)
+    close_type = "return_damaged" if settlement_flag == "damaged" else "return_restocked"
+
+    from routes.inventory import _apply_movement
+    from models.inventory import FgStockMovementIn
+
+    await _apply_movement(
+        FgStockMovementIn(
+            style_id=style_id, color=color, size=size,
+            movement_type="return_in", quantity=1,
+            reference_type="online_order",
+            reference_id=ref_id,
+            notes=f"[{platform}] monthly-report {canon.get('return_reason')} · batch {batch_id}",
+        ),
+        user_email,
+        db=db,
+    )
+    await _apply_movement(
+        FgStockMovementIn(
+            style_id=style_id, color=color, size=size,
+            movement_type=close_type, quantity=1,
+            reference_type="online_order",
+            reference_id=ref_id,
+            notes=f"[{platform}] monthly-report reconciliation · reason={canon.get('return_reason')}",
+        ),
+        user_email,
+        db=db,
+    )
+    return {"skipped": False, "close_type": close_type}
+
+
+def _parse_sku_style_and_size(raw_sku: str) -> Tuple[str, str, str]:
+    s = (raw_sku or "").strip()
+    if s.startswith("FLL_") or s.startswith("FLL-"):
+        s = "FL" + s[3:]
+    m = re.match(r"^(.*?)[-_]([A-Za-z]{1,4})[-_]([0-9]{1,2}(?:\.[0-9])?)$", s)
+    if m:
+        return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+    m2 = re.match(r"^(.*?)[-_]([0-9]{1,2}(?:\.[0-9])?)$", s)
+    if m2:
+        return m2.group(1).strip(), "", m2.group(2).strip()
+    return s, "", ""
+
+
+async def _build_monthly_style_overview(
+    canonical_rows: List[Dict[str, Any]],
+    raw_rows: List[Dict[str, Any]],
+    platform: str,
+    filename: str,
+    db,
+) -> Dict[str, Any]:
+    dates = [c.get("packed_on") or c.get("delivered_on") or c.get("cancelled_on") for c in canonical_rows]
+    valid_dates = [str(d)[:7] for d in dates if d and len(str(d)) >= 7 and str(d)[:4].isdigit()]
+    month = max(set(valid_dates), key=valid_dates.count) if valid_dates else datetime.now(timezone.utc).strftime("%Y-%m")
+
+    existing_ov = await _safe_find_one(getattr(db, "online_monthly_reconciliation_overviews", None), {"platform": platform, "month": month})
+    saved_costs = {}
+    if existing_ov and isinstance(existing_ov, dict) and "styles" in existing_ov:
+        for st_item in existing_ov.get("styles", []):
+            if st_item.get("style_code") and st_item.get("unit_production_cost") is not None:
+                saved_costs[st_item["style_code"]] = float(st_item["unit_production_cost"])
+
+    baseline_snap = await _safe_find_one(getattr(db, "style_cost_snapshots", None), {"total_cost": {"$gt": 0}})
+    default_unit_cost = float(baseline_snap["total_cost"]) if (baseline_snap and isinstance(baseline_snap, dict) and "total_cost" in baseline_snap) else 210.0
+
+    grouped: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "style_code": "",
+        "brand": "",
+        "style_name": "",
+        "article_type": "",
+        "colors": set(),
+        "sizes": defaultdict(int),
+        "total_orders": 0,
+        "packed_qty": 0,
+        "returned_qty": 0,
+        "rto_qty": 0,
+        "cancelled_qty": 0,
+        "pending_qty": 0,
+        "net_sold_qty": 0,
+        "total_seller_price": 0.0,
+        "net_sold_seller_price": 0.0,
+        "final_amount_total": 0.0,
+    })
+
+    style_cost_cache = {}
+
+    for idx, c in enumerate(canonical_rows):
+        raw_r = raw_rows[idx] if idx < len(raw_rows) else {}
+        raw_sku = c.get("leaf_sku_raw") or c.get("leaf_sku") or ""
+        st_root, col, sz = _parse_sku_style_and_size(raw_sku)
+
+        van = str(raw_r.get("vendor article number") or "").strip()
+        style_key = st_root or van or (c.get("style_code") or raw_sku)
+
+        brand = str(raw_r.get("brand") or "").strip()
+        sname = str(raw_r.get("style name") or c.get("product_title") or "").strip()
+        atype = str(raw_r.get("article type") or "").strip()
+
+        sp = float(c.get("seller_price") or 0.0)
+        fa = float(c.get("final_amount") or 0.0)
+
+        g = grouped[style_key]
+        g["style_code"] = style_key
+        g["brand"] = brand or g["brand"]
+        g["style_name"] = sname or g["style_name"]
+        g["article_type"] = atype or g["article_type"]
+        if col:
+            g["colors"].add(col)
+
+        row_size = c.get("size") or sz or c.get("derived_size") or ""
+        if row_size:
+            g["sizes"][str(row_size)] += 1
+
+        g["total_orders"] += 1
+        g["total_seller_price"] += sp
+        g["final_amount_total"] += fa
+
+        if c.get("was_packed"):
+            g["packed_qty"] += 1
+
+        if c.get("return_reason") == "rto":
+            g["rto_qty"] += 1
+        elif c.get("return_reason") == "customer_return":
+            g["returned_qty"] += 1
+        elif c.get("never_touched_inventory") or c.get("return_reason") == "cancelled_after_pack":
+            g["cancelled_qty"] += 1
+        elif c.get("is_pending"):
+            g["pending_qty"] += 1
+
+        if c.get("is_net_sold"):
+            g["net_sold_qty"] += 1
+            g["net_sold_seller_price"] += sp
+
+    styles_list = []
+    tot_sold_units = 0
+    tot_sold_rev = 0.0
+    tot_prod_cost = 0.0
+
+    for st_code, g in sorted(grouped.items(), key=lambda x: x[1]["total_orders"], reverse=True):
+        if st_code in saved_costs:
+            u_cost = saved_costs[st_code]
+        else:
+            if st_code not in style_cost_cache:
+                snap = await _safe_find_one(getattr(db, "style_cost_snapshots", None), {"style_code": st_code}, sort=[("effective_date", -1)])
+                if snap and isinstance(snap, dict) and float(snap.get("total_cost", 0) or 0) > 0:
+                    style_cost_cache[st_code] = float(snap["total_cost"])
+                else:
+                    st_doc = await _safe_find_one(getattr(db, "styles", None), {
+                        "$or": [
+                            {"code": {"$regex": f"^{re.escape(st_code)}$", "$options": "i"}},
+                            {"article_number": {"$regex": f"^{re.escape(st_code)}$", "$options": "i"}}
+                        ]
+                    })
+                    if st_doc and isinstance(st_doc, dict):
+                        from routes.styles import compute_style_costing
+                        c_calc = compute_style_costing(st_doc)
+                        style_cost_cache[st_code] = float(c_calc.get("total_cost", 0) or default_unit_cost)
+                    else:
+                        style_cost_cache[st_code] = default_unit_cost
+            u_cost = style_cost_cache[st_code]
+
+        total_cogs = round(g["net_sold_qty"] * u_cost, 2)
+        gross_profit = round(g["net_sold_seller_price"] - total_cogs, 2)
+        margin = round((gross_profit / g["net_sold_seller_price"] * 100), 1) if g["net_sold_seller_price"] > 0 else 0.0
+
+        tot_sold_units += g["net_sold_qty"]
+        tot_sold_rev += g["net_sold_seller_price"]
+        tot_prod_cost += total_cogs
+
+        sorted_sizes = dict(sorted(g["sizes"].items(), key=lambda kv: (float(kv[0]) if kv[0].replace('.', '', 1).isdigit() else kv[0])))
+
+        styles_list.append({
+            "style_code":            st_code,
+            "brand":                 g["brand"] or "Generic",
+            "style_name":            g["style_name"] or st_code,
+            "article_type":          g["article_type"] or "Footwear",
+            "colors":                sorted(list(g["colors"])),
+            "sizes":                 sorted_sizes,
+            "total_orders":          g["total_orders"],
+            "packed_qty":            g["packed_qty"],
+            "returned_qty":          g["returned_qty"],
+            "rto_qty":               g["rto_qty"],
+            "cancelled_qty":         g["cancelled_qty"],
+            "pending_qty":           g["pending_qty"],
+            "net_sold_qty":          g["net_sold_qty"],
+            "total_seller_price":    round(g["total_seller_price"], 2),
+            "net_sold_seller_price": round(g["net_sold_seller_price"], 2),
+            "unit_production_cost":  round(u_cost, 2),
+            "total_production_cost": total_cogs,
+            "gross_profit":          gross_profit,
+            "margin_pct":            margin,
+        })
+
+    overall_gross_profit = round(tot_sold_rev - tot_prod_cost, 2)
+    overall_margin = round((overall_gross_profit / tot_sold_rev * 100), 1) if tot_sold_rev > 0 else 0.0
+
+    overview = {
+        "platform":                  platform,
+        "month":                     month,
+        "filename":                  filename,
+        "styles_count":              len(styles_list),
+        "total_orders":              len(canonical_rows),
+        "total_packed":              sum(s["packed_qty"] for s in styles_list),
+        "total_returned":            sum(s["returned_qty"] for s in styles_list),
+        "total_rto":                 sum(s["rto_qty"] for s in styles_list),
+        "total_cancelled":           sum(s["cancelled_qty"] for s in styles_list),
+        "total_pending":             sum(s["pending_qty"] for s in styles_list),
+        "total_net_sold":            tot_sold_units,
+        "total_seller_revenue":      round(sum(s["total_seller_price"] for s in styles_list), 2),
+        "net_sold_revenue":          round(tot_sold_rev, 2),
+        "total_cost_of_production":  round(tot_prod_cost, 2),
+        "estimated_gross_profit":    overall_gross_profit,
+        "overall_margin_pct":        overall_margin,
+        "styles":                    styles_list,
+        "updated_at":                now_iso(),
+    }
+    return overview
+
+
 @online_orders_router.post("/online-orders/monthly-report-import", dependencies=[Depends(bulk_import_rate_limiter)])
 async def import_monthly_report(
     file: UploadFile = File(...),
@@ -2004,58 +2424,365 @@ async def import_monthly_report(
 
     from routes.sku_map import resolve_style, split_leaf_sku
 
-    matched_count = 0
-    unresolved_count = 0
-    records = []
+    replacements = cfg_doc.get("known_sku_prefix_replacements") or {}
+    prefixes = cfg_doc.get("known_sku_prefixes_to_strip") or []
 
-    for r in rows:
-        raw_leaf = r.get(resolved_cols.get("leaf_sku", ""), "").strip() if resolved_cols.get("leaf_sku") else ""
+    style_lookup_cache: Dict[str, Any] = {}
+    resolve_cache: Dict[Tuple[str, str, str, str], Any] = {}
+    canonical_rows: List[Dict[str, Any]] = []
+
+    for idx, r in enumerate(rows, start=1):
+        def _v(canon_key: str):
+            col = resolved_cols.get(canon_key)
+            return r.get(col) if col else None
+
+        def _str(k: str) -> Optional[str]:
+            s = str(_v(k) or "").strip()
+            return s if s else None
+
+        def _num(k: str) -> Optional[float]:
+            try:
+                s = str(_v(k) or "").strip()
+                if not s or not _has_val(s):
+                    return None
+                return float(s.replace(",", "").replace("₹", "").strip())
+            except Exception:
+                return None
+
+        canon: Dict[str, Any] = {
+            "source_row_index": idx,
+            "platform":         platform_lc,
+            "raw_row":          {k: (str(v) if v is not None else "") for k, v in r.items()},
+            "flags":            [],
+            "matched":          False,
+        }
+
+        canon["order_id"]             = _str("order_id")
+        canon["order_release_id"]     = _str("order_release_id")
+        canon["size"]                 = _str("size")
+        canon["order_status"]         = _str("order_status")
+        canon["packed_on"]            = _str("packed_on")
+        canon["delivered_on"]         = _str("delivered_on")
+        canon["cancelled_on"]         = _str("cancelled_on")
+        canon["rto_creation_date"]    = _str("rto_creation_date")
+        canon["return_creation_date"] = _str("return_creation_date")
+        canon["product_title"]        = _str("product_title")
+        canon["final_amount"]         = _num("final_amount")
+        canon["total_mrp"]            = _num("total_mrp")
+        canon["discount"]             = _num("discount")
+        canon["seller_price"]         = _num("seller_price")
+
+        raw_leaf = str(_v("leaf_sku") or "").strip()
+        canon["leaf_sku_raw"] = raw_leaf
         if not raw_leaf:
+            canon["flags"].append("empty_leaf_sku")
+            canon["exception_reason"] = "empty leaf_sku"
+            await _classify_monthly_row(canon, platform_lc, db=db)
+            canonical_rows.append(canon)
             continue
 
-        cleaned_leaf = strip_known_prefixes(raw_leaf, cfg_doc.get("known_sku_prefixes_to_strip", []))
-        group_id, size_token, _ = split_leaf_sku(cleaned_leaf)
+        leaf = strip_excel_apostrophe(raw_leaf)
+        leaf_after_replace, replaced_from = apply_prefix_replacements(leaf, replacements)
+        leaf_stripped = strip_known_prefixes(leaf_after_replace, prefixes)
+        canon["leaf_sku_replaced_prefix"] = replaced_from
+        canon["leaf_sku"] = leaf_stripped
 
-        result = await resolve_style(
-            source_type="online_channel",
-            source_name=platform_lc,
-            external_sku=cleaned_leaf,
-            external_color=None,
-            external_size=size_token or None,
+        group_id, size_tok, split_flags = split_leaf_sku(leaf_stripped)
+        canon["group_id"] = group_id
+        canon["derived_size"] = size_tok
+        canon["flags"].extend(split_flags)
+
+        cache_key = (leaf_stripped, group_id or "", str(canon.get("size") or size_tok or ""), str(canon.get("color") or ""))
+        if cache_key in resolve_cache:
+            resolved = resolve_cache[cache_key]
+        else:
+            resolved = {"matched": False, "match_via": None}
+            for candidate in (leaf_stripped, group_id):
+                if not candidate:
+                    continue
+                res = await resolve_style(
+                    source_type="online_channel",
+                    source_name=platform_lc,
+                    external_sku=candidate,
+                    external_color=canon.get("color") or None,
+                    external_size=canon.get("size") or size_tok or None,
+                    db=db,
+                )
+                if res.get("matched") and res.get("matched_exact", True):
+                    resolved = dict(res)
+                    resolved["resolved_from"] = candidate
+                    break
+                elif res.get("matched") and not res.get("matched_exact", True):
+                    resolved = dict(res)
+                    resolved["resolved_from"] = candidate
+                    resolved["matched"] = False
+                    resolved["unmapped_reason"] = f"Unmapped color/size for SKU '{candidate}'"
+                    break
+
+            # Fallback: if group_id matches a style in styles collection directly
+            if not resolved.get("matched"):
+                van = r.get("vendor article number", "").strip() if "vendor article number" in r else ""
+                cands_to_check = [c for c in [van, group_id, leaf_stripped] if c]
+                for cand in cands_to_check:
+                    if cand in style_lookup_cache:
+                        st_cand = style_lookup_cache[cand]
+                    else:
+                        st_cand = await _safe_find_one(getattr(db, "styles", None), {
+                            "$or": [
+                                {"code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}},
+                                {"name": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}},
+                                {"article_number": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}}
+                            ]
+                        })
+                        style_lookup_cache[cand] = st_cand
+                    if st_cand:
+                        resolved = {
+                            "matched": True,
+                            "match_via": "style_code_direct",
+                            "style_id": str(st_cand["_id"]),
+                            "style_code": st_cand.get("code", ""),
+                            "color": "",
+                            "size": canon.get("size") or size_tok or "",
+                        }
+                        break
+            resolve_cache[cache_key] = resolved
+
+        canon.update({
+            "matched":    bool(resolved.get("matched")),
+            "match_via":  resolved.get("match_via"),
+            "style_id":   resolved.get("style_id"),
+            "style_code": resolved.get("style_code"),
+            "color":      resolved.get("color") or "",
+            "size":       resolved.get("size") or (canon.get("size") or size_tok),
+        })
+        if not canon["matched"]:
+            canon["exception_reason"] = resolved.get("unmapped_reason") or resolved.get("reason") or "no style match in sku_map"
+
+        await _classify_monthly_row(canon, platform_lc, db=db)
+        canonical_rows.append(canon)
+
+    def _count(pred) -> int:
+        return sum(1 for c in canonical_rows if pred(c))
+
+    stats = {
+        "total_rows":              len(canonical_rows),
+        "packed":                  _count(lambda c: c.get("was_packed")),
+        "never_touched_inventory": _count(lambda c: c.get("never_touched_inventory")),
+        "discrepancies":           _count(lambda c: c.get("has_dispatch_discrepancy")),
+        "returned_to_stock":       _count(lambda c: c.get("was_returned_to_stock")),
+        "pending":                 _count(lambda c: c.get("is_pending")),
+        "net_sold":                _count(lambda c: c.get("is_net_sold")),
+        "matched":                 _count(lambda c: c.get("matched")),
+        "unmatched":               _count(lambda c: not c.get("matched")),
+        "empty_leaf_sku":          _count(lambda c: "empty_leaf_sku" in (c.get("flags") or [])),
+    }
+    breakdown = {
+        "rto":                  _count(lambda c: c.get("return_reason") == "rto"),
+        "customer_return":      _count(lambda c: c.get("return_reason") == "customer_return"),
+        "cancelled_after_pack": _count(lambda c: c.get("return_reason") == "cancelled_after_pack"),
+    }
+    stats["reason_breakdown"] = breakdown
+
+    # Build monthly style grouping overview (e.g. FL_DB_016 with all sizes grouped and COGS calculated)
+    style_overview = await _build_monthly_style_overview(
+        canonical_rows=canonical_rows,
+        raw_rows=rows,
+        platform=platform_lc,
+        filename=file.filename or "",
+        db=db,
+    )
+
+    import_batch_id = f"MREP_{platform_lc}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    committed: Dict[str, int] = {
+        "items_upserted":       0,
+        "orders_upserted":      0,
+        "returns_posted":       0,
+        "returns_skipped":      stats.get("returned_to_stock", 0),
+        "return_damaged_posted":0,
+        "exceptions_queued":    0,
+    }
+
+    if not dry_run:
+        exceptions: List[Dict[str, Any]] = []
+        for canon in canonical_rows:
+            src_row = canon.get("source_row_index")
+            order_release_id = canon.get("order_release_id")
+            order_id         = canon.get("order_id")
+
+            if not canon.get("matched") or "empty_leaf_sku" in (canon.get("flags") or []):
+                exceptions.append({
+                    "import_batch_id":  import_batch_id,
+                    "platform":         platform_lc,
+                    "kind":             "monthly_report_import",
+                    "source_row_index": src_row,
+                    "order_id":         order_id,
+                    "order_release_id": order_release_id,
+                    "leaf_sku_raw":     canon.get("leaf_sku_raw"),
+                    "leaf_sku":         canon.get("leaf_sku"),
+                    "reason":           canon.get("exception_reason") or "unresolved",
+                    "flags":            canon.get("flags"),
+                    "raw_row":          canon.get("raw_row"),
+                    "created_at":       now_iso(),
+                    "resolved":         False,
+                })
+                continue
+
+            style_id   = canon["style_id"]
+            style_code = canon["style_code"]
+            color      = canon["color"]
+            size       = canon.get("size") or canon.get("derived_size")
+
+            match_q: Dict[str, Any] = {"platform": platform_lc}
+            if order_release_id:
+                match_q["order_release_id"] = order_release_id
+            elif order_id:
+                match_q["order_id"] = order_id
+            existing_order = await db.online_orders.find_one(match_q) if len(match_q) > 1 else None
+            if existing_order is None:
+                new_order = {
+                    "platform":            platform_lc,
+                    "order_id":            order_id,
+                    "order_release_id":    order_release_id,
+                    "channel":             platform_lc,
+                    "order_status":        canon.get("order_status"),
+                    "packed_on":           canon.get("packed_on"),
+                    "delivered_on":        canon.get("delivered_on"),
+                    "cancelled_on":        canon.get("cancelled_on"),
+                    "rto_creation_date":   canon.get("rto_creation_date"),
+                    "return_creation_date":canon.get("return_creation_date"),
+                    "source":              "monthly_report_import",
+                    "monthly_report_batch_id": import_batch_id,
+                    "created_at":          now_iso(),
+                    "updated_at":          now_iso(),
+                }
+                res = await db.online_orders.insert_one(new_order)
+                online_order_pk = str(res.inserted_id)
+                committed["orders_upserted"] += 1
+            else:
+                online_order_pk = str(existing_order["_id"])
+                await db.online_orders.update_one(
+                    {"_id": existing_order["_id"]},
+                    {"$set": {
+                        "order_status":         canon.get("order_status"),
+                        "packed_on":            canon.get("packed_on") or existing_order.get("packed_on"),
+                        "delivered_on":         canon.get("delivered_on"),
+                        "cancelled_on":         canon.get("cancelled_on"),
+                        "rto_creation_date":    canon.get("rto_creation_date"),
+                        "return_creation_date": canon.get("return_creation_date"),
+                        "monthly_report_batch_id": import_batch_id,
+                        "updated_at":           now_iso(),
+                    }}
+                )
+
+            item_q: Dict[str, Any] = {
+                "online_order_id": ObjectId(online_order_pk),
+                "style_id":        ObjectId(style_id) if ObjectId.is_valid(str(style_id)) else style_id,
+                "color":           color,
+                "size":            size,
+            }
+            existing_item = await db.online_order_items.find_one(item_q)
+
+            item_set = {
+                "platform":               platform_lc,
+                "order_id":               order_id,
+                "order_release_id":       order_release_id,
+                "style_id":               ObjectId(style_id) if ObjectId.is_valid(str(style_id)) else style_id,
+                "style_code":             style_code,
+                "color":                  color,
+                "size":                   size,
+                "leaf_sku":               canon.get("leaf_sku"),
+                "leaf_sku_raw":           canon.get("leaf_sku_raw"),
+                "was_packed":             canon.get("was_packed"),
+                "was_returned_to_stock":  canon.get("was_returned_to_stock"),
+                "is_pending":             canon.get("is_pending"),
+                "is_net_sold":            canon.get("is_net_sold"),
+                "never_touched_inventory":canon.get("never_touched_inventory"),
+                "has_dispatch_discrepancy":canon.get("has_dispatch_discrepancy"),
+                "discrepancy_reason":     canon.get("discrepancy_reason"),
+                "return_reason":          canon.get("return_reason"),
+                "order_status":           canon.get("order_status"),
+                "packed_on":              canon.get("packed_on"),
+                "delivered_on":           canon.get("delivered_on"),
+                "cancelled_on":           canon.get("cancelled_on"),
+                "rto_creation_date":      canon.get("rto_creation_date"),
+                "return_creation_date":   canon.get("return_creation_date"),
+                "final_amount":           canon.get("final_amount"),
+                "total_mrp":              canon.get("total_mrp"),
+                "discount":               canon.get("discount"),
+                "seller_price":           canon.get("seller_price"),
+                "monthly_report_batch_id":import_batch_id,
+                "source":                 (existing_item.get("source") if existing_item else "monthly_report_import"),
+                "updated_at":             now_iso(),
+            }
+            if existing_item:
+                await db.online_order_items.update_one(
+                    {"_id": existing_item["_id"]},
+                    {"$set": item_set}
+                )
+            else:
+                item_set["online_order_id"] = ObjectId(online_order_pk)
+                item_set["created_at"]      = now_iso()
+                await db.online_order_items.insert_one(item_set)
+            committed["items_upserted"] += 1
+
+            if canon.get("has_dispatch_discrepancy"):
+                exceptions.append({
+                    "import_batch_id":  import_batch_id,
+                    "platform":         platform_lc,
+                    "kind":             "monthly_report_dispatch_discrepancy",
+                    "source_row_index": src_row,
+                    "order_id":         order_id,
+                    "order_release_id": order_release_id,
+                    "style_id":         style_id,
+                    "style_code":       style_code,
+                    "color":            color,
+                    "size":             size,
+                    "leaf_sku":         canon.get("leaf_sku"),
+                    "reason":           canon.get("discrepancy_reason") or "Dispatch discrepancy",
+                    "flags":            canon.get("flags"),
+                    "raw_row":          canon.get("raw_row"),
+                    "created_at":       now_iso(),
+                    "resolved":         False,
+                })
+
+            # Note: Inventory restocking is handled daily when physical return/RTO parcels
+            # are received and inspected at warehouse gate. Monthly report is strictly for
+            # sales/returns reconciliation and profit/COGS overview, so no return movements are posted.
+
+        if exceptions:
+            await db.online_order_exceptions.insert_many(exceptions)
+            committed["exceptions_queued"] = len(exceptions)
+
+        # Save / upsert the monthly style overview into online_monthly_reconciliation_overviews
+        await _safe_update_one(
+            getattr(db, "online_monthly_reconciliation_overviews", None),
+            {"platform": platform_lc, "month": style_overview["month"]},
+            {"$set": style_overview},
+            upsert=True,
+        )
+
+        await _log_activity(
+            "MONTHLY_REPORT_IMPORT", "online_orders",
+            f"{platform_lc}: {committed['items_upserted']} items, "
+            f"{len(style_overview['styles'])} styles reconciled (month {style_overview['month']}), "
+            f"{committed['exceptions_queued']} exceptions "
+            f"(batch {import_batch_id})",
+            u.get("email", ""),
             db=db,
         )
 
-        if result["matched"]:
-            matched_count += 1
-            records.append({
-                "platform": platform_lc,
-                "order_id": r.get(resolved_cols.get("order_id", ""), ""),
-                "order_release_id": r.get(resolved_cols.get("order_release_id", ""), ""),
-                "style_id": result["style_id"],
-                "style_code": result["style_code"],
-                "color": result["color"],
-                "size": result["size"],
-                "order_status": r.get(resolved_cols.get("order_status", ""), ""),
-                "packed_on": r.get(resolved_cols.get("packed_on", ""), ""),
-                "delivered_on": r.get(resolved_cols.get("delivered_on", ""), ""),
-                "cancelled_on": r.get(resolved_cols.get("cancelled_on", ""), ""),
-                "rto_creation_date": r.get(resolved_cols.get("rto_creation_date", ""), ""),
-                "return_creation_date": r.get(resolved_cols.get("return_creation_date", ""), ""),
-                "final_amount": float(r.get(resolved_cols.get("final_amount", ""), 0.0) or 0.0) if resolved_cols.get("final_amount") else 0.0,
-                "created_at": now_iso(),
-            })
-        else:
-            unresolved_count += 1
-
-    if not dry_run and records:
-        await db.online_orders_monthly.insert_many(records)
-
     return {
-        "platform": platform_lc,
-        "total_rows": len(rows),
-        "matched_count": matched_count,
-        "unresolved_count": unresolved_count,
-        "dry_run": dry_run,
+        "platform":           platform_lc,
+        "role":               "monthly_report",
+        "filename":           file.filename or "",
+        "header_row_1_based": 1,
+        "header":             headers,
+        "dry_run":            dry_run,
+        "stats":              stats,
+        "committed":          committed if not dry_run else None,
+        "import_batch_id":    import_batch_id,
+        "rows":               canonical_rows,
+        "style_overview":     style_overview,
     }
 
 
@@ -2227,25 +2954,164 @@ async def settlement_summary(
     }
 
 
+class UpdateStyleCostPayload(BaseModel):
+    platform: str
+    month: str
+    style_code: str
+    unit_production_cost: float
+
+
 @online_orders_router.get("/online-orders/reconciliation-summary")
 async def reconciliation_summary(
     request: Request,
     platform: Optional[str] = None,
+    month: Optional[str] = None,
 ):
     await _get_user(request)
     db = get_db()
-    pq = {"channel": platform.lower()} if platform else {}
+    platform_lc = platform.lower().strip() if platform else None
+
+    pq = {"channel": platform_lc} if platform_lc else {}
     total_orders = await db.production_jobs.count_documents({**pq, "source_type": "online_channel"})
 
-    sq = {"platform": platform.lower()} if platform else {}
+    sq = {"platform": platform_lc} if platform_lc else {}
     settled_orders = await db.online_settlements.count_documents(sq)
 
-    return {
+    ov_query: Dict[str, Any] = {}
+    if platform_lc:
+        ov_query["platform"] = platform_lc
+    if month:
+        ov_query["month"] = month
+
+    overview_doc = await _safe_find_one(
+        getattr(db, "online_monthly_reconciliation_overviews", None),
+        ov_query,
+        sort=[("month", -1), ("updated_at", -1)],
+    )
+
+    available_months: List[str] = []
+    if hasattr(db, "online_monthly_reconciliation_overviews"):
+        col = db.online_monthly_reconciliation_overviews
+        if hasattr(col, "distinct"):
+            try:
+                m_filter = {"platform": platform_lc} if platform_lc else {}
+                distinct_res = col.distinct("month", m_filter)
+                if inspect.isawaitable(distinct_res):
+                    distinct_res = await distinct_res
+                available_months = sorted([str(m) for m in (distinct_res or []) if m], reverse=True)
+            except Exception:
+                pass
+
+    active_month = month or (overview_doc.get("month") if overview_doc else (available_months[0] if available_months else None))
+
+    res: Dict[str, Any] = {
         "platform": platform or "all",
+        "month": active_month,
+        "available_months": available_months,
         "total_orders": total_orders,
         "settled_orders": settled_orders,
         "unsettled_orders": max(0, total_orders - settled_orders),
     }
+
+    if overview_doc and isinstance(overview_doc, dict):
+        tot_rows = overview_doc.get("total_orders", 0)
+        packed = overview_doc.get("total_packed", 0)
+        ret_cust = overview_doc.get("total_returned", 0)
+        rto = overview_doc.get("total_rto", 0)
+        cxl = overview_doc.get("total_cancelled", 0)
+        pending = overview_doc.get("total_pending", 0)
+        net_sold = overview_doc.get("total_net_sold", 0)
+
+        res.update({
+            "total_rows":              tot_rows,
+            "packed":                  packed,
+            "returned_to_stock":       ret_cust + rto,
+            "pending":                 pending,
+            "net_sold":                net_sold,
+            "never_touched_inventory": cxl,
+            "discrepancies":           0,
+            "reason_breakdown": {
+                "rto":                  rto,
+                "customer_return":      ret_cust,
+                "cancelled_after_pack": cxl,
+            },
+            "overview":                stringify(overview_doc),
+        })
+    else:
+        res.update({
+            "total_rows":              0,
+            "packed":                  0,
+            "returned_to_stock":       0,
+            "pending":                 0,
+            "net_sold":                0,
+            "never_touched_inventory": 0,
+            "discrepancies":           0,
+            "reason_breakdown":        {"rto": 0, "customer_return": 0, "cancelled_after_pack": 0},
+            "overview":                None,
+        })
+
+    return res
+
+
+@online_orders_router.put("/online-orders/monthly-reconciliation-overview/cost")
+async def update_monthly_style_cost(
+    payload: UpdateStyleCostPayload,
+    request: Request,
+):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = get_db()
+
+    platform_lc = payload.platform.lower().strip()
+    month = payload.month.strip()
+    style_code = payload.style_code.strip()
+    new_unit_cost = max(0.0, float(payload.unit_production_cost))
+
+    doc = await _safe_find_one(getattr(db, "online_monthly_reconciliation_overviews", None), {
+        "platform": platform_lc,
+        "month": month,
+    })
+    if not doc or not isinstance(doc, dict):
+        raise HTTPException(404, f"Overview for {platform_lc} / {month} not found")
+
+    styles = doc.get("styles", [])
+    found = False
+    tot_sold_rev = 0.0
+    tot_prod_cost = 0.0
+
+    for s in styles:
+        if s.get("style_code") == style_code:
+            s["unit_production_cost"] = round(new_unit_cost, 2)
+            cogs = round(s.get("net_sold_qty", 0) * new_unit_cost, 2)
+            s["total_production_cost"] = cogs
+            gp = round(float(s.get("net_sold_seller_price", 0) or 0) - cogs, 2)
+            s["gross_profit"] = gp
+            sold_sp = float(s.get("net_sold_seller_price", 0) or 0)
+            s["margin_pct"] = round((gp / sold_sp * 100), 1) if sold_sp > 0 else 0.0
+            found = True
+        tot_sold_rev += float(s.get("net_sold_seller_price", 0) or 0)
+        tot_prod_cost += float(s.get("total_production_cost", 0) or 0)
+
+    if not found:
+        raise HTTPException(404, f"Style '{style_code}' not found in overview")
+
+    overall_gp = round(tot_sold_rev - tot_prod_cost, 2)
+    overall_margin = round((overall_gp / tot_sold_rev * 100), 1) if tot_sold_rev > 0 else 0.0
+
+    update_data = {
+        "styles": styles,
+        "total_cost_of_production": round(tot_prod_cost, 2),
+        "estimated_gross_profit": overall_gp,
+        "overall_margin_pct": overall_margin,
+        "updated_at": now_iso(),
+    }
+    await _safe_update_one(
+        getattr(db, "online_monthly_reconciliation_overviews", None),
+        {"_id": doc["_id"]},
+        {"$set": update_data},
+    )
+    doc.update(update_data)
+    return stringify(doc)
 
 
 async def _parse_and_resolve_order_row(

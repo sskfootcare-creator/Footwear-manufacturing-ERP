@@ -8,6 +8,7 @@ import { Drawer } from "./Materials";
 import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
   ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, IndianRupee, Calendar,
+  Search, Download, Edit2, TrendingUp, Layers,
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -1151,16 +1152,13 @@ function MonthlyReportDrawer({ onClose, onDone }) {
           <>
             <div className="bg-indigo-50 border-2 border-indigo-200 px-4 py-3 text-sm text-indigo-900">
               <div className="font-bold mb-1 flex items-center gap-2">
-                <ScrollText className="w-4 h-4" /> Monthly report — inventory reconciliation
+                <ScrollText className="w-4 h-4" /> Monthly report — sales & style reconciliation
               </div>
               <div className="text-xs leading-snug">
-                The daily dispatch file only records packing. This monthly report tells us which of those
-                units were <span className="font-bold">returned</span> (RTO / customer return /
-                cancelled-after-pack) and must go back to <span className="font-mono">ready_stock_qty</span>.
-                Classification is <b>NOT</b> "status=C means sold" — a "C" (delivered) row with a
-                <span className="font-mono"> return_creation_date</span> is a return, and an "F" (cancelled)
-                row with a <span className="font-mono">packed_on</span> date consumed inventory before
-                cancellation. This importer applies the exact rules from the spec.
+                Reconciles monthly platform reports (e.g. Myntra / Flipkart). Calculates actual net units sold, customer returns & RTOs, groups all sizes under each external style (e.g. <span className="font-mono font-bold">FL_DB_016</span>), computes production cost of goods sold (COGS), and stores the monthly financial overview.
+                <div className="mt-1 font-semibold text-indigo-800">
+                  Note: Physical returns are received and restocked daily at the warehouse gate; this monthly reconciliation report does not duplicate physical inventory restocking.
+                </div>
               </div>
             </div>
 
@@ -1226,16 +1224,21 @@ function MonthlyReportDrawer({ onClose, onDone }) {
           <div className="space-y-3">
             <div className="bg-indigo-50 border-2 border-indigo-300 px-4 py-4 text-sm text-indigo-900">
               <div className="font-bold flex items-center gap-2 text-base mb-1">
-                <CheckCircle2 className="w-5 h-5" /> Reconciliation committed
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" /> Reconciliation committed successfully
               </div>
               <div className="text-xs font-mono mb-3">batch: {committed.import_batch_id}</div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <MiniStat label="items upserted" value={committed.committed?.items_upserted ?? 0} accent="#0F172A" />
-                <MiniStat label="orders upserted" value={committed.committed?.orders_upserted ?? 0} accent="#C27842" />
-                <MiniStat label="returns restocked" value={committed.committed?.returns_posted ?? 0} accent="#16A34A" />
-                <MiniStat label="returns damaged" value={committed.committed?.return_damaged_posted ?? 0} accent="#B91C1C" />
-                <MiniStat label="idempotent skipped" value={committed.committed?.returns_skipped ?? 0} accent="#64748B" />
+                <MiniStat label="styles reconciled" value={committed.style_overview?.styles_count ?? committed.committed?.items_upserted ?? 0} accent="#0F172A" />
+                <MiniStat label="net sold units" value={committed.style_overview?.total_net_sold ?? 0} accent="#16A34A" />
+                <MiniStat label="net revenue" value={`₹${Math.round(committed.style_overview?.net_sold_revenue ?? 0).toLocaleString()}`} accent="#2563EB" />
+                <MiniStat label="production cogs" value={`₹${Math.round(committed.style_overview?.total_cost_of_production ?? 0).toLocaleString()}`} accent="#D97706" />
+                <MiniStat label="gross profit" value={`₹${Math.round(committed.style_overview?.estimated_gross_profit ?? 0).toLocaleString()}`} accent="#059669" />
+                <MiniStat label="overall margin" value={`${committed.style_overview?.overall_margin_pct ?? 0}%`} accent="#7C3AED" />
+                <MiniStat label="items upserted" value={committed.committed?.items_upserted ?? 0} accent="#64748B" />
                 <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
+              </div>
+              <div className="mt-3 text-[11px] text-slate-600 bg-white/70 p-2 rounded border border-indigo-200">
+                Monthly style overview saved for month <span className="font-mono font-bold">{committed.style_overview?.month}</span>. Physical return parcels are received & restocked daily at the warehouse gate.
               </div>
             </div>
             <div className="flex gap-3">
@@ -1255,7 +1258,9 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
   const rows = preview.rows || [];
   const stats = preview.stats || {};
   const breakdown = stats.reason_breakdown || {};
+  const styleOverview = preview.style_overview;
 
+  const [activeTab, setActiveTab] = useState(styleOverview?.styles?.length ? "styles" : "rows");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [filterMode, setFilterMode] = useState("all"); // "all" | "discrepancies" | "unmatched" | "matched"
@@ -1293,114 +1298,175 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
         <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
       </div>
 
-      {/* Filter and pagination bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border-2 border-slate-200 p-2.5 rounded text-xs">
-        <div className="flex items-center gap-1.5">
-          <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] mr-1">Filter:</span>
-          <button
-            type="button"
-            onClick={() => { setFilterMode("all"); setPage(1); }}
-            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"}`}
-          >
-            All ({rows.length})
-          </button>
-          {stats.discrepancies > 0 && (
-            <button
-              type="button"
-              onClick={() => { setFilterMode("discrepancies"); setPage(1); }}
-              className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "discrepancies" ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-300 hover:bg-amber-50"}`}
-            >
-              Discrepancies ({stats.discrepancies})
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => { setFilterMode("unmatched"); setPage(1); }}
-            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "unmatched" ? "bg-red-600 text-white" : "bg-white text-red-700 border border-red-200 hover:bg-red-50"}`}
-          >
-            Unmatched ({stats.unmatched ?? 0})
-          </button>
-          <button
-            type="button"
-            onClick={() => { setFilterMode("matched"); setPage(1); }}
-            className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "matched" ? "bg-emerald-600 text-white" : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"}`}
-          >
-            Matched ({stats.matched ?? 0})
-          </button>
-        </div>
-
-        <PaginationControls
-          currentPage={currentPage}
-          totalItems={filteredRows.length}
-          pageSize={pageSize}
-          onPageChange={setPage}
-          onPageSizeChange={setPageSize}
-          pageSizeOptions={[50, 100, 250, 500]}
-          allowAll
-          rangeTextFormat="compact"
-          testIdPrefix="return-preview"
-          showFirstLast={false}
-          className="pt-0 border-t-0"
-        />
+      {/* Sub-tabs: Style Overview & Costing VS Raw Order Rows */}
+      <div className="flex border-b border-slate-200 gap-4 pt-1">
+        <button
+          type="button"
+          onClick={() => setActiveTab("styles")}
+          className={`pb-2 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+            activeTab === "styles"
+              ? "border-slate-900 text-slate-900"
+              : "border-transparent text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <Layers className="w-3.5 h-3.5" />
+          Style Overview & Production Cost ({styleOverview?.styles_count ?? styleOverview?.styles?.length ?? 0} styles)
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("rows")}
+          className={`pb-2 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+            activeTab === "rows"
+              ? "border-slate-900 text-slate-900"
+              : "border-transparent text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <ScrollText className="w-3.5 h-3.5" />
+          Order Rows ({rows.length})
+        </button>
       </div>
 
-      {/* Rows table — status columns instead of dispatch fields */}
-      <div className="border-2 border-slate-200 rounded overflow-hidden">
-        <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
-              <tr>
-                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
-                <th className="text-left p-2 border-b">Release</th>
-                <th className="text-left p-2 border-b">Status</th>
-                <th className="text-left p-2 border-b">Leaf SKU</th>
-                <th className="text-left p-2 border-b">packed_on</th>
-                <th className="text-left p-2 border-b">delivered_on</th>
-                <th className="text-left p-2 border-b">return / rto / cancel</th>
-                <th className="text-left p-2 border-b">Classification</th>
-              </tr>
-            </thead>
-            <tbody>
-              {paginatedRows.map((r, i) => (
-                <tr key={i} className={`border-b border-neutral-100 ${r.has_dispatch_discrepancy ? "bg-amber-50/50" : !r.matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                  <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
-                  <td className="p-2 font-mono text-[11px]">
-                    <div>{r.order_id || "—"}</div>
-                    <div className="text-emerald-700">{r.order_release_id || "—"}</div>
-                  </td>
-                  <td className="p-2 font-mono">{r.order_status || "—"}</td>
-                  <td className="p-2 font-mono">
-                    {r.leaf_sku_raw || "—"}
-                    {r.leaf_sku_replaced_prefix && (
-                      <span className="ml-1 text-[9px] text-purple-800 bg-purple-100 border border-purple-300 rounded px-1">
-                        {r.leaf_sku_replaced_prefix}→fix
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-2 text-[11px] whitespace-nowrap">{r.packed_on || "—"}</td>
-                  <td className="p-2 text-[11px] whitespace-nowrap">{r.delivered_on || "—"}</td>
-                  <td className="p-2 text-[11px] whitespace-nowrap">
-                    {r.return_creation_date && <div className="text-red-700">ret: {r.return_creation_date}</div>}
-                    {r.rto_creation_date && <div className="text-red-700">rto: {r.rto_creation_date}</div>}
-                    {r.cancelled_on && <div className="text-amber-700">cxl: {r.cancelled_on}</div>}
-                    {(!r.return_creation_date && !r.rto_creation_date && !r.cancelled_on) && "—"}
-                  </td>
-                  <td className="p-2">
-                    <ClassificationBadges r={r} />
-                  </td>
-                </tr>
-              ))}
-              {paginatedRows.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-6 text-center text-sm text-slate-400 italic">
-                    {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
-                  </td>
-                </tr>
+      {activeTab === "styles" && styleOverview && (
+        <div className="space-y-3">
+          {/* Quick summary strip for style overview */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-slate-50 p-3 border border-slate-200 rounded text-xs">
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase font-bold">Net Sold Units</div>
+              <div className="font-mono font-bold text-emerald-700 text-base">{styleOverview.total_net_sold}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase font-bold">Net Revenue</div>
+              <div className="font-mono font-bold text-slate-900 text-base">₹{Math.round(styleOverview.net_sold_revenue || 0).toLocaleString()}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase font-bold">Production COGS</div>
+              <div className="font-mono font-bold text-amber-700 text-base">₹{Math.round(styleOverview.total_cost_of_production || 0).toLocaleString()}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase font-bold">Est. Gross Profit</div>
+              <div className="font-mono font-bold text-emerald-700 text-base">₹{Math.round(styleOverview.estimated_gross_profit || 0).toLocaleString()}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase font-bold">Overall Margin</div>
+              <div className="font-mono font-bold text-indigo-700 text-base">{styleOverview.overall_margin_pct}%</div>
+            </div>
+          </div>
+          <MonthlyStyleOverviewTable overview={styleOverview} readOnly={true} />
+        </div>
+      )}
+
+      {activeTab === "rows" && (
+        <div className="space-y-3">
+          {/* Filter and pagination bar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border-2 border-slate-200 p-2.5 rounded text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] mr-1">Filter:</span>
+              <button
+                type="button"
+                onClick={() => { setFilterMode("all"); setPage(1); }}
+                className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "all" ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300 hover:bg-slate-100"}`}
+              >
+                All ({rows.length})
+              </button>
+              {stats.discrepancies > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setFilterMode("discrepancies"); setPage(1); }}
+                  className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "discrepancies" ? "bg-amber-600 text-white" : "bg-white text-amber-700 border border-amber-300 hover:bg-amber-50"}`}
+                >
+                  Discrepancies ({stats.discrepancies})
+                </button>
               )}
-            </tbody>
-          </table>
+              <button
+                type="button"
+                onClick={() => { setFilterMode("unmatched"); setPage(1); }}
+                className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "unmatched" ? "bg-red-600 text-white" : "bg-white text-red-700 border border-red-200 hover:bg-red-50"}`}
+              >
+                Unmatched ({stats.unmatched ?? 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => { setFilterMode("matched"); setPage(1); }}
+                className={`px-2.5 py-1 rounded font-semibold transition-colors ${filterMode === "matched" ? "bg-emerald-600 text-white" : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"}`}
+              >
+                Matched ({stats.matched ?? 0})
+              </button>
+            </div>
+
+            <PaginationControls
+              currentPage={currentPage}
+              totalItems={filteredRows.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+              pageSizeOptions={[50, 100, 250, 500]}
+              allowAll
+              rangeTextFormat="compact"
+              testIdPrefix="return-preview"
+              showFirstLast={false}
+              className="pt-0 border-t-0"
+            />
+          </div>
+
+          {/* Rows table */}
+          <div className="border-2 border-slate-200 rounded overflow-hidden">
+            <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+                  <tr>
+                    <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
+                    <th className="text-left p-2 border-b">Release</th>
+                    <th className="text-left p-2 border-b">Status</th>
+                    <th className="text-left p-2 border-b">Leaf SKU</th>
+                    <th className="text-left p-2 border-b">packed_on</th>
+                    <th className="text-left p-2 border-b">delivered_on</th>
+                    <th className="text-left p-2 border-b">return / rto / cancel</th>
+                    <th className="text-left p-2 border-b">Classification</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedRows.map((r, i) => (
+                    <tr key={i} className={`border-b border-neutral-100 ${r.has_dispatch_discrepancy ? "bg-amber-50/50" : !r.matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
+                      <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
+                      <td className="p-2 font-mono text-[11px]">
+                        <div>{r.order_id || "—"}</div>
+                        <div className="text-emerald-700">{r.order_release_id || "—"}</div>
+                      </td>
+                      <td className="p-2 font-mono">{r.order_status || "—"}</td>
+                      <td className="p-2 font-mono">
+                        {r.leaf_sku_raw || "—"}
+                        {r.leaf_sku_replaced_prefix && (
+                          <span className="ml-1 text-[9px] text-purple-800 bg-purple-100 border border-purple-300 rounded px-1">
+                            {r.leaf_sku_replaced_prefix}→fix
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-2 text-[11px] whitespace-nowrap">{r.packed_on || "—"}</td>
+                      <td className="p-2 text-[11px] whitespace-nowrap">{r.delivered_on || "—"}</td>
+                      <td className="p-2 text-[11px] whitespace-nowrap">
+                        {r.return_creation_date && <div className="text-red-700">ret: {r.return_creation_date}</div>}
+                        {r.rto_creation_date && <div className="text-red-700">rto: {r.rto_creation_date}</div>}
+                        {r.cancelled_on && <div className="text-amber-700">cxl: {r.cancelled_on}</div>}
+                        {(!r.return_creation_date && !r.rto_creation_date && !r.cancelled_on) && "—"}
+                      </td>
+                      <td className="p-2">
+                        <ClassificationBadges r={r} />
+                      </td>
+                    </tr>
+                  ))}
+                  {paginatedRows.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="p-6 text-center text-sm text-slate-400 italic">
+                        {rows.length === 0 ? "No rows parsed — check header row + column map." : "No rows match current filter."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {error && (
         <div className="bg-red-50 border-2 border-red-300 px-4 py-3 text-sm text-red-700 font-semibold whitespace-pre-line">
@@ -1412,11 +1478,11 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
         <BtnSecondary onClick={onBack} disabled={committing}>
           <ChevronLeft className="w-4 h-4 mr-1.5" /> Back
         </BtnSecondary>
-        <BtnPrimary onClick={onCommit} disabled={committing || rows.length === 0 || stats.matched === 0} className="flex-1">
+        <BtnPrimary onClick={onCommit} disabled={committing || rows.length === 0} className="flex-1">
           <span className="flex items-center justify-center gap-2">
             <ScrollText className="w-4 h-4" />
             {committing ? "Committing…" :
-              `Commit reconciliation — ${stats.returned_to_stock} return-restocks + ${stats.matched} classifications`}
+              `Commit monthly reconciliation (${styleOverview?.styles_count || 0} styles · ${rows.length} rows)`}
           </span>
         </BtnPrimary>
       </div>
@@ -1492,6 +1558,264 @@ function FunnelViz({ stats, breakdown }) {
   );
 }
 
+function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false }) {
+  const [search, setSearch] = useState("");
+  const [editingStyle, setEditingStyle] = useState(null);
+  const [editCost, setEditCost] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const styles = useMemo(() => {
+    const list = overview?.styles || [];
+    if (!search.trim()) return list;
+    const q = search.toLowerCase().trim();
+    return list.filter(
+      (s) =>
+        s.style_code?.toLowerCase().includes(q) ||
+        s.brand?.toLowerCase().includes(q) ||
+        s.style_name?.toLowerCase().includes(q) ||
+        s.article_type?.toLowerCase().includes(q)
+    );
+  }, [overview, search]);
+
+  const handleStartEdit = (s) => {
+    setEditingStyle(s.style_code);
+    setEditCost(String(s.unit_production_cost ?? 210));
+  };
+
+  const handleSaveEdit = async (s) => {
+    if (!onUpdateCost) return;
+    const num = parseFloat(editCost);
+    if (isNaN(num) || num < 0) return;
+    setSaving(true);
+    try {
+      await onUpdateCost(s.style_code, num);
+      setEditingStyle(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const exportCsv = () => {
+    if (!styles.length) return;
+    const headers = [
+      "Style Code", "Brand", "Style Name", "Article Type", "Colors", "Sizes Breakdown",
+      "Total Orders", "Packed Qty", "Returned Qty", "RTO Qty", "Cancelled Qty", "Net Sold Qty",
+      "Total Seller Price", "Net Sold Seller Price", "Unit Production Cost", "Total Production Cost",
+      "Gross Profit", "Margin %"
+    ];
+    const csvRows = styles.map((s) => [
+      `"${s.style_code}"`,
+      `"${s.brand || ""}"`,
+      `"${(s.style_name || "").replace(/"/g, '""')}"`,
+      `"${s.article_type || ""}"`,
+      `"${(s.colors || []).join(", ")}"`,
+      `"${Object.entries(s.sizes || {}).map(([sz, qty]) => `${sz}:${qty}`).join("; ")}"`,
+      s.total_orders,
+      s.packed_qty,
+      s.returned_qty,
+      s.rto_qty,
+      s.cancelled_qty,
+      s.net_sold_qty,
+      s.total_seller_price,
+      s.net_sold_seller_price,
+      s.unit_production_cost,
+      s.total_production_cost,
+      s.gross_profit,
+      s.margin_pct,
+    ]);
+    const csvContent = [headers.join(","), ...csvRows.map((r) => r.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `monthly_reconciliation_${overview?.platform || "all"}_${overview?.month || "overview"}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-1 max-w-md">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search style (e.g. FL_DB_016), brand, article…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
+            />
+          </div>
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="text-xs text-slate-500 hover:text-slate-800 underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono text-slate-500 font-semibold">
+            {styles.length} of {overview?.styles_count ?? styles.length} styles
+          </span>
+          <button
+            onClick={exportCsv}
+            disabled={!styles.length}
+            className="px-2.5 py-1 text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded inline-flex items-center gap-1.5 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" /> Export CSV
+          </button>
+        </div>
+      </div>
+
+      <div className="border-2 border-slate-200 rounded overflow-hidden">
+        <div className="max-h-[500px] overflow-y-auto overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+              <tr>
+                <th className="text-left p-2.5 border-b sticky left-0 z-10 bg-slate-100">Style / Article</th>
+                <th className="text-left p-2.5 border-b">Colors</th>
+                <th className="text-left p-2.5 border-b">Grouped Sizes</th>
+                <th className="text-right p-2.5 border-b">Packed</th>
+                <th className="text-right p-2.5 border-b">Ret / RTO</th>
+                <th className="text-right p-2.5 border-b font-bold text-emerald-800">Net Sold</th>
+                <th className="text-right p-2.5 border-b">Unit Cost (₹)</th>
+                <th className="text-right p-2.5 border-b">Total Cost (COGS)</th>
+                <th className="text-right p-2.5 border-b">Net Revenue</th>
+                <th className="text-right p-2.5 border-b">Gross Profit</th>
+                <th className="text-right p-2.5 border-b">Margin %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {styles.map((s) => {
+                const isEditing = editingStyle === s.style_code;
+                const isProfit = (s.gross_profit ?? 0) >= 0;
+                return (
+                  <tr key={s.style_code} className="border-b border-slate-100 hover:bg-slate-50/80">
+                    <td className="p-2.5 sticky left-0 z-10 bg-white">
+                      <div className="font-mono font-bold text-slate-900 text-[13px]">{s.style_code}</div>
+                      <div className="text-[11px] text-slate-600 max-w-[200px] truncate">{s.style_name || s.style_code}</div>
+                      {s.brand && (
+                        <span className="text-[9px] uppercase tracking-wider font-bold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded border border-indigo-200 inline-block mt-0.5">
+                          {s.brand}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-2.5">
+                      <div className="flex flex-wrap gap-1 max-w-[120px]">
+                        {(s.colors || []).map((col) => (
+                          <span key={col} className="text-[10px] font-mono px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded font-semibold text-slate-700">
+                            {col}
+                          </span>
+                        ))}
+                        {(!s.colors || s.colors.length === 0) && <span className="text-slate-400">—</span>}
+                      </div>
+                    </td>
+                    <td className="p-2.5">
+                      <div className="flex flex-wrap gap-1 max-w-[220px]">
+                        {Object.entries(s.sizes || {}).map(([sz, count]) => (
+                          <span
+                            key={sz}
+                            className="inline-flex items-center text-[10px] font-mono px-1.5 py-0.5 bg-blue-50 border border-blue-200 text-blue-900 rounded font-bold"
+                            title={`Size ${sz}: ${count} units`}
+                          >
+                            <span className="font-semibold text-blue-700">{sz}:</span>
+                            <span className="ml-1 text-slate-900">{count}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="p-2.5 text-right font-mono text-slate-700 font-semibold">{s.packed_qty}</td>
+                    <td className="p-2.5 text-right font-mono text-rose-700">
+                      {s.returned_qty + s.rto_qty}
+                      <span className="text-[10px] text-slate-400 ml-1">({s.returned_qty}r/{s.rto_qty}o)</span>
+                    </td>
+                    <td className="p-2.5 text-right font-mono font-black text-emerald-700 bg-emerald-50/40 text-[13px]">
+                      {s.net_sold_qty}
+                    </td>
+                    <td className="p-2.5 text-right font-mono">
+                      {isEditing ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editCost}
+                            onChange={(e) => setEditCost(e.target.value)}
+                            className="w-16 px-1 py-0.5 text-xs text-right border border-slate-400 rounded focus:outline-none"
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => handleSaveEdit(s)}
+                            disabled={saving}
+                            className="px-1.5 py-0.5 bg-emerald-600 text-white text-[10px] font-bold rounded"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            onClick={() => setEditingStyle(null)}
+                            className="px-1.5 py-0.5 bg-slate-300 text-slate-700 text-[10px] font-bold rounded"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-end gap-1">
+                          <span>₹{(s.unit_production_cost ?? 210).toFixed(2)}</span>
+                          {!readOnly && onUpdateCost && (
+                            <button
+                              onClick={() => handleStartEdit(s)}
+                              className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
+                              title="Edit unit production cost"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-2.5 text-right font-mono text-slate-700">
+                      ₹{Math.round(s.total_production_cost || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2.5 text-right font-mono text-slate-900 font-semibold">
+                      ₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}
+                    </td>
+                    <td className={`p-2.5 text-right font-mono font-bold ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>
+                      ₹{Math.round(s.gross_profit || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2.5 text-right">
+                      <span className={`px-2 py-0.5 rounded text-[11px] font-bold font-mono ${
+                        s.margin_pct >= 40
+                          ? "bg-emerald-100 text-emerald-800"
+                          : s.margin_pct >= 20
+                          ? "bg-blue-100 text-blue-800"
+                          : s.margin_pct > 0
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-rose-100 text-rose-800"
+                      }`}>
+                        {s.margin_pct}%
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {styles.length === 0 && (
+                <tr>
+                  <td colSpan={11} className="p-6 text-center text-sm text-slate-400 italic">
+                    No styles match the filter.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Read-side reconciliation summary card — feeds off /reconciliation-summary
 function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
   const [data, setData] = useState(null);
@@ -1511,13 +1835,30 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
 
   useEffect(() => { load(); }, [load]);
 
+  const handleUpdateCost = async (style_code, new_cost) => {
+    if (!data?.overview) return;
+    try {
+      await http.put("/online-orders/monthly-reconciliation-overview/cost", {
+        platform: data.overview.platform,
+        month: data.overview.month,
+        style_code,
+        unit_production_cost: new_cost,
+      });
+      load();
+    } catch (e) {
+      alert(e.response?.data?.detail || "Failed to update style production cost");
+    }
+  };
+
+  const overview = data?.overview;
+
   return (
-    <Card className="p-5 space-y-4">
+    <Card className="p-5 space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Current reconciliation state</div>
-          <div className="text-sm text-slate-600 mt-0.5">
-            {platform ? platform : "all platforms"}{month ? ` · ${month}` : " · all time"}
+          <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Monthly Reconciliation Overview</div>
+          <div className="text-sm font-semibold text-slate-700 mt-0.5">
+            {platform ? platform.toUpperCase() : "ALL PLATFORMS"} {data?.month ? ` · ${data.month}` : ""}
           </div>
         </div>
         <div className="flex gap-2">
@@ -1531,13 +1872,62 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
       </div>
 
       {loading ? (
-        <div className="py-6 text-center text-sm text-slate-400 italic">Loading…</div>
-      ) : !data || data.total_rows === 0 ? (
-        <div className="py-6 text-center text-sm text-slate-400 italic">
-          No reconciled data yet. Import a monthly report to populate the funnel.
+        <div className="py-8 text-center text-sm text-slate-400 italic">Loading reconciliation data…</div>
+      ) : !data || (data.total_rows === 0 && !overview) ? (
+        <div className="py-8 text-center text-sm text-slate-400 italic border-2 border-dashed border-slate-200 rounded p-6">
+          No reconciled data found for this selection. Import a monthly report to calculate style sales, returns, and production COGS.
         </div>
       ) : (
-        <FunnelViz stats={data} breakdown={data.reason_breakdown || {}} />
+        <>
+          {/* Financial KPI Summary Cards */}
+          {overview && (
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="bg-emerald-50/60 border-2 border-emerald-200 p-3.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">Net Sold Units</div>
+                <div className="text-2xl font-black font-mono text-emerald-900 mt-1">{overview.total_net_sold}</div>
+                <div className="text-[11px] text-emerald-700 mt-0.5">{overview.styles_count} styles</div>
+              </div>
+              <div className="bg-slate-50 border-2 border-slate-200 p-3.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Net Revenue</div>
+                <div className="text-2xl font-black font-mono text-slate-900 mt-1">₹{Math.round(overview.net_sold_revenue || 0).toLocaleString()}</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">Total: ₹{Math.round(overview.total_seller_revenue || 0).toLocaleString()}</div>
+              </div>
+              <div className="bg-amber-50/60 border-2 border-amber-200 p-3.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-amber-800">Production COGS</div>
+                <div className="text-2xl font-black font-mono text-amber-900 mt-1">₹{Math.round(overview.total_cost_of_production || 0).toLocaleString()}</div>
+                <div className="text-[11px] text-amber-700 mt-0.5">Cost of production</div>
+              </div>
+              <div className="bg-emerald-50 border-2 border-emerald-300 p-3.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">Est. Gross Profit</div>
+                <div className="text-2xl font-black font-mono text-emerald-800 mt-1">₹{Math.round(overview.estimated_gross_profit || 0).toLocaleString()}</div>
+                <div className="text-[11px] text-emerald-700 mt-0.5">Net rev − COGS</div>
+              </div>
+              <div className="bg-indigo-50 border-2 border-indigo-200 p-3.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-indigo-800">Gross Margin</div>
+                <div className="text-2xl font-black font-mono text-indigo-900 mt-1">{overview.overall_margin_pct}%</div>
+                <div className="text-[11px] text-indigo-700 mt-0.5">Overall profitability</div>
+              </div>
+            </div>
+          )}
+
+          {/* Funnel */}
+          <FunnelViz stats={data} breakdown={data.reason_breakdown || {}} />
+
+          {/* Style Breakdown Table */}
+          {overview && (
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Style Breakdown & Cost of Production</h3>
+                  <p className="text-xs text-slate-500">
+                    All sizes grouped under each external style (e.g. FL_DB_016). Production cost calculated per net unit sold.
+                  </p>
+                </div>
+              </div>
+              <MonthlyStyleOverviewTable overview={overview} onUpdateCost={handleUpdateCost} />
+            </div>
+          )}
+        </>
       )}
     </Card>
   );
