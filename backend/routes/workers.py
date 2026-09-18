@@ -1336,6 +1336,20 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                     )
                 except Exception:
                     pass
+
+            # >>> SYNC TO SUPABASE FINANCIAL CORE <<<
+            try:
+                from services.supabase_payroll_service import sync_wage_payment_to_supabase
+                bank_acc_doc = None
+                if payload.paid_via in ("bank_transfer", "upi") and payload.bank_account_id and hasattr(db, "bank_accounts"):
+                    try:
+                        bank_acc_doc = await db.bank_accounts.find_one({"_id": oid(payload.bank_account_id)})
+                    except Exception:
+                        pass
+                sync_wage_payment_to_supabase(wage_payment_doc, worker, bank_acc_doc=bank_acc_doc)
+            except Exception as se:
+                import logging
+                logging.getLogger(__name__).warning("Supabase wage payment sync failed: %s", se)
         except Exception as e:
             if payload.paid_via == "cash" and payload.cash_ledger_id:
                 try:
