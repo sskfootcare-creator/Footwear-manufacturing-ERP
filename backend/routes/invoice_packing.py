@@ -38,6 +38,7 @@ from models.invoice_packing import (
     MergedPackingListGenerate,
     PackingTemplateIn,
 )
+from models.clients import DirectInvoiceIn
 
 
 log = logging.getLogger("erp")
@@ -334,6 +335,14 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
     credit_days = int(inv.get("payment_terms_days") or 45)
     if grn_date:
         due = _due_iso(grn_date, credit_days)
+        inv["due_date"] = due
+    elif inv.get("is_direct_invoice") or inv.get("due_date"):
+        due = inv.get("due_date")
+        if not due and inv.get("invoice_iso_date"):
+            due = _due_iso(inv.get("invoice_iso_date"), credit_days)
+        elif not due and inv.get("invoice_date"):
+            inv_iso = _invoice_iso_date(inv.get("invoice_date"))
+            due = _due_iso(inv_iso, credit_days)
         inv["due_date"] = due
     else:
         due = None
@@ -1138,6 +1147,248 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
             "Content-Disposition": f'inline; filename="{invoice_no}.pdf"',
             "X-Invoice-Id": str(res.inserted_id),
         },
+    )
+
+
+@invoice_packing_router.post("/invoices/direct", dependencies=[Depends(pdf_rate_limiter)])
+async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
+    """
+    Generate and persist a direct tax invoice to a client without an upstream Purchase Order (PO).
+    Applies latest footwear GST norms:
+    - Default 5% total GST:
+      - Intra-state (Uttar Pradesh / '09'): 2.5% CGST + 2.5% SGST (IGST = 0%)
+      - Inter-state (Out-of-state): 5.0% IGST (CGST = 0%, SGST = 0%)
+    - Selectable / Custom rates (e.g. 12%, 18%, 0%, or arbitrary float).
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    client_name = (payload.client_name or "").strip()
+    if not client_name:
+        raise HTTPException(400, "Client name is required")
+
+    client_gstin = (payload.client_gstin or "").strip().upper()
+    contact_person = (payload.contact_person or "").strip()
+    phone = (payload.phone or "").strip()
+    email = (payload.email or "").strip()
+    pan = (payload.pan or "").strip().upper()
+    billing_address = (payload.billing_address or "").strip()
+    shipping_address = (payload.shipping_address or billing_address).strip()
+    place_of_supply = (payload.place_of_supply or "09-Uttar Pradesh").strip()
+    
+    # Identify state code (default 09 for Uttar Pradesh)
+    client_state_code = (payload.client_state_code or ("09" if "09" in place_of_supply or "uttar pradesh" in place_of_supply.lower() else "00")).strip()
+    is_intra_state = (client_state_code == "09") or ("09" in place_of_supply) or ("uttar pradesh" in place_of_supply.lower())
+
+    payment_terms_days = int(payload.payment_terms_days or 30)
+
+    # 1. Optionally save or update client in master directory
+    client_master_id = payload.client_id
+    if payload.save_client_to_master:
+        client_master_doc = {
+            "company_name": client_name,
+            "name": client_name,
+            "contact_person": contact_person,
+            "phone": phone,
+            "email": email,
+            "gstin": client_gstin,
+            "pan": pan,
+            "billing_address": billing_address,
+            "shipping_address": shipping_address,
+            "state": place_of_supply,
+            "state_code": client_state_code,
+            "payment_terms_days": payment_terms_days,
+            "is_active": True,
+            "updated_at": now_iso(),
+        }
+        if client_master_id:
+            try:
+                await db.clients.update_one({"_id": oid(client_master_id)}, {"$set": client_master_doc})
+            except Exception:
+                pass
+        else:
+            existing_c = None
+            if client_gstin:
+                existing_c = await db.clients.find_one({"gstin": client_gstin})
+            if not existing_c:
+                existing_c = await db.clients.find_one({"company_name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}})
+            if existing_c:
+                client_master_id = str(existing_c["_id"])
+                await db.clients.update_one({"_id": existing_c["_id"]}, {"$set": client_master_doc})
+            else:
+                client_master_doc["created_at"] = now_iso()
+                c_res = await db.clients.insert_one(client_master_doc)
+                client_master_id = str(c_res.inserted_id)
+
+    # 2. Determine GST rates (Footwear norm: default 5% total -> 2.5% CGST + 2.5% SGST or 5% IGST)
+    if payload.cgst_rate is not None and payload.sgst_rate is not None:
+        cgst_rate = float(payload.cgst_rate)
+        sgst_rate = float(payload.sgst_rate)
+        igst_rate = float(payload.igst_rate or 0.0)
+    elif payload.igst_rate is not None and not is_intra_state:
+        cgst_rate = 0.0
+        sgst_rate = 0.0
+        igst_rate = float(payload.igst_rate)
+    else:
+        total_gst = float(payload.gst_rate if payload.gst_rate is not None else 5.0)
+        if is_intra_state:
+            cgst_rate = round(total_gst / 2.0, 2)  # default 2.5%
+            sgst_rate = round(total_gst / 2.0, 2)  # default 2.5%
+            igst_rate = 0.0
+        else:
+            cgst_rate = 0.0
+            sgst_rate = 0.0
+            igst_rate = round(total_gst, 2)        # default 5.0%
+
+    # 3. Calculate line items and totals
+    subtotal = 0.0
+    total_pairs = 0
+    line_items_snapshot = []
+
+    for item in payload.line_items:
+        amt = round(float(item.qty) * float(item.unit_price), 2)
+        subtotal += amt
+        total_pairs += int(item.qty)
+        
+        i_cgst = round(amt * (cgst_rate / 100.0), 2) if cgst_rate else 0.0
+        i_sgst = round(amt * (sgst_rate / 100.0), 2) if sgst_rate else 0.0
+        i_igst = round(amt * (igst_rate / 100.0), 2) if igst_rate else 0.0
+        i_total = round(amt + i_cgst + i_sgst + i_igst, 2)
+
+        line_items_snapshot.append({
+            "style_code": item.style_code,
+            "color": item.color or "",
+            "size": str(item.size or ""),
+            "description": item.description or f"{item.style_code} Footwear",
+            "hsn_code": item.hsn_code or "6403",
+            "qty": int(item.qty),
+            "unit_price": float(item.unit_price),
+            "rate": float(item.unit_price),
+            "amount": amt,
+            "tax_value": amt,
+            "cgst_rate": cgst_rate,
+            "cgst_amt": i_cgst,
+            "sgst_rate": sgst_rate,
+            "sgst_amt": i_sgst,
+            "igst_rate": igst_rate,
+            "igst_amt": i_igst,
+            "total": i_total,
+        })
+
+    subtotal = round(subtotal, 2)
+    cgst_amount = round(subtotal * (cgst_rate / 100.0), 2) if cgst_rate else 0.0
+    sgst_amount = round(subtotal * (sgst_rate / 100.0), 2) if sgst_rate else 0.0
+    igst_amount = round(subtotal * (igst_rate / 100.0), 2) if igst_rate else 0.0
+    grand_total = round(subtotal + cgst_amount + sgst_amount + igst_amount, 2)
+
+    # 4. Dates & Sequence
+    invoice_no = await next_invoice_no(db=db)
+    
+    if payload.invoice_date:
+        invoice_date = payload.invoice_date
+        if "-" in invoice_date and len(invoice_date.split("-")[0]) == 4:
+            # YYYY-MM-DD -> DD/MM/YYYY
+            p = invoice_date.split("-")
+            invoice_date = f"{p[2]}/{p[1]}/{p[0]}"
+    else:
+        invoice_date = datetime.now().strftime("%d/%m/%Y")
+
+    invoice_iso = _invoice_iso_date(invoice_date)
+    due_date = payload.due_date or _due_iso(invoice_iso, payment_terms_days)
+
+    # 5. Build PDF Document
+    po_dict = {
+        "po_number": "DIRECT",
+        "po_date": invoice_date,
+        "client_name": client_name,
+        "client_address": billing_address,
+        "billing_address": billing_address,
+        "shipping_address": shipping_address,
+        "client_gstin": client_gstin,
+        "client_state": place_of_supply,
+        "client_state_code": client_state_code,
+        "cgst_rate": cgst_rate,
+        "sgst_rate": sgst_rate,
+        "igst_rate": igst_rate,
+        "line_items": line_items_snapshot,
+    }
+    pdf_bytes = build_invoice(
+        po_dict, invoice_no, invoice_date,
+        transport_mode=payload.transport_mode or "",
+        vehicle_no=payload.vehicle_no or "",
+        supply_date=payload.supply_date or "",
+        line_items=line_items_snapshot,
+    )
+
+    # 6. Persist to MongoDB
+    inv_doc = {
+        "invoice_no": invoice_no,
+        "invoice_date": invoice_date,
+        "invoice_iso_date": invoice_iso,
+        "due_date": due_date,
+        "payment_terms_days": payment_terms_days,
+        "is_direct_invoice": True,
+        "grn_date": None,
+        "grn_recorded": False,
+        "po_id": None,
+        "po_number": "DIRECT",
+        "po_numbers": ["DIRECT"],
+        "client_id": client_master_id,
+        "client_name": client_name,
+        "contact_person": contact_person,
+        "phone": phone,
+        "email": email,
+        "client_gstin": client_gstin,
+        "billing_address": billing_address,
+        "shipping_address": shipping_address,
+        "place_of_supply": place_of_supply,
+        "client_state_code": client_state_code,
+        "cgst_rate": cgst_rate,
+        "cgst_amount": cgst_amount,
+        "sgst_rate": sgst_rate,
+        "sgst_amount": sgst_amount,
+        "igst_rate": igst_rate,
+        "igst_amount": igst_amount,
+        "subtotal": subtotal,
+        "total_amount": subtotal,
+        "grand_total": grand_total,
+        "net_amount": grand_total,
+        "total_pairs": total_pairs,
+        "line_items_snapshot": line_items_snapshot,
+        "transport_mode": payload.transport_mode or "",
+        "vehicle_no": payload.vehicle_no or "",
+        "supply_date": payload.supply_date or "",
+        "notes": payload.notes or "",
+        "by": u["email"],
+        "created_at": now_iso(),
+        "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "merged": False,
+    }
+
+    res = await db.invoices.insert_one(inv_doc)
+    inv_doc["_id"] = res.inserted_id
+
+    # 7. Sync to Supabase Financial Core
+    try:
+        from services.supabase_invoice_service import sync_direct_invoice_to_supabase
+        sync_direct_invoice_to_supabase(inv_doc)
+    except Exception as se:
+        log.warning("Supabase direct invoice sync warning: %s", se)
+
+    decorated = _decorate_invoice(inv_doc, payments_map={}, grns_map={})
+    return JSONResponse(
+        content={
+            "ok": True,
+            "invoice": decorated,
+            "invoice_id": str(res.inserted_id),
+            "invoice_no": invoice_no,
+            "pdf_url": f"/api/invoices/{res.inserted_id}/file",
+        },
+        headers={
+            "X-Invoice-Id": str(res.inserted_id),
+            "X-Invoice-No": invoice_no,
+        }
     )
 
 

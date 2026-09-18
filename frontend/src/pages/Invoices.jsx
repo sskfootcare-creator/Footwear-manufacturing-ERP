@@ -30,6 +30,11 @@ import {
   CheckCircle2,
   CalendarDays,
   Coins,
+  Plus,
+  Building2,
+  Percent,
+  Check,
+  Users,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -60,6 +65,7 @@ export default function Invoices() {
   const [showForecast, setShowForecast] = useState(true);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [cashAccounts, setCashAccounts] = useState([]);
+  const [showDirectModal, setShowDirectModal] = useState(false);
 
   const load = async () => {
     try {
@@ -137,6 +143,16 @@ export default function Invoices() {
         title="Invoices"
         subtitle="Accounts / Receivables"
         testId="invoices-header"
+        action={
+          <BtnPrimary
+            onClick={() => setShowDirectModal(true)}
+            data-testid="btn-create-direct-invoice"
+            className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] flex items-center gap-2 shadow-sm font-semibold"
+          >
+            <Plus className="w-4 h-4" />
+            Create Direct Invoice
+          </BtnPrimary>
+        }
       />
       <div className="p-2 sm:p-4 lg:p-8 space-y-5">
         {overdue.length > 0 && (
@@ -543,6 +559,18 @@ export default function Invoices() {
           onDeleted={() => {
             setDeleteFor(null);
             load();
+          }}
+        />
+      )}
+      {showDirectModal && (
+        <DirectInvoiceModal
+          onClose={() => setShowDirectModal(false)}
+          onCreated={(newInv) => {
+            setShowDirectModal(false);
+            load();
+            if (newInv?.invoice_id) {
+              window.open(`${API}/invoices/${newInv.invoice_id}/file`, "_blank");
+            }
           }}
         />
       )}
@@ -2013,3 +2041,738 @@ function WeeklyCashInflowForecast({ forecast, onSelectInvoice, onRecordGRN }) {
     </Card>
   );
 }
+
+const INDIAN_STATES = [
+  { code: "09", name: "09-Uttar Pradesh (Factory Home State)" },
+  { code: "07", name: "07-Delhi" },
+  { code: "27", name: "27-Maharashtra" },
+  { code: "08", name: "08-Rajasthan" },
+  { code: "06", name: "06-Haryana" },
+  { code: "03", name: "03-Punjab" },
+  { code: "23", name: "23-Madhya Pradesh" },
+  { code: "10", name: "10-Bihar" },
+  { code: "24", name: "24-Gujarat" },
+  { code: "19", name: "19-West Bengal" },
+  { code: "33", name: "33-Tamil Nadu" },
+  { code: "29", name: "29-Karnataka" },
+  { code: "36", name: "36-Telangana" },
+  { code: "37", name: "37-Andhra Pradesh" },
+  { code: "05", name: "05-Uttarakhand" },
+  { code: "02", name: "02-Himachal Pradesh" },
+  { code: "01", name: "01-Jammu and Kashmir" },
+  { code: "21", name: "21-Odisha" },
+  { code: "20", name: "20-Jharkhand" },
+  { code: "22", name: "22-Chhattisgarh" },
+  { code: "32", name: "32-Kerala" },
+  { code: "18", name: "18-Assam" },
+  { code: "30", name: "30-Goa" },
+  { code: "04", name: "04-Chandigarh" },
+];
+
+function DirectInvoiceModal({ onClose, onCreated }) {
+  const [clientType, setClientType] = useState("existing");
+  const [savedClients, setSavedClients] = useState([]);
+  const [selectedClientId, setSelectedClientId] = useState("");
+  const [sameAsBilling, setSameAsBilling] = useState(true);
+
+  // Client Details
+  const [clientName, setClientName] = useState("");
+  const [contactPerson, setContactPerson] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [gstin, setGstin] = useState("");
+  const [pan, setPan] = useState("");
+  const [billingAddress, setBillingAddress] = useState("");
+  const [shippingAddress, setShippingAddress] = useState("");
+  const [stateCode, setStateCode] = useState("09");
+  const [placeOfSupply, setPlaceOfSupply] = useState("09-Uttar Pradesh");
+  const [paymentTermsDays, setPaymentTermsDays] = useState(30);
+  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
+  const [saveClientToMaster, setSaveClientToMaster] = useState(true);
+
+  // GST Settings
+  const [gstPreset, setGstPreset] = useState("5");
+  const [customGstRate, setCustomGstRate] = useState(5.0);
+
+  // Line items
+  const [items, setItems] = useState([
+    { style_code: "", color: "", size: "", hsn_code: "6403", qty: 10, unit_price: 500 },
+  ]);
+
+  // Logistics / Dispatch
+  const [transportMode, setTransportMode] = useState("");
+  const [vehicleNo, setVehicleNo] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Load saved clients
+  useEffect(() => {
+    http.get("/clients/master")
+      .then((res) => {
+        const list = Array.isArray(res.data) ? res.data : [];
+        setSavedClients(list);
+        if (list.length > 0) {
+          setClientType("existing");
+        } else {
+          setClientType("new");
+        }
+      })
+      .catch(() => setClientType("new"));
+  }, []);
+
+  // Handle client selection
+  const handleSelectClient = (cid) => {
+    setSelectedClientId(cid);
+    if (!cid) return;
+    const c = savedClients.find((cl) => (cl.id || cl._id) === cid);
+    if (c) {
+      setClientName(c.company_name || c.name || "");
+      setContactPerson(c.contact_person || "");
+      setPhone(c.phone || "");
+      setEmail(c.email || "");
+      setGstin(c.gstin || "");
+      setPan(c.pan || "");
+      setBillingAddress(c.billing_address || "");
+      setShippingAddress(c.shipping_address || c.billing_address || "");
+      setSameAsBilling(Boolean(!c.shipping_address || c.shipping_address === c.billing_address));
+      if (c.state_code) {
+        setStateCode(c.state_code);
+        const st = INDIAN_STATES.find((s) => s.code === c.state_code);
+        if (st) setPlaceOfSupply(st.name);
+      }
+      if (c.payment_terms_days) {
+        setPaymentTermsDays(Number(c.payment_terms_days));
+      }
+    }
+  };
+
+  // Auto-detect state code from GSTIN
+  const handleGstinChange = (val) => {
+    const clean = val.toUpperCase().trim();
+    setGstin(clean);
+    if (clean.length >= 2) {
+      const code = clean.slice(0, 2);
+      const matched = INDIAN_STATES.find((s) => s.code === code);
+      if (matched) {
+        setStateCode(matched.code);
+        setPlaceOfSupply(matched.name);
+      }
+    }
+  };
+
+  const handleStateChange = (code) => {
+    setStateCode(code);
+    const matched = INDIAN_STATES.find((s) => s.code === code);
+    if (matched) setPlaceOfSupply(matched.name);
+  };
+
+  // GST Calculation
+  const isIntraState = stateCode === "09" || placeOfSupply.includes("09") || placeOfSupply.toLowerCase().includes("uttar pradesh");
+  const effectiveGstRate = gstPreset === "custom" ? Number(customGstRate) || 0 : Number(gstPreset);
+  const cgstRate = isIntraState ? effectiveGstRate / 2 : 0;
+  const sgstRate = isIntraState ? effectiveGstRate / 2 : 0;
+  const igstRate = isIntraState ? 0 : effectiveGstRate;
+
+  // Item modifications
+  const handleItemChange = (idx, field, val) => {
+    setItems((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: val };
+      return next;
+    });
+  };
+
+  const addItem = () => {
+    setItems((prev) => [
+      ...prev,
+      { style_code: "", color: "", size: "", hsn_code: "6403", qty: 10, unit_price: 500 },
+    ]);
+  };
+
+  const removeItem = (idx) => {
+    if (items.length <= 1) return;
+    setItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  // Calculations
+  const subtotal = items.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
+  const totalPairs = items.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
+  const cgstAmount = Number((subtotal * (cgstRate / 100)).toFixed(2));
+  const sgstAmount = Number((subtotal * (sgstRate / 100)).toFixed(2));
+  const igstAmount = Number((subtotal * (igstRate / 100)).toFixed(2));
+  const grandTotal = Number((subtotal + cgstAmount + sgstAmount + igstAmount).toFixed(2));
+
+  // Compute estimated due date
+  const computeDueDate = () => {
+    try {
+      const d = new Date(invoiceDate);
+      d.setDate(d.getDate() + Number(paymentTermsDays));
+      return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    } catch {
+      return "—";
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!clientName.trim()) {
+      setError("Please enter client / company name.");
+      return;
+    }
+
+    if (items.some((it) => !it.style_code.trim() || Number(it.qty) <= 0 || Number(it.unit_price) < 0)) {
+      setError("Please enter a valid style code, positive quantity, and rate for all line items.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        client_id: clientType === "existing" ? selectedClientId : undefined,
+        client_name: clientName.trim(),
+        contact_person: contactPerson.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        client_gstin: gstin.trim(),
+        pan: pan.trim(),
+        billing_address: billingAddress.trim(),
+        shipping_address: sameAsBilling ? billingAddress.trim() : shippingAddress.trim(),
+        place_of_supply: placeOfSupply,
+        client_state_code: stateCode,
+        payment_terms_days: Number(paymentTermsDays),
+        invoice_date: invoiceDate,
+        gst_rate: effectiveGstRate,
+        cgst_rate: cgstRate,
+        sgst_rate: sgstRate,
+        igst_rate: igstRate,
+        transport_mode: transportMode,
+        vehicle_no: vehicleNo,
+        notes: notes,
+        save_client_to_master: saveClientToMaster,
+        line_items: items.map((it) => ({
+          style_code: it.style_code.trim(),
+          color: it.color ? it.color.trim() : "",
+          size: it.size ? it.size.trim() : "",
+          hsn_code: it.hsn_code || "6403",
+          qty: Number(it.qty),
+          unit_price: Number(it.unit_price),
+        })),
+      };
+
+      const res = await http.post("/invoices/direct", payload);
+      onCreated(res.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || "Failed to generate direct invoice.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+      <div className="bg-white w-full max-w-4xl max-h-[92vh] flex flex-col rounded-xl shadow-2xl border border-slate-200 overflow-hidden my-auto">
+        {/* Modal Header */}
+        <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white px-6 py-4 flex items-center justify-between shrink-0">
+          <div>
+            <div className="flex items-center gap-2">
+              <Building2 className="w-5 h-5 text-[#16A34A]" />
+              <h2 className="text-lg font-bold">Create Direct Tax Invoice</h2>
+              <Badge color="green" className="ml-2 font-mono text-[10px]">NO PO REQUIRED</Badge>
+            </div>
+            <p className="text-xs text-slate-300 mt-0.5">
+              Issue direct invoices to clients with automatic footwear GST rates & custom payment terms.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Modal Body */}
+        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
+          {error && (
+            <div className="bg-red-50 border border-red-200 p-3 rounded-lg flex items-center gap-3 text-red-700 text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {/* Section 1: Client Selection & Mode */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <div className="text-xs uppercase tracking-wider font-bold text-slate-700 flex items-center gap-2">
+                <Users className="w-4 h-4 text-purple-600" /> 1. Client Details
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setClientType("existing")}
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                    clientType === "existing"
+                      ? "bg-purple-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  Saved Clients ({savedClients.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClientType("new");
+                    setSelectedClientId("");
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                    clientType === "new"
+                      ? "bg-purple-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  + New Client
+                </button>
+              </div>
+            </div>
+
+            {clientType === "existing" && savedClients.length > 0 && (
+              <Field label="Choose from Master Directory">
+                <select
+                  value={selectedClientId}
+                  onChange={(e) => handleSelectClient(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-slate-50 focus:bg-white focus:border-purple-600 outline-none"
+                >
+                  <option value="">-- Select Client --</option>
+                  {savedClients.map((cl) => {
+                    const id = cl.id || cl._id;
+                    return (
+                      <option key={id} value={id}>
+                        {cl.company_name || cl.name} {cl.gstin ? `(${cl.gstin})` : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </Field>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Field label="Company / Business Name *">
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Apex Footwear Stores"
+                  value={clientName}
+                  onChange={(e) => setClientName(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none"
+                />
+              </Field>
+              <Field label="Contact Person">
+                <input
+                  type="text"
+                  placeholder="e.g. Rajesh Kumar"
+                  value={contactPerson}
+                  onChange={(e) => setContactPerson(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none"
+                />
+              </Field>
+              <Field label="Phone / Mobile">
+                <input
+                  type="text"
+                  placeholder="e.g. 9876543210"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none"
+                />
+              </Field>
+              <Field label="GSTIN (15 Digits)">
+                <input
+                  type="text"
+                  placeholder="e.g. 09ABCDE1234F1Z5"
+                  maxLength={15}
+                  value={gstin}
+                  onChange={(e) => handleGstinChange(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono uppercase focus:border-purple-600 outline-none"
+                />
+              </Field>
+              <Field label="Place of Supply (State)">
+                <select
+                  value={stateCode}
+                  onChange={(e) => handleStateChange(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none"
+                >
+                  {INDIAN_STATES.map((s) => (
+                    <option key={s.code} value={s.code}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Email Address">
+                <input
+                  type="email"
+                  placeholder="billing@client.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none"
+                />
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Billing Address">
+                <textarea
+                  rows={2}
+                  placeholder="Complete billing address..."
+                  value={billingAddress}
+                  onChange={(e) => {
+                    setBillingAddress(e.target.value);
+                    if (sameAsBilling) setShippingAddress(e.target.value);
+                  }}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:border-purple-600 outline-none resize-none"
+                />
+              </Field>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block">
+                    Shipping Address
+                  </label>
+                  <label className="text-[11px] text-slate-600 flex items-center gap-1 cursor-pointer font-medium">
+                    <input
+                      type="checkbox"
+                      checked={sameAsBilling}
+                      onChange={(e) => {
+                        setSameAsBilling(e.target.checked);
+                        if (e.target.checked) setShippingAddress(billingAddress);
+                      }}
+                      className="rounded text-purple-600"
+                    />
+                    Same as Billing
+                  </label>
+                </div>
+                <textarea
+                  rows={2}
+                  disabled={sameAsBilling}
+                  placeholder="Shipping address if different..."
+                  value={sameAsBilling ? billingAddress : shippingAddress}
+                  onChange={(e) => setShippingAddress(e.target.value)}
+                  className={`w-full border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none resize-none ${
+                    sameAsBilling ? "bg-slate-100 text-slate-500" : "focus:border-purple-600"
+                  }`}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <input
+                type="checkbox"
+                id="saveClient"
+                checked={saveClientToMaster}
+                onChange={(e) => setSaveClientToMaster(e.target.checked)}
+                className="rounded text-purple-600 w-4 h-4"
+              />
+              <label htmlFor="saveClient" className="text-xs text-slate-700 cursor-pointer font-medium">
+                Save / update client data in master directory for future invoices
+              </label>
+            </div>
+          </div>
+
+          {/* Section 2: Invoice Dates, Payment Terms & GST Norms */}
+          <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <div className="text-xs uppercase tracking-wider font-bold text-slate-700 flex items-center gap-2 border-b border-slate-200 pb-2">
+              <Percent className="w-4 h-4 text-[#16A34A]" /> 2. Invoice Terms & Footwear GST Rates
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Field label="Invoice Date">
+                <input
+                  type="date"
+                  value={invoiceDate}
+                  onChange={(e) => setInvoiceDate(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white font-mono focus:border-[#16A34A] outline-none"
+                />
+              </Field>
+
+              <Field label="Payment Terms (Credit Days)">
+                <div className="flex gap-1">
+                  {[0, 15, 30, 45, 60].map((days) => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => setPaymentTermsDays(days)}
+                      className={`px-2 py-1.5 rounded text-xs font-semibold flex-1 transition-colors ${
+                        paymentTermsDays === days
+                          ? "bg-slate-900 text-white"
+                          : "bg-white border border-slate-300 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      {days === 0 ? "Immediate" : `${days}d`}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Computed Due Date">
+                <div className="bg-white border border-slate-300 rounded-lg px-3 py-2 text-sm font-semibold text-slate-800 flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-blue-600" />
+                  <span>{computeDueDate()}</span>
+                  <span className="text-[11px] text-slate-500 font-normal">({paymentTermsDays} days)</span>
+                </div>
+              </Field>
+            </div>
+
+            {/* GST Selector */}
+            <div className="pt-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                  GST Rate Selection (Default: Footwear Norm 5%)
+                </label>
+                <div className="text-xs font-semibold flex items-center gap-1.5">
+                  {isIntraState ? (
+                    <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      {`🟢 Intra-State (Within UP): ${cgstRate}% CGST + ${sgstRate}% SGST`}
+                    </span>
+                  ) : (
+                    <span className="text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                      {`🔵 Inter-State: ${igstRate}% IGST`}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {[
+                  { label: "5% (Default Footwear: 2.5% + 2.5%)", val: "5" },
+                  { label: "12% (Higher Value / 6% + 6%)", val: "12" },
+                  { label: "18% (Accessories / 9% + 9%)", val: "18" },
+                  { label: "0% (Exempt)", val: "0" },
+                  { label: "Custom %", val: "custom" },
+                ].map((preset) => (
+                  <button
+                    key={preset.val}
+                    type="button"
+                    onClick={() => setGstPreset(preset.val)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                      gstPreset === preset.val
+                        ? "bg-[#16A34A] border-[#16A34A] text-white shadow-sm"
+                        : "bg-white border-slate-300 text-slate-700 hover:border-slate-400"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+
+                {gstPreset === "custom" && (
+                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-1">
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="100"
+                      value={customGstRate}
+                      onChange={(e) => setCustomGstRate(e.target.value)}
+                      className="w-16 text-sm font-mono outline-none text-right"
+                    />
+                    <span className="text-xs text-slate-500 font-bold">%</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: Line Items Table */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <div className="text-xs uppercase tracking-wider font-bold text-slate-700 flex items-center gap-2">
+                <ReceiptIndianRupee className="w-4 h-4 text-blue-600" /> 3. Line Items & Products
+              </div>
+              <button
+                type="button"
+                onClick={addItem}
+                className="px-3 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Row
+              </button>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-100 text-slate-600 uppercase font-bold text-[10px] tracking-wider border-b border-slate-200">
+                  <tr>
+                    <th className="px-3 py-2.5">Style / Article *</th>
+                    <th className="px-3 py-2.5">Color</th>
+                    <th className="px-3 py-2.5">Size</th>
+                    <th className="px-3 py-2.5">HSN</th>
+                    <th className="px-3 py-2.5 text-right">Pairs (Qty) *</th>
+                    <th className="px-3 py-2.5 text-right">Rate (₹) *</th>
+                    <th className="px-3 py-2.5 text-right">Total (₹)</th>
+                    <th className="px-2 py-2.5 text-center">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {items.map((it, idx) => {
+                    const rowTotal = (Number(it.qty) || 0) * (Number(it.unit_price) || 0);
+                    return (
+                      <tr key={idx} className="hover:bg-slate-50/50">
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            required
+                            placeholder="e.g. DERBY-501"
+                            value={it.style_code}
+                            onChange={(e) => handleItemChange(idx, "style_code", e.target.value)}
+                            className="w-full border border-slate-300 rounded px-2 py-1 font-semibold focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            placeholder="Black"
+                            value={it.color}
+                            onChange={(e) => handleItemChange(idx, "color", e.target.value)}
+                            className="w-20 border border-slate-300 rounded px-2 py-1 focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            placeholder="8"
+                            value={it.size}
+                            onChange={(e) => handleItemChange(idx, "size", e.target.value)}
+                            className="w-16 border border-slate-300 rounded px-2 py-1 focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={it.hsn_code}
+                            onChange={(e) => handleItemChange(idx, "hsn_code", e.target.value)}
+                            className="w-16 border border-slate-300 rounded px-2 py-1 font-mono text-center focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            min="1"
+                            required
+                            value={it.qty}
+                            onChange={(e) => handleItemChange(idx, "qty", e.target.value)}
+                            className="w-20 border border-slate-300 rounded px-2 py-1 font-mono text-right font-bold focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            required
+                            value={it.unit_price}
+                            onChange={(e) => handleItemChange(idx, "unit_price", e.target.value)}
+                            className="w-24 border border-slate-300 rounded px-2 py-1 font-mono text-right font-bold focus:border-purple-600 outline-none"
+                          />
+                        </td>
+                        <td className="p-2 text-right font-mono font-bold text-slate-800">
+                          {inr(rowTotal)}
+                        </td>
+                        <td className="p-2 text-center">
+                          <button
+                            type="button"
+                            disabled={items.length <= 1}
+                            onClick={() => removeItem(idx)}
+                            className="text-slate-400 hover:text-red-600 disabled:opacity-30 transition-colors p-1"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Section 4: Optional Transport & Dispatch Details */}
+          <details className="text-xs bg-slate-50 border border-slate-200 rounded-xl p-3">
+            <summary className="font-bold text-slate-700 cursor-pointer uppercase tracking-wider text-[11px] select-none">
+              + Optional Dispatch & Vehicle Information
+            </summary>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3">
+              <Field label="Transport Mode">
+                <input
+                  type="text"
+                  placeholder="e.g. Road / By Hand"
+                  value={transportMode}
+                  onChange={(e) => setTransportMode(e.target.value)}
+                  className="w-full border border-slate-300 rounded px-2 py-1.5 text-xs bg-white outline-none"
+                />
+              </Field>
+              <Field label="Vehicle No">
+                <input
+                  type="text"
+                  placeholder="UP-78-AB-1234"
+                  value={vehicleNo}
+                  onChange={(e) => setVehicleNo(e.target.value)}
+                  className="w-full border border-slate-300 rounded px-2 py-1.5 text-xs bg-white uppercase outline-none"
+                />
+              </Field>
+              <Field label="Remarks / Notes">
+                <input
+                  type="text"
+                  placeholder="Notes on invoice"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  className="w-full border border-slate-300 rounded px-2 py-1.5 text-xs bg-white outline-none"
+                />
+              </Field>
+            </div>
+          </details>
+
+          {/* Section 5: Calculation Summary */}
+          <div className="bg-slate-900 text-white p-4 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Total Pairs</div>
+              <div className="text-2xl font-bold font-mono text-emerald-400">{totalPairs} Pairs</div>
+              <div className="text-xs text-slate-400 mt-1">
+                Taxable: <span className="font-mono text-slate-200">{inr(subtotal)}</span>
+              </div>
+            </div>
+
+            <div className="space-y-1 text-right text-xs">
+              {isIntraState ? (
+                <>
+                  <div className="text-slate-300">
+                    CGST ({cgstRate}%): <span className="font-mono text-white">{inr(cgstAmount)}</span>
+                  </div>
+                  <div className="text-slate-300">
+                    SGST ({sgstRate}%): <span className="font-mono text-white">{inr(sgstAmount)}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-slate-300">
+                  IGST ({igstRate}%): <span className="font-mono text-white">{inr(igstAmount)}</span>
+                </div>
+              )}
+              <div className="text-base font-bold text-white pt-1 border-t border-slate-700">
+                Grand Total: <span className="font-mono text-xl text-emerald-400">{inr(grandTotal)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Modal Footer Actions */}
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
+            <BtnSecondary type="button" onClick={onClose} disabled={saving}>
+              Cancel
+            </BtnSecondary>
+            <BtnPrimary
+              type="submit"
+              disabled={saving}
+              className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] px-6 py-2.5 flex items-center gap-2 font-bold shadow-md"
+            >
+              {saving ? "Generating Direct Invoice…" : "Generate & Issue Direct Invoice"}
+            </BtnPrimary>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+

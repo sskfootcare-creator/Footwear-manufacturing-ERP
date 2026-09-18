@@ -2103,6 +2103,14 @@ async def create_payment(payload: PaymentIn, request: Request):
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # >>> SYNC PAYMENT RECEIPT TO SUPABASE FINANCIAL CORE <<<
+    try:
+        from services.supabase_invoice_service import sync_invoice_payment_to_supabase
+        sync_invoice_payment_to_supabase(doc, invoices)
+    except Exception as se:
+        log.warning("Supabase invoice payment sync warning: %s", se)
+
     return stringify(doc)
 
 
@@ -2138,6 +2146,95 @@ async def delete_payment(pid: str, request: Request):
     if not r.deleted_count:
         raise HTTPException(404, "Payment not found")
     return {"ok": True}
+
+
+# ── Clients Master & Directory ─────────────────────────────────────────────
+
+@pos_router.get("/clients/master")
+async def list_clients_master(request: Request, search: Optional[str] = None):
+    """Return all clients saved in master directory."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = get_db()
+    q: dict = {}
+    if search:
+        q["$or"] = [
+            {"company_name": {"$regex": re.escape(search), "$options": "i"}},
+            {"contact_person": {"$regex": re.escape(search), "$options": "i"}},
+            {"gstin": {"$regex": re.escape(search), "$options": "i"}},
+            {"phone": {"$regex": re.escape(search), "$options": "i"}},
+        ]
+    docs = await db.clients.find(q).sort("company_name", 1).to_list(1000)
+    return [stringify(d) for d in docs]
+
+
+@pos_router.post("/clients/master", status_code=201)
+async def create_or_update_client_master(request: Request):
+    """Create or update client master data."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = get_db()
+    data = await request.json()
+
+    company_name = (data.get("company_name") or data.get("name") or "").strip()
+    if not company_name:
+        raise HTTPException(400, "Company name is required")
+
+    cid = data.get("id") or data.get("_id")
+    client_doc = {
+        "company_name": company_name,
+        "name": company_name,
+        "contact_person": (data.get("contact_person") or "").strip(),
+        "phone": (data.get("phone") or "").strip(),
+        "email": (data.get("email") or "").strip(),
+        "gstin": (data.get("gstin") or data.get("client_gstin") or "").strip().upper(),
+        "pan": (data.get("pan") or "").strip().upper(),
+        "billing_address": (data.get("billing_address") or "").strip(),
+        "shipping_address": (data.get("shipping_address") or data.get("billing_address") or "").strip(),
+        "state": (data.get("state") or "Uttar Pradesh").strip(),
+        "state_code": (data.get("state_code") or "09").strip(),
+        "payment_terms_days": int(data.get("payment_terms_days") or 30),
+        "notes": (data.get("notes") or "").strip(),
+        "is_active": bool(data.get("is_active", True)),
+        "updated_at": now_iso(),
+    }
+
+    if cid:
+        try:
+            await db.clients.update_one({"_id": oid(cid)}, {"$set": client_doc})
+            saved = await db.clients.find_one({"_id": oid(cid)})
+        except Exception:
+            client_doc["created_at"] = now_iso()
+            res = await db.clients.insert_one(client_doc)
+            saved = await db.clients.find_one({"_id": res.inserted_id})
+    else:
+        # Check if already exists by company name or GSTIN
+        existing = None
+        if client_doc["gstin"]:
+            existing = await db.clients.find_one({"gstin": client_doc["gstin"]})
+        if not existing:
+            existing = await db.clients.find_one({"company_name": {"$regex": f"^{re.escape(company_name)}$", "$options": "i"}})
+        
+        if existing:
+            await db.clients.update_one({"_id": existing["_id"]}, {"$set": client_doc})
+            saved = await db.clients.find_one({"_id": existing["_id"]})
+        else:
+            client_doc["created_at"] = now_iso()
+            res = await db.clients.insert_one(client_doc)
+            saved = await db.clients.find_one({"_id": res.inserted_id})
+
+    # Sync to Supabase financial_entities
+    try:
+        from services.supabase_invoice_service import ensure_client_entity, _get_coa_map
+        from db.supabase_client import get_supabase_admin_client
+        sb = get_supabase_admin_client()
+        if sb:
+            coa_map = _get_coa_map(sb)
+            ensure_client_entity(sb, saved, coa_map)
+    except Exception as se:
+        log.warning("Supabase client entity sync warning: %s", se)
+
+    return stringify(saved)
 
 
 # ── Clients / AR Summary & Ledger ───────────────────────────────────────────
