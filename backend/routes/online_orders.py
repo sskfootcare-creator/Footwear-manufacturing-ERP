@@ -2205,6 +2205,645 @@ def _parse_sku_style_and_size(raw_sku: str) -> Tuple[str, str, str]:
     return s, "", ""
 
 
+def _parse_myntra_pnl_workbook(content: bytes) -> Tuple[str, str, Dict[str, Any], List[Dict[str, Any]]]:
+    """Parses Myntra Monthly PnL Excel workbook containing PnL_Summary, Glossary, and SKU_Detail."""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Could not read uploaded Excel file: {str(e)}")
+
+    sheet_names = wb.sheetnames
+    if "SKU_Detail" not in sheet_names:
+        raise HTTPException(
+            400,
+            "Invalid file: Missing 'SKU_Detail' sheet. Please upload the official Myntra Monthly PnL Excel report (PnLReport_xxxxx.xlsx)."
+        )
+
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    seller_id = ""
+    pnl_summary: Dict[str, Any] = {
+        "report_month_text": "",
+        "seller_id": "",
+        "gross_sales": 0.0,
+        "gross_units": 0,
+        "returns_amount": 0.0,
+        "returns_units": 0,
+        "net_sales": 0.0,
+        "net_units": 0,
+        "total_expenses": 0.0,
+        "forward_expense": 0.0,
+        "reverse_expense": 0.0,
+        "fwd_commission": 0.0,
+        "rev_logistic_charge": 0.0,
+        "net_sales_after_expenses": 0.0,
+        "product_gst": 0.0,
+        "bank_settlement_projected": 0.0,
+        "bank_settlement_settled": 0.0,
+        "bank_settlement_unsettled": 0.0,
+        "earnings_on_platform": 0.0,
+        "platform_net_margin_pct": 0.0,
+    }
+
+    if "PnL_Summary" in sheet_names:
+        ws_sum = wb["PnL_Summary"]
+        for r in range(1, ws_sum.max_row + 1):
+            k = ws_sum.cell(r, 1).value
+            v = ws_sum.cell(r, 2).value
+            units = ws_sum.cell(r, 3).value
+            if not k:
+                continue
+            k_str = str(k).strip()
+            if "Orders Received During:" in k_str:
+                month_str = str(v or "").strip()
+                pnl_summary["report_month_text"] = month_str
+                m_match = re.search(r"([A-Za-z]+)\s*(\d{4})", month_str)
+                if m_match:
+                    month_name, year_str = m_match.groups()
+                    try:
+                        dt = datetime.strptime(f"{month_name} {year_str}", "%B %Y")
+                        month = dt.strftime("%Y-%m")
+                    except Exception:
+                        pass
+            elif "Seller ID:" in k_str:
+                seller_id = str(v or "").strip()
+                pnl_summary["seller_id"] = seller_id
+            elif "Gross Sales" in k_str:
+                pnl_summary["gross_sales"] = float(v or 0)
+                pnl_summary["gross_units"] = int(float(units or 0))
+            elif "Returns and Cancellations" in k_str:
+                pnl_summary["returns_amount"] = float(v or 0)
+                pnl_summary["returns_units"] = int(float(units or 0))
+            elif "Estimated Net Sales" in k_str and "After" not in k_str:
+                pnl_summary["net_sales"] = float(v or 0)
+                pnl_summary["net_units"] = int(float(units or 0))
+            elif "Total Expenses" in k_str:
+                pnl_summary["total_expenses"] = float(v or 0)
+            elif "Forward Expense" in k_str:
+                pnl_summary["forward_expense"] = float(v or 0)
+            elif "Reverse Expense" in k_str:
+                pnl_summary["reverse_expense"] = float(v or 0)
+            elif "Commission Fee" in k_str and pnl_summary.get("fwd_commission") == 0.0:
+                pnl_summary["fwd_commission"] = float(v or 0)
+            elif "Reverse Logistic Charge" in k_str:
+                pnl_summary["rev_logistic_charge"] = float(v or 0)
+            elif "Estimated Net Sales After Expenses" in k_str:
+                pnl_summary["net_sales_after_expenses"] = float(v or 0)
+            elif "Product GST" in k_str:
+                pnl_summary["product_gst"] = float(v or 0)
+            elif "Bank Settlement (Projected)" in k_str:
+                pnl_summary["bank_settlement_projected"] = float(v or 0)
+            elif "Bank Settlement (Settled)" in k_str:
+                pnl_summary["bank_settlement_settled"] = float(v or 0)
+            elif "Bank Settlement (Unsettled)" in k_str:
+                pnl_summary["bank_settlement_unsettled"] = float(v or 0)
+            elif "Earnings on Platform" in k_str:
+                pnl_summary["earnings_on_platform"] = float(v or 0)
+            elif "Net Margin" in k_str:
+                pnl_summary["platform_net_margin_pct"] = round(float(v or 0) * 100, 2)
+
+    ws_sku = wb["SKU_Detail"]
+    header = [str(ws_sku.cell(1, c).value or "").strip() for c in range(1, ws_sku.max_column + 1)]
+    sku_rows: List[Dict[str, Any]] = []
+    for r in range(2, ws_sku.max_row + 1):
+        row_dict = {}
+        for c in range(1, ws_sku.max_column + 1):
+            col_name = header[c - 1]
+            if col_name:
+                row_dict[col_name] = ws_sku.cell(r, c).value
+        sku_rows.append(row_dict)
+
+    return month, seller_id, pnl_summary, sku_rows
+
+
+def _parse_flipkart_pnl_workbook(content: bytes) -> Tuple[str, str, Dict[str, Any], List[Dict[str, Any]]]:
+    """Parses Flipkart Monthly PnL Excel workbook containing Overall Summary, SKU-level P&L, and Orders P&L."""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Could not read uploaded Excel file: {str(e)}")
+
+    sheet_names = wb.sheetnames
+    if "Overall Summary" not in sheet_names and "SKU-level P&L" not in sheet_names:
+        raise HTTPException(
+            400,
+            "Invalid file: Missing 'Overall Summary' or 'SKU-level P&L' sheet. Please upload the official Flipkart Monthly PnL Excel report."
+        )
+
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    seller_id = "Flipkart Seller"
+
+    summary_map = {}
+    if "Overall Summary" in sheet_names:
+        ws_sum = wb["Overall Summary"]
+        for r in range(1, ws_sum.max_row + 1):
+            c1 = ws_sum.cell(r, 1).value
+            c2 = ws_sum.cell(r, 2).value
+            c3 = ws_sum.cell(r, 3).value
+            if not c1:
+                continue
+            c1_str = str(c1).strip()
+            summary_map[c1_str] = (c2, c3)
+            clean_k = re.sub(r"^[^\w]+", "", c1_str).strip()
+            summary_map[clean_k] = (c2, c3)
+            if "Orders Recieved During:" in c1_str or "Orders Received During:" in c1_str:
+                period_str = str(c2 or "").strip()
+                m_dt = re.search(r"(\d{4}-\d{2})", period_str)
+                if m_dt:
+                    month = m_dt.group(1)
+
+    def _val(key, idx=0, default=0.0):
+        t = summary_map.get(key)
+        if not t or len(t) <= idx or t[idx] is None:
+            return default
+        try:
+            return float(t[idx])
+        except (ValueError, TypeError):
+            return default
+
+    gross_sales = _val("Gross Sales", 0)
+    gross_units = int(_val("Gross Sales", 1))
+    returns_amount = _val("Returns and Cancellations", 0)
+    returns_units = int(_val("Returns and Cancellations", 1))
+    rto_amount = _val("RTO (Logistics Return)", 0)
+    rto_units = int(_val("RTO (Logistics Return)", 1))
+    rvp_amount = _val("RVP (Customer Return)", 0)
+    rvp_units = int(_val("RVP (Customer Return)", 1))
+    cancel_amount = _val("Cancelled", 0)
+    cancel_units = int(_val("Cancelled", 1))
+
+    est_net_sales = _val("Estimated Net Sales", 0)
+    est_net_units = int(_val("Estimated Net Sales", 1))
+    seller_discount = _val("Seller-Funded Discount", 0)
+    customer_addons = _val("Customer Add-Ons Amount", 0)
+    accounted_net_sales = _val("Accounted Net Sales (Seller Price)", 0)
+
+    total_expenses = _val("Total Expenses", 0)
+    fixed_fee = _val("Fixed Fee", 0)
+    ads_fee = _val("Ads", 0)
+    taxes_gst = _val("Taxes (GST)", 0)
+    taxes_tcs = _val("Taxes (TCS)", 0)
+    taxes_tds = _val("Taxes (TDS)", 0)
+    bank_projected = _val("Bank Settlement (Projected)", 0)
+    itc = _val("Input Tax Credits", 0)
+    platform_earnings = _val("Earnings on Platform", 0)
+    already_paid = _val("Already Paid (In Your Bank Account)", 0)
+    pending_pay = _val("Pending (Flipkart to pay you)", 0)
+
+    effective_net_sales = accounted_net_sales if accounted_net_sales else est_net_sales
+
+    pnl_summary: Dict[str, Any] = {
+        "report_month_text": f"Orders Received: {month}",
+        "seller_id": seller_id,
+        "gross_sales": round(gross_sales, 2),
+        "gross_units": gross_units,
+        "returns_amount": round(returns_amount, 2),
+        "returns_units": abs(returns_units),
+        "rto_amount": round(rto_amount, 2),
+        "rto_units": abs(rto_units),
+        "rvp_amount": round(rvp_amount, 2),
+        "rvp_units": abs(rvp_units),
+        "cancelled_amount": round(cancel_amount, 2),
+        "cancelled_units": abs(cancel_units),
+        "estimated_net_sales": round(est_net_sales, 2),
+        "seller_funded_discount": round(seller_discount, 2),
+        "customer_addons_amount": round(customer_addons, 2),
+        "net_sales": round(effective_net_sales, 2),
+        "net_units": est_net_units if est_net_units else (gross_units - abs(returns_units)),
+        "total_expenses": round(total_expenses, 2),
+        "fixed_fee": round(fixed_fee, 2),
+        "ads_fee": round(ads_fee, 2),
+        "taxes_gst": round(taxes_gst, 2),
+        "taxes_tcs": round(taxes_tcs, 2),
+        "taxes_tds": round(taxes_tds, 2),
+        "bank_settlement_projected": round(bank_projected, 2),
+        "bank_settlement_settled": round(already_paid, 2),
+        "bank_settlement_unsettled": round(pending_pay, 2),
+        "input_tax_credits": round(itc, 2),
+        "earnings_on_platform": round(platform_earnings, 2),
+        "platform_net_margin_pct": round((platform_earnings / effective_net_sales * 100), 2) if effective_net_sales > 0 else 0.0,
+    }
+
+    sku_rows: List[Dict[str, Any]] = []
+    if "SKU-level P&L" in sheet_names:
+        ws_sku = wb["SKU-level P&L"]
+        for r in range(3, ws_sku.max_row + 1):
+            sku_val = ws_sku.cell(r, 1).value
+            if not sku_val:
+                continue
+            sku_code = str(sku_val).strip()
+            gross_u = int(float(ws_sku.cell(r, 3).value or 0))
+            ret_u = int(float(ws_sku.cell(r, 4).value or 0))
+            rto_u = int(float(ws_sku.cell(r, 5).value or 0))
+            rvp_u = int(float(ws_sku.cell(r, 6).value or 0))
+            cancel_u = int(float(ws_sku.cell(r, 7).value or 0))
+            net_u = int(float(ws_sku.cell(r, 8).value or 0))
+
+            est_sales = float(ws_sku.cell(r, 10).value or 0.0)
+            order_item_val = float(ws_sku.cell(r, 11).value or 0.0)
+            seller_price = float(ws_sku.cell(r, 13).value or 0.0)
+
+            tot_exp = float(ws_sku.cell(r, 14).value or 0.0)
+            comm = float(ws_sku.cell(r, 15).value or 0.0)
+            coll = float(ws_sku.cell(r, 16).value or 0.0)
+            fixed = float(ws_sku.cell(r, 17).value or 0.0)
+            pick_pack = float(ws_sku.cell(r, 18).value or 0.0)
+            fwd_ship = float(ws_sku.cell(r, 19).value or 0.0)
+            rev_ship = float(ws_sku.cell(r, 21).value or 0.0)
+            gst = float(ws_sku.cell(r, 32).value or 0.0)
+            tcs = float(ws_sku.cell(r, 33).value or 0.0)
+            tds = float(ws_sku.cell(r, 34).value or 0.0)
+
+            bank_proj = float(ws_sku.cell(r, 39).value or 0.0)
+            itc_val = float(ws_sku.cell(r, 40).value or 0.0)
+            net_earn = float(ws_sku.cell(r, 43).value or 0.0)
+            settled_amt = float(ws_sku.cell(r, 47).value or 0.0)
+            pending_amt = float(ws_sku.cell(r, 48).value or 0.0)
+
+            sku_rows.append({
+                "sku_code": sku_code,
+                "GrossSalesUnit": gross_u,
+                "ReturnsandCancellationsUnit": ret_u,
+                "RTO_Units": rto_u,
+                "RVP_Units": rvp_u,
+                "Cancelled_Units": cancel_u,
+                "EstimatedNetSalesUnit": net_u,
+                "GrossSalesAmount": order_item_val or est_sales,
+                "EstimatedNetSalesAmount": seller_price or est_sales,
+                "TotalExpensesAmount": abs(tot_exp),
+                "CommissionFee": abs(comm),
+                "CollectionFee": abs(coll),
+                "FixedFee": abs(fixed),
+                "PickAndPackFee": abs(pick_pack),
+                "ForwardShippingFee": abs(fwd_ship),
+                "ReverseShippingFee": abs(rev_ship),
+                "GST_Amount": abs(gst),
+                "TCS_Amount": abs(tcs),
+                "TDS_Amount": abs(tds),
+                "BankSettlementProjected": bank_proj,
+                "InputTaxCredits": itc_val,
+                "EarningsOnPlatform": net_earn,
+                "AmountSettled": settled_amt,
+                "AmountPending": pending_amt,
+            })
+
+    return month, seller_id, pnl_summary, sku_rows
+
+
+
+async def _fetch_monthly_operational_expenses(
+    month: str,
+    db,
+    existing_ov: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Fetches operational costs (Rent, Electricity, Salaries, Other Basic) and calculates 50% allocation."""
+    if existing_ov and isinstance(existing_ov, dict) and "operational_expenses" in existing_ov:
+        saved_op = existing_ov["operational_expenses"]
+        if isinstance(saved_op, dict) and saved_op.get("rent") is not None:
+            return saved_op
+
+    rent_total = 0.0
+    elec_total = 0.0
+    salaries_total = 0.0
+    other_total = 0.0
+
+    try:
+        cur = db.expenses.find({"date": {"$regex": f"^{re.escape(month)}"}})
+        if hasattr(cur, "to_list"):
+            docs = await cur.to_list(1000)
+            if inspect.isawaitable(docs):
+                docs = await docs
+            for exp in (docs or []):
+                cat = (exp.get("category") or "").strip().lower()
+                amt = float(exp.get("amount") or 0.0)
+                if "rent" in cat:
+                    rent_total += amt
+                elif "elec" in cat or "power" in cat:
+                    elec_total += amt
+                elif "salaries" in cat or "wages" in cat or "salary" in cat:
+                    salaries_total += amt
+                else:
+                    other_total += amt
+    except Exception as e:
+        log.warning(f"Error querying db.expenses for month {month}: {e}")
+
+    try:
+        if rent_total == 0.0 or elec_total == 0.0:
+            recs_res = db.recurring_expenses.find({"active": True}).to_list(100)
+            if inspect.isawaitable(recs_res):
+                recs_res = await recs_res
+            for r in (recs_res or []):
+                cat = (r.get("category") or "").strip().lower()
+                amt = float(r.get("amount") or 0.0)
+                if rent_total == 0.0 and "rent" in cat:
+                    rent_total += amt
+                elif elec_total == 0.0 and ("elec" in cat or "power" in cat):
+                    elec_total += amt
+    except Exception as e:
+        log.warning(f"Error checking db.recurring_expenses: {e}")
+
+    if rent_total == 0.0:
+        rent_total = 85000.0
+    if elec_total == 0.0:
+        elec_total = 12500.0
+    if salaries_total == 0.0:
+        salaries_total = 30000.0
+    if other_total == 0.0:
+        other_total = 10000.0
+
+    total_op = round(rent_total + elec_total + salaries_total + other_total, 2)
+    alloc_pct = 50.0
+    allocated_op = round(total_op * (alloc_pct / 100.0), 2)
+
+    return {
+        "allocation_pct": alloc_pct,
+        "rent": round(rent_total, 2),
+        "electricity": round(elec_total, 2),
+        "salaries": round(salaries_total, 2),
+        "other_basic": round(other_total, 2),
+        "total_monthly_operational_cost": total_op,
+        "allocated_operational_cost": allocated_op,
+    }
+
+
+async def _build_pnl_reconciliation_overview(
+    month: str,
+    seller_id: str,
+    pnl_summary: Dict[str, Any],
+    sku_rows: List[Dict[str, Any]],
+    platform: str,
+    filename: str,
+    db,
+) -> Dict[str, Any]:
+    """Groups SKUs, maps to Style Master, computes COGS, subtracts 50% operational expenses, and calculates Actual Net Profit."""
+    existing_ov = await _safe_find_one(
+        getattr(db, "online_monthly_reconciliation_overviews", None),
+        {"platform": platform, "month": month}
+    )
+    saved_costs = {}
+    if existing_ov and isinstance(existing_ov, dict) and "styles" in existing_ov:
+        for st_item in existing_ov.get("styles", []):
+            if st_item.get("style_code") and st_item.get("unit_production_cost") is not None:
+                saved_costs[st_item["style_code"]] = float(st_item["unit_production_cost"])
+
+    baseline_snap = await _safe_find_one(getattr(db, "style_cost_snapshots", None), {"total_cost": {"$gt": 0}})
+    default_unit_cost = float(baseline_snap["total_cost"]) if (baseline_snap and isinstance(baseline_snap, dict) and "total_cost" in baseline_snap) else 210.0
+
+    all_styles_cur = getattr(db, "styles", None)
+    all_styles = []
+    if all_styles_cur is not None and hasattr(all_styles_cur, "find"):
+        try:
+            res = all_styles_cur.find().to_list(1000)
+            if inspect.isawaitable(res):
+                res = await res
+            all_styles = res or []
+        except Exception:
+            all_styles = []
+
+    style_by_code = {str(s.get("code") or "").strip().lower(): s for s in all_styles if s.get("code")}
+
+    all_sku_maps = []
+    sku_map_cur = getattr(db, "sku_map", None)
+    if sku_map_cur is not None and hasattr(sku_map_cur, "find"):
+        try:
+            res_m = sku_map_cur.find().to_list(1000)
+            if inspect.isawaitable(res_m):
+                res_m = await res_m
+            all_sku_maps = res_m or []
+        except Exception:
+            all_sku_maps = []
+
+    map_by_ext = {}
+    for sm in all_sku_maps:
+        if sm.get("external_sku"):
+            map_by_ext[str(sm["external_sku"]).strip().lower()] = sm
+
+    sku_bifurcation: List[Dict[str, Any]] = []
+    style_groups: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "style_code": "",
+        "brand": "",
+        "style_name": "",
+        "article_type": "Footwear",
+        "colors": set(),
+        "sizes": defaultdict(int),
+        "gross_units": 0,
+        "returns_units": 0,
+        "net_sold_qty": 0,
+        "gross_sales": 0.0,
+        "net_sold_seller_price": 0.0,
+        "platform_expenses": 0.0,
+        "platform_earnings": 0.0,
+        "unit_production_cost": default_unit_cost,
+        "total_production_cost": 0.0,
+        "gross_profit": 0.0,
+        "contribution": 0.0,
+        "total_orders": 0,
+        "packed_qty": 0,
+        "returned_qty": 0,
+        "rto_qty": 0,
+        "cancelled_qty": 0,
+        "pending_qty": 0,
+        "total_seller_price": 0.0,
+    })
+
+    for r in sku_rows:
+        sku = str(r.get("sku_code") or "").strip()
+        brand = str(r.get("brand_name") or "").strip()
+        st_root, col, sz = _parse_sku_style_and_size(sku)
+
+        gross_units = int(float(r.get("GrossSalesUnit") or 0))
+        ret_units = int(float(r.get("ReturnsandCancellationsUnit") or 0))
+        net_units = int(float(r.get("EstimatedNetSalesUnit") or 0))
+
+        gross_sales = float(r.get("GrossSalesAmount") or 0.0)
+        net_sales = float(r.get("EstimatedNetSalesAmount") or 0.0)
+        expenses = float(r.get("TotalExpensesAmount") or 0.0)
+        earnings = float(r.get("EarningsOnPlatform") or 0.0)
+        fwd_exp = float(r.get("ForwardExpense") or 0.0)
+        rev_exp = float(r.get("ReverseExpense") or 0.0)
+        comm = float(r.get("CommissionFee") or 0.0)
+        rev_logistics = float(r.get("ReverseLogisticFee") or 0.0)
+        gst = float(r.get("GST_Amount") or 0.0)
+
+        rto_u = int(float(r.get("RTO_Units") or 0))
+        rvp_u = int(float(r.get("RVP_Units") or 0))
+        canc_u = int(float(r.get("Cancelled_Units") or 0))
+        fixed_f = float(r.get("FixedFee") or 0.0)
+        settled_amt = float(r.get("AmountSettled") or 0.0)
+        pending_amt = float(r.get("AmountPending") or 0.0)
+
+        # Style resolution & cost lookup
+        resolved_style = map_by_ext.get(st_root.lower()) or map_by_ext.get(sku.lower())
+        u_cost = default_unit_cost
+        if st_root in saved_costs:
+            u_cost = saved_costs[st_root]
+        elif resolved_style and resolved_style.get("style_code"):
+            st_doc = style_by_code.get(resolved_style["style_code"].lower())
+            if st_doc:
+                from routes.styles import compute_style_costing
+                b_cost = compute_style_costing(st_doc).get("total_cost", 0)
+                if b_cost and float(b_cost) > 0:
+                    u_cost = float(b_cost)
+        elif st_root.lower() in style_by_code:
+            st_doc = style_by_code[st_root.lower()]
+            from routes.styles import compute_style_costing
+            b_cost = compute_style_costing(st_doc).get("total_cost", 0)
+            if b_cost and float(b_cost) > 0:
+                u_cost = float(b_cost)
+
+        cogs = round(net_units * u_cost, 2)
+        gross_prof = round(net_sales - cogs, 2)
+        contrib = round(earnings - cogs, 2)
+        margin = round((gross_prof / net_sales * 100), 1) if net_sales > 0 else 0.0
+
+        sku_bifurcation.append({
+            "sku_code": sku,
+            "style_root": st_root,
+            "color": col,
+            "size": sz,
+            "brand": brand,
+            "gross_units": gross_units,
+            "returns_units": ret_units,
+            "rto_units": rto_u,
+            "rvp_units": rvp_u,
+            "cancelled_units": canc_u,
+            "net_units": net_units,
+            "gross_sales": gross_sales,
+            "net_sales": net_sales,
+            "platform_expenses": expenses,
+            "forward_expense": fwd_exp,
+            "reverse_expense": rev_exp,
+            "commission_fee": comm,
+            "reverse_logistic_fee": rev_logistics,
+            "fixed_fee": fixed_f,
+            "gst_amount": gst,
+            "platform_earnings": earnings,
+            "settled_amount": settled_amt,
+            "pending_amount": pending_amt,
+            "unit_production_cost": round(u_cost, 2),
+            "total_production_cost": cogs,
+            "gross_profit": gross_prof,
+            "contribution_after_platform": contrib,
+            "margin_pct": margin,
+            "is_mapped": bool(resolved_style or st_root.lower() in style_by_code),
+        })
+
+        g = style_groups[st_root]
+        g["style_code"] = st_root
+        g["brand"] = brand or g["brand"]
+        g["style_name"] = st_root
+        if col:
+            g["colors"].add(col)
+        if sz:
+            g["sizes"][sz] += net_units
+        g["gross_units"] += gross_units
+        g["returns_units"] += ret_units
+        g["rto_qty"] += rto_u
+        g["returned_qty"] += (rvp_u if rvp_u > 0 else ret_units)
+        g["cancelled_qty"] += canc_u
+        g["net_sold_qty"] += net_units
+        g["gross_sales"] += gross_sales
+        g["net_sold_seller_price"] += net_sales
+        g["platform_expenses"] += expenses
+        g["platform_earnings"] += earnings
+        g["unit_production_cost"] = round(u_cost, 2)
+        g["total_production_cost"] += cogs
+        g["gross_profit"] += gross_prof
+        g["contribution"] += contrib
+        g["total_orders"] += gross_units
+        g["packed_qty"] += gross_units
+        g["total_seller_price"] += gross_sales
+
+    styles_list = []
+    tot_sold_units = 0
+    tot_sold_rev = 0.0
+    tot_prod_cost = 0.0
+
+    for st_code, g in sorted(style_groups.items(), key=lambda kv: kv[1]["net_sold_qty"], reverse=True):
+        u_cost = g["unit_production_cost"]
+        total_cogs = round(g["total_production_cost"], 2)
+        gross_profit = round(g["gross_profit"], 2)
+        margin = round((gross_profit / g["net_sold_seller_price"] * 100), 1) if g["net_sold_seller_price"] > 0 else 0.0
+
+        tot_sold_units += g["net_sold_qty"]
+        tot_sold_rev += g["net_sold_seller_price"]
+        tot_prod_cost += total_cogs
+
+        sorted_sizes = dict(sorted(g["sizes"].items(), key=lambda kv: (float(kv[0]) if kv[0].replace('.', '', 1).isdigit() else kv[0])))
+
+        styles_list.append({
+            "style_code":            st_code,
+            "brand":                 g["brand"] or "Generic",
+            "style_name":            g["style_name"] or st_code,
+            "article_type":          g["article_type"] or "Footwear",
+            "colors":                sorted(list(g["colors"])),
+            "sizes":                 sorted_sizes,
+            "total_orders":          g["total_orders"],
+            "packed_qty":            g["packed_qty"],
+            "returned_qty":          g["returned_qty"],
+            "rto_qty":               g["rto_qty"],
+            "cancelled_qty":         g["cancelled_qty"],
+            "pending_qty":           0,
+            "net_sold_qty":          g["net_sold_qty"],
+            "total_seller_price":    round(g["total_seller_price"], 2),
+            "net_sold_seller_price": round(g["net_sold_seller_price"], 2),
+            "unit_production_cost":  round(u_cost, 2),
+            "total_production_cost": total_cogs,
+            "gross_profit":          gross_profit,
+            "platform_earnings":     round(g["platform_earnings"], 2),
+            "contribution":          round(g["contribution"], 2),
+            "margin_pct":            margin,
+        })
+
+    overall_gross_profit = round(tot_sold_rev - tot_prod_cost, 2)
+    overall_margin = round((overall_gross_profit / tot_sold_rev * 100), 1) if tot_sold_rev > 0 else 0.0
+
+    op_expenses = await _fetch_monthly_operational_expenses(month, db, existing_ov)
+    allocated_op = op_expenses.get("allocated_operational_cost", 0.0)
+
+    total_platform_earnings = float(pnl_summary.get("earnings_on_platform") or sum(s["platform_earnings"] for s in sku_bifurcation))
+    actual_net_profit = round(total_platform_earnings - tot_prod_cost - allocated_op, 2)
+    actual_net_margin = round((actual_net_profit / tot_sold_rev * 100), 2) if tot_sold_rev > 0 else 0.0
+
+    tot_rto = abs(pnl_summary.get("rto_units") or sum(s.get("rto_units", 0) for s in sku_bifurcation))
+    tot_cancelled = abs(pnl_summary.get("cancelled_units") or sum(s.get("cancelled_units", 0) for s in sku_bifurcation))
+    tot_returned = abs(pnl_summary.get("rvp_units") or pnl_summary.get("returns_units") or sum(s["returns_units"] for s in sku_bifurcation))
+
+    overview = {
+        "platform":                  platform,
+        "month":                     month,
+        "filename":                  filename,
+        "is_pnl_report":             True,
+        "seller_id":                 seller_id,
+        "pnl_summary":               pnl_summary,
+        "operational_expenses":      op_expenses,
+        "styles_count":              len(styles_list),
+        "total_skus":                len(sku_bifurcation),
+        "total_orders":              pnl_summary.get("gross_units") or sum(s["gross_units"] for s in sku_bifurcation),
+        "total_packed":              pnl_summary.get("gross_units") or sum(s["gross_units"] for s in sku_bifurcation),
+        "total_returned":            tot_returned,
+        "total_rto":                 tot_rto,
+        "total_cancelled":           tot_cancelled,
+        "total_pending":             0,
+        "total_net_sold":            tot_sold_units,
+        "total_seller_revenue":      round(pnl_summary.get("gross_sales") or sum(s["gross_sales"] for s in sku_bifurcation), 2),
+        "net_sold_revenue":          round(tot_sold_rev, 2),
+        "platform_expenses":         round(pnl_summary.get("total_expenses") or sum(s["platform_expenses"] for s in sku_bifurcation), 2),
+        "platform_earnings":         round(total_platform_earnings, 2),
+        "total_cost_of_production":  round(tot_prod_cost, 2),
+        "estimated_gross_profit":    overall_gross_profit,
+        "overall_margin_pct":        overall_margin,
+        "allocated_operational_cost": round(allocated_op, 2),
+        "actual_net_profit":         actual_net_profit,
+        "actual_net_margin_pct":     actual_net_margin,
+        "styles":                    styles_list,
+        "sku_bifurcation":           sku_bifurcation,
+        "updated_at":                now_iso(),
+    }
+    return overview
+
+
 async def _build_monthly_style_overview(
     canonical_rows: List[Dict[str, Any]],
     raw_rows: List[Dict[str, Any]],
@@ -2392,13 +3031,114 @@ async def import_monthly_report(
     db = get_db()
     platform_lc = platform.strip().lower()
 
+    content = await file.read()
+    filename = file.filename or ""
+    is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xlsm") or content[:4] == b"PK\x03\x04"
+
+    # Check if this is an official Monthly PnL report (Myntra or Flipkart)
+    pnl_platform = None
+    if is_excel:
+        try:
+            import openpyxl
+            wb_check = openpyxl.load_workbook(BytesIO(content), read_only=True)
+            s_names = wb_check.sheetnames
+            if "SKU_Detail" in s_names:
+                pnl_platform = "myntra"
+            elif "SKU-level P&L" in s_names or ("Overall Summary" in s_names and "Orders P&L" in s_names):
+                pnl_platform = "flipkart"
+            wb_check.close()
+        except Exception:
+            pnl_platform = None
+
+    if pnl_platform:
+        platform_lc = pnl_platform
+        if pnl_platform == "myntra":
+            month, seller_id, pnl_summary, sku_rows = _parse_myntra_pnl_workbook(content)
+        else:
+            month, seller_id, pnl_summary, sku_rows = _parse_flipkart_pnl_workbook(content)
+
+        style_overview = await _build_pnl_reconciliation_overview(
+            month=month,
+            seller_id=seller_id,
+            pnl_summary=pnl_summary,
+            sku_rows=sku_rows,
+            platform=platform_lc,
+            filename=filename,
+            db=db,
+        )
+        import_batch_id = f"MPNL_{platform_lc}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        committed = {
+            "styles_reconciled": style_overview["styles_count"],
+            "skus_reconciled": len(style_overview["sku_bifurcation"]),
+            "items_upserted": 0,
+            "orders_upserted": 0,
+            "exceptions_queued": 0,
+        }
+        if not dry_run:
+            await _safe_update_one(
+                getattr(db, "online_monthly_reconciliation_overviews", None),
+                {"platform": platform_lc, "month": style_overview["month"]},
+                {"$set": style_overview},
+                upsert=True,
+            )
+            await _log_activity(
+                "MONTHLY_PNL_REPORT_IMPORT", "online_orders",
+                f"{platform_lc}: {style_overview['styles_count']} styles, "
+                f"{len(style_overview['sku_bifurcation'])} SKUs reconciled for month {style_overview['month']} "
+                f"(batch {import_batch_id})",
+                u.get("email", ""),
+                db=db,
+            )
+
+        stats = {
+            "total_rows": len(style_overview["sku_bifurcation"]),
+            "styles_count": style_overview["styles_count"],
+            "packed": style_overview.get("total_packed", 0),
+            "returned_to_stock": style_overview.get("total_returned", 0),
+            "discrepancies": 0,
+            "pending": 0,
+            "net_sold": style_overview.get("total_net_sold", 0),
+            "never_touched_inventory": 0,
+            "matched": sum(1 for s in style_overview["sku_bifurcation"] if s.get("is_mapped")),
+            "unmatched": sum(1 for s in style_overview["sku_bifurcation"] if not s.get("is_mapped")),
+            "empty_leaf_sku": 0,
+            "reason_breakdown": {
+                "rto": 0,
+                "customer_return": style_overview.get("total_returned", 0),
+                "cancelled_after_pack": 0,
+            },
+        }
+
+        return {
+            "platform": platform_lc,
+            "role": "monthly_report",
+            "filename": filename,
+            "is_pnl_report": True,
+            "month": style_overview["month"],
+            "seller_id": seller_id,
+            "pnl_summary": pnl_summary,
+            "operational_expenses": style_overview.get("operational_expenses"),
+            "header_row_1_based": 1,
+            "header": [
+                "sku_code", "style_root", "color", "size", "gross_units", "returns_units",
+                "net_units", "gross_sales", "net_sales", "platform_expenses", "platform_earnings",
+                "unit_production_cost", "total_production_cost", "gross_profit",
+                "contribution_after_platform", "margin_pct"
+            ],
+            "dry_run": dry_run,
+            "stats": stats,
+            "committed": committed if not dry_run else None,
+            "import_batch_id": import_batch_id,
+            "rows": style_overview["sku_bifurcation"],
+            "style_overview": style_overview,
+            "sku_bifurcation": style_overview["sku_bifurcation"],
+        }
+
     cfg_doc = await db.order_import_format_configs.find_one(
         {"platform": platform_lc, "role": "monthly_report", "active": True}
     )
     if not cfg_doc:
         raise HTTPException(400, f"No active monthly report config found for platform '{platform_lc}'")
-
-    content = await file.read()
     sheet_loc = SheetLocator(**_sanitize_sheet_loc(cfg_doc.get("sheet_locator", {"type": "first_sheet"})))
     header_loc = HeaderLocator(**_sanitize_header_loc(cfg_doc.get("header_locator", {"type": "fixed_row", "row": 0})))
     skip_rows = int(cfg_doc.get("skip_rows_after_header", 0) or 0)
@@ -2961,6 +3701,16 @@ class UpdateStyleCostPayload(BaseModel):
     unit_production_cost: float
 
 
+class UpdateOperationalCostPayload(BaseModel):
+    platform: str = "myntra"
+    month: str
+    allocation_pct: Optional[float] = 50.0
+    rent: Optional[float] = None
+    electricity: Optional[float] = None
+    salaries: Optional[float] = None
+    other_basic: Optional[float] = None
+
+
 @online_orders_router.get("/online-orders/reconciliation-summary")
 async def reconciliation_summary(
     request: Request,
@@ -3103,6 +3853,94 @@ async def update_monthly_style_cost(
         "total_cost_of_production": round(tot_prod_cost, 2),
         "estimated_gross_profit": overall_gp,
         "overall_margin_pct": overall_margin,
+        "updated_at": now_iso(),
+    }
+
+    sku_bifurcation = doc.get("sku_bifurcation", [])
+    if sku_bifurcation:
+        for sk in sku_bifurcation:
+            if str(sk.get("style_root") or "").strip().lower() == style_code.lower():
+                sk["unit_production_cost"] = round(new_unit_cost, 2)
+                sk_cogs = round(float(sk.get("net_units") or 0) * new_unit_cost, 2)
+                sk["total_production_cost"] = sk_cogs
+                sk["gross_profit"] = round(float(sk.get("net_sales") or 0) - sk_cogs, 2)
+                sk["contribution_after_platform"] = round(float(sk.get("platform_earnings") or 0) - sk_cogs, 2)
+                net_s = float(sk.get("net_sales") or 0)
+                sk["margin_pct"] = round((sk["gross_profit"] / net_s * 100), 1) if net_s > 0 else 0.0
+        update_data["sku_bifurcation"] = sku_bifurcation
+
+    op_expenses = doc.get("operational_expenses") or {}
+    allocated_op = float(op_expenses.get("allocated_operational_cost") or doc.get("allocated_operational_cost") or 0.0)
+    total_plat_earnings = float(doc.get("platform_earnings") or 0.0)
+    if not total_plat_earnings and doc.get("pnl_summary"):
+        total_plat_earnings = float(doc["pnl_summary"].get("earnings_on_platform") or 0.0)
+    actual_net_profit = round(total_plat_earnings - tot_prod_cost - allocated_op, 2)
+    actual_net_margin = round((actual_net_profit / tot_sold_rev * 100), 2) if tot_sold_rev > 0 else 0.0
+
+    update_data["actual_net_profit"] = actual_net_profit
+    update_data["actual_net_margin_pct"] = actual_net_margin
+
+    await _safe_update_one(
+        getattr(db, "online_monthly_reconciliation_overviews", None),
+        {"_id": doc["_id"]},
+        {"$set": update_data},
+    )
+    doc.update(update_data)
+    return stringify(doc)
+
+
+@online_orders_router.put("/online-orders/monthly-reconciliation-overview/operational-cost")
+async def update_monthly_operational_cost(
+    payload: UpdateOperationalCostPayload,
+    request: Request,
+):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = get_db()
+
+    platform_lc = payload.platform.lower().strip()
+    month = payload.month.strip()
+
+    doc = await _safe_find_one(getattr(db, "online_monthly_reconciliation_overviews", None), {
+        "platform": platform_lc,
+        "month": month,
+    })
+    if not doc or not isinstance(doc, dict):
+        raise HTTPException(404, f"Overview for {platform_lc} / {month} not found")
+
+    cur_op = doc.get("operational_expenses") or {}
+    rent = float(payload.rent if payload.rent is not None else cur_op.get("rent", 85000.0))
+    electricity = float(payload.electricity if payload.electricity is not None else cur_op.get("electricity", 12500.0))
+    salaries = float(payload.salaries if payload.salaries is not None else cur_op.get("salaries", 30000.0))
+    other_basic = float(payload.other_basic if payload.other_basic is not None else cur_op.get("other_basic", 10000.0))
+    alloc_pct = float(payload.allocation_pct if payload.allocation_pct is not None else cur_op.get("allocation_pct", 50.0))
+
+    tot_op = round(rent + electricity + salaries + other_basic, 2)
+    allocated_op = round(tot_op * (alloc_pct / 100.0), 2)
+
+    new_op = {
+        "allocation_pct": alloc_pct,
+        "rent": rent,
+        "electricity": electricity,
+        "salaries": salaries,
+        "other_basic": other_basic,
+        "total_monthly_operational_cost": tot_op,
+        "allocated_operational_cost": allocated_op,
+    }
+
+    tot_prod_cost = float(doc.get("total_cost_of_production") or 0.0)
+    net_sold_rev = float(doc.get("net_sold_revenue") or 0.0)
+    pnl_sum = doc.get("pnl_summary") or {}
+    tot_plat_earn = float(doc.get("platform_earnings") or pnl_sum.get("earnings_on_platform") or 0.0)
+
+    actual_net_profit = round(tot_plat_earn - tot_prod_cost - allocated_op, 2)
+    actual_net_margin = round((actual_net_profit / net_sold_rev * 100), 2) if net_sold_rev > 0 else 0.0
+
+    update_data = {
+        "operational_expenses": new_op,
+        "allocated_operational_cost": allocated_op,
+        "actual_net_profit": actual_net_profit,
+        "actual_net_margin_pct": actual_net_margin,
         "updated_at": now_iso(),
     }
     await _safe_update_one(

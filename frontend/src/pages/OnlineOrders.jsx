@@ -8,7 +8,7 @@ import { Drawer } from "./Materials";
 import {
   Upload, ShoppingBag, RefreshCw, FileWarning, Settings2,
   ChevronLeft, PlayCircle, CheckCircle2, AlertTriangle, Truck, ScrollText, IndianRupee, Calendar,
-  Search, Download, Edit2, TrendingUp, Layers,
+  Search, Download, Edit2, TrendingUp, Layers, Building2, SlidersHorizontal,
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -1061,7 +1061,7 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
 // ═══════════════════════════════════════════════════════════════════════
 function MonthlyReportDrawer({ onClose, onDone }) {
   const [configs, setConfigs] = useState(null);
-  const [platform, setPlatform] = useState("");
+  const [platform, setPlatform] = useState("myntra");
   const [file, setFile] = useState(null);
   const [step, setStep] = useState("choose");
   const [preview, setPreview] = useState(null);
@@ -1076,12 +1076,35 @@ function MonthlyReportDrawer({ onClose, onDone }) {
       try {
         const r = await http.get("/order-import-format-configs?role=monthly_report&active=true");
         setConfigs(r.data || []);
-        if (r.data?.length) setPlatform(r.data[0].platform);
+        if (r.data?.length) {
+          const hasMyntra = r.data.some((c) => c.platform === "myntra");
+          setPlatform(hasMyntra ? "myntra" : r.data[0].platform);
+        }
       } catch (e) {
         setConfigs([]);
       }
     })();
   }, []);
+
+  const platformOptions = useMemo(() => {
+    const list = (configs || []).map((c) => c.platform);
+    if (!list.includes("myntra")) list.unshift("myntra");
+    if (!list.includes("flipkart")) list.push("flipkart");
+    return list;
+  }, [configs]);
+
+  const handleFileChange = (e) => {
+    const chosen = e.target.files[0] || null;
+    setFile(chosen);
+    if (chosen?.name) {
+      const lower = chosen.name.toLowerCase();
+      if (lower.includes("flipkart")) {
+        setPlatform("flipkart");
+      } else if (lower.includes("pnlreport") || lower.includes("myntra")) {
+        setPlatform("myntra");
+      }
+    }
+  };
 
   async function runPreview() {
     setError("");
@@ -1119,45 +1142,34 @@ function MonthlyReportDrawer({ onClose, onDone }) {
     } finally { setCommitting(false); }
   }
 
-  function reset() { setPreview(null); setCommitted(null); setStep("choose"); setError(""); }
-  const noConfigs = configs !== null && configs.length === 0;
+  function reset() { setPreview(null); setCommitted(null); setStep("choose"); setError(""); setFile(null); }
 
   return (
     <Drawer
       onClose={onClose}
       title={
-        step === "choose" ? "Monthly reconciliation — step 1: choose file" :
+        step === "choose" ? "Monthly reconciliation — step 1: choose report" :
           step === "preview" ? "Monthly reconciliation — step 2: review & commit" :
-            "Monthly reconciliation — done"
+            "Monthly reconciliation — completed"
       }
       width="max-w-6xl"
     >
       <div className="space-y-5">
-        {noConfigs && step === "choose" && (
-          <div className="bg-amber-50 border-2 border-amber-300 px-4 py-4 text-sm text-amber-900">
-            <div className="font-bold mb-1 flex items-center gap-2">
-              <FileWarning className="w-4 h-4" /> No monthly-report configs yet.
-            </div>
-            <Link to="/order-import-formats" onClick={onClose}>
-              <BtnPrimary>
-                <span className="flex items-center gap-2">
-                  <Settings2 className="w-4 h-4" /> Configure a platform
-                </span>
-              </BtnPrimary>
-            </Link>
-          </div>
-        )}
-
-        {step === "choose" && configs && configs.length > 0 && (
+        {step === "choose" && (
           <>
-            <div className="bg-indigo-50 border-2 border-indigo-200 px-4 py-3 text-sm text-indigo-900">
+            <div className="bg-indigo-50 border-2 border-indigo-200 px-4 py-3 text-sm text-indigo-900 rounded">
               <div className="font-bold mb-1 flex items-center gap-2">
-                <ScrollText className="w-4 h-4" /> Monthly report — sales & style reconciliation
+                <ScrollText className="w-4 h-4 text-indigo-700" /> Dedicated Marketplace Monthly PnL & Financial Reconciliation
               </div>
-              <div className="text-xs leading-snug">
-                Reconciles monthly platform reports (e.g. Myntra / Flipkart). Calculates actual net units sold, customer returns & RTOs, groups all sizes under each external style (e.g. <span className="font-mono font-bold">FL_DB_016</span>), computes production cost of goods sold (COGS), and stores the monthly financial overview.
-                <div className="mt-1 font-semibold text-indigo-800">
-                  Note: Physical returns are received and restocked daily at the warehouse gate; this monthly reconciliation report does not duplicate physical inventory restocking.
+              <div className="text-xs leading-snug space-y-1">
+                <div>
+                  Reconciles monthly marketplace sales and calculates true profitability. Upload official Myntra (<span className="font-mono font-bold">PnLReport_*.xlsx</span>) or Flipkart (<span className="font-mono font-bold">flipkartPnL.xlsx</span>) PnL reports to automatically parse platform summaries and all SKU metrics.
+                </div>
+                <div className="text-indigo-800 font-semibold pt-0.5">
+                  • Style Master COGS: Maps each SKU to compute manufacturing cost per net unit sold.
+                </div>
+                <div className="text-indigo-800 font-semibold">
+                  • Actual Net Profit: Deducts COGS and 50% factory operational overhead (Rent, Electricity, Salaries, and Basic) from net platform earnings.
                 </div>
               </div>
             </div>
@@ -1165,34 +1177,45 @@ function MonthlyReportDrawer({ onClose, onDone }) {
             <div className="grid grid-cols-2 gap-3">
               <Select label="Platform *" id="monthly-platform" value={platform}
                 onChange={(e) => setPlatform(e.target.value)}>
-                {configs.map((c) => (
-                  <option key={c.platform} value={c.platform}>
-                    {c.platform.charAt(0).toUpperCase() + c.platform.slice(1)}
+                {platformOptions.map((p) => (
+                  <option key={p} value={p}>
+                    {p.charAt(0).toUpperCase() + p.slice(1)}
                   </option>
                 ))}
               </Select>
             </div>
 
             <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Monthly file *</div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                Monthly PnL / Order Report File *
+              </div>
               <div
-                className="border-2 border-dashed border-slate-300 hover:border-slate-500 px-4 py-6 text-center cursor-pointer transition-colors"
+                className="border-2 border-dashed border-slate-300 hover:border-slate-500 px-4 py-7 text-center cursor-pointer transition-colors rounded bg-slate-50/50 hover:bg-slate-50"
                 onClick={() => fileRef.current?.click()}
                 data-testid="monthly-import-file-drop"
               >
-                <Upload className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+                <Upload className="w-7 h-7 text-slate-400 mx-auto mb-2" />
                 {file
-                  ? <div className="text-sm font-mono font-bold text-slate-700">{file.name}</div>
-                  : <div className="text-sm text-slate-500">Click to choose the monthly .csv / .xlsx</div>}
+                  ? (
+                    <div>
+                      <div className="text-sm font-mono font-bold text-slate-800">{file.name}</div>
+                      <div className="text-xs text-slate-500 mt-1">{(file.size / 1024).toFixed(1)} KB · Ready to preview</div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-sm font-bold text-slate-700">Click to choose Myntra or Flipkart PnL Excel (.xlsx) or CSV report</div>
+                      <div className="text-xs text-slate-400 mt-0.5">Accepts flipkartPnL.xlsx, PnLReport_*.xlsx, Monthly_order_report.csv</div>
+                    </div>
+                  )}
               </div>
               <input ref={fileRef} type="file"
-                accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
                 className="hidden"
-                onChange={(e) => setFile(e.target.files[0] || null)} />
+                onChange={handleFileChange} />
             </div>
 
             {error && (
-              <div className="bg-red-50 border-2 border-red-300 px-4 py-3 text-sm text-red-700 font-semibold whitespace-pre-line">
+              <div className="bg-red-50 border-2 border-red-300 px-4 py-3 text-sm text-red-700 font-semibold whitespace-pre-line rounded">
                 {error}
               </div>
             )}
@@ -1202,7 +1225,7 @@ function MonthlyReportDrawer({ onClose, onDone }) {
                 disabled={previewing || !file} className="flex-1">
                 <span className="flex items-center justify-center gap-2">
                   <PlayCircle className="w-4 h-4" />
-                  {previewing ? "Classifying rows…" : "Preview classification"}
+                  {previewing ? "Parsing & linking style master…" : "Preview Reconciliation"}
                 </span>
               </BtnPrimary>
               <BtnSecondary onClick={onClose} disabled={previewing}>Cancel</BtnSecondary>
@@ -1221,24 +1244,27 @@ function MonthlyReportDrawer({ onClose, onDone }) {
         )}
 
         {step === "done" && committed && (
-          <div className="space-y-3">
-            <div className="bg-indigo-50 border-2 border-indigo-300 px-4 py-4 text-sm text-indigo-900">
+          <div className="space-y-4">
+            <div className="bg-indigo-50 border-2 border-indigo-300 px-4 py-4 text-sm text-indigo-900 rounded">
               <div className="font-bold flex items-center gap-2 text-base mb-1">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600" /> Reconciliation committed successfully
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" /> Monthly Reconciliation Committed Successfully
               </div>
-              <div className="text-xs font-mono mb-3">batch: {committed.import_batch_id}</div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <MiniStat label="styles reconciled" value={committed.style_overview?.styles_count ?? committed.committed?.items_upserted ?? 0} accent="#0F172A" />
-                <MiniStat label="net sold units" value={committed.style_overview?.total_net_sold ?? 0} accent="#16A34A" />
-                <MiniStat label="net revenue" value={`₹${Math.round(committed.style_overview?.net_sold_revenue ?? 0).toLocaleString()}`} accent="#2563EB" />
-                <MiniStat label="production cogs" value={`₹${Math.round(committed.style_overview?.total_cost_of_production ?? 0).toLocaleString()}`} accent="#D97706" />
-                <MiniStat label="gross profit" value={`₹${Math.round(committed.style_overview?.estimated_gross_profit ?? 0).toLocaleString()}`} accent="#059669" />
-                <MiniStat label="overall margin" value={`${committed.style_overview?.overall_margin_pct ?? 0}%`} accent="#7C3AED" />
-                <MiniStat label="items upserted" value={committed.committed?.items_upserted ?? 0} accent="#64748B" />
-                <MiniStat label="exceptions" value={committed.committed?.exceptions_queued ?? 0} accent="#DC2626" />
+              <div className="text-xs font-mono mb-3 text-slate-500">batch: {committed.import_batch_id}</div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                <MiniStat label="Net Sales Revenue" value={`₹${Math.round(committed.style_overview?.net_sold_revenue ?? 0).toLocaleString()}`} accent="#0F172A" />
+                <MiniStat label="Platform Earnings" value={`₹${Math.round(committed.style_overview?.platform_earnings ?? 0).toLocaleString()}`} accent="#2563EB" />
+                <MiniStat label="Production COGS" value={`₹${Math.round(committed.style_overview?.total_cost_of_production ?? 0).toLocaleString()}`} accent="#D97706" />
+                <MiniStat label="50% Op Overhead" value={`₹${Math.round(committed.style_overview?.allocated_operational_cost ?? 0).toLocaleString()}`} accent="#7C3AED" />
+                <MiniStat
+                  label="ACTUAL NET PROFIT"
+                  value={`₹${Math.round(committed.style_overview?.actual_net_profit ?? 0).toLocaleString()}`}
+                  accent={(committed.style_overview?.actual_net_profit ?? 0) >= 0 ? "#16A34A" : "#DC2626"}
+                />
               </div>
-              <div className="mt-3 text-[11px] text-slate-600 bg-white/70 p-2 rounded border border-indigo-200">
-                Monthly style overview saved for month <span className="font-mono font-bold">{committed.style_overview?.month}</span>. Physical return parcels are received & restocked daily at the warehouse gate.
+
+              <div className="mt-3 text-[11px] text-slate-600 bg-white/80 p-2.5 rounded border border-indigo-200">
+                Monthly style overview and SKU bifurcation saved for month <span className="font-mono font-bold">{committed.style_overview?.month}</span> ({committed.style_overview?.styles_count || 0} styles · {committed.style_overview?.total_skus || 0} SKUs). Physical return parcels are restocked daily at the warehouse gate.
               </div>
             </div>
             <div className="flex gap-3">
@@ -1259,8 +1285,9 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
   const stats = preview.stats || {};
   const breakdown = stats.reason_breakdown || {};
   const styleOverview = preview.style_overview;
+  const isPnl = preview.is_pnl_report || !!preview.sku_bifurcation?.length;
 
-  const [activeTab, setActiveTab] = useState(styleOverview?.styles?.length ? "styles" : "rows");
+  const [activeTab, setActiveTab] = useState(styleOverview?.styles?.length ? "styles" : (isPnl ? "skus" : "rows"));
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [filterMode, setFilterMode] = useState("all"); // "all" | "discrepancies" | "unmatched" | "matched"
@@ -1280,25 +1307,64 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
 
   return (
     <div className="space-y-4">
-      <div className="bg-slate-50 border-2 border-slate-200 px-4 py-3 text-xs text-slate-800 font-mono space-y-1">
-        <div>platform: <span className="font-bold">{preview.platform}</span> · role: <span className="font-bold">monthly_report</span></div>
-        <div>file: {preview.filename}</div>
+      <div className="bg-slate-50 border-2 border-slate-200 px-4 py-3 text-xs text-slate-800 font-mono flex flex-wrap items-center justify-between gap-2 rounded">
+        <div>platform: <span className="font-bold">{preview.platform}</span> · month: <span className="font-bold">{preview.month || styleOverview?.month}</span></div>
+        <div>file: <span className="font-bold">{preview.filename}</span></div>
       </div>
 
-      {/* ── Funnel: Packed → minus Returned/Pending → Net Sold ── */}
-      <FunnelViz stats={stats} breakdown={breakdown} />
+      {/* If PnL report: display the 5-card financial overview strip */}
+      {isPnl && styleOverview && (
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <div className="bg-slate-50 border-2 border-slate-200 p-3 rounded">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Net Sales Revenue</div>
+            <div className="text-xl font-black font-mono text-slate-900 mt-1">₹{Math.round(styleOverview.net_sold_revenue || 0).toLocaleString()}</div>
+            <div className="text-[11px] text-slate-500 font-mono mt-0.5">{styleOverview.total_net_sold || 0} net units</div>
+          </div>
+          <div className="bg-blue-50/60 border-2 border-blue-200 p-3 rounded">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-blue-800">Platform Payout</div>
+            <div className="text-xl font-black font-mono text-blue-900 mt-1">₹{Math.round(styleOverview.platform_earnings || 0).toLocaleString()}</div>
+            <div className="text-[11px] text-blue-700 mt-0.5">Myntra Net Earnings</div>
+          </div>
+          <div className="bg-amber-50/60 border-2 border-amber-200 p-3 rounded">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-amber-800">Manufacturing COGS</div>
+            <div className="text-xl font-black font-mono text-amber-900 mt-1">₹{Math.round(styleOverview.total_cost_of_production || 0).toLocaleString()}</div>
+            <div className="text-[11px] text-amber-700 mt-0.5">From Style Master</div>
+          </div>
+          <div className="bg-purple-50/60 border-2 border-purple-200 p-3 rounded">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-purple-800">50% Factory Overhead</div>
+            <div className="text-xl font-black font-mono text-purple-900 mt-1">₹{Math.round(styleOverview.allocated_operational_cost || 0).toLocaleString()}</div>
+            <div className="text-[11px] text-purple-700 mt-0.5">Rent, Power, Salaries</div>
+          </div>
+          <div className={`border-2 p-3 rounded ${(styleOverview.actual_net_profit ?? 0) >= 0 ? "bg-emerald-50 border-emerald-300" : "bg-rose-50 border-rose-300"}`}>
+            <div className={`text-[10px] uppercase tracking-wider font-bold ${(styleOverview.actual_net_profit ?? 0) >= 0 ? "text-emerald-800" : "text-rose-800"}`}>
+              ACTUAL NET PROFIT
+            </div>
+            <div className={`text-xl font-black font-mono mt-1 ${(styleOverview.actual_net_profit ?? 0) >= 0 ? "text-emerald-900" : "text-rose-900"}`}>
+              ₹{Math.round(styleOverview.actual_net_profit || 0).toLocaleString()}
+            </div>
+            <div className={`text-[11px] font-bold font-mono mt-0.5 ${(styleOverview.actual_net_profit ?? 0) >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+              {styleOverview.actual_net_margin_pct ?? 0}% Net Margin
+            </div>
+          </div>
+        </div>
+      )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-        <MiniStat label="total rows" value={stats.total_rows ?? 0} accent="#0F172A" />
-        <MiniStat label="matched sku" value={stats.matched ?? 0} accent="#16A34A" />
-        <MiniStat label="unmatched sku" value={stats.unmatched ?? 0} accent="#DC2626" />
-        <MiniStat label="never touched inv" value={stats.never_touched_inventory ?? 0} accent="#64748B" />
-        <MiniStat label="discrepancies" value={stats.discrepancies ?? 0} accent="#F97316" />
-        <MiniStat label="pending in transit" value={stats.pending ?? 0} accent="#EAB308" />
-        <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
-      </div>
+      {/* Non-PnL legacy order report funnel */}
+      {!isPnl && <FunnelViz stats={stats} breakdown={breakdown} />}
 
-      {/* Sub-tabs: Style Overview & Costing VS Raw Order Rows */}
+      {!isPnl && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+          <MiniStat label="total rows" value={stats.total_rows ?? 0} accent="#0F172A" />
+          <MiniStat label="matched sku" value={stats.matched ?? 0} accent="#16A34A" />
+          <MiniStat label="unmatched sku" value={stats.unmatched ?? 0} accent="#DC2626" />
+          <MiniStat label="never touched inv" value={stats.never_touched_inventory ?? 0} accent="#64748B" />
+          <MiniStat label="discrepancies" value={stats.discrepancies ?? 0} accent="#F97316" />
+          <MiniStat label="pending in transit" value={stats.pending ?? 0} accent="#EAB308" />
+          <MiniStat label="empty leaf_sku" value={stats.empty_leaf_sku ?? 0} accent="#D97706" />
+        </div>
+      )}
+
+      {/* Sub-tabs: Style Overview & Costing VS SKU Bifurcation VS Raw Order Rows */}
       <div className="flex border-b border-slate-200 gap-4 pt-1">
         <button
           type="button"
@@ -1312,46 +1378,47 @@ function MonthlyPreviewPanel({ preview, error, committing, onBack, onCommit }) {
           <Layers className="w-3.5 h-3.5" />
           Style Overview & Production Cost ({styleOverview?.styles_count ?? styleOverview?.styles?.length ?? 0} styles)
         </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("rows")}
-          className={`pb-2 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
-            activeTab === "rows"
-              ? "border-slate-900 text-slate-900"
-              : "border-transparent text-slate-500 hover:text-slate-800"
-          }`}
-        >
-          <ScrollText className="w-3.5 h-3.5" />
-          Order Rows ({rows.length})
-        </button>
+
+        {isPnl && (
+          <button
+            type="button"
+            onClick={() => setActiveTab("skus")}
+            className={`pb-2 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+              activeTab === "skus"
+                ? "border-slate-900 text-slate-900"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <ScrollText className="w-3.5 h-3.5" />
+            SKU-wise Bifurcation ({preview.sku_bifurcation?.length || 0} SKUs)
+          </button>
+        )}
+
+        {!isPnl && (
+          <button
+            type="button"
+            onClick={() => setActiveTab("rows")}
+            className={`pb-2 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+              activeTab === "rows"
+                ? "border-slate-900 text-slate-900"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <ScrollText className="w-3.5 h-3.5" />
+            Order Rows ({rows.length})
+          </button>
+        )}
       </div>
 
       {activeTab === "styles" && styleOverview && (
         <div className="space-y-3">
-          {/* Quick summary strip for style overview */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-slate-50 p-3 border border-slate-200 rounded text-xs">
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">Net Sold Units</div>
-              <div className="font-mono font-bold text-emerald-700 text-base">{styleOverview.total_net_sold}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">Net Revenue</div>
-              <div className="font-mono font-bold text-slate-900 text-base">₹{Math.round(styleOverview.net_sold_revenue || 0).toLocaleString()}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">Production COGS</div>
-              <div className="font-mono font-bold text-amber-700 text-base">₹{Math.round(styleOverview.total_cost_of_production || 0).toLocaleString()}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">Est. Gross Profit</div>
-              <div className="font-mono font-bold text-emerald-700 text-base">₹{Math.round(styleOverview.estimated_gross_profit || 0).toLocaleString()}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase font-bold">Overall Margin</div>
-              <div className="font-mono font-bold text-indigo-700 text-base">{styleOverview.overall_margin_pct}%</div>
-            </div>
-          </div>
           <MonthlyStyleOverviewTable overview={styleOverview} readOnly={true} />
+        </div>
+      )}
+
+      {activeTab === "skus" && isPnl && (
+        <div className="space-y-3">
+          <MonthlySkuBifurcationTable skuList={preview.sku_bifurcation || []} />
         </div>
       )}
 
@@ -1816,10 +1883,448 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// SKU-wise Bifurcation Table (352+ rows in Myntra PnL Report)
+// ═══════════════════════════════════════════════════════════════════════
+function MonthlySkuBifurcationTable({ skuList = [] }) {
+  const [search, setSearch] = useState("");
+  const [filterMode, setFilterMode] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const filtered = useMemo(() => {
+    let list = skuList || [];
+    if (filterMode === "mapped") list = list.filter((s) => s.is_mapped);
+    else if (filterMode === "unmapped") list = list.filter((s) => !s.is_mapped);
+    else if (filterMode === "positive") list = list.filter((s) => (s.contribution_after_platform ?? 0) > 0);
+    else if (filterMode === "loss") list = list.filter((s) => (s.contribution_after_platform ?? 0) < 0);
+
+    if (search.trim()) {
+      const q = search.toLowerCase().trim();
+      list = list.filter(
+        (s) =>
+          (s.sku_code || "").toLowerCase().includes(q) ||
+          (s.style_root || "").toLowerCase().includes(q) ||
+          (s.brand || "").toLowerCase().includes(q) ||
+          (s.color || "").toLowerCase().includes(q) ||
+          String(s.size || "").toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [skuList, search, filterMode]);
+
+  const effectivePageSize = pageSize === 0 ? filtered.length || 1 : pageSize;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / effectivePageSize));
+  const currentPage = Math.min(page, totalPages);
+  const startIdx = (currentPage - 1) * effectivePageSize;
+  const paginated = pageSize === 0 ? filtered : filtered.slice(startIdx, startIdx + effectivePageSize);
+
+  const exportCsv = () => {
+    if (!filtered.length) return;
+    const headers = [
+      "SKU Code", "Parent Style", "Color", "Size", "Brand",
+      "Gross Units", "Returns Units", "Net Sold Units",
+      "Gross Sales (Rs)", "Net Sales (Rs)",
+      "Platform Expenses (Rs)", "Platform Earnings (Rs)",
+      "Unit Production Cost (Rs)", "Total COGS (Rs)",
+      "Gross Profit (Rs)", "Net Contribution (Rs)", "Margin %", "Mapped"
+    ];
+    const csvRows = filtered.map((s) => [
+      `"${s.sku_code}"`,
+      `"${s.style_root || ""}"`,
+      `"${s.color || ""}"`,
+      `"${s.size || ""}"`,
+      `"${s.brand || ""}"`,
+      s.gross_units ?? 0,
+      s.returns_units ?? 0,
+      s.net_units ?? 0,
+      s.gross_sales ?? 0,
+      s.net_sales ?? 0,
+      s.platform_expenses ?? 0,
+      s.platform_earnings ?? 0,
+      s.unit_production_cost ?? 0,
+      s.total_production_cost ?? 0,
+      s.gross_profit ?? 0,
+      s.contribution_after_platform ?? 0,
+      s.margin_pct ?? 0,
+      s.is_mapped ? "YES" : "NO",
+    ]);
+    const csvContent = [headers.join(","), ...csvRows.map((r) => r.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `myntra_sku_bifurcation_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-1 max-w-md">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search SKU code, style root, color, size…"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
+            />
+          </div>
+          {search && (
+            <button
+              onClick={() => { setSearch(""); setPage(1); }}
+              className="text-xs text-slate-500 hover:text-slate-800 underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded text-xs border border-slate-200">
+            <button
+              type="button"
+              onClick={() => { setFilterMode("all"); setPage(1); }}
+              className={`px-2 py-0.5 rounded font-semibold text-[11px] ${filterMode === "all" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+            >
+              All ({skuList.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => { setFilterMode("mapped"); setPage(1); }}
+              className={`px-2 py-0.5 rounded font-semibold text-[11px] ${filterMode === "mapped" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-600 hover:text-emerald-800"}`}
+            >
+              Mapped ({skuList.filter((s) => s.is_mapped).length})
+            </button>
+            <button
+              type="button"
+              onClick={() => { setFilterMode("unmapped"); setPage(1); }}
+              className={`px-2 py-0.5 rounded font-semibold text-[11px] ${filterMode === "unmapped" ? "bg-white text-rose-800 shadow-sm" : "text-slate-600 hover:text-rose-800"}`}
+            >
+              Unmapped ({skuList.filter((s) => !s.is_mapped).length})
+            </button>
+            <button
+              type="button"
+              onClick={() => { setFilterMode("loss"); setPage(1); }}
+              className={`px-2 py-0.5 rounded font-semibold text-[11px] ${filterMode === "loss" ? "bg-white text-rose-800 shadow-sm" : "text-slate-600 hover:text-rose-800"}`}
+            >
+              Loss Making ({skuList.filter((s) => (s.contribution_after_platform ?? 0) < 0).length})
+            </button>
+          </div>
+
+          <button
+            onClick={exportCsv}
+            disabled={!filtered.length}
+            className="px-2.5 py-1 text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded inline-flex items-center gap-1.5 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" /> Export SKUs CSV
+          </button>
+        </div>
+      </div>
+
+      <div className="border-2 border-slate-200 rounded overflow-hidden">
+        <div className="max-h-[500px] overflow-y-auto overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+              <tr>
+                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">SKU Code</th>
+                <th className="text-left p-2 border-b">Style Master</th>
+                <th className="text-center p-2 border-b">Color</th>
+                <th className="text-center p-2 border-b">Size</th>
+                <th className="text-right p-2 border-b">Gross / Ret</th>
+                <th className="text-right p-2 border-b font-bold text-emerald-800">Net Units</th>
+                <th className="text-right p-2 border-b">Net Sales</th>
+                <th className="text-right p-2 border-b">Expenses</th>
+                <th className="text-right p-2 border-b">Earnings</th>
+                <th className="text-right p-2 border-b">Unit Cost</th>
+                <th className="text-right p-2 border-b">COGS</th>
+                <th className="text-right p-2 border-b font-bold">Contribution</th>
+                <th className="text-right p-2 border-b">Margin</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paginated.map((sk, idx) => {
+                const isPositive = (sk.contribution_after_platform ?? 0) >= 0;
+                return (
+                  <tr key={sk.sku_code || idx} className="border-b border-slate-100 hover:bg-slate-50">
+                    <td className="p-2 font-mono font-bold text-slate-900 sticky left-0 z-10 bg-white">
+                      <div>{sk.sku_code}</div>
+                      {sk.brand && <div className="text-[10px] text-slate-400 font-sans font-normal">{sk.brand}</div>}
+                    </td>
+                    <td className="p-2 font-mono">
+                      {sk.is_mapped ? (
+                        <span className="text-indigo-700 font-bold bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 text-[11px]">
+                          {sk.style_root}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 font-semibold">{sk.style_root || "—"}</span>
+                      )}
+                    </td>
+                    <td className="p-2 text-center font-mono">
+                      {sk.color ? (
+                        <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-semibold text-slate-700">
+                          {sk.color}
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className="p-2 text-center font-mono font-bold text-blue-900">
+                      {sk.size ? (
+                        <span className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded text-[10px]">
+                          {sk.size}
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className="p-2 text-right font-mono text-[11px] text-slate-600">
+                      {sk.gross_units} / <span className="text-rose-600">{sk.returns_units}</span>
+                    </td>
+                    <td className="p-2 text-right font-mono font-black text-emerald-800 bg-emerald-50/40 text-[12px]">
+                      {sk.net_units}
+                    </td>
+                    <td className="p-2 text-right font-mono text-slate-900 font-semibold">
+                      ₹{Math.round(sk.net_sales || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2 text-right font-mono text-rose-700">
+                      ₹{Math.round(sk.platform_expenses || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2 text-right font-mono text-slate-800 font-semibold">
+                      ₹{Math.round(sk.platform_earnings || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2 text-right font-mono text-slate-700">
+                      ₹{(sk.unit_production_cost ?? 210).toFixed(2)}
+                    </td>
+                    <td className="p-2 text-right font-mono text-slate-700">
+                      ₹{Math.round(sk.total_production_cost || 0).toLocaleString()}
+                    </td>
+                    <td className={`p-2 text-right font-mono font-black ${isPositive ? "text-emerald-700" : "text-rose-700"}`}>
+                      ₹{Math.round(sk.contribution_after_platform || 0).toLocaleString()}
+                    </td>
+                    <td className="p-2 text-right font-mono">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                        (sk.margin_pct ?? 0) >= 20
+                          ? "bg-emerald-100 text-emerald-800"
+                          : (sk.margin_pct ?? 0) > 0
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-rose-100 text-rose-800"
+                      }`}>
+                        {sk.margin_pct}%
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {paginated.length === 0 && (
+                <tr>
+                  <td colSpan={13} className="p-6 text-center text-sm text-slate-400 italic">
+                    No SKUs match current filter.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="p-2.5 bg-slate-50 border-t border-slate-200">
+          <PaginationControls
+            currentPage={currentPage}
+            totalItems={filtered.length}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+            pageSizeOptions={[25, 50, 100, 200]}
+            allowAll
+            rangeTextFormat="compact"
+            showFirstLast={false}
+            className="pt-0 border-t-0"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Operational Cost Adjustment Modal
+// ═══════════════════════════════════════════════════════════════════════
+function OperationalCostModal({ overview, isOpen, onClose, onSave }) {
+  const op = overview?.operational_expenses || {};
+  const [rent, setRent] = useState(op.rent ?? 85000);
+  const [electricity, setElectricity] = useState(op.electricity ?? 12500);
+  const [salaries, setSalaries] = useState(op.salaries ?? 30000);
+  const [otherBasic, setOtherBasic] = useState(op.other_basic ?? 10000);
+  const [allocationPct, setAllocationPct] = useState(op.allocation_pct ?? 50);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (overview?.operational_expenses) {
+      setRent(overview.operational_expenses.rent ?? 85000);
+      setElectricity(overview.operational_expenses.electricity ?? 12500);
+      setSalaries(overview.operational_expenses.salaries ?? 30000);
+      setOtherBasic(overview.operational_expenses.other_basic ?? 10000);
+      setAllocationPct(overview.operational_expenses.allocation_pct ?? 50);
+    }
+  }, [overview]);
+
+  if (!isOpen) return null;
+
+  const totalMonthly = Number(rent || 0) + Number(electricity || 0) + Number(salaries || 0) + Number(otherBasic || 0);
+  const allocatedOverhead = Math.round(totalMonthly * (Number(allocationPct || 0) / 100));
+
+  const totalCOGS = Number(overview?.total_cost_of_production || 0);
+  const platformEarnings = Number(overview?.platform_earnings ?? overview?.pnl_summary?.earnings_on_platform ?? 0);
+  const netSoldRev = Number(overview?.net_sold_revenue || 0);
+  const projectedNetProfit = Math.round(platformEarnings - totalCOGS - allocatedOverhead);
+  const projectedNetMargin = netSoldRev > 0 ? ((projectedNetProfit / netSoldRev) * 100).toFixed(2) : "0.00";
+  const isProfit = projectedNetProfit >= 0;
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await onSave({
+        platform: overview?.platform || "myntra",
+        month: overview?.month,
+        rent: Number(rent),
+        electricity: Number(electricity),
+        salaries: Number(salaries),
+        other_basic: Number(otherBasic),
+        allocation_pct: Number(allocationPct),
+      });
+      onClose();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Failed to save operational expenses");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-lg shadow-xl max-w-lg w-full border border-slate-200 overflow-hidden">
+        <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Building2 className="w-5 h-5 text-indigo-400" />
+            <h3 className="font-bold text-sm">Monthly Operational Overhead Allocation</h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-lg font-bold">✕</button>
+        </div>
+
+        <form onSubmit={handleSave} className="p-5 space-y-4 text-xs">
+          <p className="text-slate-600 text-xs leading-relaxed">
+            Configure factory & warehouse fixed operational costs. SSK ERP applies the designated allocation percentage (default <strong>50%</strong>) against online marketplace sales to determine <strong>Actual Net Business Profit</strong>.
+          </p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Factory & Warehouse Rent (₹)</label>
+              <input
+                type="number"
+                step="100"
+                value={rent}
+                onChange={(e) => setRent(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Electricity & Power (₹)</label>
+              <input
+                type="number"
+                step="50"
+                value={electricity}
+                onChange={(e) => setElectricity(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Staff & Worker Salaries (₹)</label>
+              <input
+                type="number"
+                step="100"
+                value={salaries}
+                onChange={(e) => setSalaries(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
+                required
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Other Factory Basic Sundry (₹)</label>
+              <input
+                type="number"
+                step="50"
+                value={otherBasic}
+                onChange={(e) => setOtherBasic(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200 p-3 rounded space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="font-bold text-slate-800 text-[11px]">Online Channel Allocation %</label>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={allocationPct}
+                  onChange={(e) => setAllocationPct(e.target.value)}
+                  className="w-14 px-2 py-0.5 border border-slate-300 rounded text-right font-mono font-bold"
+                />
+                <span className="font-bold text-slate-600">%</span>
+              </div>
+            </div>
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={allocationPct}
+              onChange={(e) => setAllocationPct(Number(e.target.value))}
+              className="w-full accent-indigo-600 cursor-pointer"
+            />
+          </div>
+
+          {/* Live Dynamic Profit Simulation */}
+          <div className="bg-indigo-50/70 border-2 border-indigo-200 rounded p-3 text-xs space-y-2">
+            <div className="flex justify-between text-slate-700">
+              <span>Total Monthly Factory Cost:</span>
+              <span className="font-mono font-bold">₹{totalMonthly.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between text-indigo-900 font-semibold border-b border-indigo-200 pb-1.5">
+              <span>Allocated Overhead ({allocationPct}%):</span>
+              <span className="font-mono font-bold text-indigo-700">₹{allocatedOverhead.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between items-center pt-0.5">
+              <span className="font-bold text-slate-800">Projected Actual Net Profit:</span>
+              <span className={`font-mono font-black text-sm ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>
+                ₹{projectedNetProfit.toLocaleString()} ({projectedNetMargin}%)
+              </span>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+            <BtnSecondary type="button" onClick={onClose} disabled={saving}>Cancel</BtnSecondary>
+            <BtnPrimary type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save & Recalculate Profit"}
+            </BtnPrimary>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // Read-side reconciliation summary card — feeds off /reconciliation-summary
 function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("styles");
+  const [showOpModal, setShowOpModal] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1850,7 +2355,28 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
     }
   };
 
+  const handleUpdateOperationalCost = async (payload) => {
+    try {
+      await http.put("/online-orders/monthly-reconciliation-overview/operational-cost", payload);
+      load();
+    } catch (e) {
+      alert(e.response?.data?.detail || "Failed to update operational expenses");
+    }
+  };
+
   const overview = data?.overview;
+
+  const actualNetProfit = overview?.actual_net_profit ?? Math.round(
+    (overview?.platform_earnings || overview?.pnl_summary?.earnings_on_platform || 0) -
+    (overview?.total_cost_of_production || 0) -
+    (overview?.allocated_operational_cost || overview?.operational_expenses?.allocated_operational_cost || 0)
+  );
+  const isProfit = actualNetProfit >= 0;
+  const actualNetMargin = overview?.actual_net_margin_pct ?? (
+    overview?.net_sold_revenue > 0 ? ((actualNetProfit / overview.net_sold_revenue) * 100).toFixed(2) : "0.00"
+  );
+  const allocatedOverhead = overview?.allocated_operational_cost ?? overview?.operational_expenses?.allocated_operational_cost ?? 68750;
+  const platformEarnings = overview?.platform_earnings ?? overview?.pnl_summary?.earnings_on_platform ?? 0;
 
   return (
     <Card className="p-5 space-y-6">
@@ -1881,50 +2407,108 @@ function ReconciliationSummaryCard({ platform, month, onOpenImport }) {
         <>
           {/* Financial KPI Summary Cards */}
           {overview && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-              <div className="bg-emerald-50/60 border-2 border-emerald-200 p-3.5 rounded">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">Net Sold Units</div>
-                <div className="text-2xl font-black font-mono text-emerald-900 mt-1">{overview.total_net_sold}</div>
-                <div className="text-[11px] text-emerald-700 mt-0.5">{overview.styles_count} styles</div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <div className="bg-slate-50 border-2 border-slate-200 p-3.5 rounded">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Net Sales Revenue</div>
+                  <div className="text-2xl font-black font-mono text-slate-900 mt-1">₹{Math.round(overview.net_sold_revenue || 0).toLocaleString()}</div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">{overview.total_net_sold} net units ({overview.styles_count} styles)</div>
+                </div>
+                <div className="bg-blue-50/60 border-2 border-blue-200 p-3.5 rounded">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-blue-800">Platform Payout</div>
+                  <div className="text-2xl font-black font-mono text-blue-900 mt-1">₹{Math.round(platformEarnings).toLocaleString()}</div>
+                  <div className="text-[11px] text-blue-700 mt-0.5">Myntra Net Payout</div>
+                </div>
+                <div className="bg-amber-50/60 border-2 border-amber-200 p-3.5 rounded">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-amber-800">Production COGS</div>
+                  <div className="text-2xl font-black font-mono text-amber-900 mt-1">₹{Math.round(overview.total_cost_of_production || 0).toLocaleString()}</div>
+                  <div className="text-[11px] text-amber-700 mt-0.5">From Style Master</div>
+                </div>
+                <div className="bg-purple-50/60 border-2 border-purple-200 p-3.5 rounded">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-purple-800">50% Factory Overhead</div>
+                  <div className="text-2xl font-black font-mono text-purple-900 mt-1">₹{Math.round(allocatedOverhead).toLocaleString()}</div>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <span className="text-[11px] text-purple-700">Rent, Power, Salaries</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowOpModal(true)}
+                      className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900 underline inline-flex items-center gap-1 ml-1"
+                    >
+                      <SlidersHorizontal className="w-3 h-3" /> Adjust
+                    </button>
+                  </div>
+                </div>
+                <div className={`border-2 p-3.5 rounded ${isProfit ? "bg-emerald-50 border-emerald-400" : "bg-rose-50 border-rose-400"}`}>
+                  <div className={`text-[10px] uppercase tracking-wider font-bold ${isProfit ? "text-emerald-800" : "text-rose-800"}`}>
+                    ACTUAL NET PROFIT
+                  </div>
+                  <div className={`text-2xl font-black font-mono mt-1 ${isProfit ? "text-emerald-900" : "text-rose-900"}`}>
+                    ₹{Math.round(actualNetProfit).toLocaleString()}
+                  </div>
+                  <div className={`text-[11px] font-bold font-mono mt-0.5 ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>
+                    {actualNetMargin}% True Margin
+                  </div>
+                </div>
               </div>
-              <div className="bg-slate-50 border-2 border-slate-200 p-3.5 rounded">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">Net Revenue</div>
-                <div className="text-2xl font-black font-mono text-slate-900 mt-1">₹{Math.round(overview.net_sold_revenue || 0).toLocaleString()}</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Total: ₹{Math.round(overview.total_seller_revenue || 0).toLocaleString()}</div>
-              </div>
-              <div className="bg-amber-50/60 border-2 border-amber-200 p-3.5 rounded">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-amber-800">Production COGS</div>
-                <div className="text-2xl font-black font-mono text-amber-900 mt-1">₹{Math.round(overview.total_cost_of_production || 0).toLocaleString()}</div>
-                <div className="text-[11px] text-amber-700 mt-0.5">Cost of production</div>
-              </div>
-              <div className="bg-emerald-50 border-2 border-emerald-300 p-3.5 rounded">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">Est. Gross Profit</div>
-                <div className="text-2xl font-black font-mono text-emerald-800 mt-1">₹{Math.round(overview.estimated_gross_profit || 0).toLocaleString()}</div>
-                <div className="text-[11px] text-emerald-700 mt-0.5">Net rev − COGS</div>
-              </div>
-              <div className="bg-indigo-50 border-2 border-indigo-200 p-3.5 rounded">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-indigo-800">Gross Margin</div>
-                <div className="text-2xl font-black font-mono text-indigo-900 mt-1">{overview.overall_margin_pct}%</div>
-                <div className="text-[11px] text-indigo-700 mt-0.5">Overall profitability</div>
-              </div>
+
+              {/* PnL Waterfall Summary Ribbon */}
+              {overview.pnl_summary && (
+                <div className="bg-slate-50 border border-slate-200 p-2.5 rounded text-xs flex flex-wrap items-center justify-between gap-2 text-slate-700 font-mono">
+                  <div>Gross: <span className="font-bold">₹{Math.round(overview.pnl_summary.gross_sales || 0).toLocaleString()}</span> ({overview.pnl_summary.gross_units} u)</div>
+                  <div>Returns: <span className="font-bold text-rose-700">₹{Math.round(overview.pnl_summary.returns_amount || 0).toLocaleString()}</span> ({overview.pnl_summary.returns_units} u)</div>
+                  <div>Net Sales: <span className="font-bold text-emerald-800">₹{Math.round(overview.pnl_summary.net_sales || 0).toLocaleString()}</span> ({overview.pnl_summary.net_units} u)</div>
+                  <div>Platform Fees: <span className="font-bold text-rose-700">₹{Math.round(overview.pnl_summary.total_expenses || 0).toLocaleString()}</span></div>
+                  <div>Payout: <span className="font-bold text-blue-800">₹{Math.round(platformEarnings).toLocaleString()}</span></div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Funnel */}
-          <FunnelViz stats={data} breakdown={data.reason_breakdown || {}} />
-
-          {/* Style Breakdown Table */}
+          {/* Sub-tabs: Style Breakdown VS SKU-wise Drilldown */}
           {overview && (
             <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">Style Breakdown & Cost of Production</h3>
-                  <p className="text-xs text-slate-500">
-                    All sizes grouped under each external style (e.g. FL_DB_016). Production cost calculated per net unit sold.
-                  </p>
-                </div>
+              <div className="flex border-b border-slate-200 gap-4 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("styles")}
+                  className={`pb-2.5 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+                    activeTab === "styles"
+                      ? "border-slate-900 text-slate-900"
+                      : "border-transparent text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  <Layers className="w-4 h-4" />
+                  Style Breakdown & COGS ({overview.styles_count || overview.styles?.length || 0} Styles)
+                </button>
+                {(overview.sku_bifurcation?.length > 0 || overview.total_skus > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("skus")}
+                    className={`pb-2.5 text-xs font-bold transition-colors inline-flex items-center gap-1.5 border-b-2 -mb-px ${
+                      activeTab === "skus"
+                        ? "border-slate-900 text-slate-900"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    <ScrollText className="w-4 h-4" />
+                    SKU-wise Drill-down ({overview.sku_bifurcation?.length || overview.total_skus || 0} SKUs)
+                  </button>
+                )}
               </div>
-              <MonthlyStyleOverviewTable overview={overview} onUpdateCost={handleUpdateCost} />
+
+              {activeTab === "styles" && (
+                <MonthlyStyleOverviewTable overview={overview} onUpdateCost={handleUpdateCost} />
+              )}
+              {activeTab === "skus" && (
+                <MonthlySkuBifurcationTable skuList={overview.sku_bifurcation || []} />
+              )}
+
+              <OperationalCostModal
+                overview={overview}
+                isOpen={showOpModal}
+                onClose={() => setShowOpModal(false)}
+                onSave={handleUpdateOperationalCost}
+              />
             </div>
           )}
         </>
