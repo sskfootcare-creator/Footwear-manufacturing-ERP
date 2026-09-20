@@ -22,6 +22,7 @@ from auth import get_current_user_factory, require_roles
 from models.orders import POIn, POLineItem, ProductionStageUpdate
 from models.sku_map import Platform, SheetLocator, HeaderLocator
 from rate_limiter import upload_rate_limiter, bulk_import_rate_limiter
+from routes.online_returns_engine import get_footwear_placeholder_image
 
 log = logging.getLogger("online_orders_routes")
 
@@ -2506,6 +2507,8 @@ async def _fetch_monthly_operational_expenses(
     rent_total = 0.0
     elec_total = 0.0
     salaries_total = 0.0
+    commission_total = 0.0
+    interest_total = 0.0
     other_total = 0.0
 
     try:
@@ -2523,6 +2526,10 @@ async def _fetch_monthly_operational_expenses(
                     elec_total += amt
                 elif "salaries" in cat or "wages" in cat or "salary" in cat:
                     salaries_total += amt
+                elif "comm" in cat or "broker" in cat:
+                    commission_total += amt
+                elif "interest" in cat or "emi" in cat or "loan" in cat or "finance" in cat:
+                    interest_total += amt
                 else:
                     other_total += amt
     except Exception as e:
@@ -2540,6 +2547,10 @@ async def _fetch_monthly_operational_expenses(
                     rent_total += amt
                 elif elec_total == 0.0 and ("elec" in cat or "power" in cat):
                     elec_total += amt
+                elif commission_total == 0.0 and ("comm" in cat or "broker" in cat):
+                    commission_total += amt
+                elif interest_total == 0.0 and ("interest" in cat or "emi" in cat or "loan" in cat):
+                    interest_total += amt
     except Exception as e:
         log.warning(f"Error checking db.recurring_expenses: {e}")
 
@@ -2552,7 +2563,7 @@ async def _fetch_monthly_operational_expenses(
     if other_total == 0.0:
         other_total = 10000.0
 
-    total_op = round(rent_total + elec_total + salaries_total + other_total, 2)
+    total_op = round(rent_total + elec_total + salaries_total + commission_total + interest_total + other_total, 2)
     alloc_pct = 50.0
     allocated_op = round(total_op * (alloc_pct / 100.0), 2)
 
@@ -2561,6 +2572,8 @@ async def _fetch_monthly_operational_expenses(
         "rent": round(rent_total, 2),
         "electricity": round(elec_total, 2),
         "salaries": round(salaries_total, 2),
+        "commission": round(commission_total, 2),
+        "interest_emi": round(interest_total, 2),
         "other_basic": round(other_total, 2),
         "total_monthly_operational_cost": total_op,
         "allocated_operational_cost": allocated_op,
@@ -2700,6 +2713,13 @@ async def _build_pnl_reconciliation_overview(
         sku_bifurcation.append({
             "sku_code": sku,
             "style_root": st_root,
+            "myntra_style_id": str(r.get("style_id") or r.get("Style ID") or "").strip(),
+            "erp_style_code": (resolved_style.get("internal_style_code") or resolved_style.get("style_code")) if resolved_style else (style_by_code[st_root.lower()].get("code") if st_root.lower() in style_by_code else ""),
+            "image_url": (
+                (style_by_code[st_root.lower()].get("image_url") if st_root.lower() in style_by_code else None)
+                or (resolved_style.get("image_url") if resolved_style else None)
+                or get_footwear_placeholder_image(st_root)
+            ),
             "color": col,
             "size": sz,
             "brand": brand,
@@ -2733,6 +2753,27 @@ async def _build_pnl_reconciliation_overview(
         g["style_code"] = st_root
         g["brand"] = brand or g["brand"]
         g["style_name"] = st_root
+        
+        sid = str(r.get("style_id") or r.get("Style ID") or "").strip()
+        if sid:
+            g["myntra_style_id"] = sid
+            
+        erp_c = (
+            (resolved_style.get("internal_style_code") or resolved_style.get("style_code")) if resolved_style else None
+        ) or (
+            style_by_code[st_root.lower()].get("code") if st_root.lower() in style_by_code else None
+        ) or g.get("erp_style_code") or ""
+        if erp_c:
+            g["erp_style_code"] = erp_c
+
+        if "image_url" not in g or not g["image_url"]:
+            img_c = (
+                (style_by_code[st_root.lower()].get("image_url") if st_root.lower() in style_by_code else None)
+                or (resolved_style.get("image_url") if resolved_style else None)
+                or get_footwear_placeholder_image(st_root)
+            )
+            g["image_url"] = img_c
+
         if col:
             g["colors"].add(col)
         if sz:
@@ -2754,6 +2795,10 @@ async def _build_pnl_reconciliation_overview(
         g["total_orders"] += gross_units
         g["packed_qty"] += gross_units
         g["total_seller_price"] += gross_sales
+        g["returns_amount"] = g.get("returns_amount", 0.0) + abs(gross_sales - net_sales)
+        g["reverse_logistics_cost"] = g.get("reverse_logistics_cost", 0.0) + abs(rev_exp or rev_logistics)
+        g["forward_logistics_cost"] = g.get("forward_logistics_cost", 0.0) + abs(fwd_exp)
+        g["commission_cost"] = g.get("commission_cost", 0.0) + abs(comm)
 
     styles_list = []
     tot_sold_units = 0
@@ -2765,6 +2810,12 @@ async def _build_pnl_reconciliation_overview(
         total_cogs = round(g["total_production_cost"], 2)
         gross_profit = round(g["gross_profit"], 2)
         margin = round((gross_profit / g["net_sold_seller_price"] * 100), 1) if g["net_sold_seller_price"] > 0 else 0.0
+        ret_qty = g["returned_qty"]
+        gross_u = g["gross_units"]
+        ret_rate = round((ret_qty / gross_u * 100), 1) if gross_u > 0 else 0.0
+        ret_loss = round(g.get("returns_amount", 0.0), 2)
+        rev_ship = round(g.get("reverse_logistics_cost", 0.0), 2)
+        tot_ret_dmg = round(ret_loss + rev_ship, 2)
 
         tot_sold_units += g["net_sold_qty"]
         tot_sold_rev += g["net_sold_seller_price"]
@@ -2774,6 +2825,9 @@ async def _build_pnl_reconciliation_overview(
 
         styles_list.append({
             "style_code":            st_code,
+            "myntra_style_id":       g.get("myntra_style_id") or "",
+            "erp_style_code":        g.get("erp_style_code") or "",
+            "image_url":             g.get("image_url") or get_footwear_placeholder_image(st_code),
             "brand":                 g["brand"] or "Generic",
             "style_name":            g["style_name"] or st_code,
             "article_type":          g["article_type"] or "Footwear",
@@ -2781,11 +2835,15 @@ async def _build_pnl_reconciliation_overview(
             "sizes":                 sorted_sizes,
             "total_orders":          g["total_orders"],
             "packed_qty":            g["packed_qty"],
-            "returned_qty":          g["returned_qty"],
+            "returned_qty":          ret_qty,
             "rto_qty":               g["rto_qty"],
             "cancelled_qty":         g["cancelled_qty"],
             "pending_qty":           0,
             "net_sold_qty":          g["net_sold_qty"],
+            "return_rate_pct":       ret_rate,
+            "return_amount_lost":    ret_loss,
+            "reverse_logistics_cost": rev_ship,
+            "total_return_cost":     tot_ret_dmg,
             "total_seller_price":    round(g["total_seller_price"], 2),
             "net_sold_seller_price": round(g["net_sold_seller_price"], 2),
             "unit_production_cost":  round(u_cost, 2),
@@ -2809,6 +2867,72 @@ async def _build_pnl_reconciliation_overview(
     tot_rto = abs(pnl_summary.get("rto_units") or sum(s.get("rto_units", 0) for s in sku_bifurcation))
     tot_cancelled = abs(pnl_summary.get("cancelled_units") or sum(s.get("cancelled_units", 0) for s in sku_bifurcation))
     tot_returned = abs(pnl_summary.get("rvp_units") or pnl_summary.get("returns_units") or sum(s["returns_units"] for s in sku_bifurcation))
+    tot_gross_units = int(pnl_summary.get("gross_units") or sum(s["gross_units"] for s in sku_bifurcation))
+
+    # --- Extensive Analytics: Returns, RTO, Costs, and Rankings ---
+    tot_ret_amount = abs(float(pnl_summary.get("returns_amount") or sum(s.get("gross_sales", 0) - s.get("net_sales", 0) for s in sku_bifurcation)))
+    tot_rev_ship = abs(float(pnl_summary.get("rev_logistic_charge") or pnl_summary.get("reverse_expense") or sum(s.get("reverse_expense", 0) or s.get("reverse_logistic_fee", 0) for s in sku_bifurcation)))
+    tot_ret_damage = round(tot_ret_amount + tot_rev_ship, 2)
+    overall_ret_rate = round((tot_returned / tot_gross_units * 100), 2) if tot_gross_units > 0 else 0.0
+    tot_rvp = max(0, tot_returned - tot_rto)
+
+    most_returned = sorted(
+        [s for s in styles_list if s["returned_qty"] > 0],
+        key=lambda s: s["returned_qty"],
+        reverse=True
+    )
+    for idx, mr in enumerate(most_returned, 1):
+        mr["return_rank"] = idx
+
+    top_profit = sorted(
+        styles_list,
+        key=lambda s: s["contribution"],
+        reverse=True
+    )[:10]
+
+    top_loss = sorted(
+        styles_list,
+        key=lambda s: s["contribution"],
+        reverse=False
+    )[:10]
+
+    fee_comm = round(abs(float(pnl_summary.get("fwd_commission") or sum(s.get("commission_fee", 0) for s in sku_bifurcation))), 2)
+    fee_fwd_ship = round(abs(float(pnl_summary.get("forward_expense") or sum(s.get("forward_expense", 0) for s in sku_bifurcation))), 2)
+    fee_rev_ship = round(tot_rev_ship, 2)
+    fee_fixed = round(abs(float(pnl_summary.get("fixed_fee") or sum(s.get("fixed_fee", 0) for s in sku_bifurcation))), 2)
+    fee_gst = round(abs(float(pnl_summary.get("product_gst") or sum(s.get("gst_amount", 0) for s in sku_bifurcation))), 2)
+    fee_total = round(abs(float(pnl_summary.get("total_expenses") or sum(s.get("platform_expenses", 0) for s in sku_bifurcation))), 2)
+
+    return_analytics = {
+        "total_returned_units":         tot_returned,
+        "total_rto_units":              tot_rto,
+        "total_rvp_units":              tot_rvp,
+        "overall_return_rate_pct":       overall_ret_rate,
+        "total_return_amount_lost":     round(tot_ret_amount, 2),
+        "total_reverse_logistics_cost": round(tot_rev_ship, 2),
+        "total_return_financial_damage": tot_ret_damage,
+        "rto_vs_rvp": {
+            "rto_units": tot_rto,
+            "rvp_units": tot_rvp,
+            "rto_pct":   round((tot_rto / tot_returned * 100), 1) if tot_returned > 0 else 0.0,
+            "rvp_pct":   round((tot_rvp / tot_returned * 100), 1) if tot_returned > 0 else 0.0,
+        },
+        "most_returned_styles":         most_returned,
+    }
+
+    profit_rankings = {
+        "top_profit_styles": top_profit,
+        "top_loss_styles":   top_loss,
+    }
+
+    platform_fee_breakdown = {
+        "commission":       fee_comm,
+        "forward_shipping": fee_fwd_ship,
+        "reverse_shipping": fee_rev_ship,
+        "fixed_fee":        fee_fixed,
+        "taxes_gst":        fee_gst,
+        "total_fees":       fee_total,
+    }
 
     overview = {
         "platform":                  platform,
@@ -2820,8 +2944,8 @@ async def _build_pnl_reconciliation_overview(
         "operational_expenses":      op_expenses,
         "styles_count":              len(styles_list),
         "total_skus":                len(sku_bifurcation),
-        "total_orders":              pnl_summary.get("gross_units") or sum(s["gross_units"] for s in sku_bifurcation),
-        "total_packed":              pnl_summary.get("gross_units") or sum(s["gross_units"] for s in sku_bifurcation),
+        "total_orders":              tot_gross_units,
+        "total_packed":              tot_gross_units,
         "total_returned":            tot_returned,
         "total_rto":                 tot_rto,
         "total_cancelled":           tot_cancelled,
@@ -2837,6 +2961,9 @@ async def _build_pnl_reconciliation_overview(
         "allocated_operational_cost": round(allocated_op, 2),
         "actual_net_profit":         actual_net_profit,
         "actual_net_margin_pct":     actual_net_margin,
+        "return_analytics":          return_analytics,
+        "profit_rankings":           profit_rankings,
+        "platform_fee_breakdown":    platform_fee_breakdown,
         "styles":                    styles_list,
         "sku_bifurcation":           sku_bifurcation,
         "updated_at":                now_iso(),
@@ -3772,6 +3899,16 @@ async def reconciliation_summary(
         pending = overview_doc.get("total_pending", 0)
         net_sold = overview_doc.get("total_net_sold", 0)
 
+        if "styles" in overview_doc and isinstance(overview_doc["styles"], list):
+            for s in overview_doc["styles"]:
+                st = s.get("style_code", "")
+                if not s.get("image_url"):
+                    s["image_url"] = get_footwear_placeholder_image(st)
+                if "myntra_style_id" not in s:
+                    s["myntra_style_id"] = ""
+                if "erp_style_code" not in s:
+                    s["erp_style_code"] = ""
+
         res.update({
             "total_rows":              tot_rows,
             "packed":                  packed,
@@ -3879,6 +4016,10 @@ async def update_monthly_style_cost(
 
     update_data["actual_net_profit"] = actual_net_profit
     update_data["actual_net_margin_pct"] = actual_net_margin
+    update_data["profit_rankings"] = {
+        "top_profit_styles": sorted(styles, key=lambda s: s.get("contribution", 0), reverse=True)[:10],
+        "top_loss_styles":   sorted(styles, key=lambda s: s.get("contribution", 0), reverse=False)[:10],
+    }
 
     await _safe_update_one(
         getattr(db, "online_monthly_reconciliation_overviews", None),

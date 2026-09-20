@@ -83,6 +83,28 @@ async def _async_test_myntra_pnl_parsing_and_actual_profit():
     assert overview["total_net_sold"] == 966
     assert len(overview["sku_bifurcation"]) == 352
     assert len(overview["styles"]) == 85
+    assert "myntra_style_id" in overview["styles"][0]
+    assert overview["styles"][0]["myntra_style_id"] != ""
+    assert "erp_style_code" in overview["styles"][0]
+    assert "image_url" in overview["styles"][0]
+    assert overview["styles"][0]["image_url"].endswith(".jpg")
+
+    # Extensive Analytics: Returns, RTO, Cost of Returns & Rankings
+    ret_an = overview["return_analytics"]
+    assert ret_an["total_returned_units"] == 929
+    assert ret_an["total_return_amount_lost"] == 477302.0
+    assert ret_an["overall_return_rate_pct"] > 40.0
+    assert len(ret_an["most_returned_styles"]) > 0
+    # Top returned style has highest returned_qty
+    assert ret_an["most_returned_styles"][0]["returned_qty"] >= ret_an["most_returned_styles"][1]["returned_qty"]
+
+    rankings = overview["profit_rankings"]
+    assert len(rankings["top_profit_styles"]) > 0
+    assert len(rankings["top_loss_styles"]) > 0
+
+    fee_bd = overview["platform_fee_breakdown"]
+    assert fee_bd["total_fees"] > 0
+    assert fee_bd["commission"] > 0
 
     # 4. Verify 50% Operational Overhead and Actual Net Profit
     op = overview["operational_expenses"]

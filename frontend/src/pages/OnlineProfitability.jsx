@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { http, inr, num } from "../lib/api";
 import {
   PageHeader,
@@ -6,7 +6,6 @@ import {
   StatTile,
   BtnPrimary,
   BtnSecondary,
-  Badge,
 } from "../components/ui-kit";
 import {
   ResponsiveContainer,
@@ -23,24 +22,20 @@ import {
 import {
   Download,
   RefreshCw,
-  AlertTriangle,
   TrendingUp,
   ShoppingBag,
-  RotateCcw,
-  Loader2,
   Info,
-  IndianRupee,
-  Upload,
-  FileSpreadsheet,
-  FileText,
-  CheckCircle,
-  Clock,
-  AlertOctagon,
-  HelpCircle,
   Plus,
   X,
   Check,
+  ScrollText,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  ShieldAlert,
 } from "lucide-react";
+import MonthlyPnLReconciliation from "../components/MonthlyPnLReconciliation";
+import ReturnsIntelligenceTab from "../components/ReturnsIntelligenceTab";
 
 const isoToday = () => new Date().toISOString().slice(0, 10);
 const isoDaysAgo = (n) => {
@@ -50,7 +45,7 @@ const isoDaysAgo = (n) => {
 };
 
 export default function OnlineProfitability() {
-  // Navigation tabs: 'overview', 'reconciliation', 'import', 'returns_deductions', 'unreconciled'
+  // Navigation tabs: 'overview' (Profitability Engine) | 'monthly_pnl' (Monthly PnL Reconciliation)
   const [activeTab, setActiveTab] = useState("overview");
 
   // Filters & State
@@ -64,19 +59,6 @@ export default function OnlineProfitability() {
 
   // Profitability report state
   const [profitData, setProfitData] = useState(null);
-
-  // Reconciliation summary state
-  const [recSummary, setRecSummary] = useState(null);
-  const [recLoading, setRecLoading] = useState(false);
-
-  // File import statuses
-  const [uploadingState, setUploadingState] = useState({
-    dailyPayments: false,
-    settled: false,
-    unsettled: false,
-    monthlyReport: false,
-  });
-  const [uploadMessage, setUploadMessage] = useState("");
 
   // Cost Snapshot Modal State
   const [snapshotModalOpen, setSnapshotModalOpen] = useState(false);
@@ -118,27 +100,9 @@ export default function OnlineProfitability() {
     }
   }, [platform, dateFrom, dateTo, styleId]);
 
-  // Load Reconciliation Engine Data
-  const loadReconciliation = useCallback(async () => {
-    setRecLoading(true);
-    setError("");
-    try {
-      const { data } = await http.get("/online-reconciliation/summary", {
-        params: { from_date: dateFrom, to_date: dateTo },
-      });
-      setRecSummary(data);
-    } catch (err) {
-      console.error("Failed to load reconciliation data:", err);
-      setError("Failed to load reconciliation engine summary.");
-    } finally {
-      setRecLoading(false);
-    }
-  }, [dateFrom, dateTo]);
-
   useEffect(() => {
     loadProfitability();
-    loadReconciliation();
-  }, [loadProfitability, loadReconciliation]);
+  }, [loadProfitability]);
 
   // Excel Export Handler
   const handleExportExcel = async () => {
@@ -164,26 +128,6 @@ export default function OnlineProfitability() {
     }
   };
 
-  // File import handlers
-  const handleFileUpload = async (endpoint, file, stateKey) => {
-    if (!file) return;
-    setUploadingState((prev) => ({ ...prev, [stateKey]: true }));
-    setUploadMessage("");
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await http.post(`/online-reconciliation/${endpoint}`, formData);
-      const msg = res.data?.message || `Successfully imported ${res.data?.filename || file.name}`;
-      setUploadMessage(msg);
-      loadReconciliation();
-      loadProfitability();
-    } catch (err) {
-      setUploadMessage(`Error: ${err?.response?.data?.detail || err?.message || "Import failed"}`);
-    } finally {
-      setUploadingState((prev) => ({ ...prev, [stateKey]: false }));
-    }
-  };
-
   const handleCreateSnapshot = async (e) => {
     e.preventDefault();
     if (!snapshotForm.style_code || !snapshotForm.total_cost) {
@@ -200,7 +144,6 @@ export default function OnlineProfitability() {
         notes: snapshotForm.notes,
       });
       setSnapshotModalOpen(false);
-      loadReconciliation();
       loadProfitability();
     } catch (err) {
       alert(err?.response?.data?.detail || "Failed to create cost snapshot");
@@ -230,44 +173,24 @@ export default function OnlineProfitability() {
               <TrendingUp className="w-3.5 h-3.5 text-[#C27842]" /> Profitability Engine
             </button>
             <button
-              onClick={() => setActiveTab("reconciliation")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "reconciliation"
+              onClick={() => setActiveTab("monthly_pnl")}
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "monthly_pnl"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                 }`}
-              data-testid="tab-reconciliation"
+              data-testid="tab-monthly-pnl"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> 5-Report Reconciler
+              <ScrollText className="w-3.5 h-3.5 text-indigo-400" /> Monthly PnL Reconciliation
             </button>
             <button
-              onClick={() => setActiveTab("import")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "import"
+              onClick={() => setActiveTab("returns_engine")}
+              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "returns_engine"
                   ? "bg-[#0F172A] text-white"
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                 }`}
-              data-testid="tab-import"
+              data-testid="tab-returns-engine"
             >
-              <Upload className="w-3.5 h-3.5" /> File Import Suite
-            </button>
-            <button
-              onClick={() => setActiveTab("returns_deductions")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "returns_deductions"
-                  ? "bg-[#0F172A] text-white"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-              data-testid="tab-returns"
-            >
-              <RotateCcw className="w-3.5 h-3.5" /> Return Charges & Deductions
-            </button>
-            <button
-              onClick={() => setActiveTab("unreconciled")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors flex items-center gap-2 ${activeTab === "unreconciled"
-                  ? "bg-[#0F172A] text-white"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-              data-testid="tab-unreconciled"
-            >
-              <AlertOctagon className="w-3.5 h-3.5 text-amber-400" /> Unreconciled Orders
+              <ShieldAlert className="w-3.5 h-3.5 text-rose-500" /> Return Reduction Engine
             </button>
           </div>
 
@@ -276,11 +199,11 @@ export default function OnlineProfitability() {
               <Plus className="w-3.5 h-3.5 text-[#C27842]" /> Cost Snapshot
             </BtnSecondary>
             <BtnSecondary
-              onClick={() => { loadProfitability(); loadReconciliation(); }}
-              disabled={loading || recLoading}
+              onClick={loadProfitability}
+              disabled={loading}
               className="flex items-center gap-1.5 text-xs"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading || recLoading ? "animate-spin" : ""}`} /> Refresh
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
             </BtnSecondary>
             {activeTab === "overview" && (
               <BtnPrimary onClick={handleExportExcel} className="flex items-center gap-1.5 text-xs">
@@ -289,15 +212,6 @@ export default function OnlineProfitability() {
             )}
           </div>
         </div>
-
-        {uploadMessage && (
-          <div className="bg-slate-900 text-white text-xs font-semibold px-4 py-2.5 rounded-sm flex items-center justify-between">
-            <span>{uploadMessage}</span>
-            <button onClick={() => setUploadMessage("")} className="text-slate-400 hover:text-white">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        )}
 
         {/* ── FILTER TOOLBAR FOR OVERVIEW TAB ────────────────────────────────── */}
         {activeTab === "overview" && (
@@ -526,384 +440,14 @@ export default function OnlineProfitability() {
           </div>
         )}
 
-        {/* ── TAB 1: RECONCILIATION ENGINE OVERVIEW & KPI CARDS ──────────────── */}
-        {activeTab === "reconciliation" && recSummary && (
-          <div className="space-y-6">
-            {/* Rates & Badges Banner */}
-            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-6 text-white rounded-sm border-2 border-slate-700 shadow-md">
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                <div>
-                  <h3 className="font-black text-base uppercase tracking-wider flex items-center gap-2 text-white">
-                    <CheckCircle className="w-5 h-5 text-emerald-400" /> 5-Report Reconciliation Status
-                  </h3>
-                  <p className="text-xs text-slate-300 mt-1">
-                    Matched monthly order lines against 3-header settled/unsettled files & daily payments
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  <div className="bg-slate-800/90 border border-emerald-500/50 px-4 py-2 text-center rounded-sm">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Report Join Rate</div>
-                    <div className="text-xl font-black text-emerald-400" data-testid="report-join-rate-value">
-                      {recSummary.join_rate_pct}%
-                    </div>
-                  </div>
-                  <div className="bg-slate-800/90 border border-blue-500/50 px-4 py-2 text-center rounded-sm">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">COGS Resolution Rate</div>
-                    <div className="text-xl font-black text-blue-400" data-testid="cogs-resolution-rate-value">
-                      {recSummary.cogs_resolution_rate_pct}%
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Reconciliation KPI Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3" data-testid="reconciliation-kpi-grid">
-              <Card className="p-4 border-l-4 border-l-emerald-600">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Settled Orders</span>
-                  <Badge variant="green">Settled</Badge>
-                </div>
-                <div className="text-2xl font-black text-slate-900" data-testid="settled-count-value">
-                  {recSummary.settled_count}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-1">Reconciled to settled.xlsx</div>
-              </Card>
-
-              <Card className="p-4 border-l-4 border-l-indigo-500">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Within Lag</span>
-                  <Badge variant="blue">≤ {recSummary.daily_payment_lag_days || 4}d Lag</Badge>
-                </div>
-                <div className="text-2xl font-black text-indigo-700" data-testid="pending-lag-count-value">
-                  {recSummary.pending_lag_count || 0}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-1">Recent shipments within normal lag</div>
-              </Card>
-
-              <Card className="p-4 border-l-4 border-l-blue-600">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Pending</span>
-                  <Badge variant="blue">≤ {recSummary.aged_pending_days || 30} Days</Badge>
-                </div>
-                <div className="text-2xl font-black text-slate-900" data-testid="pending-count-value">
-                  {recSummary.pending_count}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-1">Matched to unsettled.xlsx</div>
-              </Card>
-
-              <Card className="p-4 border-l-4 border-l-amber-500">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Aged Pending</span>
-                  <Badge variant="yellow">&gt; {recSummary.aged_pending_days || 30} Days</Badge>
-                </div>
-                <div className="text-2xl font-black text-amber-700" data-testid="aged-pending-count-value">
-                  {recSummary.aged_pending_count}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-1">Unsettled past aging threshold</div>
-              </Card>
-
-              <Card className="p-4 border-l-4 border-l-red-600">
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-[11px] uppercase tracking-wider font-bold text-slate-500">Overdue Absent</span>
-                  <Badge variant="red">FLAGGED</Badge>
-                </div>
-                <div className="text-2xl font-black text-red-600" data-testid="unmatched-count-value">
-                  {recSummary.unmatched_count}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-1">Absent &gt; {recSummary.daily_payment_lag_days || 4}d payment lag</div>
-              </Card>
-            </div>
-
-            {/* NEFT Cross-Check Warnings */}
-            {recSummary.neft_mismatches && recSummary.neft_mismatches.length > 0 && (
-              <Card className="p-5 border-2 border-red-300 bg-red-50/50">
-                <div className="flex items-center gap-2 mb-3">
-                  <AlertTriangle className="w-5 h-5 text-red-600" />
-                  <h4 className="font-bold text-red-900 text-xs uppercase tracking-wider">
-                    NEFT Cross-Check Mismatches (Daily Payments vs Settled.xlsx)
-                  </h4>
-                </div>
-                <div className="space-y-2">
-                  {recSummary.neft_mismatches.map((m, idx) => (
-                    <div key={idx} className="bg-white p-3 border border-red-200 text-xs flex justify-between items-center">
-                      <div>
-                        <span className="font-bold font-mono text-slate-800">NEFT Ref: {m.neft_ref}</span>
-                        <span className="text-slate-500 ml-3">Daily Payment: {inr(m.daily_payment_amount)}</span>
-                        <span className="text-slate-500 ml-3">Settlement File: {inr(m.settlement_file_amount)}</span>
-                      </div>
-                      <Badge variant="red">Diff: {inr(m.difference)}</Badge>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            )}
-
-            {/* Profitability Table by Style with Distinct Badges */}
-            <Card className="overflow-hidden">
-              <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-[#C27842]" /> Per-Style Online Profitability (Reconciliation Summary)
-                </h4>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                      <th className="p-3">Style Code</th>
-                      <th className="p-3 text-center">Units Sold</th>
-                      <th className="p-3 text-right">Settled Revenue</th>
-                      <th className="p-3 text-right">Platform Fees</th>
-                      <th className="p-3 text-right">Actual COGS</th>
-                      <th className="p-3 text-right">Net Profit</th>
-                      <th className="p-3 text-center">Revenue Status</th>
-                      <th className="p-3 text-center">Cost Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {recSummary.profitability_by_style.map((row) => (
-                      <tr key={row.style_code} className="hover:bg-slate-50">
-                        <td className="p-3 font-bold text-slate-900">{row.style_code}</td>
-                        <td className="p-3 text-center font-semibold text-slate-700">{row.units}</td>
-                        <td className="p-3 text-right font-black text-slate-900">{inr(row.settled_amount)}</td>
-                        <td className="p-3 text-right text-red-600 font-semibold">{inr(row.platform_fees)}</td>
-                        <td className="p-3 text-right font-bold text-amber-700">{inr(row.actual_cogs)}</td>
-                        <td className={`p-3 text-right font-black ${row.net_profit >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                          {inr(row.net_profit)}
-                        </td>
-                        <td className="p-3 text-center">
-                          <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
-                            Revenue: Confirmed
-                          </span>
-                        </td>
-                        <td className="p-3 text-center">
-                          {row.cost_estimated_count > 0 ? (
-                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title={`${row.cost_estimated_count} units used fallback estimate`}>
-                              Cost: Estimated ({row.cost_estimated_count})
-                            </span>
-                          ) : (
-                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
-                              Cost: Actual
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          </div>
+        {/* ── TAB 1: MONTHLY PNL RECONCILIATION ── */}
+        {activeTab === "monthly_pnl" && (
+          <MonthlyPnLReconciliation />
         )}
 
-        {/* ── TAB 2: FILE IMPORT SUITE ───────────────────────────────────────── */}
-        {activeTab === "import" && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6" data-testid="file-import-suite">
-            {/* Slot 1: Daily Payments */}
-            <Card className="p-5 border-t-4 border-t-blue-600 space-y-3">
-              <div className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-blue-600" />
-                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900">
-                  1. Daily Payment Files (prepaid.csv / postpaid.csv)
-                </h4>
-              </div>
-              <p className="text-xs text-slate-500">
-                Parses order-line payment rows. <strong>Payment_Type</strong> column is parsed automatically; filename is ignored.
-              </p>
-              <input
-                type="file"
-                accept=".csv"
-                onChange={(e) => handleFileUpload("import-daily-payments", e.target.files[0], "dailyPayments")}
-                disabled={uploadingState.dailyPayments}
-                className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:border-0 file:text-xs file:font-bold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
-                data-testid="input-daily-payments"
-              />
-            </Card>
-
-            {/* Slot 2: Settled Orders */}
-            <Card className="p-5 border-t-4 border-t-emerald-600 space-y-3">
-              <div className="flex items-center gap-2">
-                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
-                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900">
-                  2. Settled Excel File (settled.xlsx)
-                </h4>
-              </div>
-              <p className="text-xs text-slate-500">
-                Multi-sheet Excel with 3-row header. Parses <strong>forward_settled</strong>, <strong>reverse_settled</strong>, and <strong>non_order_deduction</strong> sheets.
-              </p>
-              <input
-                type="file"
-                accept=".xlsx"
-                onChange={(e) => handleFileUpload("import-settlements", e.target.files[0], "settled")}
-                disabled={uploadingState.settled}
-                className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:border-0 file:text-xs file:font-bold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"
-                data-testid="input-settled-excel"
-              />
-            </Card>
-
-            {/* Slot 3: Unsettled Orders */}
-            <Card className="p-5 border-t-4 border-t-amber-500 space-y-3">
-              <div className="flex items-center gap-2">
-                <FileSpreadsheet className="w-5 h-5 text-amber-600" />
-                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900">
-                  3. Unsettled Excel File (unsettled.xlsx)
-                </h4>
-              </div>
-              <p className="text-xs text-slate-500">
-                Multi-sheet Excel with 3-row header. Parses <strong>forward_unsettled</strong> and <strong>reverse_unsettled</strong> sheets for pending order status.
-              </p>
-              <input
-                type="file"
-                accept=".xlsx"
-                onChange={(e) => handleFileUpload("import-settlements", e.target.files[0], "unsettled")}
-                disabled={uploadingState.unsettled}
-                className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:border-0 file:text-xs file:font-bold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 cursor-pointer"
-                data-testid="input-unsettled-excel"
-              />
-            </Card>
-
-            {/* Slot 4: Monthly Order Report */}
-            <Card className="p-5 border-t-4 border-t-purple-600 space-y-3">
-              <div className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-purple-600" />
-                <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900">
-                  4. Monthly Order Report (monthly_order_report.csv)
-                </h4>
-              </div>
-              <p className="text-xs text-slate-500">
-                1 row = 1 unit order line. Used to reconcile every order unit against settled & unsettled records.
-              </p>
-              <input
-                type="file"
-                accept=".csv"
-                onChange={(e) => handleFileUpload("import-monthly-report", e.target.files[0], "monthlyReport")}
-                disabled={uploadingState.monthlyReport}
-                className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:border-0 file:text-xs file:font-bold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100 cursor-pointer"
-                data-testid="input-monthly-report"
-              />
-            </Card>
-          </div>
-        )}
-
-        {/* ── TAB 3: RETURN CHARGES & NON-ORDER DEDUCTIONS ────────────────────── */}
-        {activeTab === "returns_deductions" && recSummary && (
-          <div className="space-y-6">
-            {/* Return Charges by Style Table */}
-            <Card className="p-5">
-              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 mb-3 flex items-center gap-2 border-b pb-2">
-                <RotateCcw className="w-4 h-4 text-purple-600" /> Return Charges Report by Style
-              </h4>
-              <p className="text-xs text-slate-500 mb-4">
-                Sum of <strong>Logistics_Cost_Reverse_incl_Tax</strong> + <strong>Reverse_additional_charges</strong> from reverse settlement sheets.
-              </p>
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                    <th className="p-3">Style Code</th>
-                    <th className="p-3 text-right">Reverse Logistics & Additional Charges Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {Object.entries(recSummary.return_charges_by_style).map(([styleCode, amt]) => (
-                    <tr key={styleCode} className="hover:bg-slate-50">
-                      <td className="p-3 font-bold text-slate-900">{styleCode}</td>
-                      <td className="p-3 text-right font-black text-purple-700">{inr(amt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-
-            {/* Non-Order Deductions Ledger */}
-            <Card className="p-5">
-              <div className="flex justify-between items-center border-b pb-3 mb-3">
-                <div>
-                  <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-2">
-                    <IndianRupee className="w-4 h-4 text-amber-600" /> Non-Order Deductions Ledger
-                  </h4>
-                  <p className="text-xs text-slate-500">Deductions not attributed to any specific order line</p>
-                </div>
-                <div className="text-right">
-                  <div className="text-[10px] uppercase font-bold text-slate-500">Total Non-Order Deductions</div>
-                  <div className="text-xl font-black text-red-600">{inr(recSummary.total_non_order_deductions)}</div>
-                </div>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                      <th className="p-3">Date</th>
-                      <th className="p-3">Seller ID</th>
-                      <th className="p-3">Type</th>
-                      <th className="p-3">UTR / Ref</th>
-                      <th className="p-3">Description</th>
-                      <th className="p-3 text-right">Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {recSummary.non_order_deductions_ledger.map((ded) => (
-                      <tr key={ded.id} className="hover:bg-slate-50">
-                        <td className="p-3 font-mono font-semibold text-slate-700">{ded.settlement_date || "—"}</td>
-                        <td className="p-3 font-bold text-slate-900">{ded.seller_id || "—"}</td>
-                        <td className="p-3 whitespace-nowrap"><Badge variant="yellow">{ded.settlement_type || "Deduction"}</Badge></td>
-                        <td className="p-3 font-mono text-slate-600">{ded.utr || ded.invoice_ref || "—"}</td>
-                        <td className="p-3 text-slate-600">{ded.settlement_description || "—"}</td>
-                        <td className="p-3 text-right font-black text-red-600">{inr(ded.settlement_amount)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          </div>
-        )}
-
-        {/* ── TAB 4: UNRECONCILED ORDERS DRILL-DOWN ───────────────────────────── */}
-        {activeTab === "unreconciled" && recSummary && (
-          <Card className="p-5">
-            <div className="flex justify-between items-center border-b pb-3 mb-4">
-              <div>
-                <h4 className="font-bold text-xs uppercase tracking-wider text-red-700 flex items-center gap-2">
-                  <AlertOctagon className="w-4 h-4 text-red-600" /> Unreconciled / Flagged Orders ({recSummary.unreconciled_orders.length})
-                </h4>
-                <p className="text-xs text-slate-500">
-                  Delivered/active orders absent from settlements or missing cost snapshots
-                </p>
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse" data-testid="unreconciled-orders-table">
-                <thead>
-                  <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                    <th className="p-3">Seller Order ID</th>
-                    <th className="p-3">Release ID</th>
-                    <th className="p-3">Seller SKU Code</th>
-                    <th className="p-3">Order Status</th>
-                    <th className="p-3">Packed Date</th>
-                    <th className="p-3">Flagged Reason</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {recSummary.unreconciled_orders.map((u, idx) => (
-                    <tr key={idx} className="hover:bg-slate-50">
-                      <td className="p-3 font-bold font-mono text-slate-900">{u.seller_order_id}</td>
-                      <td className="p-3 font-mono text-slate-700">{u.order_release_id}</td>
-                      <td className="p-3 font-semibold text-slate-800">{u.seller_sku_code}</td>
-                      <td className="p-3"><Badge variant="blue">{u.order_status}</Badge></td>
-                      <td className="p-3 font-mono text-slate-600">{u.packed_on}</td>
-                      <td className="p-3">
-                        <div className="flex flex-wrap gap-1">
-                          {u.reasons.map((r, rIdx) => (
-                            <Badge key={rIdx} variant="red">{r}</Badge>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+        {/* ── TAB 2: RETURN REDUCTION ENGINE ── */}
+        {activeTab === "returns_engine" && (
+          <ReturnsIntelligenceTab />
         )}
       </div>
 

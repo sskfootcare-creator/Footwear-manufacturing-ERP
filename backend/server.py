@@ -248,6 +248,7 @@ from routes.online_orders import (
     import_dispatch_configured,
     import_settlement_report,
 )
+from routes.online_returns_engine import online_returns_router
 from routes.styles import (
     styles_router,
     suggest_gst_pct,
@@ -985,6 +986,7 @@ app.include_router(styles_router)
 app.include_router(banking_router)
 app.include_router(po_ean_router)
 app.include_router(reports_router)
+app.include_router(online_returns_router)
 
 
 
