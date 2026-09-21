@@ -488,33 +488,33 @@ export default function B2BProfitability() {
           </div>
 
           <div className="overflow-x-auto border border-slate-200">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-100 uppercase tracking-wider text-slate-600 font-bold border-b border-slate-200">
+            <table className="w-full text-left text-xs border-separate border-spacing-0">
+              <thead className="bg-slate-100 uppercase tracking-wider text-slate-600 font-bold">
                 <tr>
-                  <th className="py-3 px-4">Client Name</th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_pairs")}>
+                  <th className="py-3 px-4 border-b border-r border-slate-200 sticky left-0 z-20 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[180px]">Client Name</th>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_pairs")}>
                     Pairs <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_revenue")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_revenue")}>
                     Revenue <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_cost")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_cost")}>
                     Production Cost <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_profit")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_profit")}>
                     Net Profit <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("profit_pct")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("profit_pct")}>
                     Margin % <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-center">Labor Status</th>
-                  <th className="py-3 px-4 text-center">Action</th>
+                  <th className="py-3 px-4 text-center border-b border-slate-200">Labor Status</th>
+                  <th className="py-3 px-4 text-center border-b border-slate-200">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-200 font-mono">
+              <tbody className="font-mono">
                 {sortedClients.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-8 text-center text-slate-400 font-sans">
+                    <td colSpan={8} className="py-8 text-center text-slate-400 font-sans border-b border-slate-200">
                       No client profitability data found for selected period.
                     </td>
                   </tr>
@@ -605,34 +605,34 @@ export default function B2BProfitability() {
           </div>
 
           <div className="overflow-x-auto border border-slate-200">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-100 uppercase tracking-wider text-slate-600 font-bold border-b border-slate-200">
+            <table className="w-full text-left text-xs border-separate border-spacing-0">
+              <thead className="bg-slate-100 uppercase tracking-wider text-slate-600 font-bold">
                 <tr>
-                  <th className="py-3 px-4">Style Code</th>
-                  <th className="py-3 px-4">Style Description</th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_pairs")}>
+                  <th className="py-3 px-4 border-b border-r border-slate-200 sticky left-0 z-20 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[160px]">Style Code</th>
+                  <th className="py-3 px-4 border-b border-slate-200">Style Description</th>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_pairs")}>
                     Pairs <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_revenue")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_revenue")}>
                     Revenue <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_cost")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_cost")}>
                     Unit Cost (Avg) <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("total_profit")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("total_profit")}>
                     Net Profit <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200" onClick={() => handleSort("profit_pct")}>
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-slate-200 border-b border-slate-200" onClick={() => handleSort("profit_pct")}>
                     Margin % <ArrowUpDown className="w-3 h-3 inline ml-0.5" />
                   </th>
-                  <th className="py-3 px-4 text-center">Labor Status</th>
-                  <th className="py-3 px-4 text-center">Action</th>
+                  <th className="py-3 px-4 text-center border-b border-slate-200">Labor Status</th>
+                  <th className="py-3 px-4 text-center border-b border-slate-200">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-200 font-mono">
+              <tbody className="font-mono">
                 {sortedStyles.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="py-8 text-center text-slate-400 font-sans">
+                    <td colSpan={9} className="py-8 text-center text-slate-400 font-sans border-b border-slate-200">
                       No style profitability data found for selected period.
                     </td>
                   </tr>
@@ -640,16 +640,16 @@ export default function B2BProfitability() {
                   sortedStyles.map((s, i) => {
                     const avgUnitCost = s.total_pairs > 0 ? s.total_cost / s.total_pairs : 0;
                     return (
-                      <tr key={s.style_code || i} className="hover:bg-slate-50 transition-colors">
-                        <td className="py-3 px-4 font-bold text-[#0F172A]">{s.style_code}</td>
-                        <td className="py-3 px-4 font-sans font-medium text-slate-700">{s.style_name}</td>
-                        <td className="py-3 px-4 text-right text-slate-700">{num(s.total_pairs)}</td>
-                        <td className="py-3 px-4 text-right font-bold text-slate-900">{inr(s.total_revenue)}</td>
-                        <td className="py-3 px-4 text-right text-slate-600">{inr(avgUnitCost)}</td>
-                        <td className={`py-3 px-4 text-right font-bold ${s.total_profit >= 0 ? "text-emerald-700" : "text-red-600"}`}>
+                      <tr key={s.style_code || i} className="group hover:bg-slate-50 transition-colors">
+                        <td className="py-3 px-4 font-bold text-[#0F172A] border-b border-r border-slate-200 sticky left-0 z-10 bg-white group-hover:bg-slate-50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[160px]">{s.style_code}</td>
+                        <td className="py-3 px-4 font-sans font-medium text-slate-700 border-b border-slate-200">{s.style_name}</td>
+                        <td className="py-3 px-4 text-right text-slate-700 border-b border-slate-200">{num(s.total_pairs)}</td>
+                        <td className="py-3 px-4 text-right font-bold text-slate-900 border-b border-slate-200">{inr(s.total_revenue)}</td>
+                        <td className="py-3 px-4 text-right text-slate-600 border-b border-slate-200">{inr(avgUnitCost)}</td>
+                        <td className={`py-3 px-4 text-right font-bold border-b border-slate-200 ${s.total_profit >= 0 ? "text-emerald-700" : "text-red-600"}`}>
                           {inr(s.total_profit)}
                         </td>
-                        <td className="py-3 px-4 text-right font-bold">
+                        <td className="py-3 px-4 text-right font-bold border-b border-slate-200">
                           <span
                             className={`px-2 py-0.5 rounded text-[11px] ${
                               s.profit_pct >= 25
@@ -664,7 +664,7 @@ export default function B2BProfitability() {
                             {s.profit_pct}%
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-center font-sans">
+                        <td className="py-3 px-4 text-center font-sans border-b border-slate-200">
                           <div className="flex items-center justify-center gap-1">
                             {s.confirmed_lines_count > 0 && (
                               <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded">

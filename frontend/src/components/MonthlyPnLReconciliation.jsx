@@ -87,28 +87,32 @@ function FunnelViz({ stats, breakdown }) {
 // ═══════════════════════════════════════════════════════════════════════
 function OperationalCostModal({ overview, isOpen, onClose, onSave }) {
   const currentOp = overview?.operational_expenses || {};
-  const [rent, setRent] = useState(currentOp.factory_rent ?? 75000);
-  const [electricity, setElectricity] = useState(currentOp.electricity_power ?? 20000);
-  const [salaries, setSalaries] = useState(currentOp.staff_worker_salaries ?? 35000);
-  const [otherBasic, setOtherBasic] = useState(currentOp.other_basic_sundry ?? 7500);
+  const [rent, setRent] = useState(currentOp.factory_rent ?? currentOp.rent ?? 75000);
+  const [electricity, setElectricity] = useState(currentOp.electricity_power ?? currentOp.electricity ?? 20000);
+  const [salaries, setSalaries] = useState(currentOp.staff_worker_salaries ?? currentOp.salaries ?? 35000);
+  const [commission, setCommission] = useState(currentOp.commission_brokerage ?? currentOp.commission ?? 0);
+  const [interestEmi, setInterestEmi] = useState(currentOp.interest_loan_emi ?? currentOp.interest_emi ?? 0);
+  const [otherBasic, setOtherBasic] = useState(currentOp.other_basic_sundry ?? currentOp.other_basic ?? 7500);
   const [allocationPct, setAllocationPct] = useState(currentOp.allocation_pct ?? 50);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (overview?.operational_expenses) {
       const op = overview.operational_expenses;
-      setRent(op.factory_rent ?? 75000);
-      setElectricity(op.electricity_power ?? 20000);
-      setSalaries(op.staff_worker_salaries ?? 35000);
-      setOtherBasic(op.other_basic_sundry ?? 7500);
+      setRent(op.factory_rent ?? op.rent ?? 75000);
+      setElectricity(op.electricity_power ?? op.electricity ?? 20000);
+      setSalaries(op.staff_worker_salaries ?? op.salaries ?? 35000);
+      setCommission(op.commission_brokerage ?? op.commission ?? 0);
+      setInterestEmi(op.interest_loan_emi ?? op.interest_emi ?? 0);
+      setOtherBasic(op.other_basic_sundry ?? op.other_basic ?? 7500);
       setAllocationPct(op.allocation_pct ?? 50);
     }
   }, [overview]);
 
   if (!isOpen) return null;
 
-  const totalMonthly = Number(rent) + Number(electricity) + Number(salaries) + Number(otherBasic);
-  const allocatedOverhead = Math.round(totalMonthly * (Number(allocationPct) / 100));
+  const totalMonthly = Number(rent || 0) + Number(electricity || 0) + Number(salaries || 0) + Number(commission || 0) + Number(interestEmi || 0) + Number(otherBasic || 0);
+  const allocatedOverhead = Math.round(totalMonthly * (Number(allocationPct || 50) / 100));
 
   const platformEarnings = overview?.platform_earnings ?? overview?.pnl_summary?.earnings_on_platform ?? 0;
   const totalCogs = overview?.total_cost_of_production ?? 0;
@@ -124,11 +128,19 @@ function OperationalCostModal({ overview, isOpen, onClose, onSave }) {
       await onSave({
         platform: overview?.platform || "myntra",
         month: overview?.month,
-        factory_rent: Number(rent),
-        electricity_power: Number(electricity),
-        staff_worker_salaries: Number(salaries),
-        other_basic_sundry: Number(otherBasic),
-        allocation_pct: Number(allocationPct),
+        factory_rent: Number(rent || 0),
+        rent: Number(rent || 0),
+        electricity_power: Number(electricity || 0),
+        electricity: Number(electricity || 0),
+        staff_worker_salaries: Number(salaries || 0),
+        salaries: Number(salaries || 0),
+        commission_brokerage: Number(commission || 0),
+        commission: Number(commission || 0),
+        interest_loan_emi: Number(interestEmi || 0),
+        interest_emi: Number(interestEmi || 0),
+        other_basic_sundry: Number(otherBasic || 0),
+        other_basic: Number(otherBasic || 0),
+        allocation_pct: Number(allocationPct || 50),
       });
       onClose();
     } finally {
@@ -184,6 +196,26 @@ function OperationalCostModal({ overview, isOpen, onClose, onSave }) {
                 onChange={(e) => setSalaries(e.target.value)}
                 className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
                 required
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Commission & Brokerage (₹)</label>
+              <input
+                type="number"
+                step="50"
+                value={commission}
+                onChange={(e) => setCommission(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1 text-[11px]">Interest & Loan / EMI (₹)</label>
+              <input
+                type="number"
+                step="100"
+                value={interestEmi}
+                onChange={(e) => setInterestEmi(e.target.value)}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono text-sm focus:outline-none focus:border-slate-800"
               />
             </div>
             <div>
@@ -374,20 +406,20 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
 
       <div className="border-2 border-slate-200 rounded overflow-hidden">
         <div className="max-h-[500px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+          <table className="w-full text-xs border-separate border-spacing-0">
+            <thead className="bg-slate-100 sticky top-0 z-20 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2.5 border-b sticky left-0 z-10 bg-slate-100 min-w-[280px]">Style & Codes / Article</th>
-                <th className="text-left p-2.5 border-b">Colors</th>
-                <th className="text-left p-2.5 border-b">Grouped Sizes</th>
-                <th className="text-right p-2.5 border-b">Packed</th>
-                <th className="text-right p-2.5 border-b">Ret / RTO</th>
-                <th className="text-right p-2.5 border-b font-bold text-emerald-800">Net Sold</th>
-                <th className="text-right p-2.5 border-b">Unit Cost (₹)</th>
-                <th className="text-right p-2.5 border-b">Total COGS</th>
-                <th className="text-right p-2.5 border-b">Net Revenue</th>
-                <th className="text-right p-2.5 border-b">Gross Profit</th>
-                <th className="text-right p-2.5 border-b">Margin %</th>
+                <th className="text-left p-2.5 border-b border-r border-slate-200 sticky top-0 left-0 z-30 bg-slate-100 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Style & Codes / Article</th>
+                <th className="text-left p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Colors</th>
+                <th className="text-left p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Grouped Sizes</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Packed</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Ret / RTO</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100 font-bold text-emerald-800">Net Sold</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Unit Cost (₹)</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Total COGS</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Net Revenue</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Gross Profit</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Margin %</th>
               </tr>
             </thead>
             <tbody>
@@ -395,8 +427,8 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                 const isEditing = editingStyle === s.style_code;
                 const isProfit = (s.gross_profit ?? 0) >= 0;
                 return (
-                  <tr key={s.style_code} className="border-b border-slate-100 hover:bg-slate-50/80">
-                    <td className="p-2.5 sticky left-0 z-10 bg-white min-w-[280px]">
+                  <tr key={s.style_code} className="group border-b border-slate-100 hover:bg-slate-50/80">
+                    <td className="p-2.5 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
                       <div className="flex items-center gap-3">
                         {/* Style Photo Thumbnail with click-to-preview */}
                         <div
@@ -425,49 +457,47 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="font-mono font-bold text-slate-900 text-[13px]">{s.style_code}</span>
                             {s.brand && (
-                              <span className="text-[9px] uppercase tracking-wider font-bold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded border border-indigo-200">
+                              <span className="text-[9px] uppercase tracking-wider font-semibold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
                                 {s.brand}
                               </span>
                             )}
                           </div>
 
-                          {/* Myntra Style ID & ERP Style Code badges */}
+                          {/* Marketplace Style ID & ERP Style Code metadata */}
                           <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                             {s.myntra_style_id ? (
                               <span
-                                className="text-[10px] font-mono font-bold text-amber-900 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 inline-flex items-center gap-1"
-                                title="Myntra Marketplace Style ID"
+                                className="text-[10px] font-mono text-slate-600 bg-slate-100/90 px-1.5 py-0.5 rounded border border-slate-200/90 inline-flex items-center gap-1"
+                                title="Marketplace Style ID"
                               >
-                                <span className="text-amber-600 font-semibold">Myntra ID:</span>
-                                {s.myntra_style_id}
+                                <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">ID:</span>
+                                <span className="font-semibold text-slate-700">{s.myntra_style_id}</span>
                               </span>
-                            ) : (
-                              <span className="text-[10px] font-mono text-slate-400 bg-slate-50 px-1 py-0.5 rounded border border-slate-200">
-                                Myntra ID: —
-                              </span>
-                            )}
+                            ) : null}
 
                             {s.erp_style_code ? (
                               <span
-                                className="text-[10px] font-mono font-bold text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 inline-flex items-center gap-1"
+                                className="text-[10px] font-mono font-semibold text-emerald-800 bg-emerald-50/80 px-1.5 py-0.5 rounded border border-emerald-200/80 inline-flex items-center gap-1"
                                 title="Internal SSK ERP Style Code"
                               >
-                                <span className="text-emerald-700 font-semibold">ERP:</span>
+                                <span className="text-emerald-600 font-sans text-[9px] uppercase tracking-wider font-semibold">ERP:</span>
                                 {s.erp_style_code}
                               </span>
                             ) : (
                               <span
-                                className="text-[10px] font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200"
-                                title="ERP Style Code"
+                                className="text-[10px] font-mono text-slate-400 inline-flex items-center gap-1"
+                                title="ERP Style Code: Unmapped"
                               >
-                                ERP: {s.style_code.startsWith("SSK") ? s.style_code : "Unmapped"}
+                                <span className="text-slate-300">ERP:</span> Unmapped
                               </span>
                             )}
                           </div>
 
-                          <div className="text-[11px] text-slate-600 max-w-[220px] truncate" title={s.style_name}>
-                            {s.style_name || s.style_code}
-                          </div>
+                          {s.style_name && s.style_name.trim().toLowerCase() !== s.style_code.trim().toLowerCase() && (
+                            <div className="text-[11px] text-slate-500 max-w-[220px] truncate" title={s.style_name}>
+                              {s.style_name}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -481,7 +511,7 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                         {(!s.colors || s.colors.length === 0) && <span className="text-slate-400">—</span>}
                       </div>
                     </td>
-                    <td className="p-2.5">
+                    <td className="p-2.5 border-b border-slate-100">
                       <div className="flex flex-wrap gap-1 max-w-[220px]">
                         {Object.entries(s.sizes || {}).map(([sz, count]) => (
                           <span
@@ -495,15 +525,15 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                         ))}
                       </div>
                     </td>
-                    <td className="p-2.5 text-right font-mono text-slate-700 font-semibold">{s.packed_qty}</td>
-                    <td className="p-2.5 text-right font-mono text-rose-700">
+                    <td className="p-2.5 text-right font-mono text-slate-700 font-semibold border-b border-slate-100">{s.packed_qty}</td>
+                    <td className="p-2.5 text-right font-mono text-rose-700 border-b border-slate-100">
                       {s.returned_qty + s.rto_qty}
                       <span className="text-[10px] text-slate-400 ml-1">({s.returned_qty}r/{s.rto_qty}o)</span>
                     </td>
-                    <td className="p-2.5 text-right font-mono font-black text-emerald-700 bg-emerald-50/40 text-[13px]">
+                    <td className="p-2.5 text-right font-mono font-black text-emerald-700 bg-emerald-50/40 text-[13px] border-b border-slate-100">
                       {s.net_sold_qty}
                     </td>
-                    <td className="p-2.5 text-right font-mono">
+                    <td className="p-2.5 text-right font-mono border-b border-slate-100">
                       {isEditing ? (
                         <div className="flex items-center justify-end gap-1">
                           <input
@@ -551,16 +581,16 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                         </div>
                       )}
                     </td>
-                    <td className="p-2.5 text-right font-mono text-slate-700 font-semibold">
+                    <td className="p-2.5 text-right font-mono text-slate-700 font-semibold border-b border-slate-100">
                       ₹{Math.round(s.total_production_cost || 0).toLocaleString()}
                     </td>
-                    <td className="p-2.5 text-right font-mono text-slate-900 font-semibold">
+                    <td className="p-2.5 text-right font-mono text-slate-900 font-semibold border-b border-slate-100">
                       ₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}
                     </td>
-                    <td className={`p-2.5 text-right font-mono font-bold ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>
+                    <td className={`p-2.5 text-right font-mono font-bold border-b border-slate-100 ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>
                       ₹{Math.round(s.gross_profit || 0).toLocaleString()}
                     </td>
-                    <td className="p-2.5 text-right font-mono">
+                    <td className="p-2.5 text-right font-mono border-b border-slate-100">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                         (s.margin_pct ?? 0) >= 20
                           ? "bg-emerald-100 text-emerald-800"
@@ -713,22 +743,22 @@ function MonthlySkuBifurcationTable({ skuList = [], overview = null }) {
 
       <div className="border-2 border-slate-200 rounded overflow-hidden">
         <div className="max-h-[500px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+          <table className="w-full text-xs border-separate border-spacing-0">
+            <thead className="bg-slate-100 sticky top-0 z-20 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2.5 border-b sticky left-0 z-10 bg-slate-100 min-w-[280px]">SKU Code & Style Identifiers</th>
-                <th className="text-left p-2.5 border-b">Root Style</th>
-                <th className="text-center p-2.5 border-b">Color</th>
-                <th className="text-center p-2.5 border-b">Size</th>
-                <th className="text-right p-2.5 border-b">Gross / Ret</th>
-                <th className="text-right p-2.5 border-b font-bold text-emerald-800">Net Sold</th>
-                <th className="text-right p-2.5 border-b">Net Sales</th>
-                <th className="text-right p-2.5 border-b">Platform Fees</th>
-                <th className="text-right p-2.5 border-b">Payout</th>
-                <th className="text-right p-2.5 border-b">Unit Cost</th>
-                <th className="text-right p-2.5 border-b">COGS</th>
-                <th className="text-right p-2.5 border-b">Contribution</th>
-                <th className="text-right p-2.5 border-b">Margin %</th>
+                <th className="text-left p-2.5 border-b border-r border-slate-200 sticky top-0 left-0 z-30 bg-slate-100 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">SKU Code & Style Identifiers</th>
+                <th className="text-left p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Root Style</th>
+                <th className="text-center p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Color</th>
+                <th className="text-center p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Size</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Gross / Ret</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100 font-bold text-emerald-800">Net Sold</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Net Sales</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Platform Fees</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Payout</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Unit Cost</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">COGS</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Contribution</th>
+                <th className="text-right p-2.5 border-b border-slate-200 sticky top-0 bg-slate-100">Margin %</th>
               </tr>
             </thead>
             <tbody>
@@ -742,8 +772,8 @@ function MonthlySkuBifurcationTable({ skuList = [], overview = null }) {
                 const brandName = sk.brand || st.brand || "";
 
                 return (
-                  <tr key={sk.sku_code || idx} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="p-2.5 sticky left-0 z-10 bg-white min-w-[280px]">
+                  <tr key={sk.sku_code || idx} className="group border-b border-slate-100 hover:bg-slate-50">
+                    <td className="p-2.5 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
                       <div className="flex items-center gap-2.5">
                         {/* Style Photo Thumbnail with click-to-preview */}
                         <div
@@ -769,22 +799,25 @@ function MonthlySkuBifurcationTable({ skuList = [], overview = null }) {
 
                         <div className="space-y-0.5 min-w-0">
                           <div className="font-mono font-bold text-slate-900 text-xs">{sk.sku_code}</div>
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <span className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5" title="Style Code">
-                              {`Style: ${styleCode}`}
+                          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                            <span className="text-[10px] font-mono text-slate-600 bg-slate-100/90 border border-slate-200/90 rounded px-1.5 py-0.5 inline-flex items-center gap-1" title="Style Code">
+                              <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">Style:</span>
+                              <span className="font-semibold text-slate-700">{styleCode}</span>
                             </span>
                             {erpCode ? (
-                              <span className="text-[10px] font-mono font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5" title="Internal ERP Style Code">
-                                {`ERP: ${erpCode}`}
+                              <span className="text-[10px] font-mono font-semibold text-emerald-800 bg-emerald-50/80 border border-emerald-200/80 rounded px-1.5 py-0.5 inline-flex items-center gap-1" title="Internal ERP Style Code">
+                                <span className="text-emerald-600 font-sans text-[9px] uppercase tracking-wider font-semibold">ERP:</span>
+                                {erpCode}
                               </span>
                             ) : (
-                              <span className="text-[10px] font-mono text-slate-400 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5" title="ERP Style Code">
-                                ERP: Unmapped
+                              <span className="text-[10px] font-mono text-slate-400 inline-flex items-center gap-1" title="ERP Style Code: Unmapped">
+                                <span className="text-slate-300">ERP:</span> Unmapped
                               </span>
                             )}
                             {myntraId && (
-                              <span className="text-[9px] font-mono font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded px-1 py-0.5" title="Myntra Marketplace Style ID">
-                                {`ID: ${myntraId}`}
+                              <span className="text-[10px] font-mono text-slate-600 bg-slate-100/90 border border-slate-200/90 rounded px-1.5 py-0.5 inline-flex items-center gap-1" title="Marketplace Style ID">
+                                <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">ID:</span>
+                                <span className="font-semibold text-slate-700">{myntraId}</span>
                               </span>
                             )}
                           </div>
@@ -794,60 +827,60 @@ function MonthlySkuBifurcationTable({ skuList = [], overview = null }) {
                         </div>
                       </div>
                     </td>
-                    <td className="p-2.5 font-mono">
+                    <td className="p-2.5 font-mono border-b border-slate-100">
                       {sk.is_mapped ? (
-                        <span className="text-indigo-700 font-bold bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 text-[11px]">
+                        <span className="text-slate-800 font-bold bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 text-[11px]">
                           {sk.style_root}
                         </span>
                       ) : (
                         <span className="text-slate-500 font-semibold">{sk.style_root || "—"}</span>
                       )}
                       {myntraId && (
-                        <div className="text-[10px] text-amber-800 font-mono mt-0.5 font-bold">ID: {myntraId}</div>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">ID: {myntraId}</div>
                       )}
                       {erpCode && (
-                        <div className="text-[10px] text-emerald-700 font-mono mt-0.5 font-bold">ERP: {erpCode}</div>
+                        <div className="text-[10px] text-emerald-700 font-mono mt-0.5 font-semibold">ERP: {erpCode}</div>
                       )}
                     </td>
-                    <td className="p-2 text-center font-mono">
+                    <td className="p-2 text-center font-mono border-b border-slate-100">
                       {sk.color ? (
                         <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-semibold text-slate-700">
                           {sk.color}
                         </span>
                       ) : "—"}
                     </td>
-                    <td className="p-2 text-center font-mono font-bold text-blue-900">
+                    <td className="p-2 text-center font-mono font-bold text-blue-900 border-b border-slate-100">
                       {sk.size ? (
                         <span className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded text-[10px]">
                           {sk.size}
                         </span>
                       ) : "—"}
                     </td>
-                    <td className="p-2 text-right font-mono text-[11px] text-slate-600">
+                    <td className="p-2 text-right font-mono text-[11px] text-slate-600 border-b border-slate-100">
                       {sk.gross_units} / <span className="text-rose-600">{sk.returns_units}</span>
                     </td>
-                    <td className="p-2 text-right font-mono font-black text-emerald-800 bg-emerald-50/40 text-[12px]">
+                    <td className="p-2 text-right font-mono font-black text-emerald-800 bg-emerald-50/40 text-[12px] border-b border-slate-100">
                       {sk.net_units}
                     </td>
-                    <td className="p-2 text-right font-mono text-slate-900 font-semibold">
+                    <td className="p-2 text-right font-mono text-slate-900 font-semibold border-b border-slate-100">
                       ₹{Math.round(sk.net_sales || 0).toLocaleString()}
                     </td>
-                    <td className="p-2 text-right font-mono text-rose-700">
+                    <td className="p-2 text-right font-mono text-rose-700 border-b border-slate-100">
                       ₹{Math.round(sk.platform_expenses || 0).toLocaleString()}
                     </td>
-                    <td className="p-2 text-right font-mono text-slate-800 font-semibold">
+                    <td className="p-2 text-right font-mono text-slate-800 font-semibold border-b border-slate-100">
                       ₹{Math.round(sk.platform_earnings || 0).toLocaleString()}
                     </td>
-                    <td className="p-2 text-right font-mono text-slate-700">
+                    <td className="p-2 text-right font-mono text-slate-700 border-b border-slate-100">
                       ₹{(sk.unit_production_cost ?? 210).toFixed(2)}
                     </td>
-                    <td className="p-2 text-right font-mono text-slate-700">
+                    <td className="p-2 text-right font-mono text-slate-700 border-b border-slate-100">
                       ₹{Math.round(sk.total_production_cost || 0).toLocaleString()}
                     </td>
-                    <td className={`p-2 text-right font-mono font-black ${isPositive ? "text-emerald-700" : "text-rose-700"}`}>
+                    <td className={`p-2 text-right font-mono font-black border-b border-slate-100 ${isPositive ? "text-emerald-700" : "text-rose-700"}`}>
                       ₹{Math.round(sk.contribution_after_platform || 0).toLocaleString()}
                     </td>
-                    <td className="p-2 text-right font-mono">
+                    <td className="p-2 text-right font-mono border-b border-slate-100">
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                         (sk.margin_pct ?? 0) >= 20
                           ? "bg-emerald-100 text-emerald-800"
@@ -1214,6 +1247,19 @@ export default function MonthlyPnLReconciliation() {
   const allocatedOverhead = overview?.allocated_operational_cost ?? overview?.operational_expenses?.allocated_operational_cost ?? 68750;
   const platformEarnings = overview?.platform_earnings ?? overview?.pnl_summary?.earnings_on_platform ?? 0;
 
+  const netSoldUnits = Number(overview?.total_net_sold ?? overview?.pnl_summary?.net_units ?? 0);
+  const netSoldRevenue = Number(overview?.net_sold_revenue ?? overview?.pnl_summary?.net_sales ?? 0);
+  const totalCogs = Number(overview?.total_cost_of_production ?? 0);
+  const totalFees = Number(overview?.platform_fee_breakdown?.total_fees ?? overview?.pnl_summary?.total_expenses ?? 0);
+
+  const unitEcon = overview?.unit_economics || {};
+  const netAsp = unitEcon.net_asp ?? (netSoldUnits > 0 ? (netSoldRevenue / netSoldUnits).toFixed(2) : 0);
+  const avgUnitCogs = unitEcon.avg_unit_cogs ?? (netSoldUnits > 0 ? (totalCogs / netSoldUnits).toFixed(2) : 0);
+  const avgPlatformFee = unitEcon.avg_platform_fee_per_unit ?? (netSoldUnits > 0 ? (totalFees / netSoldUnits).toFixed(2) : 0);
+  const avgOverheadPerPair = unitEcon.avg_overhead_per_pair ?? (netSoldUnits > 0 ? (allocatedOverhead / netSoldUnits).toFixed(2) : 0);
+  const unitContribution = unitEcon.unit_contribution ?? (Number(netAsp) - Number(avgUnitCogs) - Number(avgPlatformFee)).toFixed(2);
+  const netProfitPerPair = unitEcon.net_profit_per_pair ?? (netSoldUnits > 0 ? (actualNetProfit / netSoldUnits).toFixed(2) : 0);
+
   return (
     <div className="space-y-6">
       {/* ── Top Filter Bar ────────────────────────────────────────── */}
@@ -1325,7 +1371,7 @@ export default function MonthlyPnLReconciliation() {
                     ₹{Math.round(allocatedOverhead).toLocaleString()}
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
-                    <span className="text-[11px] text-purple-700">Rent, Power, Salaries</span>
+                    <span className="text-[11px] text-purple-700">Rent, Power, Salaries, Comm, EMI</span>
                     <button
                       type="button"
                       onClick={() => setShowOpModal(true)}
@@ -1349,16 +1395,50 @@ export default function MonthlyPnLReconciliation() {
                 </div>
               </div>
 
-              {/* Waterfall Ribbon */}
+              {/* Critical Unit Economics & Cost Efficiency Ribbon */}
               {overview.pnl_summary && (
-                <div className="bg-slate-50 border border-slate-200 p-2.5 rounded text-xs flex flex-wrap items-center justify-between gap-2 text-slate-700 font-mono">
-                  <div>Gross: <span className="font-bold">₹{Math.round(overview.pnl_summary.gross_sales || 0).toLocaleString()}</span> ({overview.pnl_summary.gross_units} u)</div>
-                  <div>Returns: <span className="font-bold text-rose-700">₹{Math.round(overview.pnl_summary.returns_amount || 0).toLocaleString()}</span> ({overview.pnl_summary.returns_units} u)</div>
-                  <div>Net Sales: <span className="font-bold text-emerald-800">₹{Math.round(overview.pnl_summary.net_sales || 0).toLocaleString()}</span> ({overview.pnl_summary.net_units} u)</div>
-                  <div>Platform Fees: <span className="font-bold text-rose-700">₹{Math.round(overview.pnl_summary.total_expenses || 0).toLocaleString()}</span></div>
-                  <div>Payout: <span className="font-bold text-blue-800">₹{Math.round(platformEarnings).toLocaleString()}</span></div>
-                  <div>COGS: <span className="font-bold text-amber-800">₹{Math.round(overview.total_cost_of_production || 0).toLocaleString()}</span></div>
-                  <div>True Net: <span className={`font-bold ${isProfit ? "text-emerald-700" : "text-rose-700"}`}>₹{Math.round(actualNetProfit).toLocaleString()}</span></div>
+                <div className="bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-sm border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Net ASP:</span>
+                    <span className="font-bold text-white">₹{Number(netAsp).toLocaleString()}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Avg BOM COGS:</span>
+                    <span className="font-bold text-amber-400">₹{Number(avgUnitCogs).toLocaleString()}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Marketplace Fee:</span>
+                    <span className="font-bold text-rose-300">₹{Number(avgPlatformFee).toLocaleString()}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Overhead:</span>
+                    <span className="font-bold text-purple-300">₹{Number(avgOverheadPerPair).toLocaleString()}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Unit Contribution:</span>
+                    <span className="font-bold text-cyan-300">₹{Number(unitContribution).toLocaleString()}</span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 border-r border-slate-700/80 pr-3">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Net Profit / Pair:</span>
+                    <span className={`font-black ${Number(netProfitPerPair) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      ₹{Number(netProfitPerPair).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-sans">/pr</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-slate-400 text-[10px] uppercase tracking-wider font-sans font-bold">Return Drag:</span>
+                    <span className="font-bold text-amber-300">
+                      ₹{Math.round(overview.pnl_summary.returns_amount || unitEcon.return_financial_damage || 0).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-rose-300 bg-rose-950/80 px-1.5 py-0.5 rounded border border-rose-800">
+                      {unitEcon.return_rate_pct ?? overview.return_analytics?.overall_return_rate_pct ?? (overview.pnl_summary.gross_units > 0 ? ((overview.pnl_summary.returns_units / overview.pnl_summary.gross_units) * 100).toFixed(1) : 0)}% ret
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
@@ -1479,37 +1559,37 @@ export default function MonthlyPnLReconciliation() {
                         </span>
                         <span className="text-slate-400 font-mono text-[10px]">Ranked by total return volume</span>
                       </div>
-                      <div className="border border-slate-200 rounded overflow-hidden bg-white">
-                        <table className="w-full text-xs">
+                      <div className="border border-slate-200 rounded overflow-x-auto bg-white">
+                        <table className="w-full text-xs border-separate border-spacing-0">
                           <thead className="bg-slate-100 text-[10px] uppercase tracking-wider text-slate-600">
                             <tr>
-                              <th className="p-2 text-center w-12 border-b">Rank</th>
-                              <th className="p-2 text-left border-b">Style Code</th>
-                              <th className="p-2 text-left border-b">Brand</th>
-                              <th className="p-2 text-right border-b">Gross Units</th>
-                              <th className="p-2 text-right border-b">Returns</th>
-                              <th className="p-2 text-right border-b">Return Rate %</th>
-                              <th className="p-2 text-right border-b">Net Sold</th>
-                              <th className="p-2 text-right border-b">Lost Revenue</th>
+                              <th className="p-2 text-center w-12 border-b border-slate-200 sticky left-0 z-20 bg-slate-100">Rank</th>
+                              <th className="p-2 text-left border-b border-r border-slate-200 sticky left-12 z-20 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[140px]">Style Code</th>
+                              <th className="p-2 text-left border-b border-slate-200">Brand</th>
+                              <th className="p-2 text-right border-b border-slate-200">Gross Units</th>
+                              <th className="p-2 text-right border-b border-slate-200">Returns</th>
+                              <th className="p-2 text-right border-b border-slate-200">Return Rate %</th>
+                              <th className="p-2 text-right border-b border-slate-200">Net Sold</th>
+                              <th className="p-2 text-right border-b border-slate-200">Lost Revenue</th>
                             </tr>
                           </thead>
                           <tbody>
                             {returnAnalytics.most_returned_styles.slice(0, 10).map((st) => (
-                              <tr key={st.style_code} className="border-b border-slate-100 hover:bg-rose-50/40">
-                                <td className="p-2 text-center font-bold text-slate-500">#{st.return_rank}</td>
-                                <td className="p-2 font-mono font-bold text-slate-900">{st.style_code}</td>
-                                <td className="p-2 text-slate-600">{st.brand || "—"}</td>
-                                <td className="p-2 text-right font-mono text-slate-700">{st.gross_units}</td>
-                                <td className="p-2 text-right font-mono font-bold text-rose-700">{st.returned_qty}</td>
-                                <td className="p-2 text-right font-mono">
+                              <tr key={st.style_code} className="group border-b border-slate-100 hover:bg-rose-50/40">
+                                <td className="p-2 text-center font-bold text-slate-500 border-b border-slate-100 sticky left-0 z-10 bg-white group-hover:bg-rose-50/40">#{st.return_rank}</td>
+                                <td className="p-2 font-mono font-bold text-slate-900 border-b border-r border-slate-100 sticky left-12 z-10 bg-white group-hover:bg-rose-50/40 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[140px]">{st.style_code}</td>
+                                <td className="p-2 text-slate-600 border-b border-slate-100">{st.brand || "—"}</td>
+                                <td className="p-2 text-right font-mono text-slate-700 border-b border-slate-100">{st.gross_units}</td>
+                                <td className="p-2 text-right font-mono font-bold text-rose-700 border-b border-slate-100">{st.returned_qty}</td>
+                                <td className="p-2 text-right font-mono border-b border-slate-100">
                                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                     (st.return_rate_pct ?? 0) > 40 ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"
                                   }`}>
                                     {st.return_rate_pct}%
                                   </span>
                                 </td>
-                                <td className="p-2 text-right font-mono font-bold text-emerald-700">{st.net_sold_qty}</td>
-                                <td className="p-2 text-right font-mono text-rose-700">
+                                <td className="p-2 text-right font-mono font-bold text-emerald-700 border-b border-slate-100">{st.net_sold_qty}</td>
+                                <td className="p-2 text-right font-mono text-rose-700 border-b border-slate-100">
                                   ₹{Math.round(st.return_amount_lost || 0).toLocaleString()}
                                 </td>
                               </tr>
@@ -1537,25 +1617,25 @@ export default function MonthlyPnLReconciliation() {
                       <Badge color="green">Value Creators</Badge>
                     </div>
 
-                    <div className="border border-emerald-200 rounded overflow-hidden bg-white">
-                      <table className="w-full text-xs">
+                    <div className="border border-emerald-200 rounded overflow-x-auto bg-white">
+                      <table className="w-full text-xs border-separate border-spacing-0">
                         <thead className="bg-emerald-100/60 text-[10px] uppercase text-emerald-900">
                           <tr>
-                            <th className="p-2 text-left border-b">Style</th>
-                            <th className="p-2 text-right border-b">Net Sold</th>
-                            <th className="p-2 text-right border-b">Net Rev</th>
-                            <th className="p-2 text-right border-b">COGS</th>
-                            <th className="p-2 text-right border-b">Net Profit</th>
+                            <th className="p-2 text-left border-b border-r border-emerald-200 sticky left-0 z-20 bg-emerald-100/90 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">Style</th>
+                            <th className="p-2 text-right border-b border-emerald-200">Net Sold</th>
+                            <th className="p-2 text-right border-b border-emerald-200">Net Rev</th>
+                            <th className="p-2 text-right border-b border-emerald-200">COGS</th>
+                            <th className="p-2 text-right border-b border-emerald-200">Net Profit</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(profitRankings.top_profit_styles || []).map((s) => (
-                            <tr key={s.style_code} className="border-b border-emerald-50 hover:bg-emerald-50/50">
-                              <td className="p-2 font-mono font-bold text-slate-900">{s.style_code}</td>
-                              <td className="p-2 text-right font-mono text-slate-700">{s.net_sold_qty}</td>
-                              <td className="p-2 text-right font-mono text-slate-900">₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}</td>
-                              <td className="p-2 text-right font-mono text-slate-600">₹{Math.round(s.total_production_cost || 0).toLocaleString()}</td>
-                              <td className="p-2 text-right font-mono font-black text-emerald-700">
+                            <tr key={s.style_code} className="group border-b border-emerald-50 hover:bg-emerald-50/50">
+                              <td className="p-2 font-mono font-bold text-slate-900 border-b border-r border-emerald-100 sticky left-0 z-10 bg-white group-hover:bg-emerald-50/50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">{s.style_code}</td>
+                              <td className="p-2 text-right font-mono text-slate-700 border-b border-emerald-50">{s.net_sold_qty}</td>
+                              <td className="p-2 text-right font-mono text-slate-900 border-b border-emerald-50">₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono text-slate-600 border-b border-emerald-50">₹{Math.round(s.total_production_cost || 0).toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono font-black text-emerald-700 border-b border-emerald-50">
                                 ₹{Math.round(s.contribution ?? s.gross_profit ?? 0).toLocaleString()}
                               </td>
                             </tr>
@@ -1577,25 +1657,25 @@ export default function MonthlyPnLReconciliation() {
                       <Badge color="red">Attention Needed</Badge>
                     </div>
 
-                    <div className="border border-rose-200 rounded overflow-hidden bg-white">
-                      <table className="w-full text-xs">
+                    <div className="border border-rose-200 rounded overflow-x-auto bg-white">
+                      <table className="w-full text-xs border-separate border-spacing-0">
                         <thead className="bg-rose-100/60 text-[10px] uppercase text-rose-900">
                           <tr>
-                            <th className="p-2 text-left border-b">Style</th>
-                            <th className="p-2 text-right border-b">Net Sold</th>
-                            <th className="p-2 text-right border-b">Net Rev</th>
-                            <th className="p-2 text-right border-b">COGS</th>
-                            <th className="p-2 text-right border-b">Net Profit / Loss</th>
+                            <th className="p-2 text-left border-b border-r border-rose-200 sticky left-0 z-20 bg-rose-100/90 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">Style</th>
+                            <th className="p-2 text-right border-b border-rose-200">Net Sold</th>
+                            <th className="p-2 text-right border-b border-rose-200">Net Rev</th>
+                            <th className="p-2 text-right border-b border-rose-200">COGS</th>
+                            <th className="p-2 text-right border-b border-rose-200">Net Profit / Loss</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(profitRankings.top_loss_styles || []).map((s) => (
-                            <tr key={s.style_code} className="border-b border-rose-50 hover:bg-rose-50/50">
-                              <td className="p-2 font-mono font-bold text-slate-900">{s.style_code}</td>
-                              <td className="p-2 text-right font-mono text-slate-700">{s.net_sold_qty}</td>
-                              <td className="p-2 text-right font-mono text-slate-900">₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}</td>
-                              <td className="p-2 text-right font-mono text-slate-600">₹{Math.round(s.total_production_cost || 0).toLocaleString()}</td>
-                              <td className="p-2 text-right font-mono font-black text-rose-700">
+                            <tr key={s.style_code} className="group border-b border-rose-50 hover:bg-rose-50/50">
+                              <td className="p-2 font-mono font-bold text-slate-900 border-b border-r border-rose-100 sticky left-0 z-10 bg-white group-hover:bg-rose-50/50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">{s.style_code}</td>
+                              <td className="p-2 text-right font-mono text-slate-700 border-b border-rose-50">{s.net_sold_qty}</td>
+                              <td className="p-2 text-right font-mono text-slate-900 border-b border-rose-50">₹{Math.round(s.net_sold_seller_price || 0).toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono text-slate-600 border-b border-rose-50">₹{Math.round(s.total_production_cost || 0).toLocaleString()}</td>
+                              <td className="p-2 text-right font-mono font-black text-rose-700 border-b border-rose-50">
                                 ₹{Math.round(s.contribution ?? s.gross_profit ?? 0).toLocaleString()}
                               </td>
                             </tr>
@@ -1802,28 +1882,28 @@ export default function MonthlyPnLReconciliation() {
                   </span>
                 </div>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs" data-testid="returns-by-style-table">
-                    <thead className="bg-slate-100 text-[10px] uppercase tracking-wider text-slate-600 border-b border-slate-200">
+                <div className="overflow-x-auto max-h-[550px] overflow-y-auto">
+                  <table className="w-full text-xs border-separate border-spacing-0" data-testid="returns-by-style-table">
+                    <thead className="bg-slate-100 sticky top-0 z-20 text-[10px] uppercase tracking-wider text-slate-600">
                       <tr>
-                        <th className="p-2.5 text-left min-w-[280px]">Style & Codes / Article</th>
-                        <th className="p-2.5 text-left">Brand</th>
-                        <th className="p-2.5 text-right">Gross Units</th>
-                        <th className="p-2.5 text-right">Returned Units</th>
-                        <th className="p-2.5 text-right">Return Rate %</th>
-                        <th className="p-2.5 text-right">Reverse Logistics (₹)</th>
-                        <th className="p-2.5 text-right">Sales Value Lost (₹)</th>
-                        <th className="p-2.5 text-right">Total Return Damage (₹)</th>
+                        <th className="p-2.5 text-left border-b border-r border-slate-200 sticky top-0 left-0 z-30 bg-slate-100 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Style & Codes / Article</th>
+                        <th className="p-2.5 text-left border-b border-slate-200 sticky top-0 bg-slate-100">Brand</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Gross Units</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Returned Units</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Return Rate %</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Reverse Logistics (₹)</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Sales Value Lost (₹)</th>
+                        <th className="p-2.5 text-right border-b border-slate-200 sticky top-0 bg-slate-100">Total Return Damage (₹)</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody>
                       {(overview?.styles || []).map((s) => {
                         const retDmg = s.total_return_cost || ((s.reverse_logistics_cost || 0) + (s.return_amount_lost || 0));
                         const returnChargesFromSettlement = recSummary?.return_charges_by_style?.[s.style_code];
                         const revCost = s.reverse_logistics_cost || returnChargesFromSettlement || 0;
                         return (
-                          <tr key={s.style_code} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="p-2.5 min-w-[280px]">
+                          <tr key={s.style_code} className="group hover:bg-slate-50/80 transition-colors border-b border-slate-100">
+                            <td className="p-2.5 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
                               <div className="flex items-center gap-3">
                                 {/* Style Photo Thumbnail with click-to-preview */}
                                 <div
@@ -1852,56 +1932,54 @@ export default function MonthlyPnLReconciliation() {
                                   <div className="flex items-center gap-1.5 flex-wrap">
                                     <span className="font-mono font-bold text-slate-900 text-[13px]">{s.style_code}</span>
                                     {s.brand && (
-                                      <span className="text-[9px] uppercase tracking-wider font-bold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded border border-indigo-200">
+                                      <span className="text-[9px] uppercase tracking-wider font-semibold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
                                         {s.brand}
                                       </span>
                                     )}
                                   </div>
 
-                                  {/* Myntra Style ID & ERP Style Code badges */}
+                                  {/* Marketplace Style ID & ERP Style Code metadata */}
                                   <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                                     {s.myntra_style_id ? (
                                       <span
-                                        className="text-[10px] font-mono font-bold text-amber-900 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 inline-flex items-center gap-1"
-                                        title="Myntra Marketplace Style ID"
+                                        className="text-[10px] font-mono text-slate-600 bg-slate-100/90 px-1.5 py-0.5 rounded border border-slate-200/90 inline-flex items-center gap-1"
+                                        title="Marketplace Style ID"
                                       >
-                                        <span className="text-amber-600 font-semibold">Myntra ID:</span>
-                                        {s.myntra_style_id}
+                                        <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">ID:</span>
+                                        <span className="font-semibold text-slate-700">{s.myntra_style_id}</span>
                                       </span>
-                                    ) : (
-                                      <span className="text-[10px] font-mono text-slate-400 bg-slate-50 px-1 py-0.5 rounded border border-slate-200">
-                                        Myntra ID: —
-                                      </span>
-                                    )}
+                                    ) : null}
 
                                     {s.erp_style_code ? (
                                       <span
-                                        className="text-[10px] font-mono font-bold text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 inline-flex items-center gap-1"
+                                        className="text-[10px] font-mono font-semibold text-emerald-800 bg-emerald-50/80 px-1.5 py-0.5 rounded border border-emerald-200/80 inline-flex items-center gap-1"
                                         title="Internal SSK ERP Style Code"
                                       >
-                                        <span className="text-emerald-700 font-semibold">ERP:</span>
+                                        <span className="text-emerald-600 font-sans text-[9px] uppercase tracking-wider font-semibold">ERP:</span>
                                         {s.erp_style_code}
                                       </span>
                                     ) : (
                                       <span
-                                        className="text-[10px] font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200"
-                                        title="ERP Style Code"
+                                        className="text-[10px] font-mono text-slate-400 inline-flex items-center gap-1"
+                                        title="ERP Style Code: Unmapped"
                                       >
-                                        ERP: {s.style_code.startsWith("SSK") ? s.style_code : "Unmapped"}
+                                        <span className="text-slate-300">ERP:</span> Unmapped
                                       </span>
                                     )}
                                   </div>
 
-                                  <div className="text-[11px] text-slate-600 max-w-[220px] truncate" title={s.style_name}>
-                                    {s.style_name || s.style_code}
-                                  </div>
+                                  {s.style_name && s.style_name.trim().toLowerCase() !== s.style_code.trim().toLowerCase() && (
+                                    <div className="text-[11px] text-slate-500 max-w-[220px] truncate" title={s.style_name}>
+                                      {s.style_name}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             </td>
-                            <td className="p-2.5 text-slate-600 font-semibold">{s.brand || "—"}</td>
-                            <td className="p-2.5 text-right font-mono text-slate-700">{s.gross_units ?? s.total_orders ?? "—"}</td>
-                            <td className="p-2.5 text-right font-mono font-bold text-rose-700">{s.returned_qty ?? 0}</td>
-                            <td className="p-2.5 text-right font-mono">
+                            <td className="p-2.5 text-slate-600 font-semibold border-b border-slate-100">{s.brand || "—"}</td>
+                            <td className="p-2.5 text-right font-mono text-slate-700 border-b border-slate-100">{s.gross_units ?? s.total_orders ?? "—"}</td>
+                            <td className="p-2.5 text-right font-mono font-bold text-rose-700 border-b border-slate-100">{s.returned_qty ?? 0}</td>
+                            <td className="p-2.5 text-right font-mono border-b border-slate-100">
                               <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                 (s.return_rate_pct ?? 0) > 35 ? "bg-rose-100 text-rose-800" :
                                 (s.return_rate_pct ?? 0) > 20 ? "bg-amber-100 text-amber-800" :
@@ -1910,13 +1988,13 @@ export default function MonthlyPnLReconciliation() {
                                 {s.return_rate_pct ?? 0}%
                               </span>
                             </td>
-                            <td className="p-2.5 text-right font-mono font-bold text-amber-700">
+                            <td className="p-2.5 text-right font-mono font-bold text-amber-700 border-b border-slate-100">
                               {inr(revCost)}
                             </td>
-                            <td className="p-2.5 text-right font-mono text-rose-700">
+                            <td className="p-2.5 text-right font-mono text-rose-700 border-b border-slate-100">
                               {inr(s.return_amount_lost || 0)}
                             </td>
-                            <td className="p-2.5 text-right font-mono font-black text-rose-900">
+                            <td className="p-2.5 text-right font-mono font-black text-rose-900 border-b border-slate-100">
                               {inr(retDmg)}
                             </td>
                           </tr>
@@ -1954,34 +2032,34 @@ export default function MonthlyPnLReconciliation() {
                 </div>
 
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse" data-testid="non-order-deductions-table">
+                  <table className="w-full text-left text-xs border-separate border-spacing-0" data-testid="non-order-deductions-table">
                     <thead>
-                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                        <th className="p-2.5">Date</th>
-                        <th className="p-2.5">Seller ID</th>
-                        <th className="p-2.5">Type</th>
-                        <th className="p-2.5">UTR / Ref</th>
-                        <th className="p-2.5">Description</th>
-                        <th className="p-2.5 text-right">Amount</th>
+                      <tr className="bg-slate-100 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
+                        <th className="p-2.5 border-b border-r border-slate-200 sticky left-0 z-20 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">Date</th>
+                        <th className="p-2.5 border-b border-slate-200">Seller ID</th>
+                        <th className="p-2.5 border-b border-slate-200">Type</th>
+                        <th className="p-2.5 border-b border-slate-200">UTR / Ref</th>
+                        <th className="p-2.5 border-b border-slate-200">Description</th>
+                        <th className="p-2.5 text-right border-b border-slate-200">Amount</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody>
                       {recSummary?.non_order_deductions_ledger && recSummary.non_order_deductions_ledger.length > 0 ? (
                         recSummary.non_order_deductions_ledger.map((ded, dIdx) => (
-                          <tr key={ded.id || dIdx} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="p-2.5 font-mono font-semibold text-slate-700">{ded.settlement_date || "—"}</td>
-                            <td className="p-2.5 font-bold text-slate-900">{ded.seller_id || "—"}</td>
-                            <td className="p-2.5 whitespace-nowrap">
+                          <tr key={ded.id || dIdx} className="group hover:bg-slate-50/80 transition-colors">
+                            <td className="p-2.5 font-mono font-semibold text-slate-700 border-b border-r border-slate-100 sticky left-0 z-10 bg-white group-hover:bg-slate-50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[120px]">{ded.settlement_date || "—"}</td>
+                            <td className="p-2.5 font-bold text-slate-900 border-b border-slate-100">{ded.seller_id || "—"}</td>
+                            <td className="p-2.5 whitespace-nowrap border-b border-slate-100">
                               <Badge color="yellow">{ded.settlement_type || "Deduction"}</Badge>
                             </td>
-                            <td className="p-2.5 font-mono text-slate-600">{ded.utr || ded.invoice_ref || "—"}</td>
-                            <td className="p-2.5 text-slate-600">{ded.settlement_description || "—"}</td>
-                            <td className="p-2.5 text-right font-black text-rose-600">{inr(ded.settlement_amount)}</td>
+                            <td className="p-2.5 font-mono text-slate-600 border-b border-slate-100">{ded.utr || ded.invoice_ref || "—"}</td>
+                            <td className="p-2.5 text-slate-600 border-b border-slate-100">{ded.settlement_description || "—"}</td>
+                            <td className="p-2.5 text-right font-black text-rose-600 border-b border-slate-100">{inr(ded.settlement_amount)}</td>
                           </tr>
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={6} className="p-6 text-center text-slate-400 italic">
+                          <td colSpan={6} className="p-6 text-center text-slate-400 italic border-b border-slate-100">
                             No non-order deductions recorded in settlement files.
                           </td>
                         </tr>

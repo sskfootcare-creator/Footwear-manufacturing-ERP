@@ -2570,14 +2570,21 @@ async def _fetch_monthly_operational_expenses(
     return {
         "allocation_pct": alloc_pct,
         "rent": round(rent_total, 2),
+        "factory_rent": round(rent_total, 2),
         "electricity": round(elec_total, 2),
+        "electricity_power": round(elec_total, 2),
         "salaries": round(salaries_total, 2),
+        "staff_worker_salaries": round(salaries_total, 2),
         "commission": round(commission_total, 2),
+        "commission_brokerage": round(commission_total, 2),
         "interest_emi": round(interest_total, 2),
+        "interest_loan_emi": round(interest_total, 2),
         "other_basic": round(other_total, 2),
+        "other_basic_sundry": round(other_total, 2),
         "total_monthly_operational_cost": total_op,
         "allocated_operational_cost": allocated_op,
     }
+
 
 
 async def _build_pnl_reconciliation_overview(
@@ -2934,6 +2941,25 @@ async def _build_pnl_reconciliation_overview(
         "total_fees":       fee_total,
     }
 
+    # --- Critical Unit Economics & Cost Breakdown Per Pair ---
+    net_asp = round(tot_sold_rev / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_unit_cogs = round(tot_prod_cost / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_platform_fee = round(fee_total / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_overhead_per_pair = round(allocated_op / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    unit_contribution = round(net_asp - avg_unit_cogs - avg_platform_fee, 2)
+    net_profit_per_pair = round(actual_net_profit / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+
+    unit_economics = {
+        "net_asp":                   net_asp,
+        "avg_unit_cogs":             avg_unit_cogs,
+        "avg_platform_fee_per_unit": avg_platform_fee,
+        "avg_overhead_per_pair":     avg_overhead_per_pair,
+        "unit_contribution":         unit_contribution,
+        "net_profit_per_pair":       net_profit_per_pair,
+        "return_rate_pct":           overall_ret_rate,
+        "return_financial_damage":   tot_ret_damage,
+    }
+
     overview = {
         "platform":                  platform,
         "month":                     month,
@@ -2961,6 +2987,7 @@ async def _build_pnl_reconciliation_overview(
         "allocated_operational_cost": round(allocated_op, 2),
         "actual_net_profit":         actual_net_profit,
         "actual_net_margin_pct":     actual_net_margin,
+        "unit_economics":            unit_economics,
         "return_analytics":          return_analytics,
         "profit_rankings":           profit_rankings,
         "platform_fee_breakdown":    platform_fee_breakdown,
@@ -3833,9 +3860,17 @@ class UpdateOperationalCostPayload(BaseModel):
     month: str
     allocation_pct: Optional[float] = 50.0
     rent: Optional[float] = None
+    factory_rent: Optional[float] = None
     electricity: Optional[float] = None
+    electricity_power: Optional[float] = None
     salaries: Optional[float] = None
+    staff_worker_salaries: Optional[float] = None
+    commission: Optional[float] = None
+    commission_brokerage: Optional[float] = None
+    interest_emi: Optional[float] = None
+    interest_loan_emi: Optional[float] = None
     other_basic: Optional[float] = None
+    other_basic_sundry: Optional[float] = None
 
 
 @online_orders_router.get("/online-orders/reconciliation-summary")
@@ -4050,21 +4085,43 @@ async def update_monthly_operational_cost(
         raise HTTPException(404, f"Overview for {platform_lc} / {month} not found")
 
     cur_op = doc.get("operational_expenses") or {}
-    rent = float(payload.rent if payload.rent is not None else cur_op.get("rent", 85000.0))
-    electricity = float(payload.electricity if payload.electricity is not None else cur_op.get("electricity", 12500.0))
-    salaries = float(payload.salaries if payload.salaries is not None else cur_op.get("salaries", 30000.0))
-    other_basic = float(payload.other_basic if payload.other_basic is not None else cur_op.get("other_basic", 10000.0))
+    rent_val = payload.rent if payload.rent is not None else payload.factory_rent
+    rent = float(rent_val if rent_val is not None else (cur_op.get("factory_rent") or cur_op.get("rent") or 85000.0))
+
+    elec_val = payload.electricity if payload.electricity is not None else payload.electricity_power
+    electricity = float(elec_val if elec_val is not None else (cur_op.get("electricity_power") or cur_op.get("electricity") or 12500.0))
+
+    sal_val = payload.salaries if payload.salaries is not None else payload.staff_worker_salaries
+    salaries = float(sal_val if sal_val is not None else (cur_op.get("staff_worker_salaries") or cur_op.get("salaries") or 30000.0))
+
+    comm_val = payload.commission if payload.commission is not None else payload.commission_brokerage
+    commission = float(comm_val if comm_val is not None else (cur_op.get("commission_brokerage") or cur_op.get("commission") or 0.0))
+
+    int_val = payload.interest_emi if payload.interest_emi is not None else payload.interest_loan_emi
+    interest_emi = float(int_val if int_val is not None else (cur_op.get("interest_loan_emi") or cur_op.get("interest_emi") or 0.0))
+
+    other_val = payload.other_basic if payload.other_basic is not None else payload.other_basic_sundry
+    other_basic = float(other_val if other_val is not None else (cur_op.get("other_basic_sundry") or cur_op.get("other_basic") or 10000.0))
+
     alloc_pct = float(payload.allocation_pct if payload.allocation_pct is not None else cur_op.get("allocation_pct", 50.0))
 
-    tot_op = round(rent + electricity + salaries + other_basic, 2)
+    tot_op = round(rent + electricity + salaries + commission + interest_emi + other_basic, 2)
     allocated_op = round(tot_op * (alloc_pct / 100.0), 2)
 
     new_op = {
         "allocation_pct": alloc_pct,
         "rent": rent,
+        "factory_rent": rent,
         "electricity": electricity,
+        "electricity_power": electricity,
         "salaries": salaries,
+        "staff_worker_salaries": salaries,
+        "commission": commission,
+        "commission_brokerage": commission,
+        "interest_emi": interest_emi,
+        "interest_loan_emi": interest_emi,
         "other_basic": other_basic,
+        "other_basic_sundry": other_basic,
         "total_monthly_operational_cost": tot_op,
         "allocated_operational_cost": allocated_op,
     }
@@ -4077,11 +4134,34 @@ async def update_monthly_operational_cost(
     actual_net_profit = round(tot_plat_earn - tot_prod_cost - allocated_op, 2)
     actual_net_margin = round((actual_net_profit / net_sold_rev * 100), 2) if net_sold_rev > 0 else 0.0
 
+    # Recalculate unit economics
+    tot_sold_units = int(doc.get("total_net_sold") or (pnl_sum.get("net_units") or 0))
+    fee_total = float((doc.get("platform_fee_breakdown") or {}).get("total_fees") or (pnl_sum.get("total_expenses") or 0.0))
+    net_asp = round(net_sold_rev / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_unit_cogs = round(tot_prod_cost / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_platform_fee = round(fee_total / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_overhead_per_pair = round(allocated_op / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    unit_contribution = round(net_asp - avg_unit_cogs - avg_platform_fee, 2)
+    net_profit_per_pair = round(actual_net_profit / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+
+    ret_analytics = doc.get("return_analytics") or {}
+    unit_economics = {
+        "net_asp":                   net_asp,
+        "avg_unit_cogs":             avg_unit_cogs,
+        "avg_platform_fee_per_unit": avg_platform_fee,
+        "avg_overhead_per_pair":     avg_overhead_per_pair,
+        "unit_contribution":         unit_contribution,
+        "net_profit_per_pair":       net_profit_per_pair,
+        "return_rate_pct":           ret_analytics.get("overall_return_rate_pct", 0.0),
+        "return_financial_damage":   ret_analytics.get("financial_damage_amount", 0.0),
+    }
+
     update_data = {
         "operational_expenses": new_op,
         "allocated_operational_cost": allocated_op,
         "actual_net_profit": actual_net_profit,
         "actual_net_margin_pct": actual_net_margin,
+        "unit_economics": unit_economics,
         "updated_at": now_iso(),
     }
     await _safe_update_one(

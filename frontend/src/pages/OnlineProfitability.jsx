@@ -374,41 +374,41 @@ export default function OnlineProfitability() {
                 </div>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse" data-testid="by-style-table">
+                <table className="w-full text-left text-xs border-separate border-spacing-0" data-testid="by-style-table">
                   <thead>
-                    <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                      <th className="p-3">Style Code</th>
-                      <th className="p-3 text-center">Units Sold</th>
-                      <th className="p-3 text-right">Revenue</th>
-                      <th className="p-3 text-right">Platform Fees</th>
-                      <th className="p-3 text-right">Unit COGS</th>
-                      <th className="p-3 text-right">Total COGS</th>
-                      <th className="p-3 text-right">Net Profit</th>
-                      <th className="p-3 text-right">Margin %</th>
-                      <th className="p-3 text-center">Revenue Status</th>
-                      <th className="p-3 text-center">Cost Status</th>
+                    <tr className="bg-slate-100 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
+                      <th className="p-3 sticky left-0 z-20 bg-slate-100 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[160px]">Style Code</th>
+                      <th className="p-3 text-center border-b border-slate-200">Units Sold</th>
+                      <th className="p-3 text-right border-b border-slate-200">Revenue</th>
+                      <th className="p-3 text-right border-b border-slate-200">Platform Fees</th>
+                      <th className="p-3 text-right border-b border-slate-200">Unit COGS</th>
+                      <th className="p-3 text-right border-b border-slate-200">Total COGS</th>
+                      <th className="p-3 text-right border-b border-slate-200">Net Profit</th>
+                      <th className="p-3 text-right border-b border-slate-200">Margin %</th>
+                      <th className="p-3 text-center border-b border-slate-200">Revenue Status</th>
+                      <th className="p-3 text-center border-b border-slate-200">Cost Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200">
+                  <tbody>
                     {profitData.by_style && profitData.by_style.map((row) => (
-                      <tr key={row.style_id || row.style_code} className="hover:bg-slate-50">
-                        <td className="p-3 font-bold font-mono text-slate-900">
+                      <tr key={row.style_id || row.style_code} className="group hover:bg-slate-50 border-b border-slate-200">
+                        <td className="p-3 font-bold font-mono text-slate-900 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[160px]">
                           {row.style_code}
                           {row.color && <span className="text-slate-400 font-normal ml-1">({row.color})</span>}
                         </td>
-                        <td className="p-3 text-center font-semibold text-slate-700">{row.units_sold}</td>
-                        <td className="p-3 text-right font-bold text-slate-900">{inr(row.revenue_settled)}</td>
-                        <td className="p-3 text-right text-rose-600 font-semibold">{inr(row.platform_fees)}</td>
-                        <td className="p-3 text-right font-mono text-slate-700">{inr(row.unit_cogs)}</td>
-                        <td className="p-3 text-right font-bold text-amber-800">{inr(row.cogs)}</td>
-                        <td className={`p-3 text-right font-black ${row.profit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                        <td className="p-3 text-center font-semibold text-slate-700 border-b border-slate-200">{row.units_sold}</td>
+                        <td className="p-3 text-right font-bold text-slate-900 border-b border-slate-200">{inr(row.revenue_settled)}</td>
+                        <td className="p-3 text-right text-rose-600 font-semibold border-b border-slate-200">{inr(row.platform_fees)}</td>
+                        <td className="p-3 text-right font-mono text-slate-700 border-b border-slate-200">{inr(row.unit_cogs)}</td>
+                        <td className="p-3 text-right font-bold text-amber-800 border-b border-slate-200">{inr(row.cogs)}</td>
+                        <td className={`p-3 text-right font-black border-b border-slate-200 ${row.profit >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
                           {inr(row.profit)}
                         </td>
-                        <td className={`p-3 text-right font-bold ${row.margin_pct >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                        <td className={`p-3 text-right font-bold border-b border-slate-200 ${row.margin_pct >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
                           {row.margin_pct}%
                         </td>
                         {/* Distinct Independent Revenue Badge */}
-                        <td className="p-3 text-center">
+                        <td className="p-3 text-center border-b border-slate-200">
                           {row.is_estimated ? (
                             <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title={row.revenue_source || "Estimated revenue"} data-testid={`badge-rev-est-${row.style_code}`}>
                               Revenue: Estimated
@@ -420,7 +420,7 @@ export default function OnlineProfitability() {
                           )}
                         </td>
                         {/* Distinct Independent Cost Badge */}
-                        <td className="p-3 text-center">
+                        <td className="p-3 text-center border-b border-slate-200">
                           {row.cost_is_estimated ? (
                             <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300" title="Cost: planned style BOM estimate" data-testid={`badge-cost-est-${row.style_code}`}>
                               Cost: Estimated

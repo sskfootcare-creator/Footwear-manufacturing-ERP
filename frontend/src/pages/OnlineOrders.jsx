@@ -506,18 +506,18 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
       {/* Row preview table */}
       <div className="border-2 border-slate-200 rounded overflow-hidden">
         <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs" data-testid="preview-rows-table">
-            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+          <table className="w-full text-xs border-separate border-spacing-0" data-testid="preview-rows-table">
+            <thead className="bg-slate-100 sticky top-0 z-20 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
-                <th className="text-left p-2 border-b">Type</th>
-                <th className="text-left p-2 border-b">Order / Batch</th>
-                <th className="text-left p-2 border-b">Raw leaf_sku</th>
-                <th className="text-left p-2 border-b">Group → size</th>
-                <th className="text-left p-2 border-b">Style code</th>
-                <th className="text-right p-2 border-b">Qty</th>
-                <th className="text-left p-2 border-b">Mapping</th>
-                <th className="text-left p-2 border-b">Fulfillment Plan</th>
+                <th className="text-left p-2 border-b border-r border-slate-200 sticky top-0 left-0 z-30 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Row #</th>
+                <th className="text-left p-2 border-b border-slate-200">Type</th>
+                <th className="text-left p-2 border-b border-slate-200">Order / Batch</th>
+                <th className="text-left p-2 border-b border-slate-200">Raw leaf_sku</th>
+                <th className="text-left p-2 border-b border-slate-200">Group → size</th>
+                <th className="text-left p-2 border-b border-slate-200">Style code</th>
+                <th className="text-right p-2 border-b border-slate-200">Qty</th>
+                <th className="text-left p-2 border-b border-slate-200">Mapping</th>
+                <th className="text-left p-2 border-b border-slate-200">Fulfillment Plan</th>
               </tr>
             </thead>
             <tbody>
@@ -526,8 +526,8 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                 const isPicklistRow = !isOrderRow;
                 const matched = !!r.matched;
                 return (
-                  <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                    <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
+                  <tr key={i} className={`group border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
+                    <td className="p-2 font-mono sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">{r.source_row_index}</td>
                     <td className="p-2">
                       {isOrderRow
                         ? <Badge color="blue">order</Badge>
@@ -952,27 +952,27 @@ function DispatchPreviewPanel({ preview, error, committing, onBack, onCommit }) 
 
       <div className="border-2 border-slate-200 rounded overflow-hidden">
         <div className="max-h-[460px] overflow-y-auto overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead className="bg-slate-100 sticky top-0 text-[10px] uppercase tracking-wider text-slate-600">
+          <table className="w-full text-xs border-separate border-spacing-0">
+            <thead className="bg-slate-100 sticky top-0 z-20 text-[10px] uppercase tracking-wider text-slate-600">
               <tr>
-                <th className="text-left p-2 border-b sticky left-0 z-10 bg-slate-100">Row #</th>
-                <th className="text-left p-2 border-b">Order / Release</th>
-                <th className="text-left p-2 border-b">Raw leaf_sku</th>
-                <th className="text-left p-2 border-b">Group → Size</th>
-                <th className="text-left p-2 border-b">Style code</th>
-                <th className="text-left p-2 border-b">Packed on</th>
-                <th className="text-left p-2 border-b">Tracking</th>
-                <th className="text-left p-2 border-b">Destination</th>
-                <th className="text-right p-2 border-b">Qty</th>
-                <th className="text-left p-2 border-b">Status</th>
+                <th className="text-left p-2 border-b border-r border-slate-200 sticky top-0 left-0 z-30 bg-slate-100 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">Row #</th>
+                <th className="text-left p-2 border-b border-slate-200">Order / Release</th>
+                <th className="text-left p-2 border-b border-slate-200">Raw leaf_sku</th>
+                <th className="text-left p-2 border-b border-slate-200">Group → Size</th>
+                <th className="text-left p-2 border-b border-slate-200">Style code</th>
+                <th className="text-left p-2 border-b border-slate-200">Packed on</th>
+                <th className="text-left p-2 border-b border-slate-200">Tracking</th>
+                <th className="text-left p-2 border-b border-slate-200">Destination</th>
+                <th className="text-right p-2 border-b border-slate-200">Qty</th>
+                <th className="text-left p-2 border-b border-slate-200">Status</th>
               </tr>
             </thead>
             <tbody>
               {paginatedRows.map((r, i) => {
                 const matched = !!r.matched;
                 return (
-                  <tr key={i} className={`border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
-                    <td className="p-2 font-mono sticky left-0 z-10 bg-white">{r.source_row_index}</td>
+                  <tr key={i} className={`group border-b border-neutral-100 ${!matched ? "bg-red-50/40" : "hover:bg-slate-50"}`}>
+                    <td className="p-2 font-mono sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">{r.source_row_index}</td>
                     <td className="p-2 font-mono text-[11px]">
                       <div>{r.order_id || "—"}</div>
                       <div className="text-emerald-700">{r.order_release_id || "—"}</div>

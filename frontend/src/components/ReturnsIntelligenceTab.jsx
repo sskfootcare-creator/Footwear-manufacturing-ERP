@@ -565,38 +565,38 @@ export default function ReturnsIntelligenceTab({ defaultMonth = "2026-08", defau
 
         {impactResults.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full text-xs text-left border-collapse">
+            <table className="w-full text-xs text-left border-separate border-spacing-0">
               <thead className="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-wider font-bold">
                 <tr>
-                  <th className="p-2.5">Applied Date</th>
-                  <th className="p-2.5">Style Code</th>
-                  <th className="p-2.5">Intervention Type</th>
-                  <th className="p-2.5">Action Title</th>
-                  <th className="p-2.5 text-right">Pre-Fix Returns</th>
-                  <th className="p-2.5 text-right">Post-Fix Returns</th>
-                  <th className="p-2.5 text-right">Reduction %</th>
-                  <th className="p-2.5 text-right">Saved Freight (₹)</th>
-                  <th className="p-2.5">Status</th>
+                  <th className="p-2.5 sticky left-0 z-20 bg-slate-100 border-b border-slate-200 min-w-[100px]">Applied Date</th>
+                  <th className="p-2.5 sticky left-[100px] z-20 bg-slate-100 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[140px]">Style Code</th>
+                  <th className="p-2.5 border-b border-slate-200">Intervention Type</th>
+                  <th className="p-2.5 border-b border-slate-200">Action Title</th>
+                  <th className="p-2.5 text-right border-b border-slate-200">Pre-Fix Returns</th>
+                  <th className="p-2.5 text-right border-b border-slate-200">Post-Fix Returns</th>
+                  <th className="p-2.5 text-right border-b border-slate-200">Reduction %</th>
+                  <th className="p-2.5 text-right border-b border-slate-200">Saved Freight (₹)</th>
+                  <th className="p-2.5 border-b border-slate-200">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody>
                 {impactResults.map((imp) => (
-                  <tr key={imp.action_id} className="hover:bg-slate-50/60">
-                    <td className="p-2.5 font-mono text-slate-600">{imp.applied_date}</td>
-                    <td className="p-2.5 font-mono font-bold text-slate-900">{imp.style_code}</td>
-                    <td className="p-2.5">
+                  <tr key={imp.action_id} className="group hover:bg-slate-50/60 border-b border-slate-100">
+                    <td className="p-2.5 font-mono text-slate-600 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-slate-100 min-w-[100px]">{imp.applied_date}</td>
+                    <td className="p-2.5 font-mono font-bold text-slate-900 sticky left-[100px] z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)] min-w-[140px]">{imp.style_code}</td>
+                    <td className="p-2.5 border-b border-slate-100">
                       <Badge color="slate">{imp.action_type}</Badge>
                     </td>
-                    <td className="p-2.5 font-semibold text-slate-800">{imp.title}</td>
-                    <td className="p-2.5 text-right font-mono font-bold text-slate-700">{imp.pre_fix_returns}</td>
-                    <td className="p-2.5 text-right font-mono font-bold text-emerald-700">{imp.post_fix_returns}</td>
-                    <td className="p-2.5 text-right font-mono font-black text-emerald-700">
+                    <td className="p-2.5 font-semibold text-slate-800 border-b border-slate-100">{imp.title}</td>
+                    <td className="p-2.5 text-right font-mono font-bold text-slate-700 border-b border-slate-100">{imp.pre_fix_returns}</td>
+                    <td className="p-2.5 text-right font-mono font-bold text-emerald-700 border-b border-slate-100">{imp.post_fix_returns}</td>
+                    <td className="p-2.5 text-right font-mono font-black text-emerald-700 border-b border-slate-100">
                       {imp.reduction_pct}%
                     </td>
-                    <td className="p-2.5 text-right font-mono font-black text-emerald-700">
+                    <td className="p-2.5 text-right font-mono font-black text-emerald-700 border-b border-slate-100">
                       ₹{imp.saved_freight.toLocaleString()}
                     </td>
-                    <td className="p-2.5">
+                    <td className="p-2.5 border-b border-slate-100">
                       <Badge color={imp.status === "REDUCED_SUCCESSFULLY" ? "green" : imp.status === "IN_PROGRESS" ? "yellow" : "red"}>
                         {imp.status.replace(/_/g, " ")}
                       </Badge>
