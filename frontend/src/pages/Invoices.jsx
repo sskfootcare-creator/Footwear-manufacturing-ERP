@@ -743,9 +743,9 @@ function InvoiceDetailModal({ inv, onClose }) {
                   <tr key={i} className="border-t border-slate-100">
                     <td className="px-3 py-1.5 font-mono">{li.style_code}</td>
                     <td className="px-3 py-1.5">{li.color}</td>
-                    <td className="px-3 py-1.5 font-mono">{li.size}</td>
+                    <td className="px-3 py-1.5 font-mono">{li.size || "—"}</td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {li.quantity}
+                      {li.quantity ?? li.qty ?? 0}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
                       {inr(li.unit_price || 0)}
@@ -906,17 +906,20 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
       setInv(data);
       setForm((f) => ({
         ...f,
-        lines: (data.line_items_snapshot || []).map((li) => ({
-          style_code: li.style_code,
-          description: li.description || "",
-          color: li.color,
-          size: li.size,
-          dispatched_qty: li.quantity,
-          received_qty: li.quantity,
-          accepted_qty: li.quantity,
-          rejected_qty: 0,
-          rejection_reason: "",
-        })),
+        lines: (data.line_items_snapshot || []).map((li) => {
+          const q = Number(li.quantity ?? li.qty ?? 0);
+          return {
+            style_code: li.style_code,
+            description: li.description || "",
+            color: li.color,
+            size: li.size,
+            dispatched_qty: q,
+            received_qty: q,
+            accepted_qty: q,
+            rejected_qty: 0,
+            rejection_reason: "",
+          };
+        }),
       }));
     });
   }, [invoiceMeta.id]);
@@ -2309,6 +2312,7 @@ function DirectInvoiceModal({ onClose, onCreated }) {
           size: it.size ? it.size.trim() : "",
           hsn_code: it.hsn_code || "6403",
           qty: Number(it.qty),
+          quantity: Number(it.qty),
           unit_price: Number(it.unit_price),
         })),
       };

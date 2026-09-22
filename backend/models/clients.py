@@ -2,7 +2,7 @@
 
 import re
 from typing import Optional, List, Dict, Any, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ClientAddress(BaseModel):
@@ -35,8 +35,33 @@ class DirectInvoiceLineItem(BaseModel):
     size: Optional[str] = ""
     description: Optional[str] = ""
     hsn_code: Optional[str] = "6403"
-    qty: int = Field(..., gt=0, description="Quantity in pairs")
+    qty: Optional[int] = Field(None, gt=0, description="Quantity in pairs")
+    quantity: Optional[int] = Field(None, gt=0, description="Quantity in pairs")
     unit_price: float = Field(..., ge=0, description="Rate per pair")
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_quantity(cls, data: Any):
+        if isinstance(data, dict):
+            q = data.get("quantity") if data.get("quantity") is not None else data.get("qty")
+            if q is not None:
+                try:
+                    val = int(q)
+                    data["quantity"] = val
+                    data["qty"] = val
+                except (ValueError, TypeError):
+                    pass
+        return data
+
+    @model_validator(mode="after")
+    def validate_quantity_present(self):
+        if self.qty is None and self.quantity is None:
+            raise ValueError("Quantity is required and must be greater than 0")
+        if self.qty is not None and self.quantity is None:
+            self.quantity = self.qty
+        elif self.quantity is not None and self.qty is None:
+            self.qty = self.quantity
+        return self
 
 
 class DirectInvoiceIn(BaseModel):

@@ -344,3 +344,43 @@ async def test_direct_invoice_tax_mode_overrides():
         assert insert_args2["is_intra_state"] is False
         assert insert_args2["igst_rate"] == 5.0
 
+
+def test_direct_invoice_line_item_qty_and_quantity():
+    """Verify DirectInvoiceLineItem accepts quantity or qty and sets both."""
+    # Test qty provided
+    item1 = DirectInvoiceLineItem(style_code="S-1", qty=25, unit_price=200.0)
+    assert item1.qty == 25
+    assert item1.quantity == 25
+
+    # Test quantity provided
+    item2 = DirectInvoiceLineItem(style_code="S-2", quantity=40, unit_price=150.0)
+    assert item2.qty == 40
+    assert item2.quantity == 40
+
+    # Test dict input
+    item3 = DirectInvoiceLineItem.model_validate({"style_code": "S-3", "quantity": 15, "unit_price": 300.0})
+    assert item3.qty == 15
+    assert item3.quantity == 15
+
+
+def test_decorate_invoice_populates_both_quantity_and_qty():
+    """Verify _decorate_invoice normalizes line items whether stored with qty or quantity."""
+    from routes.invoice_packing import _decorate_invoice
+
+    # Doc with only qty in line items
+    raw_doc = {
+        "_id": ObjectId(),
+        "invoice_no": "SSK26-27-039",
+        "total_pairs": 100,
+        "line_items_snapshot": [
+            {"style_code": "STYLE-1", "color": "BLACK", "qty": 100, "unit_price": 500.0}
+        ]
+    }
+    dec = _decorate_invoice(raw_doc)
+    assert dec["total_quantity"] == 100
+    assert dec["total_pairs"] == 100
+    assert dec["quantity"] == 100
+    assert dec["line_items_snapshot"][0]["quantity"] == 100
+    assert dec["line_items_snapshot"][0]["qty"] == 100
+
+

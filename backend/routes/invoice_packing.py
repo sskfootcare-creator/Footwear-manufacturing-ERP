@@ -372,6 +372,23 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
     else:
         inv["days_to_due"] = None
 
+    snap = inv.get("line_items_snapshot") or inv.get("line_items") or []
+    tot_q = inv.get("total_quantity") or inv.get("total_pairs") or 0
+    if snap:
+        computed_tot = 0
+        for li in snap:
+            q = int(li.get("quantity") if li.get("quantity") is not None else (li.get("qty") or 0))
+            li["quantity"] = q
+            li["qty"] = q
+            computed_tot += q
+        if not tot_q:
+            tot_q = computed_tot
+        if not inv.get("line_items_snapshot"):
+            inv["line_items_snapshot"] = snap
+    inv["total_quantity"] = tot_q
+    inv["total_pairs"] = tot_q
+    inv["quantity"] = tot_q
+
     return inv
 
 
@@ -1303,7 +1320,8 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
             "size": str(item.size or ""),
             "description": item.description or f"{item.style_code} Footwear",
             "hsn_code": item.hsn_code or "6403",
-            "qty": int(item.qty),
+            "qty": int(item.qty or item.quantity or 0),
+            "quantity": int(item.quantity or item.qty or 0),
             "unit_price": float(item.unit_price),
             "rate": float(item.unit_price),
             "amount": amt,
@@ -1402,6 +1420,8 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
         "grand_total": grand_total,
         "net_amount": grand_total,
         "total_pairs": total_pairs,
+        "total_quantity": total_pairs,
+        "quantity": total_pairs,
         "line_items_snapshot": line_items_snapshot,
         "transport_mode": payload.transport_mode or "",
         "vehicle_no": payload.vehicle_no or "",
