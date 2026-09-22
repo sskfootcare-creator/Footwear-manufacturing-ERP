@@ -236,13 +236,22 @@ async def create_expense(payload: ExpenseIn, request: Request):
                 {"$inc": {"remaining_balance": -round(amount, 2)}},
             )
             if result.modified_count == 0:
-                raise HTTPException(400, "Insufficient cash or concurrent update conflict. Please retry.")
+                raise HTTPException(400, "Insufficient cash in ledger entry or concurrent update conflict. Please retry.")
             bank_account_id = str(cash_entry.get("bank_account_id") or "") or None
             cash_ledger_id = str(target_cash_id)
             if bank_account_id and hasattr(db, "cash_accounts") and db.cash_accounts is not None:
-                ca_entry = await db.cash_accounts.find_one({"source_bank_account_id": bank_account_id})
-                if ca_entry:
-                    cash_account_id = str(ca_entry.get("_id") or ca_entry.get("id"))
+                try:
+                    res = db.cash_accounts.find_one({"source_bank_account_id": bank_account_id})
+                    if hasattr(res, "__await__"):
+                        ca_entry = await res
+                    elif isinstance(res, dict):
+                        ca_entry = res
+                    else:
+                        ca_entry = None
+                    if ca_entry and isinstance(ca_entry, dict):
+                        cash_account_id = str(ca_entry.get("_id") or ca_entry.get("id"))
+                except Exception:
+                    pass
     else:
         bank_account_id = payload.bank_account_id
         cash_ledger_id = None

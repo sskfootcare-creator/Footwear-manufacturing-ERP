@@ -2008,8 +2008,14 @@ async def _ensure_cash_account_for_bank(db, bank_account_id: Optional[str]) -> O
     bank_acc_id_str = str(bank_account_id)
     # Check if cash account already exists for this source bank account
     try:
-        existing = await db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
-        if existing:
+        res = db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
+        if hasattr(res, "__await__"):
+            existing = await res
+        elif isinstance(res, dict):
+            existing = res
+        else:
+            existing = None
+        if existing and isinstance(existing, dict):
             return existing
     except Exception as e:
         log.warning(f"Error checking existing cash account: {e}")
@@ -2042,13 +2048,21 @@ async def _ensure_cash_account_for_bank(db, bank_account_id: Optional[str]) -> O
     }
 
     try:
-        res = await db.cash_accounts.insert_one(doc)
+        res = db.cash_accounts.insert_one(doc)
+        if hasattr(res, "__await__"):
+            res = await res
         doc["_id"] = getattr(res, "inserted_id", None) or res
         return doc
     except Exception as e:
         try:
-            existing = await db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
-            if existing:
+            res = db.cash_accounts.find_one({"source_bank_account_id": bank_acc_id_str})
+            if hasattr(res, "__await__"):
+                existing = await res
+            elif isinstance(res, dict):
+                existing = res
+            else:
+                existing = None
+            if existing and isinstance(existing, dict):
                 return existing
         except Exception:
             pass
@@ -3375,6 +3389,7 @@ async def get_reconciliation_summary(
             "name": acc_doc.get("name"),
             "bank_name": acc_doc.get("bank_name"),
             "account_type": acc_doc.get("account_type"),
+            "account_number": acc_doc.get("account_number") or acc_doc.get("account_no") or "",
             "opening_balance": acc_doc.get("opening_balance", 0.0),
             "opening_balance_date": acc_doc.get("opening_balance_date"),
             "last_balance_correction": acc_doc.get("last_balance_correction"),
@@ -3388,8 +3403,10 @@ async def get_reconciliation_summary(
             "transfers_in": 0.0,
             "transfers_out": 0.0,
             "total_lines": 0,
+            "unreconciled_count": 0,
         }
 
+    total_unreconciled_count = 0
     for d in docs:
         acc_id = str(d.get("bank_account_id"))
         status = d.get("match_status", "unmatched")
@@ -3399,6 +3416,11 @@ async def get_reconciliation_summary(
         acc_stat = per_account_stats.get(acc_id)
         if acc_stat:
             acc_stat["total_lines"] += 1
+            if status == "unmatched":
+                acc_stat["unreconciled_count"] += 1
+
+        if status == "unmatched":
+            total_unreconciled_count += 1
 
         if status == "transfer":
             transfer_count += 1
@@ -3543,6 +3565,9 @@ async def get_reconciliation_summary(
             "total_cash_withdrawn": total_cash_withdrawn,
             "erp_book_balance": round(total_erp_bank_balance, 2),
             "total_bank_balance": round(total_erp_bank_balance, 2),
+            "total_cash_position": round(total_erp_bank_balance + total_cash_in_hand, 2),
+            "unreconciled_count": total_unreconciled_count,
+            "total_unreconciled_count": total_unreconciled_count,
         },
         "accounts": list(per_account_stats.values()),
     }
