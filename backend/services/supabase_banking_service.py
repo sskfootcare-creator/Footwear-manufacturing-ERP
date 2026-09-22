@@ -9,7 +9,23 @@ from db.supabase_client import get_supabase_admin_client
 log = logging.getLogger(__name__)
 
 DEFAULT_ENTITY_ID = "00000000-0000-0000-0000-000000000001"
-DEFAULT_GL_ACCOUNT_ID = "f5f05fa5-f16c-487c-88c6-ad56108be0ea"
+DEFAULT_GL_ACCOUNT_ID = "5cd5b5bd-d7a2-46ff-8a0f-5403c1f93bc3"
+
+
+def _resolve_default_gl_account_id(client) -> str:
+    """Dynamically resolve default bank GL account ID from chart_of_accounts."""
+    try:
+        res = client.table("chart_of_accounts").select("id, code").eq("code", "1010").execute()
+        data = getattr(res, "data", [])
+        if data and len(data) > 0 and data[0].get("id"):
+            return str(data[0]["id"])
+        res = client.table("chart_of_accounts").select("id, code").eq("sub_type", "BANK_ACCOUNT").limit(1).execute()
+        data = getattr(res, "data", [])
+        if data and len(data) > 0 and data[0].get("id"):
+            return str(data[0]["id"])
+    except Exception as e:
+        log.warning("Could not dynamically resolve bank GL account ID: %s", e)
+    return DEFAULT_GL_ACCOUNT_ID
 
 
 def to_uuid(val: Any) -> str:
@@ -37,11 +53,12 @@ def upsert_supabase_bank_account(account_data: Dict[str, Any]) -> Optional[Dict[
     acc_id = to_uuid(raw_id)
     raw_acc_num = str(account_data.get("account_number", "")).strip() or "0000000000"
     last4 = account_data.get("account_number_last4") or (raw_acc_num[-4:] if len(raw_acc_num) >= 4 else raw_acc_num)
+    gl_account_id = account_data.get("gl_account_id") or _resolve_default_gl_account_id(client)
 
     row = {
         "id": acc_id,
         "entity_id": account_data.get("entity_id") or DEFAULT_ENTITY_ID,
-        "gl_account_id": account_data.get("gl_account_id") or DEFAULT_GL_ACCOUNT_ID,
+        "gl_account_id": gl_account_id,
         "account_name": account_data.get("account_name") or account_data.get("name") or "Bank Account",
         "bank_name": account_data.get("bank_name") or "Primary Bank",
         "account_number": raw_acc_num,

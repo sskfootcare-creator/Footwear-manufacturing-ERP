@@ -110,6 +110,8 @@ from routes.sku_map import (
 from routes.online_reconciliation import (
     online_reconciliation_router,
     _compute_online_profitability,
+    _per_style_settlement_split,
+    _sum_settlement_fields,
 )
 from routes.materials import (
     materials_router,

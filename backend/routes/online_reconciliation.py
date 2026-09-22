@@ -7,7 +7,7 @@ import calendar
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, date as _date, timedelta as _td
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Tuple
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query, Form
 from fastapi.responses import Response
@@ -372,35 +372,99 @@ async def _compute_online_profitability(
     if not phase_3_here:
         notes.append("Phase 3 settlement collections not yet imported; settlement figures are 0.")
 
-    settled_fwd = await _sum_settlement_fields("settlement_forward", _SETTLED_AMOUNT_FIELDS, smatch, db=db) if fwd_exists else 0.0
-    settled_rev = await _sum_settlement_fields("settlement_reverse", _SETTLED_AMOUNT_FIELDS, smatch, db=db) if rev_exists else 0.0
-    pending_fwd = await _sum_settlement_fields("settlement_unsettled_forward", _PENDING_AMOUNT_FIELDS, smatch, db=db) if fwd_un_exists else 0.0
-    pending_rev = await _sum_settlement_fields("settlement_unsettled_reverse", _PENDING_AMOUNT_FIELDS, smatch, db=db) if rev_un_exists else 0.0
+    sum_fn = getattr(server, "_sum_settlement_fields", _sum_settlement_fields)
+    async def _safe_sum(coll, flds, m):
+        try:
+            return await sum_fn(coll, flds, m, db=db)
+        except TypeError:
+            return await sum_fn(coll, flds, m)
+
+    settled_fwd = await _safe_sum("settlement_forward", _SETTLED_AMOUNT_FIELDS, smatch) if fwd_exists else 0.0
+    settled_rev = await _safe_sum("settlement_reverse", _SETTLED_AMOUNT_FIELDS, smatch) if rev_exists else 0.0
+    pending_fwd = await _safe_sum("settlement_unsettled_forward", _PENDING_AMOUNT_FIELDS, smatch) if fwd_un_exists else 0.0
+    pending_rev = await _safe_sum("settlement_unsettled_reverse", _PENDING_AMOUNT_FIELDS, smatch) if rev_un_exists else 0.0
 
     total_revenue_settled = settled_fwd - settled_rev
     total_revenue_pending = pending_fwd - pending_rev
 
-    fees_fwd = await _sum_settlement_fields("settlement_forward", _PLATFORM_FEE_FIELDS, smatch, db=db) if fwd_exists else 0.0
-    fees_rev = await _sum_settlement_fields("settlement_reverse", _PLATFORM_FEE_FIELDS, smatch, db=db) if rev_exists else 0.0
-    fees_fwd_un = await _sum_settlement_fields("settlement_unsettled_forward", _PLATFORM_FEE_FIELDS, smatch, db=db) if fwd_un_exists else 0.0
-    fees_rev_un = await _sum_settlement_fields("settlement_unsettled_reverse", _PLATFORM_FEE_FIELDS, smatch, db=db) if rev_un_exists else 0.0
+    fees_fwd = await _safe_sum("settlement_forward", _PLATFORM_FEE_FIELDS, smatch) if fwd_exists else 0.0
+    fees_rev = await _safe_sum("settlement_reverse", _PLATFORM_FEE_FIELDS, smatch) if rev_exists else 0.0
+    fees_fwd_un = await _safe_sum("settlement_unsettled_forward", _PLATFORM_FEE_FIELDS, smatch) if fwd_un_exists else 0.0
+    fees_rev_un = await _safe_sum("settlement_unsettled_reverse", _PLATFORM_FEE_FIELDS, smatch) if rev_un_exists else 0.0
     total_platform_fees = (fees_fwd + fees_fwd_un) - (fees_rev + fees_rev_un)
 
     cost_of_returns_logistics = fees_rev + fees_rev_un
 
-    if phase_3_here and (settled_fwd + settled_rev) > 0:
+    settlement_coll_exists = await _collection_exists("online_settlements", db=db)
+    reconciled_payout_sum = 0.0
+    reconciled_units = 0
+    per_style_reconciled_payout: Dict[str, float] = defaultdict(float)
+    per_style_reconciled_count: Dict[str, int] = defaultdict(int)
+
+    if settlement_coll_exists:
+        s_match: Dict[str, Any] = {"matched": True}
+        if platform: s_match["platform"] = platform.lower()
+        if style_id: s_match["matched_style_id"] = style_id
+
+        settle_agg = await db.online_settlements.aggregate([
+            {"$match": s_match},
+            {"$group": {
+                "_id": "$matched_style_id",
+                "net_payout": {"$sum": {"$ifNull": ["$net_payout", 0]}},
+                "count": {"$sum": 1},
+            }}
+        ]).to_list(1000)
+
+        for sa in settle_agg:
+            sid_s = str(sa["_id"]) if sa.get("_id") else ""
+            p_val = float(sa.get("net_payout") or 0)
+            c_val = int(sa.get("count") or 0)
+            reconciled_payout_sum += p_val
+            reconciled_units += c_val
+            if sid_s:
+                per_style_reconciled_payout[sid_s] += p_val
+                per_style_reconciled_count[sid_s] += c_val
+
+    per_style_revenue_settled: Dict[str, float] = {}
+    per_style_fees: Dict[str, float] = {}
+    split_fn = getattr(server, "_per_style_settlement_split", _per_style_settlement_split)
+    if (phase_3_here or settlement_coll_exists) and callable(split_fn):
+        try:
+            res_split = await split_fn(smatch, sold_rows)
+            if isinstance(res_split, tuple) and len(res_split) == 2:
+                per_style_revenue_settled, per_style_fees = res_split
+        except Exception as e:
+            log.warning(f"per-style settlement split failed: {e}")
+
+    if settlement_coll_exists and reconciled_payout_sum > 0:
+        total_revenue_settled = reconciled_payout_sum
+        if reconciled_units >= net_units_sold and net_units_sold > 0:
+            is_estimated = False
+            rev_source_used = "net_payout (reconciled)"
+            revenue_for_profit = reconciled_payout_sum
+            gross_profit = revenue_for_profit - total_net_cogs
+        else:
+            is_estimated = True
+            unrec_units = max(0, net_units_sold - reconciled_units)
+            est_portion = fallback_revenue * (unrec_units / net_units_sold) if net_units_sold > 0 else 0.0
+            revenue_for_profit = reconciled_payout_sum + est_portion
+            rev_source_used = "net_payout (reconciled) + final_amount (estimated fallback)"
+            gross_profit = revenue_for_profit - total_net_cogs - total_platform_fees
+    elif phase_3_here and (settled_fwd + settled_rev) > 0:
         revenue_for_profit = total_revenue_settled
         rev_source_used = "settlements (Phase 3)"
+        gross_profit = revenue_for_profit - total_net_cogs
     elif fallback_revenue > 0:
         revenue_for_profit = fallback_revenue - total_platform_fees
         rev_source_used = "item-level final_amount minus platform fees"
+        gross_profit = revenue_for_profit - total_net_cogs
         notes.append("Using item-level final_amount minus platform fees as revenue fallback.")
     else:
         revenue_for_profit = 0.0
         rev_source_used = "none"
+        gross_profit = 0.0
         notes.append("No revenue records available for this filter range.")
 
-    gross_profit = revenue_for_profit - total_net_cogs
     gross_margin_pct = (
         round((gross_profit / revenue_for_profit) * 100.0, 2)
         if revenue_for_profit > 0 else 0.0
@@ -415,7 +479,31 @@ async def _compute_online_profitability(
         total_attempts = u_sold + u_ret
         ret_rate = round((u_ret / total_attempts) * 100.0, 2) if total_attempts > 0 else 0.0
 
-        if phase_3_here:
+        rec_cnt = per_style_reconciled_count.get(sid, 0)
+        rec_pay = per_style_reconciled_payout.get(sid, 0.0)
+
+        if rec_cnt > 0:
+            unrec_cnt = max(0, u_sold - rec_cnt)
+            if unrec_cnt == 0:
+                rev_i = rec_pay
+                fee_i = float(per_style_fees.get(sid, 0.0))
+                source_i = "net_payout (reconciled)"
+                is_est_i = False
+                profit_i = rev_i - cogs_i
+            else:
+                est_p = row["fallback_revenue"] * (unrec_cnt / u_sold) if u_sold > 0 else 0.0
+                rev_i = rec_pay + est_p
+                fee_i = float(per_style_fees.get(sid, 0.0))
+                source_i = "net_payout + final_amount (partially estimated)"
+                is_est_i = True
+                profit_i = rev_i - cogs_i - fee_i
+        elif phase_3_here and fwd_exists and sid in per_style_revenue_settled:
+            rev_i = float(per_style_revenue_settled.get(sid, 0.0))
+            fee_i = float(per_style_fees.get(sid, 0.0))
+            source_i = "settlements"
+            is_est_i = False
+            profit_i = rev_i - cogs_i
+        elif phase_3_here:
             sm_style = _build_settlement_match(platform, date_from, date_to, sid)
             sf = await _sum_settlement_fields("settlement_forward", _SETTLED_AMOUNT_FIELDS, sm_style, db=db) if fwd_exists else 0.0
             sr = await _sum_settlement_fields("settlement_reverse", _SETTLED_AMOUNT_FIELDS, sm_style, db=db) if rev_exists else 0.0
@@ -424,18 +512,16 @@ async def _compute_online_profitability(
             rev_i = sf - sr
             fee_i = ff - fr
             source_i = "settlements"
+            is_est_i = False
+            profit_i = rev_i - cogs_i
         else:
             rev_i = row["fallback_revenue"]
             fee_i = 0.0
             source_i = "fallback"
+            is_est_i = True
+            profit_i = rev_i - cogs_i
 
-        if source_i == "fallback":
-            eff_rev_i = rev_i - fee_i
-        else:
-            eff_rev_i = rev_i
-
-        profit_i = eff_rev_i - cogs_i
-        margin_i = round((profit_i / eff_rev_i) * 100.0, 2) if eff_rev_i > 0 else 0.0
+        margin_i = round((profit_i / rev_i) * 100.0, 2) if rev_i > 0 else 0.0
 
         by_style_list.append({
             "style_id":          sid,
@@ -452,7 +538,7 @@ async def _compute_online_profitability(
             "platform_fees":     round(fee_i, 2),
             "profit":            round(profit_i, 2),
             "margin_pct":        margin_i,
-            "is_estimated":      source_i == "fallback",
+            "is_estimated":      is_est_i,
             "cost_is_estimated": row["cost_is_estimated"],
             "labor_source":      row.get("labor_source", "estimated"),
             "is_assigned":       row.get("is_assigned", False),
@@ -477,9 +563,9 @@ async def _compute_online_profitability(
         "gross_profit":               round(gross_profit, 2),
         "gross_margin_pct":           gross_margin_pct,
         "revenue_source_used":        rev_source_used,
-        "is_estimated":               any(r.get("is_estimated", False) for r in by_style_list) if by_style_list else (not phase_3_here),
+        "is_estimated":               any(r.get("is_estimated", False) for r in by_style_list) if by_style_list else (not phase_3_here and not (settlement_coll_exists and reconciled_payout_sum > 0)),
         "cost_is_estimated":          any(r.get("cost_is_estimated", False) for r in by_style_list) if by_style_list else True,
-        "phase_3_available":          phase_3_here,
+        "phase_3_available":          phase_3_here or (settlement_coll_exists and reconciled_payout_sum > 0),
         "by_style":                   by_style_list,
         "notes":                      notes,
         "computed_at":                now_iso(),
@@ -559,6 +645,80 @@ async def _materialise_profitability_range(
         "days_rebuilt":          days_rebuilt,
         "aggregate_computed_at": now_iso(),
     }
+
+
+async def _per_style_settlement_split(
+    settle_match: Dict[str, Any],
+    sold_rows:    List[Dict[str, Any]],
+    db=None,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Attribute settled revenue and platform fees per style, using
+    order_release_id as the join key back to online_order_items.style_id.
+
+    Returns (revenue_by_style_id_str, fees_by_style_id_str).
+    """
+    if db is None:
+        import server
+        db = server.db
+    revenue_by_style: Dict[str, float] = defaultdict(float)
+    fees_by_style:    Dict[str, float] = defaultdict(float)
+
+    for coll_name, sign in (("settlement_forward", 1.0), ("settlement_reverse", -1.0)):
+        if not await _collection_exists(coll_name, db=db):
+            continue
+        pipeline = [
+            {"$match": {**settle_match, "style_id": {"$ne": None}}},
+            {"$group": {
+                "_id": "$style_id",
+                "rev": {"$sum": {"$add": [
+                    {"$ifNull": [f"${f}", 0]} for f in _SETTLED_AMOUNT_FIELDS
+                ]}},
+                "fees": {"$sum": {"$add": [
+                    {"$ifNull": [f"${f}", 0]} for f in _PLATFORM_FEE_FIELDS
+                ]}},
+            }},
+        ]
+        try:
+            agg = await db[coll_name].aggregate(pipeline).to_list(5000)
+            for row in agg:
+                sid_str = str(row["_id"])
+                revenue_by_style[sid_str] += sign * float(row.get("rev") or 0)
+                fees_by_style[sid_str]    += sign * float(row.get("fees") or 0)
+        except Exception:
+            pass
+
+    for coll_name, sign in (("settlement_forward", 1.0), ("settlement_reverse", -1.0)):
+        if not await _collection_exists(coll_name, db=db):
+            continue
+        pipeline = [
+            {"$match": {**settle_match, "style_id": None, "order_release_id": {"$ne": None}}},
+            {"$lookup": {
+                "from":         "online_order_items",
+                "localField":   "order_release_id",
+                "foreignField": "order_release_id",
+                "as":           "items",
+            }},
+            {"$unwind": "$items"},
+            {"$group": {
+                "_id": "$items.style_id",
+                "rev": {"$sum": {"$add": [
+                    {"$ifNull": [f"${f}", 0]} for f in _SETTLED_AMOUNT_FIELDS
+                ]}},
+                "fees": {"$sum": {"$add": [
+                    {"$ifNull": [f"${f}", 0]} for f in _PLATFORM_FEE_FIELDS
+                ]}},
+            }},
+        ]
+        try:
+            agg = await db[coll_name].aggregate(pipeline, allowDiskUse=True).to_list(5000)
+            for row in agg:
+                sid_str = str(row["_id"])
+                revenue_by_style[sid_str] += sign * float(row.get("rev") or 0)
+                fees_by_style[sid_str]    += sign * float(row.get("fees") or 0)
+        except Exception:
+            pass
+
+    return revenue_by_style, fees_by_style
 
 
 # ───────────── Online Profitability Endpoints ─────────────

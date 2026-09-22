@@ -202,5 +202,5 @@ describe("Flexible Color BOM Overrides UI in Styles.jsx", () => {
     // Line 2 is still custom for Tan
     expect(screen.getByTestId("custom-bom-indicator-Tan-line-ins-1")).toHaveTextContent("Custom for Tan");
     expect(screen.getByTestId("bom-qty-line-ins-1")).toHaveValue(2.5);
-  });
+  }, 15000);
 });

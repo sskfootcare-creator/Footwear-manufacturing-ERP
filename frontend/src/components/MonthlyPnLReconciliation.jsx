@@ -801,12 +801,12 @@ function MonthlySkuBifurcationTable({ skuList = [], overview = null }) {
                           <div className="font-mono font-bold text-slate-900 text-xs">{sk.sku_code}</div>
                           <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                             <span className="text-[10px] font-mono text-slate-600 bg-slate-100/90 border border-slate-200/90 rounded px-1.5 py-0.5 inline-flex items-center gap-1" title="Style Code">
-                              <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">Style:</span>
+                              <span className="text-slate-400 font-sans text-[9px] uppercase tracking-wider font-semibold">Style: </span>
                               <span className="font-semibold text-slate-700">{styleCode}</span>
                             </span>
                             {erpCode ? (
                               <span className="text-[10px] font-mono font-semibold text-emerald-800 bg-emerald-50/80 border border-emerald-200/80 rounded px-1.5 py-0.5 inline-flex items-center gap-1" title="Internal ERP Style Code">
-                                <span className="text-emerald-600 font-sans text-[9px] uppercase tracking-wider font-semibold">ERP:</span>
+                                <span className="text-emerald-600 font-sans text-[9px] uppercase tracking-wider font-semibold">ERP: </span>
                                 {erpCode}
                               </span>
                             ) : (

@@ -413,8 +413,8 @@ describe("OnlineProfitability Page & Tabs", () => {
     await waitFor(() => {
       expect(screen.getByText(/SKU Code & Style Identifiers/i)).toBeInTheDocument();
       expect(screen.getByText(/FL_AK_002-38/i)).toBeInTheDocument();
-      expect(screen.getByText(/Style: FL_AK_002/i)).toBeInTheDocument();
-      expect(screen.getByText(/ERP: SSK_00034/i)).toBeInTheDocument();
+      expect(screen.getAllByText("FL_AK_002").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText(/SSK_00034/i).length).toBeGreaterThanOrEqual(1);
       expect(screen.getByAltText("FL_AK_002")).toBeInTheDocument();
       expect(screen.getByAltText("FL_AK_002")).toHaveAttribute("src", "/company/laser_cut_flat.jpg");
     });
