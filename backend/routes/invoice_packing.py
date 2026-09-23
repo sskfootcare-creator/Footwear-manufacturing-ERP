@@ -1439,9 +1439,16 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     # 7. Sync to Supabase Financial Core
     try:
         from services.supabase_invoice_service import sync_direct_invoice_to_supabase
-        sync_direct_invoice_to_supabase(inv_doc)
+        sync_res = sync_direct_invoice_to_supabase(inv_doc)
+        if not sync_res:
+            raise RuntimeError("Supabase invoice sync returned no confirmation (service unavailable or failed)")
     except Exception as se:
         log.warning("Supabase direct invoice sync warning: %s", se)
+        try:
+            from services.supabase_sync_failure_service import record_supabase_sync_failure
+            await record_supabase_sync_failure(db, "invoices", str(res.inserted_id), str(se))
+        except Exception:
+            pass
 
     decorated = _decorate_invoice(inv_doc, payments_map={}, grns_map={})
     return JSONResponse(

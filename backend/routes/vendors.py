@@ -1,9 +1,12 @@
 """Vendors, Vendor Purchase Orders, Material Receiving, Payments & AP Aging Routes."""
 
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional, List
 from bson import ObjectId
+
+log = logging.getLogger("vendors_routes")
 from fastapi import APIRouter, HTTPException, Request
 from pymongo.errors import DuplicateKeyError
 
@@ -472,6 +475,20 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
         except Exception:
             pass
 
+    # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
+    try:
+        from services.supabase_vendor_bill_service import sync_vendor_payment_to_supabase
+        sync_res = sync_vendor_payment_to_supabase(doc, vendor, [po] if po else None)
+        if not sync_res:
+            raise RuntimeError("Supabase vendor payment sync returned no confirmation (service unavailable or failed)")
+    except Exception as se:
+        log.warning("Supabase vendor payment sync warning: %s", se)
+        try:
+            from services.supabase_sync_failure_service import record_supabase_sync_failure
+            await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
+        except Exception:
+            pass
+
     detail_msg = f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}"
     if vendor_po_number:
         detail_msg += f" against PO {vendor_po_number}"
@@ -633,6 +650,21 @@ async def create_vendor_po(payload: VendorPOIn, request: Request):
     }
     res = await db.vendor_purchase_orders.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # >>> SYNC VENDOR PO TO SUPABASE FINANCIAL CORE <<<
+    try:
+        from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
+        sync_res = sync_vendor_po_to_supabase(doc, vendor)
+        if not sync_res:
+            raise RuntimeError("Supabase vendor PO sync returned no confirmation (service unavailable or failed)")
+    except Exception as se:
+        log.warning("Supabase vendor PO sync warning: %s", se)
+        try:
+            from services.supabase_sync_failure_service import record_supabase_sync_failure
+            await record_supabase_sync_failure(db, "vendor_purchase_orders", str(res.inserted_id), str(se))
+        except Exception:
+            pass
+
     await log_activity_db(db, "create_vendor_po", "vendor_pos", f"Created Vendor PO '{po_no}'", u.get("email", ""))
     return stringify(doc)
 
@@ -703,6 +735,21 @@ async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, req
         }
         res = await db.vendor_purchase_orders.insert_one(vpo_doc)
         vpo_doc["_id"] = res.inserted_id
+
+        # >>> SYNC VENDOR PO TO SUPABASE FINANCIAL CORE <<<
+        try:
+            from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
+            sync_res = sync_vendor_po_to_supabase(vpo_doc, vendor)
+            if not sync_res:
+                raise RuntimeError("Supabase vendor PO sync returned no confirmation (service unavailable or failed)")
+        except Exception as se:
+            log.warning("Supabase vendor PO sync warning: %s", se)
+            try:
+                from services.supabase_sync_failure_service import record_supabase_sync_failure
+                await record_supabase_sync_failure(db, "vendor_purchase_orders", str(vpo_doc["_id"]), str(se))
+            except Exception:
+                pass
+
         await log_activity_db(db, "create_vendor_po", "vendor_pos", f"Auto-generated Vendor PO '{po_no}' from Planning Stage", u.get("email", ""))
         created_vpos.append(vpo_doc)
 
@@ -989,6 +1036,21 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
         }
         await db.vendor_po_receives.insert_one(receive_doc)
         po = await db.vendor_purchase_orders.find_one({"_id": po["_id"]})
+
+        # >>> SYNC VENDOR BILL TO SUPABASE FINANCIAL CORE <<<
+        try:
+            from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
+            sync_res = sync_vendor_po_to_supabase(receive_doc, vendor)
+            if not sync_res:
+                raise RuntimeError("Supabase vendor bill sync returned no confirmation (service unavailable or failed)")
+        except Exception as se:
+            log.warning("Supabase vendor bill sync warning: %s", se)
+            try:
+                from services.supabase_sync_failure_service import record_supabase_sync_failure
+                rec_id = str(receive_doc.get("_id") or receive_doc.get("id") or receipt_id)
+                await record_supabase_sync_failure(db, "vendor_po_receives", rec_id, str(se))
+            except Exception:
+                pass
         
     await log_activity_db(db, "receive_vendor_po", "vendor_pos", f"Received materials for PO {po.get('po_number')} (receipt: {receipt_id})", u.get("email", ""))
     return stringify(po)

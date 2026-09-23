@@ -967,6 +967,13 @@ async def root():
         "docs": "Visit /docs for the API documentation."
     }
 
+@app.get("/api/supabase/sync-failures")
+async def get_sync_failures_endpoint(collection: Optional[str] = None, limit: int = 100):
+    """Query logged Supabase sync failures from MongoDB."""
+    from services.supabase_sync_failure_service import get_supabase_sync_failures
+    return await get_supabase_sync_failures(db, collection=collection, limit=limit)
+
+
 app.include_router(api)
 app.include_router(auth_router)
 app.include_router(plm_router)

@@ -305,6 +305,11 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
         client_uuid = None
         if invoice_docs:
             client_uuid = ensure_client_entity(client, invoice_docs[0], coa_map)
+        elif payment_doc.get("client_name"):
+            client_uuid = ensure_client_entity(client, {
+                "client_name": payment_doc.get("client_name"),
+                "client_id": payment_doc.get("client_id") or payment_doc.get("client_name"),
+            }, coa_map)
 
         # 1. Receipt Journal Entry
         je_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_REC_{pay_id}"))

@@ -1346,10 +1346,17 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                         bank_acc_doc = await db.bank_accounts.find_one({"_id": oid(payload.bank_account_id)})
                     except Exception:
                         pass
-                sync_wage_payment_to_supabase(wage_payment_doc, worker, bank_acc_doc=bank_acc_doc)
+                sync_res = sync_wage_payment_to_supabase(wage_payment_doc, worker, bank_acc_doc=bank_acc_doc)
+                if not sync_res:
+                    raise RuntimeError("Supabase wage payment sync returned no confirmation (service unavailable or failed)")
             except Exception as se:
                 import logging
                 logging.getLogger(__name__).warning("Supabase wage payment sync failed: %s", se)
+                try:
+                    from services.supabase_sync_failure_service import record_supabase_sync_failure
+                    await record_supabase_sync_failure(db, "wage_payments", str(res.inserted_id), str(se))
+                except Exception:
+                    pass
         except Exception as e:
             if payload.paid_via == "cash" and payload.cash_ledger_id:
                 try:

@@ -2002,6 +2002,21 @@ async def create_payment(payload: PaymentIn, request: Request):
         }
         res = await db.payments.insert_one(doc)
         doc["_id"] = res.inserted_id
+
+        # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
+        try:
+            from services.supabase_vendor_bill_service import sync_vendor_payment_to_supabase
+            sync_res = sync_vendor_payment_to_supabase(doc, vendor)
+            if not sync_res:
+                raise RuntimeError("Supabase vendor payment sync returned no confirmation (service unavailable or failed)")
+        except Exception as se:
+            log.warning("Supabase vendor payment sync warning: %s", se)
+            try:
+                from services.supabase_sync_failure_service import record_supabase_sync_failure
+                await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
+            except Exception:
+                pass
+
         await _log_activity("create_vendor_payment", "vendor_payments", f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}", u["email"], db=db)
         return stringify(doc)
 
@@ -2108,9 +2123,16 @@ async def create_payment(payload: PaymentIn, request: Request):
     # >>> SYNC PAYMENT RECEIPT TO SUPABASE FINANCIAL CORE <<<
     try:
         from services.supabase_invoice_service import sync_invoice_payment_to_supabase
-        sync_invoice_payment_to_supabase(doc, invoices)
+        sync_res = sync_invoice_payment_to_supabase(doc, invoices)
+        if not sync_res:
+            raise RuntimeError("Supabase invoice payment sync returned no confirmation (service unavailable or failed)")
     except Exception as se:
         log.warning("Supabase invoice payment sync warning: %s", se)
+        try:
+            from services.supabase_sync_failure_service import record_supabase_sync_failure
+            await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
+        except Exception:
+            pass
 
     return stringify(doc)
 
