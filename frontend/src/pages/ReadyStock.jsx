@@ -10,9 +10,30 @@ import { SafeImage } from "../components/ImageUploader";
 import {
   AlertTriangle, Plus, RefreshCw, Package, History,
   Boxes, ImageOff, ChevronDown, ChevronRight, Upload, Hammer,
+  Trash2, List, LayoutGrid,
 } from "lucide-react";
 import AdHocProduceDrawer from "../components/AdHocProduceDrawer";
 import ResponsiveTable from "../components/ResponsiveTable";
+
+// ────────────────────────────────────────────────────────────
+//  Helper: check if an inventory row is completely empty across
+//  all stock quantities and available qty (matches backend rule)
+// ────────────────────────────────────────────────────────────
+export const isRowEmpty = (r) => {
+  if (!r) return false;
+  const stockFields = [
+    "ready_stock_qty",
+    "reserved_qty",
+    "in_transit_qty",
+    "return_qty",
+    "damaged_qty",
+    "liquidation_qty",
+  ];
+  return (
+    stockFields.every((f) => Number(r[f] || 0) === 0) &&
+    Number(r.available_qty || 0) === 0
+  );
+};
 
 // ────────────────────────────────────────────────────────────
 //  Metric definitions — the cell value & the color accent
@@ -83,6 +104,7 @@ function MovementDrawer({ initial = null, styles = [], onClose, onDone }) {
     online_order_id:  "",
   });
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError]   = useState("");
   const [result, setResult] = useState(null);
 
@@ -227,11 +249,56 @@ function MovementDrawer({ initial = null, styles = [], onClose, onDone }) {
         )}
 
         <div className="flex gap-3 pt-2">
-          <BtnPrimary onClick={submit} disabled={saving} className="flex-1" id="btn-post-movement">
+          <BtnPrimary onClick={submit} disabled={saving || deleting} className="flex-1" id="btn-post-movement">
             {saving ? "Posting…" : "Post Movement"}
           </BtnPrimary>
-          <BtnSecondary onClick={onClose} disabled={saving}>Close</BtnSecondary>
+          <BtnSecondary onClick={onClose} disabled={saving || deleting}>Close</BtnSecondary>
         </div>
+
+        {initial?.row && (
+          <div className="pt-4 mt-2 border-t-2 border-slate-200 flex items-center justify-between gap-3">
+            <div className="text-[11px] text-slate-500 leading-tight">
+              {isRowEmpty(initial.row) ? (
+                <span className="text-slate-600 font-medium">Stock is zero across all buckets. This SKU row can be removed.</span>
+              ) : (
+                <span className="text-amber-700 font-medium">Cannot delete: stock quantities must be 0 first.</span>
+              )}
+            </div>
+            <button
+              type="button"
+              disabled={!isRowEmpty(initial.row) || deleting}
+              onClick={async () => {
+                const r = initial.row;
+                const label = `${r.style_code || "Style"} · ${r.color} / Size ${r.size}`;
+                if (!window.confirm(`Delete empty inventory record for ${label}?`)) return;
+                setDeleting(true);
+                try {
+                  await http.delete(`/fg-inventory/${r.id}`);
+                  onDone();
+                  onClose();
+                } catch (e) {
+                  setError(formatApiError(e.response?.data?.detail) || "Failed to delete inventory record.");
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+              className={`text-xs font-bold px-3 py-1.5 flex items-center gap-1.5 border transition-colors shrink-0 ${
+                isRowEmpty(initial.row) && !deleting
+                  ? "border-red-300 text-red-600 hover:bg-red-50 hover:border-red-500 cursor-pointer"
+                  : "border-slate-200 text-slate-300 cursor-not-allowed opacity-50"
+              }`}
+              title={
+                isRowEmpty(initial.row)
+                  ? "Delete this zero-stock inventory record"
+                  : "Cannot delete: stock quantities must all be 0"
+              }
+              data-testid="btn-delete-fg-row"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {deleting ? "Deleting…" : "Delete Record"}
+            </button>
+          </div>
+        )}
       </div>
     </Drawer>
   );
@@ -376,8 +443,9 @@ function LedgerDrawer({ styleId, styleCode, onClose }) {
 //    Right   = Row totals    (per color, across all sizes)
 //    Corner  = Grand total
 // ═══════════════════════════════════════════════════════════
-function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, onAddStock, onOpenLedger }) {
+function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, onAddStock, onOpenLedger, onDeleteRow }) {
   const M = METRICS[metric];
+  const [showRows, setShowRows] = useState(false);
 
   // Build (color, size) → row lookup and axes
   const { colors, sizes, cellMap, totals } = useMemo(() => {
@@ -476,6 +544,18 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
               <History className="w-3 h-3" /> Ledger
             </button>
             <button
+              onClick={() => setShowRows(!showRows)}
+              title={showRows ? "Switch back to matrix view" : "Manage individual SKU rows and delete zero-stock records"}
+              className={`text-[10px] uppercase tracking-wider font-bold border px-2 py-1 flex items-center gap-1 transition-colors ${
+                showRows
+                  ? "text-white bg-[#0F172A] border-[#0F172A]"
+                  : "text-slate-700 hover:text-white hover:bg-[#0F172A] border-slate-300"
+              }`}
+              data-testid={`toggle-rows-${style.code}`}
+            >
+              <List className="w-3 h-3" /> {showRows ? "Matrix" : "Rows"}
+            </button>
+            <button
               onClick={() => onAddMovement({ style_id: style.id })}
               title="Post a single movement for this style"
               className="text-[10px] uppercase tracking-wider font-bold text-slate-700 hover:text-white hover:bg-[#0F172A] border border-slate-300 px-2 py-1 flex items-center gap-1"
@@ -495,14 +575,82 @@ function StyleInventoryCard({ style, rows, metric, onCellClick, onAddMovement, o
         </div>
       </div>
 
-      {/* Color × Size matrix (mirrors PO layout) */}
-      <div className="p-3 overflow-x-auto">
-        {!hasData ? (
-          <div className="text-center py-8 text-xs text-slate-400 italic">
-            No FG rows yet — post a movement to seed the first (color × size) cell.
-          </div>
-        ) : (
-          <table className="w-full text-xs border border-slate-300" data-testid={`matrix-${style.code}`}>
+      {/* Either SKU rows table or Color × Size matrix */}
+      {showRows ? (
+        <div className="p-3 overflow-x-auto" data-testid={`sku-rows-${style.code}`}>
+          <table className="w-full text-xs border border-slate-300">
+            <thead className="bg-slate-100 text-[10px] uppercase tracking-wider font-bold text-slate-600 border-b border-slate-300">
+              <tr>
+                <th className="px-2 py-1.5 text-left">Color</th>
+                <th className="px-2 py-1.5 text-center">Size</th>
+                <th className="px-2 py-1.5 text-center">Ready</th>
+                <th className="px-2 py-1.5 text-center">Reserved</th>
+                <th className="px-2 py-1.5 text-center font-bold text-slate-900">Available</th>
+                <th className="px-2 py-1.5 text-center">In Transit</th>
+                <th className="px-2 py-1.5 text-center">Return</th>
+                <th className="px-2 py-1.5 text-center">Damaged</th>
+                <th className="px-2 py-1.5 text-center">Min</th>
+                <th className="px-2 py-1.5 text-center w-14">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((r) => {
+                const canDel = isRowEmpty(r);
+                return (
+                  <tr key={r.id} className="hover:bg-slate-50 font-mono">
+                    <td className="px-2 py-1.5 font-sans font-bold text-slate-800">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-full border border-slate-300"
+                          style={{ background: cssColor(r.color) }}
+                          title={r.color}
+                        />
+                        {r.color}
+                      </div>
+                    </td>
+                    <td className="px-2 py-1.5 text-center font-bold">{r.size}</td>
+                    <td className="px-2 py-1.5 text-center text-green-700">{r.ready_stock_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center text-blue-700">{r.reserved_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center font-bold text-slate-900">{r.available_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center text-amber-600">{r.in_transit_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center text-orange-600">{r.return_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center text-red-600">{r.damaged_qty || 0}</td>
+                    <td className="px-2 py-1.5 text-center text-slate-500">{r.min_stock_level ?? 25}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => onDeleteRow && onDeleteRow(r)}
+                        disabled={!canDel}
+                        className={`p-1.5 rounded transition-colors ${
+                          canDel
+                            ? "text-red-600 hover:text-red-800 hover:bg-red-50 cursor-pointer"
+                            : "text-slate-300 cursor-not-allowed opacity-40"
+                        }`}
+                        title={
+                          canDel
+                            ? `Delete empty inventory record for ${r.color} / Size ${r.size}`
+                            : `Cannot delete: stock quantities must all be 0 (currently ready:${r.ready_stock_qty || 0}, avl:${r.available_qty || 0})`
+                        }
+                        data-testid={`delete-fg-${style.code}-${r.color}-${r.size}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5 inline" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        /* Color × Size matrix (mirrors PO layout) */
+        <div className="p-3 overflow-x-auto">
+          {!hasData ? (
+            <div className="text-center py-8 text-xs text-slate-400 italic">
+              No FG rows yet — post a movement to seed the first (color × size) cell.
+            </div>
+          ) : (
+            <table className="w-full text-xs border border-slate-300" data-testid={`matrix-${style.code}`}>
             <thead className="bg-slate-100">
               <tr>
                 <th className="px-2 py-1.5 text-left text-[10px] uppercase tracking-wider font-bold text-slate-700 border-r border-slate-300 sticky left-0 z-10 bg-slate-100">
@@ -612,6 +760,7 @@ Min level:   ${r.min_stock_level}${low ? "\n⚠  LOW STOCK" : ""}`
           </table>
         )}
       </div>
+      )}
 
       {/* Foot strip — quick stats & actions */}
       <div className="px-3 pb-3 pt-1 flex items-center justify-between gap-2 flex-wrap border-t border-slate-100 bg-slate-50/60">
@@ -650,6 +799,7 @@ export default function ReadyStock() {
   const [rows, setRows]           = useState([]);
   const [stylesMeta, setStylesMeta] = useState({});
   const [loading, setLoading]     = useState(true);
+  const [viewMode, setViewMode]   = useState("matrix"); // "matrix" | "table"
   const [search, setSearch]       = useState("");
   const [lowOnly, setLowOnly]     = useState(false);
   const [metric, setMetric]       = useState("ready");
@@ -729,6 +879,27 @@ export default function ReadyStock() {
 
   const stylesList = useMemo(() => Object.values(stylesMeta), [stylesMeta]);
 
+  const handleDeleteRow = async (r) => {
+    if (!r?.id) return;
+    if (!isRowEmpty(r)) {
+      window.alert(
+        "Cannot delete inventory record with non-zero stock quantities. " +
+        "Zero it out via POST /fg-inventory/movements first."
+      );
+      return;
+    }
+    const label = `${r.style_code || "Style"} · ${r.color} / Size ${r.size}`;
+    if (!window.confirm(`Are you sure you want to delete inventory record: ${label}?`)) {
+      return;
+    }
+    try {
+      await http.delete(`/fg-inventory/${r.id}`);
+      await load();
+    } catch (err) {
+      window.alert(formatApiError(err.response?.data?.detail) || "Failed to delete inventory record.");
+    }
+  };
+
   return (
     <div className="bg-[#F7F7F5]">
       <PageHeader
@@ -785,6 +956,34 @@ export default function ReadyStock() {
           onClick={() => { setSearch(""); setLowOnly(false); }}
         >Clear</button>
 
+        {/* View mode toggle: Matrix vs Table */}
+        <div className="flex items-center gap-1 border-2 border-slate-300 bg-slate-100 p-0.5 ml-2" data-testid="view-mode-toggle">
+          <button
+            type="button"
+            onClick={() => setViewMode("matrix")}
+            className={`flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+              viewMode === "matrix"
+                ? "bg-[#0F172A] text-white shadow-sm"
+                : "text-slate-600 hover:text-slate-900 bg-transparent"
+            }`}
+            data-testid="view-mode-matrix"
+          >
+            <LayoutGrid className="w-3 h-3" /> Matrix
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("table")}
+            className={`flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+              viewMode === "table"
+                ? "bg-[#0F172A] text-white shadow-sm"
+                : "text-slate-600 hover:text-slate-900 bg-transparent"
+            }`}
+            data-testid="view-mode-table"
+          >
+            <List className="w-3 h-3" /> SKU Rows
+          </button>
+        </div>
+
         {/* Metric selector — determines what cell values show across all cards */}
         <div className="ml-auto flex items-end gap-1 flex-wrap" data-testid="metric-toggle">
           <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 pb-1 mr-2">
@@ -828,6 +1027,124 @@ export default function ReadyStock() {
               </BtnSecondary>
             </div>
           </Card>
+        ) : viewMode === "table" ? (
+          <Card className="p-0 border-2 border-slate-200 overflow-hidden" data-testid="table-view-container">
+            <ResponsiveTable
+              columns={[
+                {
+                  key: "style_code",
+                  header: "Style",
+                  primary: true,
+                  className: "font-mono font-bold text-slate-900",
+                  render: (r) => (
+                    <div>
+                      <div>{r.style_code}</div>
+                      <div className="text-[10px] text-slate-500 font-sans">{stylesMeta[r.style_id]?.name || ""}</div>
+                    </div>
+                  ),
+                },
+                {
+                  key: "color",
+                  header: "Color",
+                  render: (r) => (
+                    <div className="flex items-center gap-1.5 font-bold text-slate-800">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-full border border-slate-300"
+                        style={{ background: cssColor(r.color) }}
+                        title={r.color}
+                      />
+                      {r.color}
+                    </div>
+                  ),
+                },
+                {
+                  key: "size",
+                  header: "Size",
+                  className: "font-mono font-bold text-center",
+                  render: (r) => r.size,
+                },
+                {
+                  key: "ready_stock_qty",
+                  header: "Ready",
+                  className: "font-mono font-bold text-green-700 text-center",
+                  render: (r) => r.ready_stock_qty || 0,
+                },
+                {
+                  key: "reserved_qty",
+                  header: "Reserved",
+                  className: "font-mono text-blue-700 text-center",
+                  render: (r) => r.reserved_qty || 0,
+                },
+                {
+                  key: "available_qty",
+                  header: "Available",
+                  className: "font-mono font-bold text-slate-900 text-center",
+                  render: (r) => (
+                    <span className={r.is_low_stock ? "text-red-600 flex items-center justify-center gap-1" : ""}>
+                      {r.available_qty || 0}
+                      {r.is_low_stock && <span className="text-[9px]">▲</span>}
+                    </span>
+                  ),
+                },
+                {
+                  key: "in_transit_qty",
+                  header: "In Transit",
+                  className: "font-mono text-amber-600 text-center",
+                  render: (r) => r.in_transit_qty || 0,
+                },
+                {
+                  key: "return_qty",
+                  header: "Return",
+                  className: "font-mono text-orange-600 text-center",
+                  render: (r) => r.return_qty || 0,
+                },
+                {
+                  key: "damaged_qty",
+                  header: "Damaged",
+                  className: "font-mono text-red-600 text-center",
+                  render: (r) => r.damaged_qty || 0,
+                },
+                {
+                  key: "min_stock_level",
+                  header: "Min",
+                  className: "font-mono text-slate-500 text-center",
+                  render: (r) => r.min_stock_level ?? 25,
+                },
+                {
+                  key: "actions",
+                  header: "Actions",
+                  className: "text-center",
+                  render: (r) => {
+                    const canDel = isRowEmpty(r);
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRow(r)}
+                        disabled={!canDel}
+                        className={`p-1.5 rounded transition-colors ${
+                          canDel
+                            ? "text-red-600 hover:text-red-800 hover:bg-red-50 cursor-pointer"
+                            : "text-slate-300 cursor-not-allowed opacity-40"
+                        }`}
+                        title={
+                          canDel
+                            ? `Delete empty inventory record for ${r.style_code} ${r.color} / Size ${r.size}`
+                            : `Cannot delete: stock quantities must all be 0 (currently ready:${r.ready_stock_qty || 0}, avl:${r.available_qty || 0})`
+                        }
+                        data-testid={`table-delete-fg-${r.id}`}
+                      >
+                        <Trash2 className="w-4 h-4 inline" />
+                      </button>
+                    );
+                  },
+                },
+              ]}
+              rows={rows}
+              rowKey={(r) => r.id}
+              stickyHeader
+              testId="sku-rows-table"
+            />
+          </Card>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5" data-testid="style-cards-grid">
             {grouped.map((g) => (
@@ -840,6 +1157,7 @@ export default function ReadyStock() {
                 onAddMovement={(sel) => { setMvInitial(sel); setMvOpen(true); }}
                 onAddStock={(sid) => { setAddStockStyleId(sid); setAddStockOpen(true); }}
                 onOpenLedger={(style) => setLedger({ style_id: style.id, style_code: style.code })}
+                onDeleteRow={handleDeleteRow}
               />
             ))}
           </div>

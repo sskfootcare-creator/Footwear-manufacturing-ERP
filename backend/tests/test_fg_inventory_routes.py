@@ -413,3 +413,59 @@ async def test_seed_fg_inventory_for_lifecycle(mock_fg_env):
     res2 = await _seed_fg_inventory_for_lifecycle(lifecycle_doc, "admin@sskfootcare.com", db=mock_fg_env)
     assert res2["created"] == 0
     assert res2["updated"] == 6
+
+
+def test_delete_fg_inventory_success_and_validations(client, mock_fg_env):
+    # Seed style
+    s_oid = ObjectId()
+    sid = str(s_oid)
+    mock_fg_env.styles_store[sid] = {
+        "_id": s_oid,
+        "code": "SSK-TEST-DEL",
+        "name": "Delete Test Shoe",
+    }
+
+    # 1. Create FG inventory record with non-zero ready stock
+    res = client.post("/api/fg-inventory", json={
+        "style_id": sid,
+        "color": "Black",
+        "size": "42",
+        "ready_stock_qty": 10,
+        "min_stock_level": 20,
+    })
+    assert res.status_code == 200, res.text
+    item_id = res.json()["id"]
+
+    # 2. Attempt to delete non-zero record -> should return 400
+    res = client.delete(f"/api/fg-inventory/{item_id}")
+    assert res.status_code == 400
+    assert "Cannot delete inventory record with non-zero stock quantities" in res.json()["detail"]
+    assert "POST /fg-inventory/movements" in res.json()["detail"]
+
+    # 3. Attempt to delete non-existent ID -> should return 404
+    non_existent = str(ObjectId())
+    res = client.delete(f"/api/fg-inventory/{non_existent}")
+    assert res.status_code == 404
+    assert "not found" in res.json()["detail"].lower()
+
+    # 4. Attempt to delete with invalid ID format -> should return 400
+    res = client.delete("/api/fg-inventory/invalid-oid-123")
+    assert res.status_code == 400
+
+    # 5. Zero out stock fields directly in mock store to simulate zero stock after movements
+    mock_fg_env.fg_inventory_store[item_id]["ready_stock_qty"] = 0
+    mock_fg_env.fg_inventory_store[item_id]["reserved_qty"] = 0
+    mock_fg_env.fg_inventory_store[item_id]["in_transit_qty"] = 0
+    mock_fg_env.fg_inventory_store[item_id]["return_qty"] = 0
+    mock_fg_env.fg_inventory_store[item_id]["damaged_qty"] = 0
+    mock_fg_env.fg_inventory_store[item_id]["liquidation_qty"] = 0
+
+    # 6. Delete zero-stock record -> should succeed with 200
+    res = client.delete(f"/api/fg-inventory/{item_id}")
+    assert res.status_code == 200
+    assert res.json()["message"] == "Inventory record deleted successfully"
+    assert res.json()["id"] == item_id
+
+    # 7. Verify document was removed from DB
+    assert item_id not in mock_fg_env.fg_inventory_store
+

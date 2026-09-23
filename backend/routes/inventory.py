@@ -924,6 +924,36 @@ async def update_fg_inventory(request: Request, id: str, payload: FgInventoryUpd
     return doc
 
 
+@inventory_router.delete("/fg-inventory/{id}")
+async def delete_fg_inventory(request: Request, id: str):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    doc = await db.fg_inventory.find_one({"_id": oid(id)})
+    if not doc:
+        raise HTTPException(404, "Inventory record not found")
+
+    stock_fields = [
+        "ready_stock_qty",
+        "reserved_qty",
+        "in_transit_qty",
+        "return_qty",
+        "damaged_qty",
+        "liquidation_qty",
+    ]
+    non_zero = [f for f in stock_fields if (doc.get(f) or 0) != 0]
+    if non_zero:
+        raise HTTPException(
+            400,
+            f"Cannot delete inventory record with non-zero stock quantities ({', '.join(non_zero)}). "
+            f"Zero it out via POST /fg-inventory/movements first."
+        )
+
+    await db.fg_inventory.delete_one({"_id": oid(id)})
+    return {"message": "Inventory record deleted successfully", "id": id}
+
+
 @inventory_router.post("/fg-inventory/reserve")
 async def reserve_stock(request: Request, payload: StockReservation):
     """Legacy convenience wrapper — routes through the movement engine."""
