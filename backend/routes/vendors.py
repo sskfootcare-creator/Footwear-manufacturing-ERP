@@ -651,19 +651,6 @@ async def create_vendor_po(payload: VendorPOIn, request: Request):
     res = await db.vendor_purchase_orders.insert_one(doc)
     doc["_id"] = res.inserted_id
 
-    # >>> SYNC VENDOR PO TO SUPABASE FINANCIAL CORE <<<
-    try:
-        from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
-        sync_res = sync_vendor_po_to_supabase(doc, vendor)
-        if not sync_res:
-            raise RuntimeError("Supabase vendor PO sync returned no confirmation (service unavailable or failed)")
-    except Exception as se:
-        log.warning("Supabase vendor PO sync warning: %s", se)
-        try:
-            from services.supabase_sync_failure_service import record_supabase_sync_failure
-            await record_supabase_sync_failure(db, "vendor_purchase_orders", str(res.inserted_id), str(se))
-        except Exception:
-            pass
 
     await log_activity_db(db, "create_vendor_po", "vendor_pos", f"Created Vendor PO '{po_no}'", u.get("email", ""))
     return stringify(doc)
@@ -736,19 +723,6 @@ async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, req
         res = await db.vendor_purchase_orders.insert_one(vpo_doc)
         vpo_doc["_id"] = res.inserted_id
 
-        # >>> SYNC VENDOR PO TO SUPABASE FINANCIAL CORE <<<
-        try:
-            from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
-            sync_res = sync_vendor_po_to_supabase(vpo_doc, vendor)
-            if not sync_res:
-                raise RuntimeError("Supabase vendor PO sync returned no confirmation (service unavailable or failed)")
-        except Exception as se:
-            log.warning("Supabase vendor PO sync warning: %s", se)
-            try:
-                from services.supabase_sync_failure_service import record_supabase_sync_failure
-                await record_supabase_sync_failure(db, "vendor_purchase_orders", str(vpo_doc["_id"]), str(se))
-            except Exception:
-                pass
 
         await log_activity_db(db, "create_vendor_po", "vendor_pos", f"Auto-generated Vendor PO '{po_no}' from Planning Stage", u.get("email", ""))
         created_vpos.append(vpo_doc)

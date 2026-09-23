@@ -476,3 +476,7 @@ def sync_vendor_payment_to_supabase(
     except Exception as e:
         log.error("Failed to sync vendor payment to Supabase: %s", e)
         return None
+
+
+# Alias for semantic clarity with bills vs purchase orders
+sync_vendor_bill_to_supabase = sync_vendor_po_to_supabase

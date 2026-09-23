@@ -17,6 +17,7 @@ from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request
 
 from auth import require_roles
+from db.supabase_client import get_supabase_admin_client
 
 log = logging.getLogger(__name__)
 
@@ -824,4 +825,69 @@ async def report_pnl_detailed(
         "net_margin_pct": net_margin_pct,
         "expense_categories": cat_list,
         "monthly_pnl": monthly_pnl[-12:],
+    }
+
+
+@reports_router.get("/reports/cash-position")
+async def report_cash_position(request: Request):
+    """Bank cash position and reconciliation status, sourced from Supabase
+    (bank_accounts, bank_statement_lines, bank_reconciliation_statements).
+    This report endpoint reads the banking module and aggregates current cleared balances
+    and reconciliation status.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+
+    client = get_supabase_admin_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    accounts_res = client.table("bank_accounts").select("*").eq("is_active", True).execute()
+    accounts = accounts_res.data or []
+
+    account_rows = []
+    total_cash = 0.0
+    total_unreconciled = 0
+
+    for acc in accounts:
+        acc_id = acc["id"]
+        balance = float(acc.get("current_cleared_balance") or 0.0)
+        total_cash += balance
+
+        unmatched_res = (
+            client.table("bank_statement_lines")
+            .select("id", count="exact")
+            .eq("bank_account_id", acc_id)
+            .neq("match_status", "MATCHED")
+            .execute()
+        )
+        unmatched_count = unmatched_res.count or 0
+        total_unreconciled += unmatched_count
+
+        recon_res = (
+            client.table("bank_reconciliation_statements")
+            .select("*")
+            .eq("bank_account_id", acc_id)
+            .order("as_of_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        last_recon = (recon_res.data or [None])[0]
+
+        account_rows.append({
+            "account_name": acc.get("account_name"),
+            "bank_name": acc.get("bank_name"),
+            "account_number_last4": acc.get("account_number_last4"),
+            "category": acc.get("category"),
+            "current_cleared_balance": round(balance, 2),
+            "unmatched_statement_lines": unmatched_count,
+            "last_reconciled_as_of": last_recon.get("as_of_date") if last_recon else None,
+            "last_reconciliation_balanced": last_recon.get("is_balanced") if last_recon else None,
+        })
+
+    return {
+        "total_cash_position": round(total_cash, 2),
+        "accounts": account_rows,
+        "total_unreconciled_lines": total_unreconciled,
+        "accounts_never_reconciled": sum(1 for r in account_rows if r["last_reconciled_as_of"] is None),
     }
