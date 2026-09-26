@@ -578,3 +578,4 @@ sample_myntra_picklist_OP20625445.csv
 backend/scripts/seed_test_picklist_data.py
 backend/scripts/test_live_db_import.py
 aug.csv
+record.csv

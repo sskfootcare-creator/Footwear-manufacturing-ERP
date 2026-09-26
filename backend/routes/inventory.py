@@ -31,6 +31,7 @@ from models.inventory import (
     MovementType,
     ReferenceType,
     AdjustmentField,
+    DefectReportIn,
 )
 from auth import require_roles
 from routes.components import _build_size_matrix_pivot
@@ -450,6 +451,12 @@ async def _apply_movement(payload: "FgStockMovementIn", user_email: str, skip_lo
         }
         if payload.movement_type == "adjustment":
             mv_doc["adjustment_field"] = payload.adjustment_field
+        if getattr(payload, "defect_photo_url", None):
+            mv_doc["defect_photo_url"] = payload.defect_photo_url
+        if getattr(payload, "defect_photos", None):
+            mv_doc["defect_photos"] = payload.defect_photos
+        if getattr(payload, "defect_reason", None):
+            mv_doc["defect_reason"] = payload.defect_reason
         mv_res = await db.fg_stock_movements.insert_one(mv_doc)
         inserted_movement_id = mv_res.inserted_id
         mv_doc["_id"] = inserted_movement_id
@@ -1315,3 +1322,88 @@ async def release_stock(request: Request, payload: StockRelease):
     )
     result = await _apply_movement(mv, u.get("email") or u.get("name", ""), db=db)
     return {"success": True, "message": f"Released {payload.quantity} pairs via {payload.release_type}", **result}
+
+
+# ── Quality Defect Reporting & Photo Evidence (U-005) ─────────────────────────
+
+@inventory_router.post("/inventory/defect-report")
+async def report_inventory_defect(payload: DefectReportIn, request: Request):
+    """File a damaged stock or returned goods defect report with photographic evidence (U-005)."""
+    u = await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    if payload.quantity <= 0:
+        raise HTTPException(400, "Defect quantity must be greater than zero")
+
+    user_email = u.get("email") or u.get("name") or "system"
+
+    # 1. Apply stock movement to record damaged stock
+    primary_photo = payload.photo_urls[0] if payload.photo_urls else None
+    mv = FgStockMovementIn(
+        style_id=payload.style_id,
+        color=payload.color,
+        size=payload.size,
+        movement_type="return_damaged",
+        quantity=payload.quantity,
+        reference_type="return" if payload.reference_type == "return" else "manual",
+        reference_id=payload.reference_id or "",
+        notes=f"Quality defect reported: {payload.defect_reason}. {payload.notes or ''}".strip(),
+        defect_photo_url=primary_photo,
+        defect_photos=payload.photo_urls or [],
+        defect_reason=payload.defect_reason,
+    )
+    mv_result = await _apply_movement(mv, user_email, db=db)
+
+    # 2. Record full audit in quality_defect_reports
+    report_doc = {
+        "style_id": payload.style_id,
+        "style_code": mv_result.get("style_code"),
+        "color": payload.color,
+        "size": payload.size,
+        "quantity": payload.quantity,
+        "defect_reason": payload.defect_reason,
+        "defect_category": payload.defect_category,
+        "photo_urls": payload.photo_urls or [],
+        "notes": payload.notes or "",
+        "reference_type": payload.reference_type,
+        "reference_id": payload.reference_id,
+        "reported_by": user_email,
+        "created_at": now_iso(),
+        "status": "investigating",
+    }
+    ins = await db.quality_defect_reports.insert_one(report_doc)
+    report_doc["id"] = str(ins.inserted_id)
+    report_doc.pop("_id", None)
+
+    return {
+        "ok": True,
+        "report_id": report_doc["id"],
+        "message": f"Recorded defect report for {payload.quantity} pairs with {len(payload.photo_urls or [])} photos",
+        "movement": mv_result,
+        "report": report_doc,
+    }
+
+
+@inventory_router.get("/inventory/defect-reports")
+async def list_inventory_defects(
+    request: Request,
+    style_id: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 50,
+):
+    """Lists recent quality defect reports with photo attachments (U-005)."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    query: Dict[str, Any] = {}
+    if style_id:
+        query["style_id"] = style_id
+    if category:
+        query["defect_category"] = category
+
+    reports = await db.quality_defect_reports.find(query).sort("created_at", -1).to_list(min(limit, 200))
+    for r in reports:
+        r["id"] = str(r.pop("_id"))
+
+    return {"reports": reports, "total": len(reports)}
+

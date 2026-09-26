@@ -71,6 +71,9 @@ class FgStockMovementIn(BaseModel):
     notes: Optional[str] = ""
     adjustment_field: Optional[AdjustmentField] = None
     online_order_id: Optional[str] = None
+    defect_photo_url: Optional[str] = None
+    defect_photos: Optional[list[str]] = []
+    defect_reason: Optional[str] = None
 
 
 class InventoryReservationIn(BaseModel):
@@ -79,3 +82,17 @@ class InventoryReservationIn(BaseModel):
     size: str
     qty: int
     online_order_id: str
+
+
+class DefectReportIn(BaseModel):
+    style_id: str
+    color: str
+    size: str
+    quantity: int
+    defect_reason: str
+    defect_category: Optional[str] = "manufacturing_defect"
+    photo_urls: Optional[list[str]] = []
+    notes: Optional[str] = ""
+    reference_type: Optional[str] = "quality_audit"
+    reference_id: Optional[str] = None
+

@@ -43,10 +43,16 @@ import StylePLM from "@/pages/StylePLM";
 import PatternManager from "@/pages/PatternManager";
 import ToolingLibrary from "@/pages/ToolingLibrary";
 import BankReconciliation from "@/pages/BankReconciliation";
+import AnalyticsReportsPage from "@/pages/AnalyticsReportsPage";
+import MobilePicklist from "@/pages/MobilePicklist";
+import OfflineStatusIndicator from "@/components/OfflineStatusIndicator";
 import { Loader2 } from "lucide-react";
 
 // F-037: Route-to-module & role authorization matrix for frontend navigation guard
 const ROUTE_PERMISSIONS = {
+  "analytics": { roles: ["admin", "manager", "production", "inventory", "sales", "finance"], modules: ["reports"] },
+  "mobile/picklist": { roles: ["admin", "manager", "production", "inventory"], modules: ["inventory"] },
+
   "styles": { roles: ["admin", "manager", "production", "sales"], modules: ["production", "orders_sales"] },
   "plm": { roles: ["admin", "manager", "production"], modules: ["production"] },
   "patterns": { roles: ["admin", "manager", "production"], modules: ["production"] },
@@ -145,6 +151,7 @@ function App() {
           <Route path="/karigar-login" element={<KarigarLogin />} />
           <Route path="/karigar" element={<KarigarDashboard />} />
           <Route path="/select-workspace" element={<Protected><SelectWorkspace /></Protected>} />
+          <Route path="/mobile/picklist" element={<Protected><MobilePicklist /></Protected>} />
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
             <Route index element={<Dashboard />} />
@@ -162,6 +169,7 @@ function App() {
             <Route path="production" element={<RouteGuard path="production"><Production /></RouteGuard>} />
             <Route path="defects" element={<RouteGuard path="defects"><Defects /></RouteGuard>} />
             <Route path="reports" element={<RouteGuard path="reports"><Reports /></RouteGuard>} />
+            <Route path="analytics" element={<RouteGuard path="analytics"><AnalyticsReportsPage /></RouteGuard>} />
             <Route path="invoices" element={<RouteGuard path="invoices"><Invoices /></RouteGuard>} />
             <Route path="expenses" element={<RouteGuard path="expenses"><Expenses /></RouteGuard>} />
             <Route path="bank-reconciliation" element={<RouteGuard path="bank-reconciliation"><BankReconciliation /></RouteGuard>} />
@@ -187,6 +195,7 @@ function App() {
           </Route>
         </Routes>
       </BrowserRouter>
+      <OfflineStatusIndicator />
     </AuthProvider>
   );
 }

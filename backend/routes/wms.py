@@ -2,6 +2,7 @@
 
 import re
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from bson import ObjectId
@@ -1631,3 +1632,154 @@ async def bom_feasibility(sid: str, request: Request, pairs: int = 1):
             "shortfall":      short,
         })
     return {"feasible": feasible, "components": comps, "missing_bom": False, "pairs": pairs}
+
+
+# ── Warehouse Analytics (A-005) ──────────────────────────────────────────
+
+@wms_router.get("/wms/analytics/utilization-heatmap")
+async def warehouse_utilization_heatmap(request: Request, zone: Optional[str] = None):
+    """Calculates cell utilization heatmaps and rack capacity density (A-005)."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    query: Dict[str, Any] = {}
+    if zone:
+        query["zone"] = zone
+
+    locations = await db.warehouse_locations.find(query).to_list(1000)
+    if not locations:
+        await _seed_warehouse_locations(db=db)
+        locations = await db.warehouse_locations.find(query).to_list(1000)
+
+    total_cells = len(locations)
+    occupied_cells = sum(1 for loc in locations if int(loc.get("occupied_pairs", 0)) > 0)
+    empty_cells = sum(1 for loc in locations if int(loc.get("occupied_pairs", 0)) == 0 and loc.get("status") != "blocked")
+    blocked_cells = sum(1 for loc in locations if loc.get("status") == "blocked")
+
+    total_capacity = sum(int(loc.get("capacity_pairs", CAPACITY)) for loc in locations)
+    total_occupied = sum(int(loc.get("occupied_pairs", 0)) for loc in locations)
+    overall_utilization_pct = round((total_occupied / max(1, total_capacity)) * 100.0, 1)
+
+    heatmap_cells = []
+    rack_aggregates = defaultdict(lambda: {"capacity": 0, "occupied": 0, "cells": 0})
+
+    for loc in locations:
+        cap = int(loc.get("capacity_pairs", CAPACITY))
+        occ = int(loc.get("occupied_pairs", 0))
+        pct = round((occ / max(1, cap)) * 100.0, 1)
+        r = int(loc.get("row", 1))
+        rk = int(loc.get("rack", 1))
+        c = int(loc.get("cell", 1))
+
+        # Heatmap intensity bucket: 0 (empty), 1 (1-40%), 2 (41-75%), 3 (76-90%), 4 (91-100% full)
+        intensity = 0 if occ == 0 else (1 if pct <= 40 else (2 if pct <= 75 else (3 if pct <= 90 else 4)))
+        rack_key = f"R{r:02d}-RK{rk}"
+        rack_aggregates[rack_key]["capacity"] += cap
+        rack_aggregates[rack_key]["occupied"] += occ
+        rack_aggregates[rack_key]["cells"] += 1
+
+        heatmap_cells.append({
+            "location_code": loc.get("location_code", _make_location_code(r, rk, c)),
+            "row": r,
+            "rack": rk,
+            "cell": c,
+            "zone": loc.get("zone", "main"),
+            "capacity_pairs": cap,
+            "occupied_pairs": occ,
+            "utilization_pct": pct,
+            "status": loc.get("status", "empty"),
+            "intensity": intensity,
+        })
+
+    racks_summary = []
+    for rk, agg in sorted(rack_aggregates.items()):
+        u_pct = round((agg["occupied"] / max(1, agg["capacity"])) * 100.0, 1)
+        racks_summary.append({
+            "rack": rk,
+            "capacity": agg["capacity"],
+            "occupied": agg["occupied"],
+            "utilization_pct": u_pct,
+            "status": "CONGESTED" if u_pct >= 90 else ("OPTIMAL" if u_pct >= 40 else "UNDERUTILIZED"),
+        })
+
+    return {
+        "summary": {
+            "total_cells": total_cells,
+            "occupied_cells": occupied_cells,
+            "empty_cells": empty_cells,
+            "blocked_cells": blocked_cells,
+            "total_capacity_pairs": total_capacity,
+            "total_occupied_pairs": total_occupied,
+            "overall_utilization_pct": overall_utilization_pct,
+        },
+        "racks": racks_summary,
+        "heatmap": heatmap_cells,
+    }
+
+
+@wms_router.get("/wms/analytics/picker-efficiency")
+async def warehouse_picker_efficiency(request: Request, days: int = 30):
+    """Calculates warehouse picker productivity, pick rates, and turnaround speed (A-005)."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    picklists = await db.picklists.find({}).to_list(5000)
+    picker_stats = defaultdict(lambda: {
+        "picklists_completed": 0,
+        "total_units_picked": 0,
+        "total_duration_minutes": 0.0,
+        "error_count": 0,
+    })
+
+    total_dispatched_picks = 0
+    for pl in picklists:
+        picker = pl.get("picker") or pl.get("created_by") or "Staff-1"
+        is_done = pl.get("status") in ("completed", "picked", "dispatched")
+        units = sum(int(it.get("qty", 1)) for it in (pl.get("items") or []))
+
+        if is_done:
+            total_dispatched_picks += 1
+            picker_stats[picker]["picklists_completed"] += 1
+            picker_stats[picker]["total_units_picked"] += units
+
+            # Time calculation
+            c_at = pl.get("created_at")
+            comp_at = pl.get("completed_at") or pl.get("updated_at")
+            if c_at and comp_at:
+                try:
+                    t1 = datetime.fromisoformat(str(c_at).replace("Z", "+00:00"))
+                    t2 = datetime.fromisoformat(str(comp_at).replace("Z", "+00:00"))
+                    dur = max(2.0, (t2 - t1).total_seconds() / 60.0)
+                    picker_stats[picker]["total_duration_minutes"] += dur
+                except Exception:
+                    picker_stats[picker]["total_duration_minutes"] += 15.0
+            else:
+                picker_stats[picker]["total_duration_minutes"] += 15.0
+
+    picker_scorecards = []
+    for picker, stats in picker_stats.items():
+        completed = stats["picklists_completed"]
+        units = stats["total_units_picked"]
+        mins = max(1.0, stats["total_duration_minutes"])
+        picks_per_hour = round((units / mins) * 60.0, 1)
+        avg_pick_time_mins = round(mins / max(1, completed), 1)
+
+        picker_scorecards.append({
+            "picker": picker,
+            "picklists_completed": completed,
+            "total_units_picked": units,
+            "total_hours": round(mins / 60.0, 2),
+            "units_per_hour": picks_per_hour,
+            "avg_time_per_picklist_mins": avg_pick_time_mins,
+            "performance_rating": "EXEMPLARY" if picks_per_hour >= 40 else ("NORMAL" if picks_per_hour >= 20 else "NEEDS_TRAINING"),
+        })
+
+    picker_scorecards.sort(key=lambda x: x["units_per_hour"], reverse=True)
+
+    return {
+        "period_days": days,
+        "total_picklists_completed": total_dispatched_picks,
+        "total_pickers_evaluated": len(picker_scorecards),
+        "pickers": picker_scorecards,
+    }
+

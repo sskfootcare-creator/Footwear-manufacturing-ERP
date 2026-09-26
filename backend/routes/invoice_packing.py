@@ -3521,3 +3521,155 @@ async def delete_packing_template(tid: str, request: Request):
     await db.packing_templates.delete_one({"_id": oid(tid)})
     await log_activity("delete_packing_template", "settings", f"Deleted packing template: {t.get('name')}", u["email"], db=db)
     return {"ok": True}
+
+
+# ── Invoice Variance Explanation & Approval Workflow (U-006) ──────────────────
+
+class InvoiceVarianceIn(BaseModel):
+    variance_reason: str
+    variance_category: str = "off_standard_adjustment"
+    variance_amount: float
+    notes: Optional[str] = ""
+    attachment_url: Optional[str] = None
+
+
+class InvoiceVarianceApprovalIn(BaseModel):
+    approved: bool
+    approval_notes: Optional[str] = ""
+
+
+@invoice_packing_router.post("/invoices/{id}/variance")
+async def record_invoice_variance(id: str, payload: InvoiceVarianceIn, request: Request):
+    """Submit an explanation and financial justification for an invoice mismatch or off-standard charge (U-006)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "finance", "billing")(u)
+    db = _get_db(request)
+
+    target_oid = oid(id)
+    inv = await db.invoices.find_one({"_id": target_oid})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+
+    user_email = u.get("email") or "system"
+    now = now_iso()
+
+    variance_entry = {
+        "invoice_id": id,
+        "invoice_no": inv.get("invoice_no"),
+        "variance_reason": payload.variance_reason.strip(),
+        "variance_category": payload.variance_category,
+        "variance_amount": float(payload.variance_amount),
+        "notes": payload.notes or "",
+        "attachment_url": payload.attachment_url,
+        "submitted_by": user_email,
+        "submitted_at": now,
+        "status": "pending_approval",
+    }
+    ins = await db.invoice_variances.insert_one(variance_entry)
+    variance_entry["id"] = str(ins.inserted_id)
+    variance_entry.pop("_id", None)
+
+    # Attach to main invoice document
+    await db.invoices.update_one(
+        {"_id": target_oid},
+        {"$set": {
+            "has_variance": True,
+            "variance_status": "pending_approval",
+            "last_variance_id": variance_entry["id"],
+            "variance_reason": payload.variance_reason,
+            "variance_amount": float(payload.variance_amount),
+            "variance_submitted_at": now,
+            "variance_submitted_by": user_email,
+        }}
+    )
+
+    await log_activity(
+        "record_invoice_variance", "invoices",
+        f"Submitted variance explanation for invoice {inv.get('invoice_no')}: {payload.variance_reason} (Amount: {payload.variance_amount})",
+        user_email, db=db
+    )
+
+    return {"ok": True, "variance": variance_entry}
+
+
+@invoice_packing_router.post("/invoices/{id}/variance/approve")
+async def approve_invoice_variance(id: str, payload: InvoiceVarianceApprovalIn, request: Request):
+    """Approve or reject a submitted invoice variance with manager audit notes (U-006)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = _get_db(request)
+
+    target_oid = oid(id)
+    inv = await db.invoices.find_one({"_id": target_oid})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+
+    user_email = u.get("email") or "system"
+    now = now_iso()
+    new_status = "approved" if payload.approved else "rejected"
+
+    await db.invoices.update_one(
+        {"_id": target_oid},
+        {"$set": {
+            "variance_status": new_status,
+            "variance_approved_by": user_email,
+            "variance_approved_at": now,
+            "variance_approval_notes": payload.approval_notes or "",
+        }}
+    )
+
+    await db.invoice_variances.update_many(
+        {"invoice_id": id, "status": "pending_approval"},
+        {"$set": {
+            "status": new_status,
+            "reviewed_by": user_email,
+            "reviewed_at": now,
+            "review_notes": payload.approval_notes or "",
+        }}
+    )
+
+    await log_activity(
+        "approve_invoice_variance", "invoices",
+        f"Variance for invoice {inv.get('invoice_no')} marked {new_status} by {user_email}",
+        user_email, db=db
+    )
+
+    return {"ok": True, "invoice_id": id, "variance_status": new_status}
+
+
+@invoice_packing_router.get("/invoices/{id}/variance")
+async def get_invoice_variance(id: str, request: Request):
+    """Retrieve all logged variance explanations and audit decisions for an invoice (U-006)."""
+    await _get_user(request)
+    db = _get_db(request)
+
+    target_oid = oid(id)
+    inv = await db.invoices.find_one({"_id": target_oid})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+
+    variances = await db.invoice_variances.find({"invoice_id": id}).sort("submitted_at", -1).to_list(100)
+    for v in variances:
+        v["id"] = str(v.pop("_id"))
+
+    return {
+        "invoice_id": id,
+        "invoice_no": inv.get("invoice_no"),
+        "variance_status": inv.get("variance_status", "none"),
+        "variances": variances,
+    }
+
+
+@invoice_packing_router.get("/invoices-variances/pending")
+async def list_pending_invoice_variances(request: Request):
+    """List all invoices requiring accounting/manager approval for variances (U-006)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "finance")(u)
+    db = _get_db(request)
+
+    pending = await db.invoice_variances.find({"status": "pending_approval"}).sort("submitted_at", -1).to_list(100)
+    for p in pending:
+        p["id"] = str(p.pop("_id"))
+
+    return {"pending_variances": pending, "total": len(pending)}
+

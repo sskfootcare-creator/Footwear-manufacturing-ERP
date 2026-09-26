@@ -10,6 +10,8 @@ import {
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
   Check, Bell, TrendingUp, Landmark,
 } from "lucide-react";
+import AlertBanner from "@/components/AlertBanner";
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
    NAV GROUPS — single source of truth
@@ -53,6 +55,7 @@ const NAV_GROUPS = [
       { to: "/b2b-profitability", label: "B2B Profitability", icon: TrendingUp,  roles: ["admin","manager"] },
       { to: "/defects",           label: "Defects",           icon: AlertOctagon,roles: ["admin","manager","production"] },
       { to: "/reports",    label: "Reports",      icon: BarChart3,   roles: ["admin","manager"] },
+      { to: "/analytics",  label: "Analytics & Intelligence", icon: TrendingUp, roles: ["admin","manager","production","sales"] },
     ],
   },
   {
@@ -67,6 +70,7 @@ const NAV_GROUPS = [
       { to: "/online-profitability", label: "Profitability",         icon: BarChart3,     roles: ["admin","manager"] },
       { to: "/warehouse",            label: "Warehouse",             icon: Warehouse,     roles: ["admin","manager","production"] },
       { to: "/picklists",            label: "Picklists",             icon: ClipboardList, roles: ["admin","manager","production"] },
+      { to: "/mobile/picklist",      label: "Mobile Picker Flow",    icon: ClipboardList, roles: ["admin","manager","production"] },
       { to: "/warehouse/reports",    label: "Warehouse Reports",     icon: BarChart3,     roles: ["admin","manager"] },
       { to: "/pending-list",         label: "Pending Product List",  icon: PackageOpen,   roles: ["admin","manager","production"] },
     ],
@@ -881,6 +885,7 @@ export default function AppShell() {
         className="flex-1 min-w-0 lg:pl-64 mobile-main-content"
         data-testid="main-content"
       >
+        <AlertBanner />
         <Outlet key={workspace} context={{ workspace }} />
       </main>
 

@@ -1169,6 +1169,208 @@ async def get_sync_failures_endpoint(
     return await get_supabase_sync_failures(db, collection=collection, limit=capped_limit)
 
 
+# ── Task Progress & Real-Time ETA Tracking (U-004) ────────────────────────────
+
+_task_progress_store: Dict[str, Dict[str, Any]] = {}
+
+
+@app.get("/api/tasks/{task_id}/progress")
+async def get_task_progress(task_id: str, request: Request):
+    """Retrieve real-time processing progress and ETA for background/import tasks (U-004)."""
+    prog = _task_progress_store.get(task_id)
+    if not prog:
+        doc = await db.task_progress.find_one({"task_id": task_id})
+        if doc:
+            doc.pop("_id", None)
+            prog = doc
+    if not prog:
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "percent": 100.0,
+            "processed": 1,
+            "total": 1,
+            "eta_seconds": 0,
+            "message": "Task complete or not found",
+        }
+    return prog
+
+
+@app.post("/api/tasks/{task_id}/progress")
+async def update_task_progress(task_id: str, payload: Dict[str, Any], request: Request):
+    """Update progress and remaining ETA for long-running batch operations (U-004)."""
+    total = int(payload.get("total", 100))
+    processed = int(payload.get("processed", 0))
+    percent = round((processed / max(1, total)) * 100.0, 1)
+    status = payload.get("status", "processing" if percent < 100.0 else "completed")
+
+    elapsed = float(payload.get("elapsed_seconds", 1.0))
+    rate = processed / max(0.1, elapsed)
+    remaining_items = max(0, total - processed)
+    eta_seconds = round(remaining_items / rate) if rate > 0 else 0
+
+    record = {
+        "task_id": task_id,
+        "status": status,
+        "percent": min(100.0, percent),
+        "processed": processed,
+        "total": total,
+        "eta_seconds": eta_seconds,
+        "current_item": payload.get("current_item", ""),
+        "error": payload.get("error"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _task_progress_store[task_id] = record
+    await db.task_progress.update_one({"task_id": task_id}, {"$set": record}, upsert=True)
+    return record
+
+
+# ── Entity Revision History & Revert Controls (U-008) ─────────────────────────
+
+@app.get("/api/revisions/{entity_type}/{entity_id}")
+async def get_entity_revisions(entity_type: str, entity_id: str, request: Request):
+    """Retrieve revision snapshot history for key entities like Invoices, POs, and Inventory (U-008)."""
+    u = await _get_auth_user(request)
+    require_roles("admin", "manager", "inventory", "sales", "finance")(u)
+
+    revs = await db.entity_revisions.find(
+        {"entity_type": entity_type, "entity_id": str(entity_id)}
+    ).sort("created_at", -1).to_list(50)
+
+    for r in revs:
+        r["id"] = str(r.pop("_id"))
+    return {"entity_type": entity_type, "entity_id": entity_id, "revisions": revs}
+
+
+@app.post("/api/revisions/{entity_type}/{entity_id}/revert")
+async def revert_entity_revision(entity_type: str, entity_id: str, payload: Dict[str, Any], request: Request):
+    """Reverts an entity back to a chosen previous revision snapshot with full audit trail (U-008)."""
+    u = await _get_auth_user(request)
+    require_roles("admin", "manager")(u)
+
+    revision_id = payload.get("revision_id")
+    if not revision_id:
+        raise HTTPException(400, "revision_id is required")
+
+    rev = await db.entity_revisions.find_one({"_id": ObjectId(revision_id)})
+    if not rev:
+        raise HTTPException(404, "Revision snapshot not found")
+
+    snapshot_data = rev.get("snapshot")
+    if not snapshot_data:
+        raise HTTPException(400, "Revision has no valid snapshot data")
+
+    collection_map = {
+        "invoice": "invoices",
+        "invoices": "invoices",
+        "po": "pos",
+        "pos": "pos",
+        "inventory": "fg_inventory",
+        "job": "production_jobs",
+        "jobs": "production_jobs",
+    }
+    coll_name = collection_map.get(entity_type, entity_type)
+    coll = db[coll_name]
+    target_oid = ObjectId(entity_id) if ObjectId.is_valid(entity_id) else entity_id
+
+    # Create safety backup snapshot before revert
+    current = await coll.find_one({"_id": target_oid})
+    now = datetime.now(timezone.utc).isoformat()
+    if current:
+        safe_curr = dict(current)
+        safe_curr.pop("_id", None)
+        await db.entity_revisions.insert_one({
+            "entity_type": entity_type,
+            "entity_id": str(entity_id),
+            "snapshot": safe_curr,
+            "reason": f"Pre-revert safety snapshot prior to restoring revision {revision_id}",
+            "created_by": u.get("email", "system"),
+            "created_at": now,
+        })
+
+    restore_copy = dict(snapshot_data)
+    restore_copy.pop("_id", None)
+    restore_copy["reverted_at"] = now
+    restore_copy["reverted_by"] = u.get("email", "system")
+
+    await coll.update_one({"_id": target_oid}, {"$set": restore_copy})
+    return {"ok": True, "reverted_to_revision": revision_id, "entity_type": entity_type, "entity_id": entity_id}
+
+
+# ── Warehouse Offline Mode & Sync-on-Reconnect (U-010) ────────────────────────
+
+@app.post("/api/sync/offline-batch")
+async def process_offline_batch(payload: Dict[str, Any], request: Request):
+    """Sync queued offline operations from warehouse mobile devices upon reconnecting (U-010)."""
+    u = await _get_auth_user(request)
+    operations = payload.get("operations") or []
+    import secrets as _secrets
+    client_sync_id = payload.get("client_sync_id") or _secrets.token_hex(8)
+
+    results = []
+    synced_count = 0
+    failed_count = 0
+    now = datetime.now(timezone.utc).isoformat()
+    user_email = u.get("email", "floor_user")
+
+    for op in operations:
+        op_id = op.get("id") or _secrets.token_hex(6)
+        op_type = op.get("type", "generic_sync")
+        op_payload = op.get("payload") or {}
+
+        try:
+            if op_type == "wms_pick":
+                pl_id = op_payload.get("picklist_id")
+                item_idx = int(op_payload.get("item_idx", 0))
+                p_oid = ObjectId(pl_id) if ObjectId.is_valid(str(pl_id)) else str(pl_id)
+                await db.picklists.update_one(
+                    {"_id": p_oid},
+                    {"$set": {
+                        f"items.{item_idx}.picked": True,
+                        f"items.{item_idx}.picked_at": now,
+                        f"items.{item_idx}.offline_synced": True,
+                    }}
+                )
+            elif op_type == "barcode_scan":
+                await db.barcode_scan_logs.insert_one({
+                    "barcode": op_payload.get("barcode"),
+                    "location_code": op_payload.get("location_code"),
+                    "scanned_at": op.get("timestamp") or now,
+                    "user": user_email,
+                    "offline_synced": True,
+                })
+            elif op_type == "stock_count":
+                await db.stock_audit_counts.insert_one({
+                    "location_code": op_payload.get("location_code"),
+                    "counted_pairs": op_payload.get("counted_pairs"),
+                    "audited_by": user_email,
+                    "timestamp": op.get("timestamp") or now,
+                    "offline_synced": True,
+                })
+            else:
+                await db.offline_sync_events.insert_one({
+                    "sync_id": client_sync_id,
+                    "op_type": op_type,
+                    "payload": op_payload,
+                    "user": user_email,
+                    "synced_at": now,
+                })
+
+            results.append({"id": op_id, "status": "synced"})
+            synced_count += 1
+        except Exception as e:
+            results.append({"id": op_id, "status": "failed", "error": str(e)})
+            failed_count += 1
+
+    return {
+        "client_sync_id": client_sync_id,
+        "total_operations": len(operations),
+        "synced": synced_count,
+        "failed": failed_count,
+        "results": results,
+    }
+
+
 app.include_router(api)
 app.include_router(auth_router)
 app.include_router(plm_router)
@@ -1184,12 +1386,12 @@ app.include_router(materials_router)
 app.include_router(inventory_router)
 app.include_router(invoice_packing_router)
 app.include_router(wms_router)
+app.include_router(reports_router)
 app.include_router(pos_router)
 app.include_router(online_orders_router)
 app.include_router(styles_router)
 app.include_router(banking_router)
 app.include_router(po_ean_router)
-app.include_router(reports_router)
 app.include_router(online_returns_router)
 
 
