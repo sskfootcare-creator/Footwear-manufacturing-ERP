@@ -262,6 +262,8 @@ def require_module(*modules: str):
                 detail=f"Access denied: You do not have permission for the '{', '.join(modules)}' module."
             )
         return user
+    return checker
+
 ROUTE_MODULE_MAP = {
     "/api/inventory": ["inventory"],
     "/api/materials": ["inventory", "procurement"],
