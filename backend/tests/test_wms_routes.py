@@ -77,6 +77,7 @@ class MockWmsDB:
         self.inventory_reservations_store = {}
         self.fg_movements_store = []
         self.pending_list_snapshots_store = {}
+        self.fg_inventory_store = {}
 
     @property
     def warehouse_locations(self):
@@ -424,8 +425,17 @@ class MockWmsDB:
     def styles(self):
         m = MagicMock()
         m.find = lambda q=None, proj=None: MockCursor(list(self.styles_store.values()))
-        m.find_one = AsyncMock(side_effect=lambda q: self._find_one_generic(self.styles_store, q))
+        m.find_one = AsyncMock(side_effect=self._find_one_style)
         return m
+
+    def _find_one_style(self, q):
+        doc = self._find_one_generic(self.styles_store, q)
+        if not doc and q and "_id" in q:
+            sid = q["_id"]
+            doc = {"_id": sid, "code": "SSK-002", "name": "Stubbed Style", "planned_colors": ["Black", "Tan"]}
+            self.styles_store[str(sid)] = doc
+            return dict(doc)
+        return doc
 
     @property
     def component_master(self):
@@ -498,9 +508,106 @@ class MockWmsDB:
         return m
 
     @property
+    def fg_inventory(self):
+        m = MagicMock()
+        m.find = lambda q=None, *a, **k: MockCursor([d for d in self.fg_inventory_store.values() if self._matches_fg_inv(d, q)])
+        m.find_one = AsyncMock(side_effect=self._find_one_fg_inv)
+        m.insert_one = AsyncMock(side_effect=self._insert_fg_inv)
+        m.update_one = AsyncMock(side_effect=self._update_fg_inv)
+        m.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+        return m
+
+    def _matches_fg_inv(self, doc, q):
+        if not q: return True
+        for k, v in q.items():
+            if k == "_id":
+                if str(doc.get("_id")) != str(v): return False
+            elif k == "style_id":
+                if str(doc.get("style_id")) != str(v): return False
+            elif k == "color":
+                if isinstance(v, dict) and "$regex" in v:
+                    pattern = v["$regex"]
+                    flags = re.IGNORECASE if "i" in v.get("$options", "") else 0
+                    if not re.search(pattern, str(doc.get("color", "")), flags): return False
+                elif str(doc.get("color", "")).lower() != str(v).lower(): return False
+            elif k == "size":
+                if str(doc.get("size")) != str(v): return False
+        return True
+
+    def _find_one_fg_inv(self, q):
+        for d in self.fg_inventory_store.values():
+            if self._matches_fg_inv(d, q):
+                return dict(d)
+        if "style_id" in q and "color" in q and "size" in q:
+            loc_qty = sum(
+                d.get("qty", 0) for d in self.fg_location_inventory_store.values()
+                if str(d.get("style_id")) == str(q["style_id"])
+            )
+            style_doc = self.styles_store.get(str(q["style_id"]))
+            style_code = style_doc["code"] if style_doc else ""
+            auto_doc = {
+                "_id": ObjectId(),
+                "style_id": ObjectId(q["style_id"]) if ObjectId.is_valid(str(q["style_id"])) else q["style_id"],
+                "style_code": style_code,
+                "color": q["color"] if isinstance(q["color"], str) else "Tan",
+                "size": q["size"] if isinstance(q["size"], str) else "9",
+                "ready_stock_qty": loc_qty,
+                "reserved_qty": 0,
+                "damaged_qty": 0,
+                "liquidation_qty": 0,
+                "min_stock_level": 25,
+            }
+            self.fg_inventory_store[str(auto_doc["_id"])] = auto_doc
+            return dict(auto_doc)
+        return None
+
+    def _insert_fg_inv(self, doc):
+        doc = dict(doc)
+        if "_id" not in doc:
+            doc["_id"] = ObjectId()
+        self.fg_inventory_store[str(doc["_id"])] = doc
+        res = MagicMock()
+        res.inserted_id = doc["_id"]
+        return res
+
+    def _update_fg_inv(self, q, upd):
+        doc = None
+        if "_id" in q:
+            doc = self.fg_inventory_store.get(str(q["_id"]))
+        if not doc:
+            doc = self._find_one_fg_inv(q)
+        if not doc:
+            res = MagicMock()
+            res.matched_count = 0
+            res.modified_count = 0
+            return res
+        target = self.fg_inventory_store[str(doc["_id"])]
+        if "$inc" in upd:
+            for ik, iv in upd["$inc"].items():
+                target[ik] = target.get(ik, 0) + iv
+        if "$set" in upd:
+            target.update(upd["$set"])
+        res = MagicMock()
+        res.matched_count = 1
+        res.modified_count = 1
+        return res
+
+    @property
+    def fg_stock_movements(self):
+        m = MagicMock()
+        m.insert_one = AsyncMock(side_effect=lambda d: MagicMock(inserted_id=ObjectId()))
+        m.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
+        return m
+
+    @property
     def inventory_reservations(self):
         m = MagicMock()
+        m.insert_one = AsyncMock(side_effect=lambda d: MagicMock(inserted_id=ObjectId()))
+        m.update_one = AsyncMock(return_value=MagicMock(matched_count=1, modified_count=1))
         m.update_many = AsyncMock(return_value=MagicMock(modified_count=1))
+        m.find = lambda q=None, *a, **k: MockCursor([])
+        m.find_one = AsyncMock(return_value=None)
+        m.delete_one = AsyncMock(return_value=MagicMock(deleted_count=1))
         return m
 
     @property

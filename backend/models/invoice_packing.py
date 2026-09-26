@@ -10,11 +10,13 @@ class InvoiceGenerate(BaseModel):
     transport_mode: Optional[str] = ""
     vehicle_no: Optional[str] = ""
     supply_date: Optional[str] = ""
+    idempotency_key: Optional[str] = None
 
 
 class DispatchCreate(BaseModel):
     job_ids: List[str]
     po_id: str
+    idempotency_key: Optional[str] = None
     dispatch_quantities: Optional[Dict[str, int]] = None
     # job_id -> quantity to dispatch now. If a job_id is in job_ids but NOT in this
     # dict, dispatch its full remaining quantity (backward-compatible default —

@@ -20,6 +20,15 @@ def get_db():
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+async def _get_user(request: Request):
+    import server
+    if getattr(server, "get_current_user", None) is not None:
+        return await server.get_current_user(request)
+    from auth import get_current_user_factory
+    db = getattr(request.app, "mongodb", None) or get_db()
+    fn = await get_current_user_factory(db)
+    return await fn(request)
+
 online_returns_router = APIRouter(prefix="/api/online-returns", tags=["Online Returns Engine"])
 
 # Business classification taxonomy for footwear returns
@@ -114,6 +123,8 @@ async def upload_myntra_returns(
     month: str = Query(..., description="Reporting month YYYY-MM (e.g. 2026-08)"),
     platform: str = Query("myntra", description="Platform identifier"),
 ):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
     db = get_db()
     content = await file.read()
     try:
@@ -164,21 +175,35 @@ async def upload_myntra_returns(
         records.append(rec)
     
     if records:
-        await db.online_returns_records.delete_many({"month": batch_month, "platform": platform.lower()})
-        await db.online_returns_records.insert_many(records)
-        
-        await db.online_returns_batches.update_one(
-            {"month": batch_month, "platform": platform.lower()},
-            {"$set": {
-                "batch_id": batch_id,
+        try:
+            # 1. Insert new batch records first without touching previous data
+            await db.online_returns_records.insert_many(records)
+            
+            # 2. Only after insert succeeds, remove previous batches for this month & platform
+            await db.online_returns_records.delete_many({
                 "month": batch_month,
                 "platform": platform.lower(),
-                "filename": file.filename,
-                "total_rows": len(records),
-                "uploaded_at": now_iso(),
-            }},
-            upsert=True
-        )
+                "batch_id": {"$ne": batch_id}
+            })
+            
+            # 3. Update batch tracking metadata
+            await db.online_returns_batches.update_one(
+                {"month": batch_month, "platform": platform.lower()},
+                {"$set": {
+                    "batch_id": batch_id,
+                    "month": batch_month,
+                    "platform": platform.lower(),
+                    "filename": file.filename,
+                    "total_rows": len(records),
+                    "uploaded_at": now_iso(),
+                    "uploaded_by": u.get("email") or u.get("name") or "admin",
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            # Rollback: Clean up any records from this failed batch so existing valid data is preserved
+            await db.online_returns_records.delete_many({"batch_id": batch_id})
+            raise HTTPException(status_code=500, detail=f"Failed to ingest return records: {str(e)}")
         
     return {
         "success": True,
@@ -194,7 +219,10 @@ async def get_returns_analytics(
     month: Optional[str] = Query(None, description="Month YYYY-MM"),
     platform: str = Query("myntra"),
     style_code: Optional[str] = Query(None),
+    freight_rate: Optional[float] = Query(None, description="Configurable reverse freight cost per unit"),
 ):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "operator", "production", "viewer")(u)
     db = get_db()
     
     # Auto select latest month if not specified
@@ -283,6 +311,26 @@ async def get_returns_analytics(
                 styles_img_map[st_c] = img
                 styles_img_map[st_c.replace("-", "_")] = img
 
+    # Resolve configurable freight rate
+    rate = 85.0
+    rate_source = "default"
+    if freight_rate is not None and freight_rate > 0:
+        rate = float(freight_rate)
+        rate_source = "query_parameter"
+    else:
+        try:
+            sys_setting = await db.system_settings.find_one({"key": "reverse_freight_rate"})
+            if sys_setting and sys_setting.get("value") is not None:
+                rate = float(sys_setting["value"])
+                rate_source = "system_settings"
+            else:
+                plat_setting = await db.platform_settings.find_one({"platform": platform.lower()})
+                if plat_setting and plat_setting.get("reverse_freight_rate") is not None:
+                    rate = float(plat_setting["reverse_freight_rate"])
+                    rate_source = "platform_settings"
+        except Exception:
+            pass
+
     # Format styles ranking list
     ranked_styles = []
     for st, d in styles_map.items():
@@ -306,7 +354,7 @@ async def get_returns_analytics(
             "categories": dict(d["categories"]),
             "reasons": dict(d["reasons"]),
             "sizes": dict(d["sizes"]),
-            "estimated_reverse_freight": d["total"] * 85.0, # Average ₹85 reverse freight per return
+            "estimated_reverse_freight": round(d["total"] * rate, 2),
         })
     ranked_styles.sort(key=lambda s: s["total_returns"], reverse=True)
     
@@ -322,7 +370,10 @@ async def get_returns_analytics(
         "category_breakdown": dict(category_counts),
         "top_reasons": sorted([{"reason": k, "count": v} for k, v in reason_counts.items()], key=lambda x: x["count"], reverse=True)[:10],
         "styles": ranked_styles,
-        "total_reverse_freight_damage": round(total_returns * 85.0, 2),
+        "total_reverse_freight_damage": round(total_returns * rate, 2),
+        "reverse_freight_rate_applied": rate,
+        "is_freight_estimated": True,
+        "freight_rate_source": rate_source,
     }
 
 @online_returns_router.get("/prescriptions")
@@ -331,6 +382,8 @@ async def get_return_prescriptions(
     month: Optional[str] = Query(None),
     platform: str = Query("myntra"),
 ):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "operator", "production", "viewer")(u)
     analytics = await get_returns_analytics(request, month=month, platform=platform, style_code=None)
     styles = analytics.get("styles", [])
     
@@ -423,6 +476,8 @@ async def get_return_prescriptions(
 
 @online_returns_router.post("/style-photo")
 async def update_style_photo(payload: StylePhotoPayload, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
     db = get_db()
     st = payload.style_code.strip()
     img = payload.image_url.strip()
@@ -430,7 +485,12 @@ async def update_style_photo(payload: StylePhotoPayload, request: Request):
         raise HTTPException(status_code=400, detail="style_code and image_url are required")
     await db.online_style_photos.update_one(
         {"style_code": st},
-        {"$set": {"style_code": st, "image_url": img, "updated_at": now_iso()}},
+        {"$set": {
+            "style_code": st,
+            "image_url": img,
+            "updated_at": now_iso(),
+            "updated_by": u.get("email") or u.get("name") or "admin"
+        }},
         upsert=True
     )
     await db.styles.update_one(
@@ -441,8 +501,10 @@ async def update_style_photo(payload: StylePhotoPayload, request: Request):
 
 @online_returns_router.post("/actions")
 async def record_applied_fix(payload: AppliedFixPayload, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
     db = get_db()
-    u = getattr(request.state, "user", None)
+    user_email = u.get("email") or u.get("name") or "admin"
     doc = {
         "style_code": payload.style_code.strip(),
         "action_type": payload.action_type,
@@ -454,14 +516,16 @@ async def record_applied_fix(payload: AppliedFixPayload, request: Request):
         "target_reduction_pct": payload.target_reduction_pct or 30.0,
         "status": "APPLIED",
         "created_at": now_iso(),
-        "user": u.get("email") if u else "admin",
+        "user": user_email,
     }
     res = await db.online_return_actions.insert_one(doc)
     doc["_id"] = str(res.inserted_id)
     return doc
 
 @online_returns_router.get("/actions")
-async def list_applied_fixes(style_code: Optional[str] = None):
+async def list_applied_fixes(request: Request, style_code: Optional[str] = None):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "operator", "production", "viewer")(u)
     db = get_db()
     q = {}
     if style_code:
@@ -478,9 +542,26 @@ async def check_return_reduction_impact(
     request: Request,
     style_code: Optional[str] = None,
     platform: str = Query("myntra"),
+    freight_rate: Optional[float] = Query(None, description="Configurable reverse freight cost per unit"),
 ):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "operator", "production", "viewer")(u)
     db = get_db()
     
+    rate = 85.0
+    if freight_rate is not None and freight_rate > 0:
+        rate = float(freight_rate)
+    else:
+        try:
+            sys_setting = await db.system_settings.find_one({"key": "reverse_freight_rate"})
+            if sys_setting and sys_setting.get("value") is not None:
+                rate = float(sys_setting["value"])
+            else:
+                plat_setting = await db.platform_settings.find_one({"platform": platform.lower()})
+                if plat_setting and plat_setting.get("reverse_freight_rate") is not None:
+                    rate = float(plat_setting["reverse_freight_rate"])
+        except Exception:
+            pass
     # Find applied actions
     q = {}
     if style_code and isinstance(style_code, str):
@@ -503,14 +584,64 @@ async def check_return_reduction_impact(
             "style_code": st,
             "return_date": {"$gte": applied_date}
         })
-        
-        # Calculate reduction percentage
-        if pre_returns > 0:
-            reduction_pct = round(((pre_returns - post_returns) / pre_returns) * 100, 1)
+
+        # Calculate sales/shipped units in pre and post periods if available
+        pre_shipped = 0
+        post_shipped = 0
+        try:
+            pre_shipped = await db.online_orders.count_documents({
+                "style_code": st,
+                "order_date": {"$lt": applied_date}
+            })
+            post_shipped = await db.online_orders.count_documents({
+                "style_code": st,
+                "order_date": {"$gte": applied_date}
+            })
+        except Exception:
+            pass
+
+        # Calculate date spans for normalization
+        earliest_rec = await db.online_returns_records.find_one(
+            {"platform": platform.lower(), "style_code": st, "return_date": {"$lt": applied_date}},
+            sort=[("return_date", 1)]
+        )
+        latest_rec = await db.online_returns_records.find_one(
+            {"platform": platform.lower(), "style_code": st, "return_date": {"$gte": applied_date}},
+            sort=[("return_date", -1)]
+        )
+
+        pre_days = 30
+        post_days = 30
+        if earliest_rec and earliest_rec.get("return_date"):
+            try:
+                d0 = datetime.fromisoformat(str(earliest_rec["return_date"])[:10])
+                d_app = datetime.fromisoformat(str(applied_date)[:10])
+                pre_days = max(1, (d_app - d0).days)
+            except Exception:
+                pre_days = 30
+        if latest_rec and latest_rec.get("return_date"):
+            try:
+                d_latest = datetime.fromisoformat(str(latest_rec["return_date"])[:10])
+                d_app = datetime.fromisoformat(str(applied_date)[:10])
+                post_days = max(1, (d_latest - d_app).days)
+            except Exception:
+                post_days = 30
+
+        pre_daily_rate = round(pre_returns / pre_days, 3)
+        post_daily_rate = round(post_returns / post_days, 3)
+
+        volume_normalized = False
+        if pre_shipped > 0 and post_shipped > 0:
+            pre_rate = (pre_returns / pre_shipped) * 100
+            post_rate = (post_returns / post_shipped) * 100
+            reduction_pct = round(((pre_rate - post_rate) / pre_rate) * 100, 1) if pre_rate > 0 else 0.0
+            volume_normalized = True
+        elif pre_daily_rate > 0:
+            reduction_pct = round(((pre_daily_rate - post_daily_rate) / pre_daily_rate) * 100, 1)
         else:
             reduction_pct = 0.0
-            
-        saved_freight = max(0.0, round((pre_returns - post_returns) * 85.0, 2))
+
+        saved_freight = max(0.0, round((pre_returns - post_returns) * rate, 2))
         
         status = "IN_PROGRESS"
         if pre_returns > 0:
@@ -527,8 +658,16 @@ async def check_return_reduction_impact(
             "applied_date": applied_date,
             "pre_fix_returns": pre_returns,
             "post_fix_returns": post_returns,
+            "pre_period_days": pre_days,
+            "post_period_days": post_days,
+            "pre_daily_returns": pre_daily_rate,
+            "post_daily_returns": post_daily_rate,
+            "pre_shipped_volume": pre_shipped if pre_shipped > 0 else None,
+            "post_shipped_volume": post_shipped if post_shipped > 0 else None,
+            "volume_normalized": volume_normalized,
             "reduction_pct": reduction_pct,
             "saved_freight": saved_freight,
+            "freight_rate_applied": rate,
             "status": status,
         })
         

@@ -3,13 +3,23 @@
 import re
 import csv
 import io
+import uuid
+import difflib
 import logging
+import inspect
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, HTTPException, Request, Depends, Query, File, UploadFile
 from fastapi.responses import PlainTextResponse
+
+
+async def _maybe_await(val):
+    if inspect.isawaitable(val):
+        return await val
+    return val
+
 
 from models.inventory import (
     FgInventoryIn,
@@ -84,13 +94,117 @@ async def _get_user(request: Request):
 # ══ FG INVENTORY ENGINE & HELPERS ═══════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════
 
+def _clean_color_str(raw: Any) -> str:
+    """Strip whitespace and collapse inner whitespace in color names."""
+    if raw is None:
+        return ""
+    return re.sub(r"\s+", " ", str(raw)).strip()
+
+
+def _validate_and_clean_size(size: Any) -> str:
+    """Validate and clean shoe size string. Rejects composite/comma-separated strings."""
+    if size is None:
+        raise HTTPException(400, "Size is required")
+    s = str(size).strip()
+    if not s:
+        raise HTTPException(400, "Size cannot be empty")
+    # Reject multi-value sizes like '37,38,39,40,41,42'
+    if any(sep in s for sep in [",", ";", "\n", "\t"]):
+        raise HTTPException(
+            400,
+            f"Invalid size '{s}'. Size must be a single value, not comma-separated or multi-value."
+        )
+    if len(s) > 12:
+        raise HTTPException(
+            400,
+            f"Invalid size '{s}'. Size value is too long (maximum 12 characters)."
+        )
+    return s
+
+
+async def _resolve_canonical_color(db, style_id: str, raw_color: str, auto_correct: bool = True) -> str:
+    """Normalize color against existing inventory rows for this style, planned colors,
+    and color master.
+    1. Trims and case-insensitively matches existing FG colors for this style.
+    2. Case-insensitively matches style planned colors and color master.
+    3. If no exact match and auto_correct=True, fuzzy-matches (similarity >= 0.75) to resolve typos.
+    4. Defaults to clean UPPERCASE string.
+    """
+    clean = _clean_color_str(raw_color)
+    if not clean:
+        raise HTTPException(400, "Color cannot be empty")
+
+    clean_lower = clean.lower()
+
+    # 1. Check existing rows in fg_inventory for this style
+    fg_rows = []
+    try:
+        s_oid = ObjectId(style_id)
+        fg_rows = await db.fg_inventory.find(
+            {"style_id": s_oid},
+            {"color": 1}
+        ).to_list(1000)
+    except Exception:
+        pass
+    existing_fg_colors = list(dict.fromkeys(r["color"] for r in fg_rows if r.get("color")))
+
+    for c in existing_fg_colors:
+        if c.lower() == clean_lower:
+            return c
+
+    # 2. Check style's planned_colors in styles & style_lifecycle
+    style_planned = []
+    try:
+        s_oid = ObjectId(style_id)
+        style = await db.styles.find_one({"_id": s_oid})
+        if style and style.get("planned_colors"):
+            style_planned.extend(style.get("planned_colors") or [])
+        lifecycle = await db.style_lifecycle.find_one({"style_id": s_oid})
+        if lifecycle and lifecycle.get("planned_colors"):
+            style_planned.extend(lifecycle.get("planned_colors") or [])
+    except Exception:
+        pass
+
+    style_planned = list(dict.fromkeys(str(c).strip() for c in style_planned if c and str(c).strip()))
+    for c in style_planned:
+        if c.lower() == clean_lower:
+            return c
+
+    # 3. Check color_master collection
+    cms = []
+    try:
+        cms = await db.color_master.find({"active": {"$ne": False}}).to_list(500)
+    except Exception:
+        pass
+
+    for doc in cms:
+        cm_name = (doc.get("color_name") or "").strip()
+        cm_code = (doc.get("color_code") or "").strip()
+        if cm_name.lower() == clean_lower or (cm_code and cm_code.lower() == clean_lower):
+            return cm_name
+
+    # 4. Fuzzy typo correction if enabled
+    if auto_correct:
+        candidate_pool = list(dict.fromkeys(
+            existing_fg_colors + style_planned + [(d.get("color_name") or "").strip() for d in cms if d.get("color_name")]
+        ))
+        candidate_map = {c.upper(): c for c in candidate_pool if c}
+        matches = difflib.get_close_matches(clean.upper(), list(candidate_map.keys()), n=1, cutoff=0.75)
+        if matches:
+            matched_key = matches[0]
+            matched_canonical = candidate_map[matched_key]
+            log.info(f"Fuzzy-resolved color '{clean}' to '{matched_canonical}' for style '{style_id}'")
+            return matched_canonical
+
+    # 5. Default: preserve clean input string
+    return clean
+
+
 async def _seed_fg_inventory_for_lifecycle(lifecycle_doc: dict, user_email: str, db=None) -> dict:
     """Auto-create fg_inventory rows for every planned (color, size) pair, at
     ready_stock_qty=0 and min_stock_level=planned_min_stock. Idempotent — if a row
     already exists for a (style_id, color, size), only the min_stock_level is updated
     (never overwrites existing quantities).
-
-    Returns a summary: {created, updated, pairs}
     """
     if db is None:
         import server
@@ -111,13 +225,21 @@ async def _seed_fg_inventory_for_lifecycle(lifecycle_doc: dict, user_email: str,
     created = 0
     updated = 0
     now = now_iso()
-    for color in colors:
-        for size in sizes:
+    for raw_color in colors:
+        clean_color = await _resolve_canonical_color(db, style_id, raw_color)
+        for raw_size in sizes:
+            clean_size = _validate_and_clean_size(raw_size)
             row = await db.fg_inventory.find_one({
                 "style_id": ObjectId(style_id),
-                "color":    color,
-                "size":     size,
+                "color":    clean_color,
+                "size":     clean_size,
             })
+            if not row:
+                row = await db.fg_inventory.find_one({
+                    "style_id": ObjectId(style_id),
+                    "color":    {"$regex": f"^{re.escape(clean_color)}$", "$options": "i"},
+                    "size":     clean_size,
+                })
             if row:
                 # Only bump the min_stock_level; never touch quantities
                 await db.fg_inventory.update_one(
@@ -130,8 +252,8 @@ async def _seed_fg_inventory_for_lifecycle(lifecycle_doc: dict, user_email: str,
                     await db.fg_inventory.insert_one({
                         "style_id":         ObjectId(style_id),
                         "style_code":       style_code,
-                        "color":            color,
-                        "size":             size,
+                        "color":            clean_color,
+                        "size":             clean_size,
                         "ready_stock_qty":  0,
                         "reserved_qty":     0,
                         "in_transit_qty":   0,
@@ -154,7 +276,9 @@ async def _seed_fg_inventory_for_lifecycle(lifecycle_doc: dict, user_email: str,
 
 
 async def _get_or_create_fg_row(style_id: str, color: str, size: str, db=None):
-    """Return the fg_inventory row for (style_id, color, size). Auto-create at zero if absent."""
+    """Return the fg_inventory row for (style_id, color, size). Auto-create at zero if absent.
+    Canonicalizes color and validates size.
+    """
     if db is None:
         import server
         db = server.db
@@ -162,6 +286,11 @@ async def _get_or_create_fg_row(style_id: str, color: str, size: str, db=None):
     style = await db.styles.find_one({"_id": ObjectId(style_id)})
     if not style:
         raise HTTPException(404, f"Style '{style_id}' not found")
+
+    size = _validate_and_clean_size(size)
+    color = await _resolve_canonical_color(db, style_id, color)
+
+    # 1. Exact match on canonical color and size
     row = await db.fg_inventory.find_one({
         "style_id": ObjectId(style_id),
         "color": color,
@@ -169,6 +298,16 @@ async def _get_or_create_fg_row(style_id: str, color: str, size: str, db=None):
     })
     if row:
         return row
+
+    # 2. Case-insensitive fallback to prevent duplicate row creation if legacy DB has variant case
+    row = await db.fg_inventory.find_one({
+        "style_id": ObjectId(style_id),
+        "color": {"$regex": f"^{re.escape(color)}$", "$options": "i"},
+        "size":  size,
+    })
+    if row:
+        return row
+
     doc = {
         "style_id":         ObjectId(style_id),
         "style_code":       style["code"],
@@ -188,8 +327,17 @@ async def _get_or_create_fg_row(style_id: str, color: str, size: str, db=None):
         doc["_id"] = res.inserted_id
         return doc
     except DuplicateKeyError:
+        row = await db.fg_inventory.find_one({
+            "style_id": ObjectId(style_id),
+            "color": color,
+            "size": size,
+        })
+        if row:
+            return row
         return await db.fg_inventory.find_one({
-            "style_id": ObjectId(style_id), "color": color, "size": size,
+            "style_id": ObjectId(style_id),
+            "color": {"$regex": f"^{re.escape(color)}$", "$options": "i"},
+            "size": size,
         })
 
 
@@ -215,7 +363,13 @@ async def _apply_movement(payload: "FgStockMovementIn", user_email: str, skip_lo
         import server
         db = server.db
 
+    payload.size = _validate_and_clean_size(payload.size)
+    payload.color = await _resolve_canonical_color(db, payload.style_id, payload.color)
+
     row = await _get_or_create_fg_row(payload.style_id, payload.color, payload.size, db=db)
+    # Ensure payload color and size match the row's canonical values
+    payload.color = row.get("color", payload.color)
+    payload.size  = row.get("size", payload.size)
 
     # ── Build the delta dict (field → signed change) ────────────────────
     if payload.movement_type == "adjustment":
@@ -241,6 +395,20 @@ async def _apply_movement(payload: "FgStockMovementIn", user_email: str, skip_lo
                 f"Movement blocked."
             )
 
+    # F-009: For reserved movement, enforce available stock >= requested quantity
+    if payload.movement_type == "reserved":
+        current_ready = int(row.get("ready_stock_qty", 0))
+        current_res = int(row.get("reserved_qty", 0))
+        current_dmg = int(row.get("damaged_qty", 0))
+        current_liq = int(row.get("liquidation_qty", 0))
+        avail = current_ready - current_res - current_dmg - current_liq
+        if avail < int(payload.quantity):
+            raise HTTPException(
+                400,
+                f"Insufficient available stock to reserve. Available: {avail}, requested: {payload.quantity}. "
+                f"Movement blocked."
+            )
+
     # ── Atomic $inc with concurrency guard (match on current values) ────
     match_filter = {"_id": row["_id"]}
     for field in delta:
@@ -250,68 +418,135 @@ async def _apply_movement(payload: "FgStockMovementIn", user_email: str, skip_lo
         "$inc": {field: int(d) for field, d in delta.items()},
         "$set": {"updated_at": now_iso()},
     }
-    res = await db.fg_inventory.update_one(match_filter, update)
-    if res.modified_count == 0:
-        raise HTTPException(
-            409,
-            "Concurrent modification detected on fg_inventory. Please retry the movement."
-        )
 
-    # ── Post the ledger row ─────────────────────────────────────────────
-    mv_doc = {
-        "style_id":       ObjectId(payload.style_id),
-        "style_code":     row.get("style_code", ""),
-        "color":          payload.color,
-        "size":           payload.size,
-        "movement_type":  payload.movement_type,
-        "quantity":       int(payload.quantity),
-        "reference_type": payload.reference_type,
-        "reference_id":   payload.reference_id or "",
-        "notes":          payload.notes or "",
-        "delta":          {k: int(v) for k, v in delta.items()},
-        "created_at":     now_iso(),
-        "by":             user_email,
-    }
-    if payload.movement_type == "adjustment":
-        mv_doc["adjustment_field"] = payload.adjustment_field
-    mv_res = await db.fg_stock_movements.insert_one(mv_doc)
-    mv_doc["_id"] = mv_res.inserted_id
+    # Tracking for transactional compensating rollback (F-006)
+    applied_inventory_delta = None
+    inserted_movement_id = None
+    reservation_actions = []
 
-    # ── Maintain inventory_reservations for reserve / unreserve / dispatch ──
-    if payload.movement_type == "reserved" and payload.online_order_id:
-        await db.inventory_reservations.insert_one({
-            "style_id":        ObjectId(payload.style_id),
-            "style_code":      row.get("style_code", ""),
-            "color":           payload.color,
-            "size":            payload.size,
-            "qty":             int(payload.quantity),
-            "online_order_id": payload.online_order_id,
-            "reserved_at":     now_iso(),
-            "released_at":     None,
-            "status":          "active",
-        })
-    elif payload.movement_type == "unreserved" and payload.online_order_id:
-        await db.inventory_reservations.update_many(
-            {
+    try:
+        res = await db.fg_inventory.update_one(match_filter, update)
+        if res.modified_count == 0:
+            raise HTTPException(
+                409,
+                "Concurrent modification detected on fg_inventory. Please retry the movement."
+            )
+        applied_inventory_delta = delta
+
+        # ── Post the ledger row ─────────────────────────────────────────────
+        mv_doc = {
+            "style_id":       ObjectId(payload.style_id),
+            "style_code":     row.get("style_code", ""),
+            "color":          payload.color,
+            "size":           payload.size,
+            "movement_type":  payload.movement_type,
+            "quantity":       int(payload.quantity),
+            "reference_type": payload.reference_type,
+            "reference_id":   payload.reference_id or "",
+            "notes":          payload.notes or "",
+            "delta":          {k: int(v) for k, v in delta.items()},
+            "created_at":     now_iso(),
+            "by":             user_email,
+        }
+        if payload.movement_type == "adjustment":
+            mv_doc["adjustment_field"] = payload.adjustment_field
+        mv_res = await db.fg_stock_movements.insert_one(mv_doc)
+        inserted_movement_id = mv_res.inserted_id
+        mv_doc["_id"] = inserted_movement_id
+
+        # ── Maintain inventory_reservations with deterministic FIFO quantity allocation (F-010) ──
+        if payload.movement_type == "reserved" and payload.online_order_id:
+            res_doc = {
+                "style_id":        ObjectId(payload.style_id),
+                "style_code":      row.get("style_code", ""),
+                "color":           payload.color,
+                "size":            payload.size,
+                "qty":             int(payload.quantity),
+                "online_order_id": payload.online_order_id,
+                "reserved_at":     now_iso(),
+                "released_at":     None,
+                "status":          "active",
+            }
+            ins_res = await _maybe_await(db.inventory_reservations.insert_one(res_doc))
+            ins_id = getattr(ins_res, "inserted_id", None)
+            if ins_id:
+                reservation_actions.append({"type": "insert", "id": ins_id})
+        elif payload.movement_type in ("unreserved", "dispatched") and payload.online_order_id:
+            new_status = "released" if payload.movement_type == "unreserved" else "fulfilled"
+            remaining_to_release = int(payload.quantity)
+
+            res_cursor = db.inventory_reservations.find({
                 "online_order_id": payload.online_order_id,
                 "style_id":        ObjectId(payload.style_id),
                 "color":           payload.color,
                 "size":            payload.size,
                 "status":          "active",
-            },
-            {"$set": {"status": "released", "released_at": now_iso()}}
-        )
-    elif payload.movement_type == "dispatched" and payload.online_order_id:
-        await db.inventory_reservations.update_many(
-            {
-                "online_order_id": payload.online_order_id,
-                "style_id":        ObjectId(payload.style_id),
-                "color":           payload.color,
-                "size":            payload.size,
-                "status":          "active",
-            },
-            {"$set": {"status": "fulfilled", "released_at": now_iso()}}
-        )
+            })
+            if hasattr(res_cursor, "sort"):
+                res_cursor = res_cursor.sort([("reserved_at", 1), ("_id", 1)])
+            active_res = await _maybe_await(res_cursor.to_list(100) if hasattr(res_cursor, "to_list") else res_cursor)
+            active_res = active_res or []
+
+            for r_doc in active_res:
+                if remaining_to_release <= 0:
+                    break
+                r_qty = int(r_doc.get("qty", 0))
+                if r_qty <= remaining_to_release:
+                    await _maybe_await(db.inventory_reservations.update_one(
+                        {"_id": r_doc["_id"]},
+                        {"$set": {"status": new_status, "released_at": now_iso()}}
+                    ))
+                    reservation_actions.append({"type": "close", "id": r_doc["_id"]})
+                    remaining_to_release -= r_qty
+                else:
+                    await _maybe_await(db.inventory_reservations.update_one(
+                        {"_id": r_doc["_id"]},
+                        {"$inc": {"qty": -remaining_to_release}, "$set": {"updated_at": now_iso()}}
+                    ))
+                    reservation_actions.append({"type": "partial_decrement", "id": r_doc["_id"], "qty": remaining_to_release})
+                    partial_doc = {
+                        "style_id":        ObjectId(payload.style_id),
+                        "style_code":      row.get("style_code", ""),
+                        "color":           payload.color,
+                        "size":            payload.size,
+                        "qty":             remaining_to_release,
+                        "online_order_id": payload.online_order_id,
+                        "reserved_at":     r_doc.get("reserved_at", now_iso()),
+                        "released_at":     now_iso(),
+                        "status":          new_status,
+                    }
+                    p_ins = await _maybe_await(db.inventory_reservations.insert_one(partial_doc))
+                    p_id = getattr(p_ins, "inserted_id", None)
+                    if p_id:
+                        reservation_actions.append({"type": "insert", "id": p_id})
+                    remaining_to_release = 0
+
+    except Exception as e:
+        # F-006: Compensating rollback across collections
+        if applied_inventory_delta:
+            rollback_inc = {field: -int(d) for field, d in applied_inventory_delta.items()}
+            try:
+                await _maybe_await(db.fg_inventory.update_one({"_id": row["_id"]}, {"$inc": rollback_inc, "$set": {"updated_at": now_iso()}}))
+            except Exception as _rb_err:
+                log.error("Failed to rollback fg_inventory delta: %s", _rb_err)
+        if inserted_movement_id:
+            try:
+                await _maybe_await(db.fg_stock_movements.delete_one({"_id": inserted_movement_id}))
+            except Exception as _rb_err:
+                log.error("Failed to delete orphaned fg_stock_movement: %s", _rb_err)
+        for act in reservation_actions:
+            try:
+                if act["type"] == "insert":
+                    await _maybe_await(db.inventory_reservations.delete_one({"_id": act["id"]}))
+                elif act["type"] == "close":
+                    await _maybe_await(db.inventory_reservations.update_one({"_id": act["id"]}, {"$set": {"status": "active", "released_at": None}}))
+                elif act["type"] == "partial_decrement":
+                    await _maybe_await(db.inventory_reservations.update_one({"_id": act["id"]}, {"$inc": {"qty": int(act["qty"])}}))
+            except Exception as _rb_err:
+                log.error("Failed to rollback reservation action: %s", _rb_err)
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(500, f"Inventory movement failed: {e}")
 
     updated = await db.fg_inventory.find_one({"_id": row["_id"]})
     updated = stringify(updated)
@@ -323,14 +558,32 @@ async def _apply_movement(payload: "FgStockMovementIn", user_email: str, skip_lo
     updated["available_qty"] = u_ready - u_res - u_dmg - u_liq
     updated["is_low_stock"]  = u_ready < u_min
 
-    # ── Warehouse location sync (Phase WMS) ─────────────────────────────
+    # ── Warehouse location sync (Phase WMS) (F-011) ─────────────────────
     location_result = None
     if not skip_location_sync:
         try:
             import server
             sync_fn = getattr(server, "_sync_warehouse_locations", None)
             if sync_fn:
-                location_result = await sync_fn(payload, user_email)
+                location_result = await sync_fn(payload, user_email, db=db)
+                if location_result and location_result.get("unplaced_qty", 0) > 0 and payload.movement_type in ("production_in", "return_in", "return_restocked"):
+                    unplaced = int(location_result["unplaced_qty"])
+                    await db.fg_location_inventory.update_one(
+                        {
+                            "style_id": ObjectId(payload.style_id),
+                            "color": payload.color,
+                            "size": payload.size,
+                            "location_code": "STAGE-OVERFLOW",
+                        },
+                        {
+                            "$inc": {"qty": unplaced},
+                            "$setOnInsert": {"created_at": now_iso(), "zone": "stage", "style_code": row.get("style_code", "")},
+                            "$set": {"updated_at": now_iso()},
+                        },
+                        upsert=True
+                    )
+                    location_result["staging_placed_qty"] = unplaced
+                    location_result["staging_location"] = "STAGE-OVERFLOW"
         except Exception as _wms_err:
             log.warning(f"WMS sync failed for {payload.movement_type}: {_wms_err}")
 
@@ -410,12 +663,21 @@ async def create_fg_movement(request: Request, payload: FgStockMovementIn):
 
 @inventory_router.post("/fg-inventory/bulk-movements")
 async def bulk_fg_movements(request: Request, payload: dict):
-    """Apply many movements in one request. Best-effort: each row is validated and
-    applied independently; failures are reported per-row and don't abort the batch.
+    """Apply many movements in one request with robust batch semantics (F-036).
+    Supports batch_id/idempotency_key, dry-run validation, and audit status recording.
     """
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    batch_id = (payload or {}).get("batch_id") or (payload or {}).get("idempotency_key") or str(uuid.uuid4())
+    is_dry_run = bool((payload or {}).get("dry_run", False))
+
+    if not is_dry_run and hasattr(db, "inventory_batch_runs"):
+        existing_batch = await db.inventory_batch_runs.find_one({"batch_id": batch_id})
+        if existing_batch:
+            resp_data = existing_batch.get("response", existing_batch)
+            return stringify(resp_data)
 
     movements = (payload or {}).get("movements") or []
     if not isinstance(movements, list) or not movements:
@@ -424,47 +686,87 @@ async def bulk_fg_movements(request: Request, payload: dict):
         raise HTTPException(400, "Batch too large — max 2000 movements per request")
 
     results = []
-    ok_count  = 0
+    ok_count = 0
     err_count = 0
+    user_identifier = u.get("email") or u.get("name", "")
+
     for idx, row in enumerate(movements):
         try:
             mv = FgStockMovementIn(**row)
-            out = await _apply_movement(mv, u.get("email") or u.get("name", ""), db=db)
-            results.append({
-                "index":     idx,
-                "style_id":  mv.style_id,
-                "color":     mv.color,
-                "size":      mv.size,
-                "movement":  mv.movement_type,
-                "ok":        True,
-                "delta":     out["movement"].get("delta"),
-            })
+            if is_dry_run:
+                # Dry run: validate row parsing and basic stock availability without committing writes
+                s_oid = ObjectId(mv.style_id) if ObjectId.is_valid(str(mv.style_id)) else str(mv.style_id)
+                cur_row = await db.fg_inventory.find_one({
+                    "$or": [{"style_id": s_oid}, {"style_id": str(mv.style_id)}],
+                    "color": mv.color,
+                    "size": mv.size,
+                })
+                if cur_row and mv.movement_type == "reserved":
+                    avail = int(cur_row.get("ready_stock_qty", 0)) - int(cur_row.get("reserved_qty", 0))
+                    if avail < int(mv.quantity):
+                        raise HTTPException(400, f"Insufficient stock: {avail} available, {mv.quantity} requested")
+                results.append({
+                    "index": idx,
+                    "style_id": mv.style_id,
+                    "color": mv.color,
+                    "size": mv.size,
+                    "movement": mv.movement_type,
+                    "ok": True,
+                    "dry_run": True,
+                })
+            else:
+                out = await _apply_movement(mv, user_identifier, db=db)
+                results.append({
+                    "index": idx,
+                    "style_id": mv.style_id,
+                    "color": mv.color,
+                    "size": mv.size,
+                    "movement": mv.movement_type,
+                    "ok": True,
+                    "delta": out["movement"].get("delta"),
+                })
             ok_count += 1
         except HTTPException as he:
             results.append({
-                "index":    idx,
-                "row":      row,
-                "ok":       False,
-                "error":    str(he.detail),
-                "status":   he.status_code,
+                "index": idx,
+                "row": row,
+                "ok": False,
+                "error": str(he.detail),
+                "status": he.status_code,
             })
             err_count += 1
         except Exception as e:
             results.append({
-                "index":    idx,
-                "row":      row,
-                "ok":       False,
-                "error":    str(e),
-                "status":   500,
+                "index": idx,
+                "row": row,
+                "ok": False,
+                "error": str(e),
+                "status": 500,
             })
             err_count += 1
 
-    return {
-        "total":    len(movements),
-        "success":  ok_count,
-        "failed":   err_count,
-        "results":  results,
+    batch_response = {
+        "batch_id": batch_id,
+        "dry_run": is_dry_run,
+        "total": len(movements),
+        "success": ok_count,
+        "failed": err_count,
+        "reconciliation_status": "reconciled" if err_count == 0 else ("partial_failure" if ok_count > 0 else "failed"),
+        "results": results,
     }
+
+    if not is_dry_run and hasattr(db, "inventory_batch_runs"):
+        try:
+            await db.inventory_batch_runs.insert_one({
+                "batch_id": batch_id,
+                "user": user_identifier,
+                "created_at": now_iso(),
+                "response": batch_response,
+            })
+        except Exception as _b_err:
+            log.warning("Could not persist inventory batch run: %s", _b_err)
+
+    return batch_response
 
 
 @inventory_router.post("/fg-inventory/import-csv")
@@ -846,11 +1148,29 @@ async def create_fg_inventory(request: Request, payload: FgInventoryIn):
     if not style:
         raise HTTPException(400, "Style does not exist")
         
+    clean_size = _validate_and_clean_size(payload.size)
+    clean_color = await _resolve_canonical_color(db, payload.style_id, payload.color)
+
+    # Check if duplicate exists before inserting (exact or case-insensitive)
+    existing = await db.fg_inventory.find_one({
+        "style_id": ObjectId(payload.style_id),
+        "color": clean_color,
+        "size": clean_size,
+    })
+    if not existing:
+        existing = await db.fg_inventory.find_one({
+            "style_id": ObjectId(payload.style_id),
+            "color": {"$regex": f"^{re.escape(clean_color)}$", "$options": "i"},
+            "size": clean_size,
+        })
+    if existing:
+        raise HTTPException(400, "Inventory entry for this style/color/size already exists")
+
     doc = {
         "style_id": ObjectId(payload.style_id),
         "style_code": style["code"],
-        "color": payload.color,
-        "size": payload.size,
+        "color": clean_color,
+        "size": clean_size,
         "ready_stock_qty": payload.ready_stock_qty,
         "reserved_qty": payload.reserved_qty,
         "in_transit_qty": payload.in_transit_qty,

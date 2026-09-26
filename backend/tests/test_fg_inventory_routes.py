@@ -7,12 +7,16 @@ from fastapi.testclient import TestClient
 from bson import ObjectId
 
 import server
+import re
 from routes.inventory import (
     inventory_router,
     _apply_movement,
     _seed_fg_inventory_for_lifecycle,
     _get_or_create_fg_row,
     _resolve_style_by_code,
+    _clean_color_str,
+    _validate_and_clean_size,
+    _resolve_canonical_color,
 )
 from models.inventory import FgStockMovementIn
 
@@ -37,6 +41,8 @@ class MockFgDB:
         self.fg_movements_store = {}
         self.reservations_store = {}
         self.styles_store = {}
+        self.color_master_store = []
+        self.style_lifecycle_store = {}
         self.audit_logs_store = []
 
         self.fg_inventory = MagicMock()
@@ -61,16 +67,27 @@ class MockFgDB:
         self.styles = MagicMock()
         self.styles.find_one = AsyncMock(side_effect=self._find_one_style)
 
+        self.color_master = MagicMock()
+        self.color_master.find = MagicMock(side_effect=lambda *args, **kwargs: MockCursor(self.color_master_store))
+
+        self.style_lifecycle = MagicMock()
+        self.style_lifecycle.find_one = AsyncMock(side_effect=lambda q, *a, **k: self.style_lifecycle_store.get(str(q.get("style_id"))))
+
         self.audit_logs = MagicMock()
         self.audit_logs.insert_one = AsyncMock(return_value=MagicMock(inserted_id="audit_1"))
 
-    def _find_inventory(self, q=None):
+    def _find_inventory(self, q=None, *args, **kwargs):
         docs = list(self.fg_inventory_store.values())
         if q:
             if "style_id" in q:
                 docs = [d for d in docs if str(d.get("style_id")) == str(q["style_id"])]
             if "color" in q:
-                docs = [d for d in docs if d.get("color") == q["color"]]
+                cq = q["color"]
+                if isinstance(cq, dict) and "$regex" in cq:
+                    flags = re.IGNORECASE if "i" in cq.get("$options", "") else 0
+                    docs = [d for d in docs if re.search(cq["$regex"], d.get("color", ""), flags)]
+                else:
+                    docs = [d for d in docs if d.get("color") == cq]
             if "size" in q:
                 docs = [d for d in docs if d.get("size") == q["size"]]
         return MockCursor(docs)
@@ -79,12 +96,18 @@ class MockFgDB:
         if "_id" in q:
             return self.fg_inventory_store.get(str(q["_id"]))
         if "style_id" in q and "color" in q and "size" in q:
+            cq = q["color"]
             for doc in self.fg_inventory_store.values():
-                if (
-                    str(doc.get("style_id")) == str(q["style_id"])
-                    and doc.get("color") == q["color"]
-                    and doc.get("size") == q["size"]
-                ):
+                if str(doc.get("style_id")) != str(q["style_id"]):
+                    continue
+                if doc.get("size") != q["size"]:
+                    continue
+                doc_color = doc.get("color", "")
+                if isinstance(cq, dict) and "$regex" in cq:
+                    flags = re.IGNORECASE if "i" in cq.get("$options", "") else 0
+                    if re.search(cq["$regex"], doc_color, flags):
+                        return doc
+                elif doc_color == cq:
                     return doc
         return None
 
@@ -468,4 +491,140 @@ def test_delete_fg_inventory_success_and_validations(client, mock_fg_env):
 
     # 7. Verify document was removed from DB
     assert item_id not in mock_fg_env.fg_inventory_store
+
+
+def test_clean_color_str_and_validate_size():
+    from fastapi import HTTPException
+
+    # _clean_color_str
+    assert _clean_color_str("  navy   blue  ") == "navy blue"
+    assert _clean_color_str(None) == ""
+    assert _clean_color_str("") == ""
+
+    # _validate_and_clean_size valid
+    assert _validate_and_clean_size(" 42 ") == "42"
+    assert _validate_and_clean_size(42) == "42"
+    assert _validate_and_clean_size("9.5") == "9.5"
+
+    # _validate_and_clean_size invalid cases
+    with pytest.raises(HTTPException) as exc:
+        _validate_and_clean_size(None)
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_and_clean_size("   ")
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_and_clean_size("38,39,40")
+    assert exc.value.status_code == 400
+    assert "comma-separated" in exc.value.detail
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_and_clean_size("38;39")
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        _validate_and_clean_size("A" * 15)
+    assert exc.value.status_code == 400
+    assert "too long" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_resolve_canonical_color_sources(mock_fg_env):
+    s_oid = ObjectId()
+    sid = str(s_oid)
+
+    # 1. Existing fg row matching
+    mock_fg_env.fg_inventory_store["fg_1"] = {
+        "_id": ObjectId(),
+        "style_id": s_oid,
+        "color": "Tan Brown",
+        "size": "42",
+    }
+    c1 = await _resolve_canonical_color(mock_fg_env, sid, "tan brown")
+    assert c1 == "Tan Brown"
+
+    # 2. Planned colors in styles
+    s_oid2 = ObjectId()
+    sid2 = str(s_oid2)
+    mock_fg_env.styles_store[sid2] = {
+        "_id": s_oid2,
+        "code": "SSK-PLANNED-1",
+        "planned_colors": ["Dark Olive", "Navy"],
+    }
+    c2 = await _resolve_canonical_color(mock_fg_env, sid2, "dark olive")
+    assert c2 == "Dark Olive"
+
+    # 3. Color master collection
+    mock_fg_env.color_master_store = [
+        {"color_name": "Royal Blue", "color_code": "RB-01", "active": True}
+    ]
+    s_oid3 = ObjectId()
+    sid3 = str(s_oid3)
+    c3 = await _resolve_canonical_color(mock_fg_env, sid3, "royal blue")
+    assert c3 == "Royal Blue"
+    c3_code = await _resolve_canonical_color(mock_fg_env, sid3, "RB-01")
+    assert c3_code == "Royal Blue"
+
+    # 4. Fuzzy typo correction
+    c4 = await _resolve_canonical_color(mock_fg_env, sid2, "Navvy")
+    assert c4 == "Navy"
+
+    # 5. Default fallback preserves clean string
+    c5 = await _resolve_canonical_color(mock_fg_env, sid3, "  Custom Fuchsia  ")
+    assert c5 == "Custom Fuchsia"
+
+
+def test_movement_rejects_composite_and_empty_size(client, mock_fg_env):
+    s_oid = ObjectId()
+    sid = str(s_oid)
+    mock_fg_env.styles_store[sid] = {
+        "_id": s_oid,
+        "code": "SSK-SIZE-TEST",
+        "name": "Size Test Shoe",
+    }
+
+    # Comma-separated size in movement
+    res = client.post("/api/fg-inventory/movements", json={
+        "style_id": sid,
+        "color": "Black",
+        "size": "39,40,41",
+        "movement_type": "production_in",
+        "quantity": 10,
+    })
+    assert res.status_code == 400
+    assert "comma-separated" in res.json()["detail"]
+
+
+def test_create_fg_inventory_rejects_case_insensitive_duplicate(client, mock_fg_env):
+    s_oid = ObjectId()
+    sid = str(s_oid)
+    mock_fg_env.styles_store[sid] = {
+        "_id": s_oid,
+        "code": "SSK-DUP-TEST",
+        "name": "Dup Test Shoe",
+    }
+
+    # 1. Create first row
+    res = client.post("/api/fg-inventory", json={
+        "style_id": sid,
+        "color": "Cognac",
+        "size": "41",
+        "ready_stock_qty": 5,
+        "min_stock_level": 15,
+    })
+    assert res.status_code == 200, res.text
+
+    # 2. Attempt to create duplicate with variant case "cognac"
+    res2 = client.post("/api/fg-inventory", json={
+        "style_id": sid,
+        "color": "cognac",
+        "size": "41",
+        "ready_stock_qty": 2,
+        "min_stock_level": 15,
+    })
+    assert res2.status_code == 400
+    assert "already exists" in res2.json()["detail"].lower()
+
 

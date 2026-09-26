@@ -262,7 +262,43 @@ def require_module(*modules: str):
                 detail=f"Access denied: You do not have permission for the '{', '.join(modules)}' module."
             )
         return user
-    return checker
+ROUTE_MODULE_MAP = {
+    "/api/inventory": ["inventory"],
+    "/api/materials": ["inventory", "procurement"],
+    "/api/components": ["inventory", "production"],
+    "/api/workers": ["workers"],
+    "/api/pos": ["orders_sales"],
+    "/api/invoices": ["orders_sales"],
+    "/api/packing": ["orders_sales", "online"],
+    "/api/vendors": ["procurement"],
+    "/api/purchase-orders": ["procurement"],
+    "/api/grn": ["procurement"],
+    "/api/wms": ["online", "inventory"],
+    "/api/online-orders": ["online"],
+    "/api/online-returns": ["online"],
+    "/api/reports": ["reports"],
+    "/api/plm": ["production"],
+    "/api/jobs": ["production"],
+    "/api/styles": ["production", "orders_sales"],
+    "/api/users": ["settings_admin"],
+    "/api/settings": ["settings_admin"],
+}
+
+
+def check_route_module_access(user: dict, path: str):
+    """Enforce backend route-to-module authorization matrix (F-026)."""
+    if not user or user.get("role") == "admin":
+        return
+    user_mods = set(get_user_modules(user))
+    for prefix, required_mods in ROUTE_MODULE_MAP.items():
+        if path.startswith(prefix):
+            if not any(m in user_mods for m in required_mods):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied: Module '{'/'.join(required_mods)}' permission required for '{path}'."
+                )
+            break
+
 
 
 def create_access_token(
@@ -352,6 +388,9 @@ async def get_current_user_factory(db):
                     user.pop("password_hash", None)
                     user["supabase_uid"] = getattr(supa_user, "id", None)
                     user["modules"] = get_user_modules(user)
+                    path = getattr(request, "url", None) and getattr(request.url, "path", None)
+                    if path:
+                        check_route_module_access(user, path)
                     return user
         except Exception as _supa_err:
             log.debug("Supabase token verification fallback: %s", _supa_err)
@@ -373,7 +412,7 @@ async def get_current_user_factory(db):
                 worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
                 if not worker or not worker.get("active", True):
                     raise HTTPException(status_code=401, detail="Worker not found or inactive")
-                return {
+                w_user = {
                     "id": str(worker["_id"]),
                     "worker_id": str(worker["_id"]),
                     "name": worker.get("name", ""),
@@ -381,8 +420,12 @@ async def get_current_user_factory(db):
                     "role": "worker",
                     "email": payload.get("email", ""),  # synthetic — phone used as email in token
                     "skill": worker.get("skill", ""),
-                    "modules": [],
+                    "modules": ["workers"],
                 }
+                path = getattr(request, "url", None) and getattr(request.url, "path", None)
+                if path:
+                    check_route_module_access(w_user, path)
+                return w_user
 
             # ── Regular user token ────────────────────────────────────────────
             user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
@@ -392,6 +435,9 @@ async def get_current_user_factory(db):
             user.pop("_id", None)
             user.pop("password_hash", None)
             user["modules"] = get_user_modules(user)
+            path = getattr(request, "url", None) and getattr(request.url, "path", None)
+            if path:
+                check_route_module_access(user, path)
             return user
         except jwt.ExpiredSignatureError:
             raise HTTPException(status_code=401, detail="Token expired")

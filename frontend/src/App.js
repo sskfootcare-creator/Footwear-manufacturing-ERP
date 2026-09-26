@@ -45,6 +45,67 @@ import ToolingLibrary from "@/pages/ToolingLibrary";
 import BankReconciliation from "@/pages/BankReconciliation";
 import { Loader2 } from "lucide-react";
 
+// F-037: Route-to-module & role authorization matrix for frontend navigation guard
+const ROUTE_PERMISSIONS = {
+  "styles": { roles: ["admin", "manager", "production", "sales"], modules: ["production", "orders_sales"] },
+  "plm": { roles: ["admin", "manager", "production"], modules: ["production"] },
+  "patterns": { roles: ["admin", "manager", "production"], modules: ["production"] },
+  "tooling": { roles: ["admin", "manager", "production"], modules: ["production"] },
+  "materials": { roles: ["admin", "manager", "production"], modules: ["inventory", "procurement"] },
+  "workers": { roles: ["admin", "manager", "production"], modules: ["workers"] },
+  "inventory": { roles: ["admin", "manager", "production"], modules: ["inventory"] },
+  "components": { roles: ["admin", "manager", "production"], modules: ["inventory", "production"] },
+  "payroll": { roles: ["admin", "manager"], modules: ["workers", "settings_admin"] },
+  "expenses": { roles: ["admin", "manager"], modules: ["reports", "settings_admin"] },
+  "bank-reconciliation": { roles: ["admin", "manager"], modules: ["reports", "settings_admin"] },
+  "pos": { roles: ["admin", "manager", "sales"], modules: ["orders_sales"] },
+  "production": { roles: ["admin", "manager", "production"], modules: ["production"] },
+  "defects": { roles: ["admin", "manager", "production"], modules: ["production"] },
+  "costing": { roles: ["admin", "manager"], modules: ["orders_sales", "production"] },
+  "b2b-profitability": { roles: ["admin", "manager"], modules: ["reports", "orders_sales"] },
+  "reports": { roles: ["admin", "manager"], modules: ["reports"] },
+  "invoices": { roles: ["admin", "manager", "sales"], modules: ["orders_sales"] },
+  "clients": { roles: ["admin", "manager", "sales"], modules: ["orders_sales"] },
+  "vendors": { roles: ["admin", "manager"], modules: ["procurement"] },
+  "vendor-pos": { roles: ["admin", "manager"], modules: ["procurement"] },
+  "sku-map": { roles: ["admin", "manager"], modules: ["online"] },
+  "online-pipeline": { roles: ["admin", "manager"], modules: ["online", "production"] },
+  "ready-stock": { roles: ["admin", "manager"], modules: ["online", "inventory"] },
+  "online-orders": { roles: ["admin", "manager", "sales"], modules: ["online"] },
+  "online-profitability": { roles: ["admin", "manager"], modules: ["online", "reports"] },
+  "warehouse": { roles: ["admin", "manager", "production"], modules: ["online", "inventory"] },
+  "picklists": { roles: ["admin", "manager", "production"], modules: ["online", "inventory"] },
+  "warehouse/reports": { roles: ["admin", "manager"], modules: ["online", "reports"] },
+  "warehouse/qr": { roles: ["admin", "manager", "production"], modules: ["online", "inventory"] },
+  "pending-list": { roles: ["admin", "manager", "production"], modules: ["online", "inventory"] },
+  "listing-formats": { roles: ["admin"], modules: ["settings_admin"] },
+  "order-import-formats": { roles: ["admin"], modules: ["settings_admin"] },
+  "settings": { roles: ["admin", "manager"], modules: ["settings_admin"] },
+  "users": { roles: ["admin"], modules: ["settings_admin"] },
+};
+
+function RouteGuard({ path, children }) {
+  const { user } = useAuth();
+  if (!user || user.role === "admin") return children;
+
+  const rule = ROUTE_PERMISSIONS[path];
+  if (!rule) return children;
+
+  if (rule.roles && !rule.roles.includes(user.role)) {
+    return <Navigate to="/" replace />;
+  }
+
+  const userModules = Array.isArray(user.modules) ? user.modules : [];
+  if (rule.modules && userModules.length > 0) {
+    const hasModule = rule.modules.some((m) => userModules.includes(m));
+    if (!hasModule) {
+      return <Navigate to="/" replace />;
+    }
+  }
+
+  return children;
+}
+
 function Protected({ children }) {
   const { user } = useAuth();
   if (user === null) return <div className="min-h-screen grid place-items-center text-slate-500"><Loader2 className="w-6 h-6 animate-spin" /></div>;
@@ -53,10 +114,12 @@ function Protected({ children }) {
   // Workers (karigars) must never access the main ERP console — redirect to karigar dashboard
   if (user.role === "worker") return <Navigate to="/karigar" replace />;
 
-  const workspace = localStorage.getItem("workspace");
+  // F-038: localStorage workspace is treated as a UI display preference, never an authorization boundary.
+  // All tenant/company data access is strictly enforced server-side.
+  const workspace = localStorage.getItem("workspace") || "management";
   const isSelectPage = window.location.pathname === "/select-workspace";
-  if (!workspace && !isSelectPage) {
-    return <Navigate to="/select-workspace" replace />;
+  if (!localStorage.getItem("workspace") && !isSelectPage) {
+    localStorage.setItem("workspace", "management");
   }
   return children;
 }
@@ -85,42 +148,42 @@ function App() {
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
             <Route index element={<Dashboard />} />
-            <Route path="styles" element={<Styles />} />
-            <Route path="plm" element={<StylePLM />} />
-            <Route path="patterns" element={<PatternManager />} />
-            <Route path="tooling" element={<ToolingLibrary />} />
-            <Route path="materials" element={<Materials />} />
-            <Route path="workers" element={<Workers />} />
-            <Route path="inventory" element={<Inventory />} />
-            <Route path="payroll" element={<Payroll />} />
-            <Route path="costing" element={<Costing />} />
-            <Route path="pos" element={<POs />} />
+            <Route path="styles" element={<RouteGuard path="styles"><Styles /></RouteGuard>} />
+            <Route path="plm" element={<RouteGuard path="plm"><StylePLM /></RouteGuard>} />
+            <Route path="patterns" element={<RouteGuard path="patterns"><PatternManager /></RouteGuard>} />
+            <Route path="tooling" element={<RouteGuard path="tooling"><ToolingLibrary /></RouteGuard>} />
+            <Route path="materials" element={<RouteGuard path="materials"><Materials /></RouteGuard>} />
+            <Route path="workers" element={<RouteGuard path="workers"><Workers /></RouteGuard>} />
+            <Route path="inventory" element={<RouteGuard path="inventory"><Inventory /></RouteGuard>} />
+            <Route path="payroll" element={<RouteGuard path="payroll"><Payroll /></RouteGuard>} />
+            <Route path="costing" element={<RouteGuard path="costing"><Costing /></RouteGuard>} />
+            <Route path="pos" element={<RouteGuard path="pos"><POs /></RouteGuard>} />
 
-            <Route path="production" element={<Production />} />
-            <Route path="defects" element={<Defects />} />
-            <Route path="reports" element={<Reports />} />
-            <Route path="invoices" element={<Invoices />} />
-            <Route path="expenses" element={<Expenses />} />
-            <Route path="bank-reconciliation" element={<BankReconciliation />} />
-            <Route path="clients" element={<Clients />} />
-            <Route path="vendors" element={<Vendors />} />
-            <Route path="vendor-pos" element={<VendorPOs />} />
-            <Route path="sku-map" element={<SkuMap />} />
-            <Route path="online-pipeline" element={<OnlineStylePipeline />} />
-            <Route path="components" element={<ComponentInventory />} />
-            <Route path="ready-stock" element={<ReadyStock />} />
-            <Route path="online-orders" element={<OnlineOrders />} />
-            <Route path="online-profitability" element={<OnlineProfitability />} />
-            <Route path="b2b-profitability" element={<B2BProfitability />} />
-            <Route path="warehouse" element={<WarehouseDashboard />} />
-            <Route path="picklists" element={<Picklists />} />
-            <Route path="warehouse/reports" element={<WarehouseReports />} />
-            <Route path="warehouse/qr" element={<WarehouseQRSheet />} />
-            <Route path="pending-list" element={<PendingProductList />} />
-            <Route path="listing-formats" element={<ListingFormats />} />
-            <Route path="order-import-formats" element={<OrderImportFormats />} />
-            <Route path="settings" element={<Settings />} />
-            <Route path="users" element={<Users />} />
+            <Route path="production" element={<RouteGuard path="production"><Production /></RouteGuard>} />
+            <Route path="defects" element={<RouteGuard path="defects"><Defects /></RouteGuard>} />
+            <Route path="reports" element={<RouteGuard path="reports"><Reports /></RouteGuard>} />
+            <Route path="invoices" element={<RouteGuard path="invoices"><Invoices /></RouteGuard>} />
+            <Route path="expenses" element={<RouteGuard path="expenses"><Expenses /></RouteGuard>} />
+            <Route path="bank-reconciliation" element={<RouteGuard path="bank-reconciliation"><BankReconciliation /></RouteGuard>} />
+            <Route path="clients" element={<RouteGuard path="clients"><Clients /></RouteGuard>} />
+            <Route path="vendors" element={<RouteGuard path="vendors"><Vendors /></RouteGuard>} />
+            <Route path="vendor-pos" element={<RouteGuard path="vendor-pos"><VendorPOs /></RouteGuard>} />
+            <Route path="sku-map" element={<RouteGuard path="sku-map"><SkuMap /></RouteGuard>} />
+            <Route path="online-pipeline" element={<RouteGuard path="online-pipeline"><OnlineStylePipeline /></RouteGuard>} />
+            <Route path="components" element={<RouteGuard path="components"><ComponentInventory /></RouteGuard>} />
+            <Route path="ready-stock" element={<RouteGuard path="ready-stock"><ReadyStock /></RouteGuard>} />
+            <Route path="online-orders" element={<RouteGuard path="online-orders"><OnlineOrders /></RouteGuard>} />
+            <Route path="online-profitability" element={<RouteGuard path="online-profitability"><OnlineProfitability /></RouteGuard>} />
+            <Route path="b2b-profitability" element={<RouteGuard path="b2b-profitability"><B2BProfitability /></RouteGuard>} />
+            <Route path="warehouse" element={<RouteGuard path="warehouse"><WarehouseDashboard /></RouteGuard>} />
+            <Route path="picklists" element={<RouteGuard path="picklists"><Picklists /></RouteGuard>} />
+            <Route path="warehouse/reports" element={<RouteGuard path="warehouse/reports"><WarehouseReports /></RouteGuard>} />
+            <Route path="warehouse/qr" element={<RouteGuard path="warehouse/qr"><WarehouseQRSheet /></RouteGuard>} />
+            <Route path="pending-list" element={<RouteGuard path="pending-list"><PendingProductList /></RouteGuard>} />
+            <Route path="listing-formats" element={<RouteGuard path="listing-formats"><ListingFormats /></RouteGuard>} />
+            <Route path="order-import-formats" element={<RouteGuard path="order-import-formats"><OrderImportFormats /></RouteGuard>} />
+            <Route path="settings" element={<RouteGuard path="settings"><Settings /></RouteGuard>} />
+            <Route path="users" element={<RouteGuard path="users"><Users /></RouteGuard>} />
           </Route>
         </Routes>
       </BrowserRouter>

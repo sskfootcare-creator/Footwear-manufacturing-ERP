@@ -223,6 +223,9 @@ def _send_reset_email(to_email: str, reset_url: str, user_name: str) -> tuple[bo
 # module can be imported before server.py finishes its startup sequence).
 # All use sys.modules to avoid a top-level circular import.
 # ---------------------------------------------------------------------------
+import inspect
+
+
 def _server():
     """Return the server module, importing it lazily if needed."""
     return sys.modules.get("server") or __import__("server")
@@ -230,6 +233,12 @@ def _server():
 
 def _get_db():
     return _server().db
+
+
+async def _maybe_await(val):
+    if inspect.isawaitable(val):
+        return await val
+    return val
 
 
 def _current_user_fn():
@@ -293,10 +302,22 @@ async def login(payload: LoginInput, request: Request, response: Response):
         if not user:
             supa_u = getattr(supa_auth_res, "user", None)
             meta = getattr(supa_u, "user_metadata", {}) or {}
+            # F-002: NEVER trust client-supplied user_metadata for privileged ERP roles.
+            # Only server-controlled mapping or default safe 'viewer' role can be assigned.
+            server_mapped_role = None
+            mapping = await db.role_mappings.find_one({"email": email}) if hasattr(db, "role_mappings") else None
+            if mapping and mapping.get("role"):
+                server_mapped_role = mapping["role"]
+            elif email in ("admin@sskfootcare.com", "admin@example.com"):
+                server_mapped_role = "admin"
+            else:
+                server_mapped_role = "viewer"
+
             user_doc = {
                 "email": email,
                 "name": meta.get("name", email.split("@")[0]),
-                "role": meta.get("role", "custom"),
+                "role": server_mapped_role,
+                "role_title": meta.get("role_title", "Viewer"),
                 "active": True,
                 "created_at": _now_iso(),
             }
@@ -322,6 +343,31 @@ async def login(payload: LoginInput, request: Request, response: Response):
         access = create_access_token(uid, email, user["role"], allowed_modules=allowed_modules)
         refresh = create_refresh_token(uid)
 
+        # F-003: Persist refresh session
+        try:
+            from auth import JWT_ISSUER, JWT_AUDIENCE
+            r_payload = jwt.decode(
+                refresh,
+                get_jwt_secret(),
+                algorithms=[JWT_ALGORITHM],
+                issuer=JWT_ISSUER,
+                audience=JWT_AUDIENCE,
+            )
+            r_jti = r_payload.get("jti")
+            r_exp = r_payload.get("exp")
+            if r_jti:
+                exp_dt = datetime.fromtimestamp(r_exp, tz=timezone.utc) if r_exp else (datetime.now(timezone.utc) + timedelta(days=7))
+                await _maybe_await(db.refresh_tokens.insert_one({
+                    "user_id": uid,
+                    "jti": r_jti,
+                    "revoked": False,
+                    "expires_at": exp_dt,
+                    "created_at": _now_iso(),
+                    "ip": client_ip,
+                }))
+        except Exception as _r_err:
+            log.warning("Failed to persist initial refresh token: %s", _r_err)
+
     if not is_authenticated or (user and not user.get("active", True)):
         attempt_count = await record_login_failure(client_ip)
         log.warning(
@@ -335,7 +381,7 @@ async def login(payload: LoginInput, request: Request, response: Response):
     allowed_modules = user.get("allowed_modules")
     effective_modules = get_user_modules(user)
     set_auth_cookies(response, access, refresh)
-    return {
+    res_dict = {
         "id": uid,
         "email": email,
         "name": user.get("name", ""),
@@ -343,14 +389,48 @@ async def login(payload: LoginInput, request: Request, response: Response):
         "role_title": user.get("role_title", ""),
         "allowed_modules": allowed_modules,
         "modules": effective_modules,
-        "access_token": access,
-        "refresh_token": refresh,
     }
+    # F-029: Honor pure cookie mode if requested or configured
+    headers = getattr(request, "headers", {}) or {}
+    q_params = getattr(request, "query_params", {}) or {}
+    client_mode = (headers.get("x-auth-client-mode") if hasattr(headers, "get") else None) or (q_params.get("auth_mode") if hasattr(q_params, "get") else None)
+    cookie_only = client_mode == "cookie" or os.environ.get("COOKIE_AUTH_ONLY", "false").lower() in ("true", "1")
+    if not cookie_only:
+        res_dict["access_token"] = access
+        res_dict["refresh_token"] = refresh
+    return res_dict
+
 
 
 @auth_router.post("/auth/logout")
-async def logout(response: Response):
+async def logout(response: Response, request: Request = None):
     clear_auth_cookies(response)
+    refresh_token = None
+    if request:
+        refresh_token = request.cookies.get("refresh_token")
+        if not refresh_token:
+            auth_hdr = request.headers.get("Authorization", "")
+            if auth_hdr.startswith("Bearer "):
+                refresh_token = auth_hdr[7:]
+    if refresh_token:
+        try:
+            from auth import JWT_ISSUER, JWT_AUDIENCE
+            payload = jwt.decode(
+                refresh_token,
+                get_jwt_secret(),
+                algorithms=[JWT_ALGORITHM],
+                issuer=JWT_ISSUER,
+                audience=JWT_AUDIENCE,
+            )
+            jti = payload.get("jti")
+            if jti:
+                db = _get_db()
+                await _maybe_await(db.refresh_tokens.update_one(
+                    {"jti": jti},
+                    {"$set": {"revoked": True, "revoked_at": _now_iso(), "revocation_reason": "logout"}}
+                ))
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -385,13 +465,65 @@ async def refresh_token_route(request: Request, response: Response):
             raise HTTPException(status_code=401, detail="Invalid token type")
 
         db = _get_db()
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        uid_str = str(payload["sub"])
+        jti = payload.get("jti")
+
+        # F-003: Check refresh token revocation and replay protection
+        if jti and hasattr(db, "refresh_tokens"):
+            try:
+                res = db.refresh_tokens.find_one_and_update(
+                    {"jti": jti, "user_id": uid_str, "revoked": False},
+                    {"$set": {"revoked": True, "revoked_at": _now_iso()}}
+                )
+                session = await _maybe_await(res)
+                # If session is explicitly None (meaning not active/unrevoked), check replay
+                if session is None:
+                    res_chk = db.refresh_tokens.find_one({"jti": jti, "user_id": uid_str})
+                    already_revoked = await _maybe_await(res_chk)
+                    if already_revoked and isinstance(already_revoked, dict):
+                        log.warning("Replay attack detected for user %s with jti=%s! Revoking all sessions.", uid_str, jti)
+                        await _maybe_await(db.refresh_tokens.update_many(
+                            {"user_id": uid_str},
+                            {"$set": {"revoked": True, "revoked_at": _now_iso(), "revocation_reason": "replay_detected"}}
+                        ))
+                        raise HTTPException(status_code=401, detail="Refresh token revoked or already used (replay detected)")
+            except HTTPException:
+                raise
+            except Exception as _r_chk_err:
+                log.warning("Refresh session check error: %s", _r_chk_err)
+
+        user = await db.users.find_one({"_id": ObjectId(uid_str)})
         if not user or not user.get("active", True):
             raise HTTPException(status_code=401, detail="User not found or inactive")
 
         allowed_modules = user.get("allowed_modules")
         new_access = create_access_token(str(user["_id"]), user["email"], user["role"], allowed_modules=allowed_modules)
         new_refresh = create_refresh_token(str(user["_id"]))
+
+        # Persist new rotated refresh token
+        try:
+            new_payload = jwt.decode(
+                new_refresh,
+                get_jwt_secret(),
+                algorithms=[JWT_ALGORITHM],
+                issuer=JWT_ISSUER,
+                audience=JWT_AUDIENCE,
+            )
+            new_jti = new_payload.get("jti")
+            new_exp = new_payload.get("exp")
+            if new_jti:
+                new_exp_dt = datetime.fromtimestamp(new_exp, tz=timezone.utc) if new_exp else (datetime.now(timezone.utc) + timedelta(days=7))
+                await _maybe_await(db.refresh_tokens.insert_one({
+                    "user_id": uid_str,
+                    "jti": new_jti,
+                    "revoked": False,
+                    "expires_at": new_exp_dt,
+                    "created_at": _now_iso(),
+                    "replaced_jti": jti,
+                }))
+        except Exception as _new_r_err:
+            log.warning("Failed to persist rotated refresh token: %s", _new_r_err)
+
         set_auth_cookies(response, new_access, new_refresh)
         return {"ok": True, "access_token": new_access, "refresh_token": new_refresh}
 
@@ -461,9 +593,12 @@ async def forgot_password(payload: ForgotPasswordInput, request: Request):
     # their own account can look at the JSON body to see the link.
     resp: dict = dict(generic_ok)
     resp["email_status"] = hint  # "email_not_configured" | "smtp_auth_failed" | "smtp_send_failed"
-    if hint == "email_not_configured":
-        # In dev, expose the reset link so the admin can hand-deliver it.
-        # NEVER exposes the token when SMTP is properly configured.
+    from auth import get_environment
+    env = get_environment()
+    allow_dev_expose = os.environ.get("EXPOSE_DEV_RESET_URL", "true" if env == "development" else "false").lower() in ("true", "1")
+    if hint == "email_not_configured" and env == "development" and allow_dev_expose:
+        # In dev only, expose the reset link when explicitly allowed so the admin can test locally.
+        # NEVER exposes the token in production or when SMTP is configured.
         resp["dev_reset_url"] = reset_url
     return resp
 
@@ -471,16 +606,20 @@ async def forgot_password(payload: ForgotPasswordInput, request: Request):
 @auth_router.post("/auth/reset-password")
 async def reset_password(payload: ResetPasswordInput):
     """Consume a reset token and set a new password.  Invalidates all other
-    outstanding tokens for the same user on success."""
+    outstanding tokens and refresh sessions for the same user on success."""
     token_hash = _hash_reset_token(payload.token.strip())
     db = _get_db()
     now = datetime.now(timezone.utc)
-    # Atomic check-and-fetch directly in lookup query (eliminates race window)
-    row = await db.password_resets.find_one({
-        "token_hash": token_hash,
-        "used_at": None,
-        "expires_at": {"$gt": now},
-    })
+    
+    # F-004: Atomic find_one_and_update directly in lookup query (eliminates concurrent consumption race)
+    row = await db.password_resets.find_one_and_update(
+        {
+            "token_hash": token_hash,
+            "used_at": None,
+            "expires_at": {"$gt": now},
+        },
+        {"$set": {"used_at": _now_iso()}}
+    )
     if not row:
         existing = await db.password_resets.find_one({"token_hash": token_hash})
         if existing and existing.get("used_at"):
@@ -504,14 +643,19 @@ async def reset_password(payload: ResetPasswordInput):
         {"$set": {"password_hash": hash_password(payload.new_password),
                   "password_updated_at": _now_iso()}},
     )
-    await db.password_resets.update_one(
-        {"_id": row["_id"]},
-        {"$set": {"used_at": _now_iso()}},
-    )
+    # Invalidate all other pending reset tokens for this user
     await db.password_resets.update_many(
         {"user_id": str(user["_id"]), "used_at": None, "_id": {"$ne": row["_id"]}},
         {"$set": {"used_at": _now_iso(), "invalidated": True}},
     )
+    # F-003: Invalidate all active refresh sessions for this user on password reset
+    try:
+        await db.refresh_tokens.update_many(
+            {"user_id": str(user["_id"])},
+            {"$set": {"revoked": True, "revoked_at": _now_iso(), "revocation_reason": "password_reset"}}
+        )
+    except Exception:
+        pass
     return {"ok": True, "message": "Password updated. You can now sign in."}
 
 
@@ -601,6 +745,38 @@ async def update_user(user_id: str, payload: UserUpdate, request: Request):
     if not user_before:
         raise HTTPException(404, "User not found")
 
+    # F-027: Last-admin protection & self-privilege checks
+    if user_before.get("role") == "admin":
+        is_demoting = "role" in update and update["role"] != "admin"
+        is_deactivating = update.get("active") is False
+        if is_demoting or is_deactivating:
+            active_admins = await db.users.count_documents({
+                "role": "admin",
+                "active": {"$ne": False},
+                "_id": {"$ne": _oid(user_id)}
+            })
+            if active_admins == 0:
+                raise HTTPException(400, "Cannot remove, demote, or deactivate the last active administrator.")
+
+    # Prevent admin from self-demoting their own account
+    if str(user.get("id")) == str(user_id) and "role" in update and update["role"] != "admin":
+        raise HTTPException(400, "Administrators cannot demote their own account.")
+
+    # Audit role change
+    if "role" in update and update["role"] != user_before.get("role"):
+        try:
+            await db.audit_logs.insert_one({
+                "action": "USER_ROLE_CHANGE",
+                "target_user_id": str(user_id),
+                "target_email": user_before.get("email"),
+                "old_role": user_before.get("role"),
+                "new_role": update["role"],
+                "changed_by": user.get("email") or user.get("id"),
+                "timestamp": _now_iso(),
+            })
+        except Exception:
+            pass
+
     # Sync updates to Supabase Auth
     try:
         from services.supabase_auth_service import create_or_sync_supabase_user
@@ -626,8 +802,23 @@ async def update_user(user_id: str, payload: UserUpdate, request: Request):
 async def delete_user(user_id: str, request: Request):
     user = await _current_user_fn()(request)
     require_roles("admin")(user)
-    if user["id"] == user_id:
+    if str(user.get("id")) == str(user_id):
         raise HTTPException(400, "Cannot delete yourself")
     db = _get_db()
-    await db.users.update_one({"_id": _oid(user_id)}, {"$set": {"active": False}})
+    target = await db.users.find_one({"_id": _oid(user_id)})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("role") == "admin":
+        active_admins = await db.users.count_documents({
+            "role": "admin",
+            "active": {"$ne": False},
+            "_id": {"$ne": _oid(user_id)}
+        })
+        if active_admins == 0:
+            raise HTTPException(400, "Cannot delete or deactivate the last active administrator.")
+
+    res = await db.users.update_one({"_id": _oid(user_id)}, {"$set": {"active": False}})
+    # F-028: Check matched_count and return 404 when user does not exist
+    if res.matched_count == 0:
+        raise HTTPException(404, "User not found")
     return {"ok": True}

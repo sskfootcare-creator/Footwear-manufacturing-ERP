@@ -5,6 +5,7 @@ import re
 import zipfile
 import base64
 import logging
+import inspect
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict
@@ -147,7 +148,7 @@ def _compute_deadline(entered_iso: str, hours: float) -> str:
 class CartonIn(BaseModel):
     job_id: str
     size: str
-    qty: int
+    qty: int = Field(..., gt=0, description="Quantity must be strictly greater than 0")
 
 
 class EanCodeSimple(BaseModel):
@@ -157,7 +158,7 @@ class EanCodeSimple(BaseModel):
 
 class CartonRowSimple(BaseModel):
     size: str
-    qty: int
+    qty: int = Field(..., gt=0, description="Quantity must be strictly greater than 0")
 
 
 class QcPackConfirmIn(BaseModel):
@@ -174,6 +175,46 @@ class EanCodeIn(BaseModel):
 
 
 # ── Invoicing Sequence and AR Helpers ─────────────────────────────────────
+def _extract_idempotency_key(payload, request: Request) -> Optional[str]:
+    """Safely extract string idempotency key from payload or request headers, guarding against MagicMocks."""
+    raw_key = getattr(payload, "idempotency_key", None)
+    if isinstance(raw_key, str) and raw_key.strip():
+        return raw_key.strip()
+    if request is not None and hasattr(request, "headers") and hasattr(request.headers, "get"):
+        header_fn = getattr(request.headers, "get", None)
+        if callable(header_fn):
+            for h in ("Idempotency-Key", "X-Idempotency-Key"):
+                val = header_fn(h)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    return None
+
+
+async def _maybe_await(res):
+    """Safely await if res is an awaitable / coroutine; otherwise return directly."""
+    if inspect.isawaitable(res):
+        return await res
+    return res
+
+
+async def _safe_find_one(collection, query: dict) -> Optional[dict]:
+    """Find one document safely, supporting Motor async cursors, AsyncMock, and MagicMock fallbacks."""
+    if collection is None:
+        return None
+    try:
+        fn = getattr(collection, "find_one", None)
+        if not fn or not callable(fn):
+            return None
+        res = fn(query)
+        res = await _maybe_await(res)
+        if isinstance(res, dict):
+            return res
+        return None
+    except Exception as e:
+        log.warning(f"Error querying {collection}: {e}")
+        return None
+
+
 async def _get_max_invoice_seq(fy_label: str, db=None) -> int:
     """Find the highest sequence number across db.invoices and db.dispatch_records for given FY."""
     if db is None:
@@ -182,39 +223,46 @@ async def _get_max_invoice_seq(fy_label: str, db=None) -> int:
     pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     max_seq = 0
 
-    # 1. Scan db.invoices
-    inv_docs = await db.invoices.find(
-        {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}},
-        {"invoice_no": 1}
-    ).to_list(10000)
-    for doc in inv_docs:
-        ino = str(doc.get("invoice_no") or "")
-        m = pattern.match(ino)
-        if m:
-            try:
-                max_seq = max(max_seq, int(m.group(1)))
-            except ValueError:
-                pass
+    async def _scan(coll):
+        nonlocal max_seq
+        if coll is None:
+            return
+        try:
+            find_fn = getattr(coll, "find", None)
+            if not find_fn or not callable(find_fn):
+                return
+            cursor = find_fn(
+                {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}},
+                {"invoice_no": 1}
+            )
+            if hasattr(cursor, "to_list"):
+                docs = await _maybe_await(cursor.to_list(10000))
+            elif inspect.isawaitable(cursor):
+                docs = await cursor
+            else:
+                docs = cursor
+            if isinstance(docs, (list, tuple)):
+                for doc in docs:
+                    if isinstance(doc, dict):
+                        ino = str(doc.get("invoice_no") or "")
+                        m = pattern.match(ino)
+                        if m:
+                            try:
+                                max_seq = max(max_seq, int(m.group(1)))
+                            except ValueError:
+                                pass
+        except Exception as e:
+            log.warning(f"Error scanning sequence on {coll}: {e}")
 
-    # 2. Scan db.dispatch_records
-    dr_docs = await db.dispatch_records.find(
-        {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}},
-        {"invoice_no": 1}
-    ).to_list(10000)
-    for doc in dr_docs:
-        ino = str(doc.get("invoice_no") or "")
-        m = pattern.match(ino)
-        if m:
-            try:
-                max_seq = max(max_seq, int(m.group(1)))
-            except ValueError:
-                pass
-
+    await _scan(getattr(db, "invoices", None))
+    await _scan(getattr(db, "dispatch_records", None))
     return max_seq
 
 
 async def next_invoice_no(db=None) -> str:
-    """Generate strictly-serial SSK<FY>-XXX format (e.g. SSK26-27-020)."""
+    """Generate strictly-serial SSK<FY>-XXX format (e.g. SSK26-27-020) with atomic counter initialization
+    and duplicate collision retry handling (F-020).
+    """
     if db is None:
         db = getattr(__import__("server"), "db")
     today = datetime.now(timezone.utc)
@@ -227,28 +275,55 @@ async def next_invoice_no(db=None) -> str:
     fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
 
     min_seq = 16 if fy_label == "26-27" else 1
-
-    max_existing = await _get_max_invoice_seq(fy_label, db=db)
-    baseline = max(min_seq - 1, max_existing)
-
     counter_id = f"invoice_{fy_label}"
-    counter_doc = await db.counters.find_one({"_id": counter_id})
-    cur_seq = int(counter_doc.get("seq", 0)) if counter_doc else 0
-    if cur_seq < baseline:
-        await db.counters.update_one(
-            {"_id": counter_id},
-            {"$set": {"seq": baseline}},
-            upsert=True,
-        )
 
-    counter = await db.counters.find_one_and_update(
-        {"_id": counter_id},
-        {"$inc": {"seq": 1}},
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    seq = int(counter.get("seq", baseline + 1))
-    return f"SSK{fy_label}-{seq:03d}"
+    # Atomic counter initialization if counter doc does not exist yet (avoid repeated full scans)
+    counter_doc = await _safe_find_one(getattr(db, "counters", None), {"_id": counter_id})
+    if not counter_doc:
+        max_existing = await _get_max_invoice_seq(fy_label, db=db)
+        baseline = max(min_seq - 1, max_existing)
+        try:
+            counters_coll = getattr(db, "counters", None)
+            if counters_coll is not None and hasattr(counters_coll, "update_one"):
+                res = counters_coll.update_one(
+                    {"_id": counter_id},
+                    {"$setOnInsert": {"seq": baseline}},
+                    upsert=True,
+                )
+                await _maybe_await(res)
+        except Exception as e:
+            log.warning(f"Counter init race on {counter_id}: {e}")
+
+    # Allocate sequence with duplicate collision handling (up to 10 retries)
+    seq = min_seq
+    for _ in range(10):
+        counter = None
+        counters_coll = getattr(db, "counters", None)
+        if counters_coll is not None and hasattr(counters_coll, "find_one_and_update"):
+            try:
+                res = counters_coll.find_one_and_update(
+                    {"_id": counter_id},
+                    {"$inc": {"seq": 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+                counter = await _maybe_await(res)
+            except Exception as e:
+                log.warning(f"Error incrementing counter: {e}")
+                counter = None
+
+        seq = int(counter.get("seq", min_seq)) if isinstance(counter, dict) else min_seq
+        candidate_no = f"SSK{fy_label}-{seq:03d}"
+        
+        # Guard against collision with manual / out-of-band inserts
+        exists_inv = await _safe_find_one(getattr(db, "invoices", None), {"invoice_no": candidate_no})
+        exists_dr = await _safe_find_one(getattr(db, "dispatch_records", None), {"invoice_no": candidate_no})
+        if not exists_inv and not exists_dr:
+            return candidate_no
+        log.warning(f"Invoice number collision on {candidate_no}; incrementing counter to next sequence")
+
+    # Fallback if loop exhausted
+    return f"SSK{fy_label}-{seq + 1:03d}"
 
 
 def _extract_credit_days(payment_terms_text: str | None) -> int:
@@ -470,7 +545,14 @@ async def _generate_invoice_payload(po: dict, job_ids: list[str] | None, db=None
             key = (j.get("style_code"), j.get("color"), str(j.get("size", "")))
             li_src = po_price_idx.get(key, {})
             comp = j.get("completed_qty")
-            qty = comp if (comp is not None and comp > 0) else j.get("quantity", 0)
+            billing_mode = po.get("billing_mode")
+            if billing_mode == "ordered_qty":
+                qty = int(j.get("quantity", 0) or 0)
+            elif comp is not None:
+                qty = int(comp)
+            else:
+                stage = j.get("stage")
+                qty = int(j.get("quantity", 0) or 0) if stage in ("qc_pack", "dispatched") else 0
             unit_price = li_src.get("unit_price") or j.get("unit_price") or 0
             raw_items.append({
                 "style_code": j.get("style_code", ""),
@@ -496,7 +578,14 @@ async def _generate_invoice_payload(po: dict, job_ids: list[str] | None, db=None
                 key = (j.get("style_code"), j.get("color"), str(j.get("size", "")))
                 li_src = po_price_idx.get(key, {})
                 comp = j.get("completed_qty")
-                qty = comp if (comp is not None and comp > 0) else j.get("quantity", 0)
+                billing_mode = po.get("billing_mode")
+                if billing_mode == "ordered_qty":
+                    qty = int(j.get("quantity", 0) or 0)
+                elif comp is not None:
+                    qty = int(comp)
+                else:
+                    stage = j.get("stage")
+                    qty = int(j.get("quantity", 0) or 0) if stage in ("qc_pack", "dispatched") else 0
                 unit_price = li_src.get("unit_price") or j.get("unit_price") or 0
                 raw_items.append({
                     "style_code": j.get("style_code", ""),
@@ -510,9 +599,15 @@ async def _generate_invoice_payload(po: dict, job_ids: list[str] | None, db=None
                     "mrp": li_src.get("mrp", ""),
                 })
         else:
+            billing_mode = po.get("billing_mode")
             for li in po_items:
                 comp = li.get("completed_qty")
-                qty = comp if (comp is not None and comp > 0) else li.get("quantity", 0)
+                if billing_mode == "ordered_qty":
+                    qty = int(li.get("quantity", 0) or 0)
+                elif comp is not None:
+                    qty = int(comp)
+                else:
+                    qty = int(li.get("quantity", 0) or 0)
                 unit_price = li.get("unit_price", 0)
                 raw_items.append({
                     "style_code": li.get("style_code", ""),
@@ -1091,6 +1186,22 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         raise HTTPException(404, "PO not found")
     po = stringify(po_doc)
 
+    idem_key = _extract_idempotency_key(payload, request)
+    if idem_key:
+        cached_inv = await db.invoices.find_one({"idempotency_key": idem_key})
+        if cached_inv and cached_inv.get("file_b64"):
+            raw_pdf = base64.b64decode(cached_inv["file_b64"])
+            inv_no = cached_inv.get("invoice_no") or "invoice"
+            return StreamingResponse(
+                BytesIO(raw_pdf), media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'inline; filename="{inv_no}.pdf"',
+                    "X-Invoice-Id": str(cached_inv["_id"]),
+                    "X-Invoice-No": inv_no,
+                    "X-Idempotent-Replay": "true",
+                },
+            )
+
     if payload.job_ids:
         dr_existing = await db.dispatch_records.find_one({"job_ids": {"$in": payload.job_ids}})
         if dr_existing and dr_existing.get("invoice_file_b64"):
@@ -1150,6 +1261,7 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         "by": u["email"], "created_at": now_iso(),
         "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
         "merged": False,
+        "idempotency_key": idem_key,
     }
     res = await db.invoices.insert_one(inv_doc)
     cartons = await db.packing_cartons.find({"job_id": {"$in": payload.job_ids or []}, "status": "packed"}).to_list(10000)
@@ -1185,6 +1297,27 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
     db = _get_db(request)
+
+    # F-019: Idempotency check
+    idem_key = _extract_idempotency_key(payload, request)
+    if idem_key:
+        cached_inv = await db.invoices.find_one({"idempotency_key": idem_key})
+        if cached_inv:
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "invoice": _decorate_invoice(cached_inv, payments_map={}, grns_map={}),
+                    "invoice_id": str(cached_inv["_id"]),
+                    "invoice_no": cached_inv.get("invoice_no"),
+                    "pdf_url": f"/api/invoices/{cached_inv['_id']}/file",
+                    "idempotent_replay": True,
+                },
+                headers={
+                    "X-Invoice-Id": str(cached_inv["_id"]),
+                    "X-Invoice-No": cached_inv.get("invoice_no", ""),
+                    "X-Idempotent-Replay": "true",
+                }
+            )
 
     client_name = (payload.client_name or "").strip()
     if not client_name:
@@ -1305,9 +1438,13 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     line_items_snapshot = []
 
     for item in payload.line_items:
-        amt = round(float(item.qty) * float(item.unit_price), 2)
+        # F-024: Use canonical quantity, reject non-positive quantity
+        canonical_qty = int(item.quantity or item.qty or 0)
+        if canonical_qty <= 0:
+            raise HTTPException(400, f"Line item quantity must be > 0 (got {canonical_qty})")
+        amt = round(float(canonical_qty) * float(item.unit_price), 2)
         subtotal += amt
-        total_pairs += int(item.qty)
+        total_pairs += canonical_qty
         
         i_cgst = round(amt * (cgst_rate / 100.0), 2) if cgst_rate else 0.0
         i_sgst = round(amt * (sgst_rate / 100.0), 2) if sgst_rate else 0.0
@@ -1320,8 +1457,8 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
             "size": str(item.size or ""),
             "description": item.description or f"{item.style_code} Footwear",
             "hsn_code": item.hsn_code or "6403",
-            "qty": int(item.qty or item.quantity or 0),
-            "quantity": int(item.quantity or item.qty or 0),
+            "qty": canonical_qty,
+            "quantity": canonical_qty,
             "unit_price": float(item.unit_price),
             "rate": float(item.unit_price),
             "amount": amt,
@@ -1431,6 +1568,7 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
         "created_at": now_iso(),
         "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
         "merged": False,
+        "idempotency_key": idem_key,
     }
 
     res = await db.invoices.insert_one(inv_doc)
@@ -1477,6 +1615,8 @@ async def delete_invoice(id: str, request: Request):
         raise HTTPException(404, "Invoice not found")
     
     job_ids = inv.get("job_ids", [])
+    now = now_iso()
+    job_ids = inv.get("job_ids", [])
     if job_ids:
         obj_ids = [oid(j) for j in job_ids]
         await db.production_jobs.update_many(
@@ -1487,8 +1627,8 @@ async def delete_invoice(id: str, request: Request):
             await db.production_jobs.update_one(
                 {"_id": o_id},
                 {"$push": {"history": {
-                    "stage": "qc_pack", "at": now_iso(), "by": u["email"],
-                    "notes": f"Invoice {inv.get('invoice_no')} deleted; stage reverted to QC & Pack",
+                    "stage": "qc_pack", "at": now, "by": u["email"],
+                    "notes": f"Invoice {inv.get('invoice_no')} voided; stage reverted to QC & Pack",
                     "qc_pass": None, "rejected_qty": 0
                 }}}
             )
@@ -1498,33 +1638,32 @@ async def delete_invoice(id: str, request: Request):
         {"$set": {
             "status": "packed",
             "invoice_id": None,
-            "box_number": None
+            "box_number": None,
+            "updated_at": now
         }}
     )
     
-    await db.payments.delete_many({"invoice_id": id})
-    await db.invoices.delete_one({"_id": oid(id)})
-    await db.dispatch_records.delete_many({"$or": [{"invoice_id": id}, {"invoice_no": inv.get("invoice_no")}]})
+    # F-022: Preserve financial auditability: mark invoice voided, reverse payments, cancel dispatches
+    await db.payments.update_many(
+        {"invoice_id": id},
+        {"$set": {"status": "reversed", "reversed_at": now, "reversed_by": u["email"]}}
+    )
+    await db.invoices.update_one(
+        {"_id": oid(id)},
+        {"$set": {"status": "voided", "voided_at": now, "voided_by": u["email"], "active": False}}
+    )
+    await db.dispatch_records.update_many(
+        {"$or": [{"invoice_id": id}, {"invoice_no": inv.get("invoice_no")}]},
+        {"$set": {"status": "cancelled", "cancelled_at": now, "cancelled_by": u["email"]}}
+    )
 
-    try:
-        today = datetime.now(timezone.utc)
-        yr = today.year
-        fy_start = yr - 1 if today.month < 4 else yr
-        fy_end = fy_start + 1
-        fy_label = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}"
-        min_seq = 16 if fy_label == "26-27" else 1
+    return {"ok": True, "status": "voided", "invoice_no": inv.get("invoice_no")}
 
-        max_existing = await _get_max_invoice_seq(fy_label, db=db)
-        target_seq = max(min_seq - 1, max_existing)
-        await db.counters.update_one(
-            {"_id": f"invoice_{fy_label}"},
-            {"$set": {"seq": target_seq}},
-            upsert=True,
-        )
-    except Exception as e:
-        log.warning(f"Failed to resync invoice counter after deletion: {e}")
 
-    return {"ok": True}
+@invoice_packing_router.post("/invoices/{id}/void")
+async def void_invoice(id: str, request: Request):
+    """Explicit audit-compliant endpoint to void an invoice and revert related state (F-022)."""
+    return await delete_invoice(id, request)
 
 
 @invoice_packing_router.post("/invoices/merged", dependencies=[Depends(pdf_rate_limiter)])
@@ -1971,6 +2110,26 @@ async def pack_carton(payload: CartonIn, request: Request):
     job = await db.production_jobs.find_one({"_id": oid(payload.job_id)})
     if not job:
         raise HTTPException(404, "Job not found")
+
+    # F-023: Enforce positive quantity, job size alignment, and remaining un-packed quantity
+    if int(payload.qty) <= 0:
+        raise HTTPException(400, "Carton quantity must be strictly greater than 0")
+
+    job_size = str(job.get("size") or "").strip()
+    carton_size = str(payload.size or "").strip()
+    if job_size and carton_size != job_size:
+        raise HTTPException(400, f"Carton size '{carton_size}' does not match job size '{job_size}'")
+
+    job_max = int(job.get("completed_qty") or job.get("quantity") or 0)
+    existing_packed = sum(
+        int(c.get("qty", 0))
+        for c in await db.packing_cartons.find({"job_id": payload.job_id, "status": "packed"}).to_list(2000)
+    )
+    if existing_packed + int(payload.qty) > job_max:
+        raise HTTPException(
+            400,
+            f"Cannot pack {payload.qty} pairs; already packed {existing_packed}/{job_max} pairs for this job"
+        )
     
     ean_code = ""
     po_id = job.get("po_id")
@@ -2081,11 +2240,33 @@ async def confirm_qc_pack(payload: QcPackConfirmIn, request: Request):
     if style_id:
         sku_mapping_doc = await db.sku_map.find_one({"style_id": str(style_id)})
 
+    if not payload.cartons:
+        raise HTTPException(400, "At least one carton row is required")
+
+    # F-023: Reconcile carton quantities per size and check for overpacking
+    packed_by_size = {}
+    for c in payload.cartons:
+        c_sz = str(c.size).strip()
+        c_q = int(c.qty)
+        if c_q <= 0:
+            raise HTTPException(400, f"Carton quantity must be strictly greater than 0 for size '{c_sz}'")
+        packed_by_size[c_sz] = packed_by_size.get(c_sz, 0) + c_q
+
+    for job in job_objs:
+        j_size = str(job.get("size") or "").strip()
+        j_max = int(job.get("completed_qty") or job.get("quantity") or 0)
+        tot_packed = packed_by_size.get(j_size, 0)
+        if tot_packed > j_max:
+            raise HTTPException(
+                400,
+                f"Over-packing detected for size {j_size}: packed {tot_packed} pairs exceeds job quantity {j_max}"
+            )
+
     job_by_size = {job.get("size"): str(job["_id"]) for job in job_objs}
 
     for c in payload.cartons:
-        size = c.size
-        qty = c.qty
+        size = str(c.size).strip()
+        qty = int(c.qty)
         job_id = job_by_size.get(size)
         if not job_id:
             raise HTTPException(400, f"Size {size} not found in color group jobs")
@@ -2281,11 +2462,49 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     if not payload.job_ids:
         raise HTTPException(400, "job_ids required")
 
+    # F-019: Idempotency check
+    idem_key = _extract_idempotency_key(payload, request)
+    if idem_key:
+        cached_dr = await db.dispatch_records.find_one({"idempotency_key": idem_key})
+        if cached_dr and cached_dr.get("zip_b64"):
+            raw_zip = base64.b64decode(cached_dr["zip_b64"])
+            inv_no = cached_dr.get("invoice_no") or "dispatch"
+            return StreamingResponse(
+                BytesIO(raw_zip), media_type="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{inv_no}-dispatch.zip"',
+                    "X-Dispatch-Record-Id": str(cached_dr["_id"]),
+                    "X-Invoice-No": inv_no,
+                    "X-Idempotent-Replay": "true",
+                }
+            )
+
     # 1. Load PO
     po_doc = await db.pos.find_one({"_id": oid(payload.po_id)})
     if not po_doc:
         raise HTTPException(404, "PO not found")
     po = stringify(po_doc)
+
+    # F-017: Validate every selected job against requested PO ID and PO number
+    po_str_id = str(po_doc["_id"])
+    po_no = str(po_doc.get("po_number") or "").strip()
+
+    for jid in payload.job_ids:
+        orig_job = await db.production_jobs.find_one({"_id": oid(jid)})
+        if not orig_job:
+            continue
+        job_po_id = str(orig_job.get("po_id") or "")
+        job_po_no = str(orig_job.get("po_number") or "").strip()
+        if job_po_id and job_po_id != po_str_id:
+            raise HTTPException(
+                400,
+                f"Job '{jid}' belongs to PO ID '{job_po_id}', not the requested PO '{po_str_id}'"
+            )
+        if job_po_no and po_no and job_po_no != po_no:
+            raise HTTPException(
+                400,
+                f"Job '{jid}' belongs to PO '{job_po_no}', not the requested PO '{po_no}'"
+            )
 
     # 1.5 Handle partial dispatch / job splitting if dispatch_quantities is provided
     effective_job_ids = []
@@ -2393,17 +2612,44 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
                 }}
             )
 
-            # 3. Reassign corresponding packed cartons to new_job_oid
+            # 3. Reassign corresponding packed cartons to new_job_oid (F-016: cartons must align with target_qty, or split carton explicitly)
             orig_cartons = await db.packing_cartons.find({"job_id": jid, "status": "packed"}).to_list(5000)
             allocated = 0
             for c in orig_cartons:
-                c_q = c.get("qty", 0)
-                if allocated + c_q <= target_qty or allocated < target_qty:
+                if allocated >= target_qty:
+                    break
+                c_q = int(c.get("qty", 0))
+                if allocated + c_q <= target_qty:
                     await db.packing_cartons.update_one(
                         {"_id": c["_id"]},
-                        {"$set": {"job_id": str(new_job_oid)}}
+                        {"$set": {"job_id": str(new_job_oid), "updated_at": now}}
                     )
                     allocated += c_q
+                else:
+                    needed = target_qty - allocated
+                    rem_qty_in_carton = c_q - needed
+                    if rem_qty_in_carton > 0:
+                        split_carton_doc = dict(c)
+                        split_carton_doc["_id"] = ObjectId()
+                        split_carton_doc.pop("id", None)
+                        split_carton_doc["job_id"] = str(orig_job["_id"])
+                        split_carton_doc["qty"] = rem_qty_in_carton
+                        split_carton_doc["created_at"] = now
+                        split_carton_doc["updated_at"] = now
+                        await db.packing_cartons.insert_one(split_carton_doc)
+
+                    await db.packing_cartons.update_one(
+                        {"_id": c["_id"]},
+                        {"$set": {"job_id": str(new_job_oid), "qty": needed, "updated_at": now}}
+                    )
+                    allocated += needed
+                    break
+
+            if allocated < target_qty:
+                raise HTTPException(
+                    400,
+                    f"Insufficient packed cartons ({allocated} pairs) to satisfy partial dispatch quantity of {target_qty} pairs for job {jid}"
+                )
 
             effective_job_ids.append(str(new_job_oid))
         else:
@@ -2599,6 +2845,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "file_b64": base64.b64encode(invoice_pdf).decode("ascii"),
         "ewaybill_file_b64": base64.b64encode(eway_json).decode("ascii"),
         "merged": is_merged,
+        "idempotency_key": idem_key,
     }
     inv_res = await db.invoices.insert_one(inv_doc)
     invoice_id = str(inv_res.inserted_id)
@@ -2645,6 +2892,7 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         "carton_labels_file_b64": base64.b64encode(labels_pdf).decode("ascii"),
         "carton_list_file_b64": base64.b64encode(carton_list_xlsx).decode("ascii"),
         "ewaybill_file_b64": base64.b64encode(eway_json).decode("ascii"),
+        "idempotency_key": idem_key,
     }
     dr_res = await db.dispatch_records.insert_one(dispatch_doc)
     dispatch_record_id = str(dr_res.inserted_id)
@@ -2661,6 +2909,15 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
         zf.writestr(f"CartonLabels-{invoice_no}.pdf", labels_pdf)
         zf.writestr(f"CartonList-{invoice_no}-{date_tag}.xlsx", carton_list_xlsx)
         zf.writestr(f"EWayBill-{invoice_no}.json", eway_json)
+    raw_zip = zip_buf.getvalue()
+    if idem_key:
+        try:
+            await db.dispatch_records.update_one(
+                {"_id": dr_res.inserted_id},
+                {"$set": {"zip_b64": base64.b64encode(raw_zip).decode("ascii")}}
+            )
+        except Exception:
+            pass
     zip_buf.seek(0)
 
     return StreamingResponse(

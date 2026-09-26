@@ -555,17 +555,41 @@ async def _generate_picklist_for_order(order_id: str, channel: str, order_lines:
                 raise HTTPException(409, "Could not reserve WMS stock for picklist")
         
         # Book SKU-level reservations for covered portion
-        for r in reservations_to_book:
-            try:
+        booked_sku_movements = []
+        try:
+            for r in reservations_to_book:
                 mv = FgStockMovementIn(
                     style_id=r["style_id"], color=r["color"], size=r["size"],
                     movement_type="reserved", quantity=int(r["qty"]),
                     reference_type="online_order", reference_id=order_id,
                     online_order_id=order_id, notes=f"Auto-reserved for picklist {picklist_no}",
                 )
-                await _apply_movement(mv, user_email, skip_location_sync=True)
-            except Exception as e:
-                log.warning(f"Reservation booking failed for {r}: {e}")
+                await _apply_movement(mv, user_email, skip_location_sync=True, db=db)
+                booked_sku_movements.append(r)
+        except Exception as e:
+            # F-008: Rollback all SKU reservations and location reservations, and abort picklist creation
+            log.error(f"SKU reservation failed during picklist generation: {e}. Rolling back all reservations.")
+            for r_done in booked_sku_movements:
+                try:
+                    rel_mv = FgStockMovementIn(
+                        style_id=r_done["style_id"], color=r_done["color"], size=r_done["size"],
+                        movement_type="unreserved", quantity=int(r_done["qty"]),
+                        reference_type="online_order", reference_id=order_id,
+                        online_order_id=order_id, notes=f"Rollback reservation for failed picklist {picklist_no}",
+                    )
+                    await _apply_movement(rel_mv, user_email, skip_location_sync=True, db=db)
+                except Exception as _r_err:
+                    log.error("Failed to rollback SKU reservation: %s", _r_err)
+            for booked_id, booked_qty in booked_loc_reservations:
+                try:
+                    await db.fg_location_inventory.update_one(
+                        {"_id": booked_id},
+                        {"$inc": {"reserved_qty": -int(booked_qty)}, "$set": {"updated_at": now_iso()}},
+                    )
+                except Exception as _r_err:
+                    log.error("Failed to rollback location reservation: %s", _r_err)
+            raise HTTPException(409, f"Failed to book SKU reservation for picklist: {e}")
+
         res = await db.picklists.insert_one(doc)
         doc["_id"] = res.inserted_id
     return doc, covered, uncovered
@@ -942,9 +966,31 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
             reference_type="online_order", reference_id=doc["order_id"],
             online_order_id=doc["order_id"], notes=f"Picklist {doc['picklist_no']} item {payload.item_index}",
         )
-        await _apply_movement(mv, u["email"], skip_location_sync=True)
+        await _apply_movement(mv, u["email"], skip_location_sync=True, db=db)
     except Exception as e:
-        log.warning(f"Dispatched ledger failed: {e}")
+        log.error(f"Dispatched ledger failed for picklist item {payload.item_index}: {e}")
+        # F-007: Rollback location deduction and picklist claim if ledger posting fails
+        try:
+            sid_oid = ObjectId(item["style_id"]) if ObjectId.is_valid(str(item["style_id"])) else str(item["style_id"])
+            await db.fg_location_inventory.update_one(
+                {"$or": [{"style_id": sid_oid}, {"style_id": str(item["style_id"])}], "color": item["color"], "size": item["size"], "location_code": item["location_code"]},
+                {"$inc": {"qty": int(item["qty"]), "reserved_qty": int(item["qty"])}, "$set": {"updated_at": now_iso()}}
+            )
+            wloc = await db.warehouse_locations.find_one({"location_code": item["location_code"]})
+            if wloc:
+                r_occ = int(wloc.get("occupied_pairs", 0)) + int(item["qty"])
+                r_av = max(0, int(wloc.get("capacity_pairs", CAPACITY)) - r_occ)
+                await db.warehouse_locations.update_one(
+                    {"_id": wloc["_id"]},
+                    {"$set": {"occupied_pairs": r_occ, "available_pairs": r_av, "updated_at": now_iso()}}
+                )
+            await db.picklists.update_one(
+                {"_id": ObjectId(pid)},
+                {"$set": {f"items.{payload.item_index}.picked": False, f"items.{payload.item_index}.picked_at": None, f"items.{payload.item_index}.picked_by": None, "updated_at": now_iso()}}
+            )
+        except Exception as _rb_err:
+            log.error("Compensating rollback failed for pick_item: %s", _rb_err)
+        raise HTTPException(500, f"Failed to post dispatched inventory movement: {e}")
 
     doc = await db.picklists.find_one({"_id": ObjectId(pid)})
     all_picked = all(bool(i.get("picked")) for i in doc["items"])
@@ -1002,7 +1048,7 @@ async def delete_picklist(request: Request, pid: str):
                     online_order_id=doc["order_id"],
                     notes=f"Picklist {doc['picklist_no']} cancelled",
                 )
-                await _apply_movement(mv, u["email"], skip_location_sync=True)
+                await _apply_movement(mv, u["email"], skip_location_sync=True, db=db)
             except Exception:
                 pass
     await db.picklists.delete_one({"_id": ObjectId(pid)})
@@ -1132,46 +1178,17 @@ async def pending_product_list(request: Request):
     }).sort("created_at", 1).to_list(2000)
 
     style_ids = list({str(j.get("style_id")) for j in jobs if j.get("style_id")})
-    comp_stock_by_style = {}
+    boms_by_style = {}
     for sid in style_ids:
         try:
             oid_val = ObjectId(sid)
         except Exception:
-            comp_stock_by_style[sid] = {"components_available": False, "shortages": []}
+            boms_by_style[sid] = None
             continue
-        bom = await db.style_component_mapping.find({
+        bom_rows = await db.style_component_mapping.find({
             "style_id": oid_val, "active": {"$ne": False},
         }).to_list(200)
-        if not bom:
-            comp_stock_by_style[sid] = {
-                "components_available": False,
-                "has_bom": False,
-                "shortages": [{
-                    "component_code": "NO_BOM",
-                    "component_name": "No BOM Mapped",
-                    "available": 0,
-                    "per_pair": 0,
-                }],
-                "note": "No BOM mapped — components cannot be verified",
-            }
-            continue
-        shortages = []
-        ok = True
-        for b in bom:
-            comp = await db.component_master.find_one({"_id": ObjectId(b["component_id"])})
-            if not comp:
-                continue
-            cur = int(comp.get("current_stock", 0)) - int(comp.get("reserved_stock", 0))
-            need_per_pair = float(b.get("quantity_per_pair", b.get("qty_per_pair", 1)) or 1)
-            if cur <= 0:
-                ok = False
-                shortages.append({
-                    "component_code": comp.get("component_code"),
-                    "component_name": comp.get("component_name"),
-                    "available":      cur,
-                    "per_pair":       need_per_pair,
-                })
-        comp_stock_by_style[sid] = {"components_available": ok, "has_bom": True, "shortages": shortages}
+        boms_by_style[sid] = bom_rows
 
     out = []
     style_lookup: dict = {}
@@ -1185,13 +1202,52 @@ async def pending_product_list(request: Request):
                     "image_thumbnail_url":    s.get("image_thumbnail_url", ""),
                     "style_name":             s.get("name", ""),
                 }
+
     for j in jobs:
         jd = stringify(j)
         sid = jd.get("style_id")
-        info = comp_stock_by_style.get(sid, {"components_available": False, "shortages": []})
-        jd["components_available"] = bool(info.get("components_available"))
-        jd["has_bom"]              = bool(info.get("has_bom", True))
-        jd["component_shortages"]  = info.get("shortages", [])
+        bom = boms_by_style.get(sid)
+
+        # F-013: Calculate required quantity for this specific job's pending pairs
+        pending_pairs = int(j.get("quantity", 0)) - int(j.get("completed_qty", 0) or 0)
+        if pending_pairs <= 0:
+            pending_pairs = int(j.get("quantity", 0) or 1)
+
+        if not bom:
+            jd["components_available"] = False
+            jd["has_bom"] = False
+            jd["component_shortages"] = [{
+                "component_code": "NO_BOM",
+                "component_name": "No BOM Mapped",
+                "available": 0,
+                "needed": 0,
+                "per_pair": 0,
+            }]
+        else:
+            job_ok = True
+            job_shortages = []
+            for b in bom:
+                comp = await db.component_master.find_one({"_id": ObjectId(b["component_id"]) if ObjectId.is_valid(str(b["component_id"])) else str(b["component_id"])})
+                if not comp:
+                    continue
+                free_stock = max(0, int(comp.get("current_stock", 0)) - int(comp.get("reserved_stock", 0) or 0))
+                per_pair = float(b.get("quantity_per_pair", b.get("qty_per_pair", 1)) or 1)
+                waste = float(b.get("wastage_percent", 0) or 0) / 100.0
+                total_needed = int(round(pending_pairs * per_pair * (1 + waste)))
+                if free_stock < total_needed:
+                    job_ok = False
+                    job_shortages.append({
+                        "component_code": comp.get("component_code"),
+                        "component_name": comp.get("component_name"),
+                        "available":      free_stock,
+                        "needed":         total_needed,
+                        "per_pair":       per_pair,
+                        "shortfall":      total_needed - free_stock,
+                    })
+            jd["components_available"] = job_ok
+            jd["has_bom"] = True
+            jd["component_shortages"] = job_shortages
+
         s_meta = style_lookup.get(sid, {})
         jd["image_url"]           = s_meta.get("image_url", "")
         jd["image_display_url"]   = s_meta.get("image_display_url", "")
@@ -1335,6 +1391,11 @@ async def produce_cell(request: Request, payload: ProduceCellIn):
                  "produced":   produced,
                  "shortages":  shortages},
             )
+    # F-012: Tracking for compensating rollback
+    applied_comp_deductions: list[tuple[Any, int]] = []
+    applied_job_updates: list[tuple[Any, int, str]] = []
+
+    try:
         for comp, deduct in deductions:
             new_stock = int(comp.get("current_stock", 0)) - deduct
             await db.component_master.update_one(
@@ -1346,6 +1407,7 @@ async def produce_cell(request: Request, payload: ProduceCellIn):
                                        "pairs": produced, "deducted": deduct,
                                        "new_stock": new_stock}}},
             )
+            applied_comp_deductions.append((comp["_id"], deduct))
             bom_used.append({
                 "component_id":   str(comp["_id"]),
                 "component_code": comp.get("component_code"),
@@ -1354,80 +1416,89 @@ async def produce_cell(request: Request, payload: ProduceCellIn):
                 "new_stock":      new_stock,
             })
 
-    remaining_to_cover = min(produced, pending_total)
-    covered_job_ids: list[str] = []
-    for j in jobs:
-        if remaining_to_cover <= 0:
-            break
-        job_pending = int(j.get("quantity", 0)) - int(j.get("completed_qty", 0) or 0)
-        take = min(job_pending, remaining_to_cover)
-        new_completed = int(j.get("completed_qty", 0) or 0) + take
-        new_stage = payload.dispatch_stage if new_completed >= int(j.get("quantity", 0)) else "packing"
-        await db.production_jobs.update_one(
-            {"_id": j["_id"]},
-            {"$set": {"completed_qty": new_completed, "stage": new_stage, "updated_at": now_iso()},
-             "$push": {"history": {"event": "produced", "at": now_iso(), "by": u["email"],
-                                   "produced_qty": take, "new_completed": new_completed,
-                                   "reason": payload.reason or ""}}},
-        )
-        covered_job_ids.append(str(j["_id"]))
-        remaining_to_cover -= take
+        remaining_to_cover = min(produced, pending_total)
+        covered_job_ids: list[str] = []
+        for j in jobs:
+            if remaining_to_cover <= 0:
+                break
+            prev_comp = int(j.get("completed_qty", 0) or 0)
+            prev_stage = j.get("stage", "assembly")
+            job_pending = int(j.get("quantity", 0)) - prev_comp
+            take = min(job_pending, remaining_to_cover)
+            new_completed = prev_comp + take
+            new_stage = payload.dispatch_stage if new_completed >= int(j.get("quantity", 0)) else "packing"
+            await db.production_jobs.update_one(
+                {"_id": j["_id"]},
+                {"$set": {"completed_qty": new_completed, "stage": new_stage, "updated_at": now_iso()},
+                 "$push": {"history": {"event": "produced", "at": now_iso(), "by": u["email"],
+                                       "produced_qty": take, "new_completed": new_completed,
+                                       "reason": payload.reason or ""}}},
+            )
+            applied_job_updates.append((j["_id"], prev_comp, prev_stage))
+            covered_job_ids.append(str(j["_id"]))
+            remaining_to_cover -= take
 
-    shortfall = pending_total - produced if is_short else 0
-    if is_short:
-        await db.short_production_log.insert_one({
-            "style_id":    payload.style_id,
-            "style_code":  style_code,
-            "color":       payload.color,
-            "size":        payload.size,
-            "pending_qty": pending_total,
-            "produced_qty": produced,
-            "shortfall":   shortfall,
-            "reason":      payload.reason or "",
-            "logged_by":   u["email"],
-            "created_at":  now_iso(),
-        })
+        shortfall = pending_total - produced if is_short else 0
+        if is_short:
+            await db.short_production_log.insert_one({
+                "style_id":    payload.style_id,
+                "style_code":  style_code,
+                "color":       payload.color,
+                "size":        payload.size,
+                "pending_qty": pending_total,
+                "produced_qty": produced,
+                "shortfall":   shortfall,
+                "reason":      payload.reason or "",
+                "logged_by":   u["email"],
+                "created_at":  now_iso(),
+            })
 
-    excess = produced - pending_total if is_over else 0
-    excess_placed_at: Optional[str] = None
-    if excess > 0:
-        home = await _pick_new_cell_for_style(payload.style_id, db=db) or "R01-RK1-C01"
-        excess_placed_at = home
-        try:
-            mv = FgStockMovementIn(
-                style_id=payload.style_id, color=payload.color, size=payload.size,
-                movement_type="production_in", quantity=int(excess),
-                reference_type="produce_cell_excess", reference_id="",
-                notes=f"Excess of {excess} pairs over pending {pending_total} for {style_code}",
+        excess = produced - pending_total if is_over else 0
+        excess_placed_at: Optional[str] = None
+        excess_alloc_result = None
+        if excess > 0:
+            home = await _pick_new_cell_for_style(payload.style_id, db=db) or "R01-RK1-C01"
+            excess_placed_at = home
+            # F-015: Allocate excess across available warehouse cells sequentially
+            excess_alloc_result = await _allocate_to_locations(
+                payload.style_id, style_code, payload.color, payload.size, int(excess),
+                u["email"], reference_type="produce_cell_excess", db=db
             )
-            await _apply_movement(mv, u["email"], skip_location_sync=True)
-        except Exception:
-            log.exception("Excess fg_stock movement failed")
-        
-        cell = await db.warehouse_locations.find_one({"location_code": home})
-        capacity = int(cell.get("capacity_pairs", CAPACITY)) if cell else CAPACITY
-        room = capacity - int(cell.get("occupied_pairs", 0)) if cell else capacity
-        put_here = min(excess, room)
-        if put_here > 0:
-            await db.fg_location_inventory.update_one(
-                {"style_id": sid_oid, "color": payload.color,
-                 "size": payload.size, "location_code": home},
-                {"$inc": {"qty": put_here},
-                 "$setOnInsert": {"style_code": style_code, "created_at": now_iso(),
-                                  "rack": cell.get("rack") if cell else None,
-                                  "row":  cell.get("row")  if cell else None,
-                                  "cell": cell.get("cell") if cell else None},
-                 "$set": {"updated_at": now_iso()}},
-                upsert=True,
-            )
-            new_occ = int(cell.get("occupied_pairs", 0)) + put_here if cell else put_here
-            await db.warehouse_locations.update_one(
-                {"location_code": home},
-                {"$set": {"occupied_pairs":  new_occ,
-                          "available_pairs": max(0, capacity - new_occ),
-                          "status":          _recompute_status(new_occ, capacity),
-                          "updated_at":      now_iso()}},
-            )
+            if excess_alloc_result and excess_alloc_result.get("placements"):
+                excess_placed_at = excess_alloc_result["placements"][0]["location_code"]
+
+            try:
+                mv = FgStockMovementIn(
+                    style_id=payload.style_id, color=payload.color, size=payload.size,
+                    movement_type="production_in", quantity=int(excess),
+                    reference_type="produce_cell_excess", reference_id="",
+                    notes=f"Excess of {excess} pairs over pending {pending_total} for {style_code}",
+                )
+                await _apply_movement(mv, u["email"], skip_location_sync=True, db=db)
+            except Exception:
+                log.exception("Excess fg_stock movement failed")
+
+    except Exception as e:
+        # F-012: Compensating rollback across components and jobs
+        for comp_id, deduct_qty in applied_comp_deductions:
+            try:
+                await db.component_master.update_one(
+                    {"_id": comp_id},
+                    {"$inc": {"current_stock": deduct_qty}, "$set": {"updated_at": now_iso()}}
+                )
+            except Exception as _c_err:
+                log.error("Failed to rollback component deduction: %s", _c_err)
+        for job_id, prev_comp, prev_stage in applied_job_updates:
+            try:
+                await db.production_jobs.update_one(
+                    {"_id": job_id},
+                    {"$set": {"completed_qty": prev_comp, "stage": prev_stage, "updated_at": now_iso()}}
+                )
+            except Exception as _j_err:
+                log.error("Failed to rollback job update: %s", _j_err)
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(500, f"produce_cell failed: {e}")
 
     return {
         "ok":                  True,
@@ -1545,7 +1616,9 @@ async def bom_feasibility(sid: str, request: Request, pairs: int = 1):
         comp = await db.component_master.find_one({"_id": ObjectId(b["component_id"]) if ObjectId.is_valid(str(b["component_id"])) else str(b["component_id"])})
         if not comp:
             continue
-        available = int(comp.get("current_stock", 0))
+        current = int(comp.get("current_stock", 0))
+        reserved = int(comp.get("reserved_stock", 0) or 0)
+        available = max(0, current - reserved)
         short = max(0, needed - available)
         if short > 0:
             feasible = False

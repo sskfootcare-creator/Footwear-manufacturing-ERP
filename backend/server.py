@@ -393,6 +393,10 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     if ext not in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
         raise HTTPException(400, "Invalid image format")
 
+    valid_content_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg"}
+    if file.content_type and file.content_type.lower() not in valid_content_types:
+        raise HTTPException(400, f"Unsupported Content-Type '{file.content_type}'. Must be a valid image MIME type.")
+
     # ── Read up to cap + 1 byte to enforce bounded memory allocation
     MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB — server-side limit
     content = await file.read(MAX_UPLOAD_BYTES + 1)
@@ -402,15 +406,24 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
             "Image too large. Max allowed is 8 MB."
         )
 
-
-    # ── Verify it's really an image (spoofed extension → PIL will raise)
+    # ── Verify it's really an image (spoofed extension → PIL will raise) & pixel-bomb protection (F-030)
     from PIL import Image, ImageOps, UnidentifiedImageError
+    # Prevent decompression bombs: limit max pixels to 10MP
+    Image.MAX_IMAGE_PIXELS = 10_000_000
     try:
         img = Image.open(BytesIO(content))
         img.verify()   # header check; must reopen for real decode
         img = Image.open(BytesIO(content))
-    except (UnidentifiedImageError, Exception) as e:
-        raise HTTPException(400, f"File is not a valid image: {e}")
+    except (Image.DecompressionBombError, Exception) as e:
+        if "DecompressionBomb" in type(e).__name__ or "decompression bomb" in str(e).lower():
+            raise HTTPException(400, "Image pixel dimension exceeds maximum limit (decompression bomb protection)")
+        if isinstance(e, UnidentifiedImageError):
+            raise HTTPException(400, f"File is not a valid image: {e}")
+        raise HTTPException(400, f"Image processing error: {e}")
+
+    orig_w, orig_h = img.size
+    if orig_w * orig_h > 10_000_000:
+        raise HTTPException(400, "Image pixel dimensions exceed maximum allowed limit (10MP)")
 
     # ── Auto-orient by EXIF (phone photos often carry rotation flag)
     try:
@@ -457,13 +470,41 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     key = uuid.uuid4().hex
 
     if s3_client:
-        for name, data in encoded.items():
-            s3_client.put_object(
-                Bucket=S3_BUCKET,
-                Key=f"images/{key}/{name}",
-                Body=data,
-                ContentType="image/jpeg",
-            )
+        uploaded_keys = []
+        try:
+            for name, data in encoded.items():
+                s3_key = f"images/{key}/{name}"
+                s3_client.put_object(
+                    Bucket=S3_BUCKET,
+                    Key=s3_key,
+                    Body=data,
+                    ContentType="image/jpeg",
+                )
+                uploaded_keys.append(s3_key)
+        except Exception as e:
+            # Partial cleanup on failure (F-030)
+            for s3_k in uploaded_keys:
+                try:
+                    s3_client.delete_object(Bucket=S3_BUCKET, Key=s3_k)
+                except Exception:
+                    pass
+            raise HTTPException(500, f"Failed to persist image to cloud storage: {e}")
+
+        # Record metadata for lifecycle and orphan management
+        if db is not None and hasattr(db, "image_uploads"):
+            try:
+                await db.image_uploads.insert_one({
+                    "_id": key,
+                    "key": key,
+                    "storage": "s3",
+                    "uploader": u.get("email"),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "width": orig_w,
+                    "height": orig_h,
+                    "status": "active"
+                })
+            except Exception:
+                pass
 
         def _s3_url(name: str) -> str:
             if S3_ENDPOINT:
@@ -471,6 +512,7 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
             return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/images/{key}/{name}"
 
         return {
+            "key":           key,
             "url":           _s3_url("original.jpg"),   # kept for back-compat
             "original_url":  _s3_url("original.jpg"),
             "display_url":   _s3_url("display.jpg"),
@@ -482,9 +524,43 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     # ── Local storage: images/{uuid}/original.jpg etc.
     folder = os.path.join("uploads", "images", key)
     os.makedirs(folder, exist_ok=True)
-    for name, data in encoded.items():
-        with open(os.path.join(folder, name), "wb") as f:
-            f.write(data)
+    written_files = []
+    try:
+        for name, data in encoded.items():
+            fpath = os.path.join(folder, name)
+            with open(fpath, "wb") as f:
+                f.write(data)
+            written_files.append(fpath)
+    except Exception as e:
+        # Partial cleanup on failure (F-030)
+        for fp in written_files:
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception:
+                pass
+        try:
+            if os.path.exists(folder):
+                os.rmdir(folder)
+        except Exception:
+            pass
+        raise HTTPException(500, f"Failed to persist image locally: {e}")
+
+    # Record metadata for lifecycle and orphan management
+    if db is not None and hasattr(db, "image_uploads"):
+        try:
+            await db.image_uploads.insert_one({
+                "_id": key,
+                "key": key,
+                "storage": "local",
+                "uploader": u.get("email"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "width": orig_w,
+                "height": orig_h,
+                "status": "active"
+            })
+        except Exception:
+            pass
 
     # Persist RELATIVE URLs (no scheme, no host) so the same upload keeps
     # working when the preview hostname rotates — the browser resolves them
@@ -492,6 +568,7 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     # was the root cause of the "image never appears" bug filed earlier.
     prefix = f"/api/uploads/images/{key}"
     return {
+        "key":           key,
         "url":           f"{prefix}/original.jpg",   # kept for back-compat
         "original_url":  f"{prefix}/original.jpg",
         "display_url":   f"{prefix}/display.jpg",
@@ -499,6 +576,46 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
         "width":         orig_w,
         "height":        orig_h,
     }
+
+
+@api.delete("/upload/image/{key}")
+async def delete_uploaded_image(key: str, request: Request = None):
+    """Delete an uploaded image and its variants from S3 or local storage (F-030)."""
+    u = await get_current_user(request)
+    require_roles("admin", "manager")(u)
+
+    deleted_variants = 0
+    if s3_client:
+        for name in ("original.jpg", "display.jpg", "thumb.jpg"):
+            try:
+                s3_client.delete_object(Bucket=S3_BUCKET, Key=f"images/{key}/{name}")
+                deleted_variants += 1
+            except Exception:
+                pass
+    else:
+        folder = os.path.join("uploads", "images", key)
+        if os.path.exists(folder):
+            for name in os.listdir(folder):
+                try:
+                    os.remove(os.path.join(folder, name))
+                    deleted_variants += 1
+                except Exception:
+                    pass
+            try:
+                os.rmdir(folder)
+            except Exception:
+                pass
+
+    if db is not None and hasattr(db, "image_uploads"):
+        try:
+            await db.image_uploads.update_one(
+                {"key": key},
+                {"$set": {"status": "deleted", "deleted_at": datetime.now(timezone.utc).isoformat()}}
+            )
+        except Exception:
+            pass
+
+    return {"ok": True, "key": key, "deleted_variants": deleted_variants}
 
 
 def resolve_local_upload_path(url: str) -> Optional[str]:
@@ -610,6 +727,9 @@ log = logging.getLogger("ssk")
 #   clear_login_failures, login, logout, refresh_token_route, me,
 #   forgot_password, reset_password, list_users, create_user, update_user,
 #   delete_user, ForgotPasswordInput, ResetPasswordInput
+
+
+get_current_user = None
 
 
 # ---------- Keep Awake Job ----------
@@ -807,6 +927,32 @@ async def _compute_dashboard_stats_live() -> dict:
     pairs_in_wip = b2b_wip + online_wip
     dispatched = b2b_dispatched + online_dispatched
     
+    # F-032: Authoritative physical stock and dispatch ledgers
+    physical_fg_stock = 0
+    reserved_fg_stock = 0
+    if hasattr(db, "fg_inventory") and db.fg_inventory is not None:
+        try:
+            fg_docs = await db.fg_inventory.find({}).to_list(5000)
+            physical_fg_stock = sum(int(doc.get("ready_stock") or doc.get("quantity") or 0) for doc in fg_docs)
+            reserved_fg_stock = sum(int(doc.get("reserved") or 0) for doc in fg_docs)
+        except Exception:
+            pass
+
+    ledger_dispatched_pairs = 0
+    if hasattr(db, "dispatch_records") and db.dispatch_records is not None:
+        try:
+            dr_docs = await db.dispatch_records.find({}).to_list(5000)
+            ledger_dispatched_pairs = sum(int(dr.get("total_pairs") or dr.get("total_quantity") or 0) for dr in dr_docs)
+        except Exception:
+            pass
+
+    total_returns_count = 0
+    if hasattr(db, "online_returns_records") and db.online_returns_records is not None:
+        try:
+            total_returns_count = await db.online_returns_records.count_documents({})
+        except Exception:
+            pass
+
     # Stage counts
     stage_counts = {s: 0 for s in PRODUCTION_STAGES}
     b2b_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
@@ -830,13 +976,33 @@ async def _compute_dashboard_stats_live() -> dict:
             else:
                 b2b_stage_counts[st] = b2b_stage_counts.get(st, 0) + qty
             
-    # Revenue split
-    b2b_revenue = 0.0
+    # F-031: Clean revenue recognition
+    # 1. Authoritative recognized invoiced revenue (active non-voided invoices)
+    invoiced_revenue = 0.0
+    if hasattr(db, "invoices") and db.invoices is not None:
+        try:
+            inv_docs = await db.invoices.find({"status": {"$ne": "voided"}}).to_list(5000)
+            invoiced_revenue = sum(float(inv.get("grand_total") or inv.get("net_amount") or inv.get("subtotal") or 0.0) for inv in inv_docs)
+        except Exception:
+            pass
+
+    # 2. Approved B2B PO revenue (excluding cancelled and rejected POs)
+    b2b_po_pipeline = 0.0
     pos = await db.pos.find({}).to_list(2000)
     for p in pos:
-        b2b_revenue += p.get("grand_total", 0) or 0
+        p_status = (p.get("status") or "").lower()
+        if p_status not in ("cancelled", "rejected"):
+            b2b_po_pipeline += float(p.get("grand_total", 0) or 0.0)
+
+    # Use invoiced revenue as recognized B2B revenue when invoices exist, fallback to valid PO pipeline
+    b2b_revenue = invoiced_revenue if invoiced_revenue > 0 else b2b_po_pipeline
         
-    online_revenue = sum(j.get("amount", 0.0) or 0.0 for j in online_jobs)
+    # Online revenue excluding cancelled jobs
+    online_revenue = sum(
+        float(j.get("amount", 0.0) or 0.0)
+        for j in online_jobs
+        if (j.get("status") or "").lower() not in ("cancelled", "rejected")
+    )
     
     recent_pos = [stringify(p) for p in pos[-5:][::-1]]
     recent_online = [stringify(j) for j in online_jobs[-5:][::-1]]
@@ -861,6 +1027,16 @@ async def _compute_dashboard_stats_live() -> dict:
         "styles_count": await db.styles.count_documents({}),
         "total_cash_in_hand": total_cash_in_hand,
         
+        # Authoritative Ledger Invariants (F-031 & F-032)
+        "ledger_invariants": {
+            "physical_fg_stock": physical_fg_stock,
+            "reserved_fg_stock": reserved_fg_stock,
+            "authoritative_dispatched": ledger_dispatched_pairs if ledger_dispatched_pairs > 0 else dispatched,
+            "total_returns_units": total_returns_count,
+            "invoiced_realized_revenue": round(invoiced_revenue, 2),
+            "po_approved_pipeline_revenue": round(b2b_po_pipeline, 2),
+        },
+
         # Detailed split for Management View
         "b2b": {
             "revenue": round(b2b_revenue, 2),
@@ -967,11 +1143,30 @@ async def root():
         "docs": "Visit /docs for the API documentation."
     }
 
+async def _get_auth_user(request: Request):
+    global get_current_user
+    if get_current_user is not None:
+        return await get_current_user(request)
+    fn = await get_current_user_factory(db)
+    return await fn(request)
+
+
 @app.get("/api/supabase/sync-failures")
-async def get_sync_failures_endpoint(collection: Optional[str] = None, limit: int = 100):
+async def get_sync_failures_endpoint(
+    request: Request,
+    collection: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
     """Query logged Supabase sync failures from MongoDB."""
+    user = await _get_auth_user(request)
+    require_roles("admin")(user)
+
+    if collection and not re.match(r"^[a-zA-Z0-9_\-]+$", collection):
+        raise HTTPException(status_code=400, detail="Invalid collection name")
+
+    capped_limit = max(1, min(limit, 500))
     from services.supabase_sync_failure_service import get_supabase_sync_failures
-    return await get_supabase_sync_failures(db, collection=collection, limit=limit)
+    return await get_supabase_sync_failures(db, collection=collection, limit=capped_limit)
 
 
 app.include_router(api)

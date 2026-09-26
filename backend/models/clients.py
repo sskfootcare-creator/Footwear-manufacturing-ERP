@@ -43,7 +43,16 @@ class DirectInvoiceLineItem(BaseModel):
     @classmethod
     def resolve_quantity(cls, data: Any):
         if isinstance(data, dict):
-            q = data.get("quantity") if data.get("quantity") is not None else data.get("qty")
+            qty_raw = data.get("qty")
+            quantity_raw = data.get("quantity")
+            if qty_raw is not None and quantity_raw is not None:
+                try:
+                    if int(qty_raw) != int(quantity_raw):
+                        raise ValueError(f"Conflicting quantity aliases provided: qty={qty_raw} vs quantity={quantity_raw}. Use one canonical quantity.")
+                except (TypeError, ValueError) as ex:
+                    if "Conflicting" in str(ex):
+                        raise
+            q = quantity_raw if quantity_raw is not None else qty_raw
             if q is not None:
                 try:
                     val = int(q)
@@ -57,6 +66,8 @@ class DirectInvoiceLineItem(BaseModel):
     def validate_quantity_present(self):
         if self.qty is None and self.quantity is None:
             raise ValueError("Quantity is required and must be greater than 0")
+        if self.qty is not None and self.quantity is not None and self.qty != self.quantity:
+            raise ValueError(f"Conflicting quantity aliases: qty={self.qty} vs quantity={self.quantity}")
         if self.qty is not None and self.quantity is None:
             self.quantity = self.qty
         elif self.quantity is not None and self.qty is None:
@@ -102,6 +113,7 @@ class DirectInvoiceIn(BaseModel):
 
     # Master saving option
     save_client_to_master: Optional[bool] = True
+    idempotency_key: Optional[str] = None
 
 
 INDIAN_STATES_MAP: Dict[str, str] = {

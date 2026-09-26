@@ -10,6 +10,7 @@ Persists sync failures to the MongoDB `supabase_sync_failures` collection:
 
 import logging
 import uuid
+import inspect
 from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List
 
@@ -58,7 +59,11 @@ async def record_supabase_sync_failure(
 
     try:
         if hasattr(db, "supabase_sync_failures") and db.supabase_sync_failures is not None:
-            await db.supabase_sync_failures.insert_one(dict(record))
+            insert_fn = getattr(db.supabase_sync_failures, "insert_one", None)
+            if callable(insert_fn):
+                res = insert_fn(dict(record))
+                if inspect.isawaitable(res):
+                    await res
         return record
     except Exception as e:
         log.warning("Could not persist failure into supabase_sync_failures: %s", e)
