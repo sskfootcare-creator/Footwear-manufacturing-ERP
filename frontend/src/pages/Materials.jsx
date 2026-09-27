@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { http, inr } from "../lib/api";
 import { broadcastSync, useCrossTabSync } from "../lib/sync";
 import {
@@ -12,6 +12,7 @@ import {
   ConfirmDialog,
 } from "../components/ui-kit";
 import ImageUploader, { ImageThumb } from "../components/ImageUploader";
+import QuickAddVendorModal from "../components/QuickAddVendorModal";
 import { Plus, Trash2, Pencil, X, Save } from "lucide-react";
 
 const CATEGORIES = [
@@ -81,11 +82,12 @@ export default function Materials() {
   const [confirm, setConfirm] = useState(null);
 
   const [vendors, setVendors] = useState([]);
+  const [showAddVendor, setShowAddVendor] = useState(false);
 
   const load = async () => {
     const [matsRes, vendorsRes] = await Promise.all([
       http.get("/materials"),
-      http.get("/vendors?include_inactive=true"),
+      http.get("/vendors?include_inactive=true").catch(() => ({ data: [] })),
     ]);
     setItems(matsRes.data || []);
     setVendors(vendorsRes.data || []);
@@ -96,6 +98,9 @@ export default function Materials() {
 
   // Synchronize in real time with changes from other open tabs
   useCrossTabSync("materials", () => {
+    load();
+  });
+  useCrossTabSync("vendors", () => {
     load();
   });
 
@@ -168,11 +173,17 @@ export default function Materials() {
     });
   };
 
+  const vendorMap = useMemo(
+    () => Object.fromEntries(vendors.map((v) => [v.id, v.name])),
+    [vendors],
+  );
+
   const filtered = items.filter((m) => {
     if (filterCat && m.category !== filterCat) return false;
+    const vName = vendorMap[m.preferred_vendor_id] || "";
     if (
       filter &&
-      !`${m.code} ${m.name} ${m.color || ""}`.toLowerCase().includes(filter.toLowerCase())
+      !`${m.code} ${m.name} ${m.color || ""} ${vName}`.toLowerCase().includes(filter.toLowerCase())
     )
       return false;
     return true;
@@ -239,6 +250,7 @@ export default function Materials() {
                   <th className="px-4 py-3 font-bold">Code</th>
                   <th className="px-4 py-3 font-bold">Name</th>
                   <th className="px-4 py-3 font-bold">Category</th>
+                  <th className="px-4 py-3 font-bold">Vendor</th>
                   <th className="px-4 py-3 font-bold">Color</th>
                   <th className="px-4 py-3 font-bold">Unit</th>
                   <th className="px-4 py-3 font-bold text-right">Rate (₹)</th>
@@ -249,7 +261,7 @@ export default function Materials() {
                 {filtered.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="8"
+                      colSpan="9"
                       className="px-6 py-10 text-center text-slate-400"
                     >
                       No materials yet. Click &quot;Add Material&quot; to start.
@@ -287,6 +299,15 @@ export default function Materials() {
                             </Badge>
                           )}
                         </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs" data-testid={`material-vendor-${m.code}`}>
+                        {m.preferred_vendor_id && vendorMap[m.preferred_vendor_id] ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200">
+                            {vendorMap[m.preferred_vendor_id]}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 text-xs">—</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         {m.color ? (
@@ -472,21 +493,36 @@ export default function Materials() {
               }
               testId="form-mat-reorder"
             />
-            <Select
-              label="Preferred Vendor"
-              value={form.preferred_vendor_id}
-              onChange={(e) =>
-                setForm({ ...form, preferred_vendor_id: e.target.value })
-              }
-              testId="form-mat-vendor"
-            >
-              <option value="">-- No Preferred Vendor --</option>
-              {vendors.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                </option>
-              ))}
-            </Select>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                  Vendor / Supplier
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowAddVendor(true)}
+                  className="text-[11px] font-bold text-[#2563EB] hover:text-[#1d4ed8] flex items-center gap-1 hover:underline"
+                  data-testid="mat-add-vendor-btn"
+                >
+                  <Plus className="w-3 h-3" /> New Vendor
+                </button>
+              </div>
+              <select
+                value={form.preferred_vendor_id}
+                onChange={(e) =>
+                  setForm({ ...form, preferred_vendor_id: e.target.value })
+                }
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
+                data-testid="form-mat-vendor"
+              >
+                <option value="">-- No Preferred Vendor --</option>
+                {vendors.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <Input
               label="Notes"
               value={form.notes}
@@ -526,6 +562,20 @@ export default function Materials() {
             </div>
           </div>
         </Drawer>
+      )}
+
+      {showAddVendor && (
+        <QuickAddVendorModal
+          open={showAddVendor}
+          onClose={() => setShowAddVendor(false)}
+          onSuccess={(newV) => {
+            setVendors((prev) => {
+              if (prev.some((v) => v.id === newV.id)) return prev;
+              return [...prev, newV].sort((a, b) => a.name.localeCompare(b.name));
+            });
+            setForm((f) => ({ ...f, preferred_vendor_id: newV.id }));
+          }}
+        />
       )}
       <ConfirmDialog
         open={!!confirm}

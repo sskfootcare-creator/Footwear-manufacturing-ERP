@@ -174,6 +174,8 @@ class InventoryMovement(BaseModel):
     quantity: float
     rate: Optional[float] = None
     party: Optional[str] = ""
+    vendor_id: Optional[str] = None
+    set_as_preferred_vendor: Optional[bool] = False
     job_id: Optional[str] = None
     notes: Optional[str] = ""
     date: Optional[str] = ""

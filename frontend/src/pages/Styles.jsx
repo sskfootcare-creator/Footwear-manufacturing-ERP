@@ -455,11 +455,21 @@ export default function Styles() {
   }, []);
 
   const [quickAddMaterialOpen, setQuickAddMaterialOpen] = useState(false);
+  const [quickVendors, setQuickVendors] = useState([]);
   const [quickMaterialForm, setQuickMaterialForm] = useState({
-    code: "", name: "", category: "upper", unit: "sqft", rate: 0,
+    code: "", name: "", category: "upper", unit: "sqft", rate: 0, preferred_vendor_id: "",
   });
   const [quickMaterialSaving, setQuickMaterialSaving] = useState(false);
   const [quickMaterialError, setQuickMaterialError] = useState("");
+
+  const openQuickAddMaterial = () => {
+    http.get("/vendors?include_inactive=false").then((res) => {
+      setQuickVendors(res.data || []);
+    }).catch(() => {});
+    setQuickMaterialForm({ code: "", name: "", category: "upper", unit: "sqft", rate: 0, preferred_vendor_id: "" });
+    setQuickMaterialError("");
+    setQuickAddMaterialOpen(true);
+  };
 
   const handleQuickCreateMaterial = async () => {
     if (!quickMaterialForm.name.trim() || !quickMaterialForm.code.trim()) {
@@ -475,13 +485,14 @@ export default function Styles() {
         category: quickMaterialForm.category || "upper",
         unit: quickMaterialForm.unit || "sqft",
         rate: Number(quickMaterialForm.rate || 0),
+        preferred_vendor_id: quickMaterialForm.preferred_vendor_id || "",
         color: "",
       });
       broadcastSync("materials", { action: "create", data: res.data });
       await fetchMaterials();
       addBomRow(res.data);
       setQuickAddMaterialOpen(false);
-      setQuickMaterialForm({ code: "", name: "", category: "upper", unit: "sqft", rate: 0 });
+      setQuickMaterialForm({ code: "", name: "", category: "upper", unit: "sqft", rate: 0, preferred_vendor_id: "" });
     } catch (e) {
       setQuickMaterialError(formatApiError(e.response?.data?.detail) || "Failed to create material.");
     } finally {
@@ -1892,7 +1903,7 @@ export default function Styles() {
                           </div>
                           <button
                             type="button"
-                            onClick={() => setQuickAddMaterialOpen(true)}
+                            onClick={openQuickAddMaterial}
                             className="inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-2 border-2 border-slate-300 rounded text-xs font-bold transition-colors min-h-[44px] flex-shrink-0"
                             title="Quick Add Material to Master without leaving Style"
                           >
@@ -3938,6 +3949,19 @@ export default function Styles() {
                   onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, rate: e.target.value })}
                 />
               </div>
+
+              <Select
+                label="Vendor / Supplier (optional)"
+                value={quickMaterialForm.preferred_vendor_id}
+                onChange={(e) => setQuickMaterialForm({ ...quickMaterialForm, preferred_vendor_id: e.target.value })}
+              >
+                <option value="">-- No Preferred Vendor --</option>
+                {quickVendors.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </Select>
             </div>
 
             <div className="flex gap-2 pt-2 border-t">

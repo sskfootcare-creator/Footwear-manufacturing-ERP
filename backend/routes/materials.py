@@ -114,6 +114,7 @@ async def _sync_material_to_component(mat_doc: dict, db=None):
                 "component_name": name,
                 "component_category": comp_cat,
                 "color": color,
+                "vendor": vendor,
                 "image_url": image_url,
                 "image_display_url": image_display_url,
                 "image_thumbnail_url": image_thumbnail_url,
@@ -639,10 +640,14 @@ async def list_inventory(request: Request):
         if mid:
             mov_by_mat[mid].append(m)
 
+    vendors = await db.vendors.find({}).to_list(1000)
+    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
+
     out = []
     for mat in materials:
         mat_id = str(mat["_id"])
         summary = _calculate_material_weighted_avg(mat, mov_by_mat.get(mat_id, []))
+        pref_vid = str(mat.get("preferred_vendor_id") or "")
         out.append({
             "material_id": mat_id,
             "code": mat.get("code"),
@@ -662,6 +667,9 @@ async def list_inventory(request: Request):
             "image_url": mat.get("image_url", ""),
             "image_display_url": mat.get("image_display_url", ""),
             "image_thumbnail_url": mat.get("image_thumbnail_url", ""),
+            "preferred_vendor_id": pref_vid,
+            "vendor_name": vendor_map.get(pref_vid, ""),
+            "reorder_level": mat.get("reorder_level", 0),
         })
     out.sort(key=lambda r: (r["category"] or "", r["name"] or ""))
     return out
@@ -769,6 +777,13 @@ async def create_movement(payload: InventoryMovement, request: Request):
     doc["by"] = u.get("email") or u.get("name", "")
     if not doc.get("date"):
         doc["date"] = datetime.now(timezone.utc).date().isoformat()
+    if payload.vendor_id and not doc.get("party"):
+        try:
+            vend = await db.vendors.find_one({"_id": oid(payload.vendor_id)})
+            if vend:
+                doc["party"] = vend.get("name", "")
+        except Exception:
+            pass
 
     try:
         res = await db.inventory_movements.insert_one(doc)
@@ -789,15 +804,22 @@ async def create_movement(payload: InventoryMovement, request: Request):
 
     try:
         summary = await _compute_material_inventory_summary(payload.material_id, mat, db=db)
+        mat_update = {
+            "balance": round(summary["balance"], 2),
+            "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+            "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else (mat.get("rate") or 0.0),
+            "updated_at": now_iso(),
+        }
+        if payload.type == "in" and payload.vendor_id and (payload.set_as_preferred_vendor or not mat.get("preferred_vendor_id")):
+            mat_update["preferred_vendor_id"] = payload.vendor_id
         await db.materials.update_one(
             {"_id": mat["_id"]},
-            {"$set": {
-                "balance": round(summary["balance"], 2),
-                "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
-                "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else (mat.get("rate") or 0.0),
-                "updated_at": now_iso(),
-            }}
+            {"$set": mat_update}
         )
+        if payload.type == "in" and payload.vendor_id and (payload.set_as_preferred_vendor or not mat.get("preferred_vendor_id")):
+            fresh_mat = await db.materials.find_one({"_id": mat["_id"]})
+            if fresh_mat:
+                await _sync_material_to_component(stringify(fresh_mat), db=db)
     except Exception:
         pass
 

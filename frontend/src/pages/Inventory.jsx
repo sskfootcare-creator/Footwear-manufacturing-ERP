@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
+import { useCrossTabSync } from "../lib/sync";
 import {
   PageHeader,
   Card,
@@ -11,6 +12,7 @@ import {
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
 import { ImageThumb } from "../components/ImageUploader";
+import QuickAddVendorModal from "../components/QuickAddVendorModal";
 import {
   Plus,
   ArrowDownToLine,
@@ -36,20 +38,30 @@ export default function Inventory() {
   const [open, setOpen] = useState(null);
   const [history, setHistory] = useState(null);
   const [materials, setMaterials] = useState([]);
+  const [vendors, setVendors] = useState([]);
 
   const load = async () => {
-    const [inv, mats, al] = await Promise.all([
+    const [inv, mats, al, vends] = await Promise.all([
       http.get("/inventory"),
       http.get("/materials"),
       http.get("/inventory/alerts"),
+      http.get("/vendors?include_inactive=false").catch(() => ({ data: [] })),
     ]);
-    setItems(inv.data);
-    setMaterials(mats.data);
-    setAlerts(al.data);
+    setItems(inv.data || []);
+    setMaterials(mats.data || []);
+    setAlerts(al.data || []);
+    setVendors(vends.data || []);
   };
   useEffect(() => {
     load();
   }, []);
+
+  useCrossTabSync("vendors", () => {
+    load();
+  });
+  useCrossTabSync("materials", () => {
+    load();
+  });
 
   const openType = (type, material = null) => setOpen({ type, material });
 
@@ -114,7 +126,7 @@ export default function Inventory() {
     if (filterCat && m.category !== filterCat) return false;
     if (
       filter &&
-      !`${m.code} ${m.name}`.toLowerCase().includes(filter.toLowerCase())
+      !`${m.code} ${m.name} ${m.vendor_name || ""}`.toLowerCase().includes(filter.toLowerCase())
     )
       return false;
     return true;
@@ -304,7 +316,14 @@ export default function Inventory() {
                         />
                       </td>
                       <td className="px-3 py-2 font-mono font-bold">{r.code}</td>
-                      <td className="px-3 py-2">{r.name}</td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-slate-900">{r.name}</div>
+                        {r.vendor_name && (
+                          <div className="text-[10px] text-slate-500 font-normal mt-0.5">
+                            Vendor: <span className="font-semibold text-slate-700">{r.vendor_name}</span>
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-2">
                         <Badge color="slate">{r.category}</Badge>
                       </td>
@@ -388,6 +407,13 @@ export default function Inventory() {
           type={open.type}
           material={open.material}
           materials={materials}
+          vendors={vendors}
+          onVendorCreated={(newV) => {
+            setVendors((prev) => {
+              if (prev.some((v) => v.id === newV.id)) return prev;
+              return [...prev, newV].sort((a, b) => a.name.localeCompare(b.name));
+            });
+          }}
           onClose={() => setOpen(null)}
           onSaved={() => {
             setOpen(null);
@@ -542,32 +568,93 @@ function KpiTile({ label, value, accent }) {
   );
 }
 
-function MovementDrawer({ type, material, materials, onClose, onSaved }) {
-  const [form, setForm] = useState({
-    material_id: material?.material_id || material?.id || "",
-    quantity: 0,
-    rate: material?.last_purchase_rate ?? material?.current_rate ?? 0,
+function MovementDrawer({ type, material, materials, vendors = [], onVendorCreated, onClose, onSaved }) {
+  const initialMatId = material?.material_id || material?.id || "";
+  const initialMat = materials.find((m) => m.id === initialMatId) || material;
+  const initialPrefVendor = initialMat?.preferred_vendor_id
+    ? vendors.find((v) => v.id === initialMat.preferred_vendor_id)
+    : null;
 
-    party: "",
+  const [form, setForm] = useState({
+    material_id: initialMatId,
+    quantity: 0,
+    rate: material?.last_purchase_rate ?? material?.current_rate ?? initialMat?.rate ?? 0,
+    party: initialPrefVendor ? initialPrefVendor.name : (material?.party || ""),
+    vendor_id: initialPrefVendor ? initialPrefVendor.id : "",
+    set_as_preferred_vendor: !initialMat?.preferred_vendor_id,
     notes: "",
     date: new Date().toISOString().slice(0, 10),
   });
+  const [showAddVendor, setShowAddVendor] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
   const titleMap = {
     in: "Stock In (Purchase)",
     out: "Consumption / Stock Out",
     adjustment: "Stock Adjustment",
   };
+
+  const handleMaterialChange = (newMatId) => {
+    const selMat = materials.find((m) => m.id === newMatId);
+    let newParty = form.party;
+    let newVendorId = form.vendor_id;
+    let setAsPref = form.set_as_preferred_vendor;
+
+    if (selMat?.preferred_vendor_id) {
+      const v = vendors.find((vend) => vend.id === selMat.preferred_vendor_id);
+      if (v) {
+        newParty = v.name;
+        newVendorId = v.id;
+        setAsPref = false;
+      }
+    } else if (selMat) {
+      setAsPref = true;
+    }
+
+    setForm((prev) => ({
+      ...prev,
+      material_id: newMatId,
+      rate: selMat?.last_purchase_rate ?? selMat?.rate ?? prev.rate ?? 0,
+      party: newParty,
+      vendor_id: newVendorId,
+      set_as_preferred_vendor: setAsPref,
+    }));
+  };
+
+  const handleVendorChange = (e) => {
+    const vid = e.target.value;
+    const v = vendors.find((vend) => vend.id === vid);
+    setForm((prev) => ({
+      ...prev,
+      vendor_id: vid,
+      party: v ? v.name : "",
+    }));
+  };
+
   const submit = async () => {
+    if (!form.material_id) {
+      alert("Please select a material.");
+      return;
+    }
+    if (type === "in" && !form.vendor_id && !form.party) {
+      alert("Please select or specify a vendor / supplier.");
+      return;
+    }
+    setSubmitting(true);
     try {
       await http.post("/inventory/movements", {
         ...form,
         type,
         quantity: Number(form.quantity),
         rate: form.rate === "" ? null : Number(form.rate),
+        vendor_id: form.vendor_id || null,
+        set_as_preferred_vendor: Boolean(form.set_as_preferred_vendor),
       });
       onSaved();
     } catch (e) {
       alert(e.response?.data?.detail || e.message);
+    } finally {
+      setSubmitting(false);
     }
   };
   const selectedMaterial = materials.find((m) => m.id === form.material_id);
@@ -581,7 +668,7 @@ function MovementDrawer({ type, material, materials, onClose, onSaved }) {
           </label>
           <select
             value={form.material_id}
-            onChange={(e) => setForm({ ...form, material_id: e.target.value })}
+            onChange={(e) => handleMaterialChange(e.target.value)}
             className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none"
             data-testid="movement-material"
           >
@@ -617,11 +704,64 @@ function MovementDrawer({ type, material, materials, onClose, onSaved }) {
             />
           )}
         </div>
-        <Input
-          label={type === "in" ? "Supplier" : "Reference (PO / job)"}
-          value={form.party}
-          onChange={(e) => setForm({ ...form, party: e.target.value })}
-        />
+
+        {type === "in" ? (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                Supplier / Vendor <span className="text-red-500">*</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowAddVendor(true)}
+                className="text-[11px] font-bold text-[#2563EB] hover:text-[#1d4ed8] flex items-center gap-1 hover:underline"
+                data-testid="stock-in-add-vendor-btn"
+              >
+                <Plus className="w-3 h-3" /> New Vendor
+              </button>
+            </div>
+            <select
+              value={form.vendor_id}
+              onChange={handleVendorChange}
+              className="w-full border-2 border-slate-300 px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none bg-white font-medium"
+              data-testid="movement-vendor-select"
+            >
+              <option value="">— Select Vendor —</option>
+              {vendors.map((v) => {
+                const isPreferred = selectedMaterial?.preferred_vendor_id === v.id;
+                return (
+                  <option key={v.id} value={v.id}>
+                    {v.name} {isPreferred ? "★ (Material Vendor)" : ""}
+                  </option>
+                );
+              })}
+            </select>
+            {selectedMaterial && form.vendor_id && (
+              <label className="flex items-center gap-2 pt-1 text-xs text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.set_as_preferred_vendor}
+                  onChange={(e) =>
+                    setForm({ ...form, set_as_preferred_vendor: e.target.checked })
+                  }
+                  className="rounded text-[#2563EB] focus:ring-[#2563EB]"
+                  data-testid="movement-set-preferred-vendor"
+                />
+                <span>
+                  Set as default vendor for <strong>{selectedMaterial.name}</strong>
+                </span>
+              </label>
+            )}
+          </div>
+        ) : (
+          <Input
+            label="Reference (PO / job)"
+            value={form.party}
+            onChange={(e) => setForm({ ...form, party: e.target.value })}
+            testId="movement-party"
+          />
+        )}
+
         <Input
           label="Date"
           type="date"
@@ -634,12 +774,28 @@ function MovementDrawer({ type, material, materials, onClose, onSaved }) {
           onChange={(e) => setForm({ ...form, notes: e.target.value })}
         />
         <div className="flex gap-2 pt-3 border-t border-slate-200">
-          <BtnPrimary onClick={submit} data-testid="movement-save">
-            <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save
+          <BtnPrimary onClick={submit} disabled={submitting} data-testid="movement-save">
+            <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> {submitting ? "Saving..." : "Save"}
           </BtnPrimary>
-          <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+          <BtnSecondary onClick={onClose} disabled={submitting}>Cancel</BtnSecondary>
         </div>
       </div>
+
+      {showAddVendor && (
+        <QuickAddVendorModal
+          open={showAddVendor}
+          onClose={() => setShowAddVendor(false)}
+          onSuccess={(newV) => {
+            if (onVendorCreated) onVendorCreated(newV);
+            setForm((prev) => ({
+              ...prev,
+              vendor_id: newV.id,
+              party: newV.name,
+              set_as_preferred_vendor: true,
+            }));
+          }}
+        />
+      )}
     </Drawer>
   );
 }
