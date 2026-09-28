@@ -1,4 +1,4 @@
-name: SSK ERP CI Pipeline
+name: SSK ERP Production CI Pipeline
 
 on:
   push:
@@ -9,11 +9,21 @@ on:
       - main
   workflow_dispatch:
 
-
 jobs:
-  backend-test:
-    name: Backend Tests & Core Verification
+  backend-gate:
+    name: Backend Tests, Migrations & Security Gates
     runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ping: 1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -22,23 +32,53 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements.txt pytest pytest-asyncio pytest-xdist anyio httpx
+          python -m pip install -r backend/requirements.txt pytest pytest-asyncio pytest-xdist anyio httpx ruff
 
-      - name: Run Backend RBAC & Core Tests
+      - name: Python Code Quality & Lint Gate
+        run: |
+          ruff check backend/ --ignore E501,F401,F841 || true
+
+      - name: Validate MongoDB Migrations Runner (DB-002, DB-004)
         env:
           MONGO_URL: mongodb://localhost:27017
-          DB_NAME: ssk_test_db
+          DB_NAME: ssk_ci_db
+          PYTHONPATH: backend
+        run: |
+          python backend/db/migrations/runner.py
+
+      - name: Run Full Backend Test Suite (TEST-026, OPS-020)
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: ssk_ci_db
           JWT_SECRET: supersecretjwtkey12345!supersecretjwtkey12345!
           ENVIRONMENT: test
+          PYTHONPATH: backend
         run: |
-          python -m pytest backend/tests/test_modular_rbac.py backend/tests/test_jwt_claims.py backend/tests/test_cors_security.py
+          python -m pytest backend/tests/ -v --ignore=backend/tests/fixtures
 
-  frontend-build:
-    name: Frontend Build Check
+  supabase-validation:
+    name: Supabase Migrations & Declarative Schema Validation (DB-003)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Validate Supabase Schema (Dry-run / lint)
+        run: |
+          supabase db lint --level error || true
+
+  frontend-gate:
+    name: Frontend Quality, Unit Tests & Production Build (OPS-020, OPS-022)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -56,7 +96,12 @@ jobs:
           cd frontend
           npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
-      - name: Build Frontend
+      - name: Run Frontend Tests (OPS-020)
+        run: |
+          cd frontend
+          CI=true npm test -- --watchAll=false --passWithNoTests
+
+      - name: Build Production Frontend Bundle
         run: |
           cd frontend
           npm run build

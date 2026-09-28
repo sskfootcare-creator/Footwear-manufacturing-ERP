@@ -61,17 +61,19 @@ async def _get_user(request: Request):
     return await fn(request)
 
 
-async def log_activity_db(db, action: str, category: str, details: str, email: str):
+async def log_activity_db(db, action: str, category: str, details: str, email: str, request_id: str = None):
+    """DATA-024: Robust audit logging with error observability and actor attribution."""
     try:
         await db.audit_logs.insert_one({
             "action": action,
             "category": category,
             "details": details,
-            "by": email,
+            "by": email or "system",
+            "request_id": request_id,
             "created_at": now_iso()
         })
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"DATA-024 AUDIT_LOG_PERSISTENCE_FAILED: action={action} category={category} actor={email}: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

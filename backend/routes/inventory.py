@@ -1126,6 +1126,65 @@ async def list_inventory_reservations(
     return [stringify(d) for d in docs]
 
 
+@inventory_router.get("/inventory/channel-allocation")
+async def get_channel_allocation(
+    request: Request,
+    style_id: Optional[str] = None,
+    channel: Optional[str] = Query(None, description="Channel identifier e.g. 'b2b' or 'online'"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """DB-009: Explains available, reserved, allocated, safety, and sellable quantities by channel and SKU."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+
+    q = {}
+    if style_id:
+        try:
+            q["style_id"] = ObjectId(style_id)
+        except Exception:
+            q["style_id"] = style_id
+
+    fg_items = await db.fg_inventory.find(q).to_list(limit)
+
+    results = []
+    for item in fg_items:
+        s_id = item.get("style_id")
+        clr = item.get("color", "")
+        sz = str(item.get("size", ""))
+        ready = int(item.get("ready_for_dispatch") or 0)
+        reserved = int(item.get("reserved") or 0)
+        total_physical = ready + reserved
+        safety_stock = int(item.get("safety_stock", 5))
+
+        available_pool = max(0, ready)
+        b2b_sellable = max(0, total_physical - reserved)
+        online_sellable = max(0, ready - safety_stock)
+
+        results.append({
+            "style_id": str(s_id),
+            "style_code": item.get("style_code", ""),
+            "color": clr,
+            "size": sz,
+            "sku": f"{item.get('style_code', 'SKU')}-{clr}-{sz}",
+            "physical_on_hand": total_physical,
+            "available": available_pool,
+            "reserved": reserved,
+            "allocated": 0,
+            "safety": safety_stock,
+            "sellable": online_sellable if (channel and "online" in channel.lower()) else (b2b_sellable if channel == "b2b" else available_pool),
+            "channels": {
+                "b2b": b2b_sellable,
+                "online": online_sellable
+            }
+        })
+
+    return {
+        "channel": channel or "all",
+        "total_skus": len(results),
+        "items": results
+    }
+
+
 @inventory_router.get("/fg-inventory/{id}")
 async def get_fg_inventory_item(request: Request, id: str):
     await _get_user(request)

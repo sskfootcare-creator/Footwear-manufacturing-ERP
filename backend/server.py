@@ -339,14 +339,31 @@ if _cors_origins_env:
 _default_cors_regex = r"^https:\/\/(?:[a-zA-Z0-9_-]+\.)*(?:ssk-footcare-manufacturing-erp|footwear-manufacturing(?:-[a-zA-Z0-9_-]+)?-ssk-footcare)\.vercel\.app$"
 _cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or _default_cors_regex
 
+_ALLOWED_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+_ALLOWED_CORS_HEADERS = [
+    "Authorization",
+    "Content-Type",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "Range",
+    "x-client-info",
+    "apikey",
+    "x-test-rate-limit-client-ip",
+    "x-test-rate-limit-window",
+    "If-Match",
+    "If-None-Match",
+    "If-Modified-Since",
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(set(_raw_origins)),
     allow_origin_regex=_cors_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    allow_methods=_ALLOWED_CORS_METHODS,
+    allow_headers=_ALLOWED_CORS_HEADERS,
+    expose_headers=["Content-Range", "X-Total-Count", "Content-Disposition", "access-control-allow-origin"],
 )
 
 
@@ -382,6 +399,9 @@ if S3_BUCKET:
         aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "")
     )
 else:
+    # SEC-014: Fail production startup if durable object storage is not configured
+    if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
+        raise RuntimeError("SEC-014: Production environment detected, but durable S3_BUCKET is not configured. Server startup aborted.")
     s3_client = None
 
 @api.post("/upload/image", dependencies=[Depends(upload_rate_limiter)])
@@ -1301,7 +1321,9 @@ async def revert_entity_revision(entity_type: str, entity_id: str, payload: Dict
 
 @app.post("/api/sync/offline-batch")
 async def process_offline_batch(payload: Dict[str, Any], request: Request):
-    """Sync queued offline operations from warehouse mobile devices upon reconnecting (U-010)."""
+    """Sync queued offline operations from warehouse mobile devices upon reconnecting (U-010).
+    DB-007: Idempotent operation deduplication via offline_operation_registry.
+    """
     u = await _get_auth_user(request)
     operations = payload.get("operations") or []
     import secrets as _secrets
@@ -1309,6 +1331,7 @@ async def process_offline_batch(payload: Dict[str, Any], request: Request):
 
     results = []
     synced_count = 0
+    already_processed_count = 0
     failed_count = 0
     now = datetime.now(timezone.utc).isoformat()
     user_email = u.get("email", "floor_user")
@@ -1317,6 +1340,23 @@ async def process_offline_batch(payload: Dict[str, Any], request: Request):
         op_id = op.get("id") or _secrets.token_hex(6)
         op_type = op.get("type", "generic_sync")
         op_payload = op.get("payload") or {}
+
+        # DB-007 Idempotency check: Reject/skip if (client_sync_id, op_id) already executed
+        try:
+            existing = await db.offline_operation_registry.find_one({
+                "client_sync_id": client_sync_id,
+                "op_id": op_id
+            })
+            if existing:
+                results.append({
+                    "id": op_id,
+                    "status": "already_processed",
+                    "processed_at": existing.get("processed_at") or existing.get("created_at")
+                })
+                already_processed_count += 1
+                continue
+        except Exception as check_err:
+            log.warning(f"Error checking offline operation registry: {check_err}")
 
         try:
             if op_type == "wms_pick":
@@ -1356,6 +1396,19 @@ async def process_offline_batch(payload: Dict[str, Any], request: Request):
                     "synced_at": now,
                 })
 
+            # Record successfully executed operation to registry
+            try:
+                await db.offline_operation_registry.insert_one({
+                    "client_sync_id": client_sync_id,
+                    "op_id": op_id,
+                    "op_type": op_type,
+                    "user": user_email,
+                    "processed_at": now,
+                    "status": "synced"
+                })
+            except Exception as reg_err:
+                log.warning(f"Could not record operation {op_id} to offline_operation_registry: {reg_err}")
+
             results.append({"id": op_id, "status": "synced"})
             synced_count += 1
         except Exception as e:
@@ -1366,6 +1419,7 @@ async def process_offline_batch(payload: Dict[str, Any], request: Request):
         "client_sync_id": client_sync_id,
         "total_operations": len(operations),
         "synced": synced_count,
+        "already_processed": already_processed_count,
         "failed": failed_count,
         "results": results,
     }
@@ -1397,295 +1451,74 @@ app.include_router(online_returns_router)
 
 
 
+# ── Observability & Health Endpoints (OPS-023, DB-004) ───────────────────────
+
+@app.get("/healthz", tags=["System"])
+async def healthz():
+    """Liveness probe: verifies process is alive and responding."""
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/readyz", tags=["System"])
+async def readyz():
+    """Readiness probe: verifies operational MongoDB connection and readiness to accept traffic."""
+    checks = {}
+    is_ready = True
+
+    # MongoDB check
+    try:
+        await db.command("ping")
+        checks["mongodb"] = "connected"
+    except Exception as e:
+        checks["mongodb"] = f"unhealthy: {str(e)}"
+        is_ready = False
+
+    # Supabase optional check
+    try:
+        from db.supabase_client import get_supabase_admin_client
+        sb = get_supabase_admin_client()
+        checks["supabase"] = "configured" if sb else "unconfigured_optional"
+    except Exception as e:
+        checks["supabase"] = f"warning: {str(e)}"
+
+    if not is_ready:
+        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+
+    return {"status": "ready", "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
 @app.on_event("startup")
 async def on_startup():
+    """Decoupled, replica-safe startup initialization (DB-002, DB-004)."""
     validate_jwt_secret()
     global get_current_user, client, db
     try:
         client = AsyncIOMotorClient(mongo_url)
         db = client[os.environ["DB_NAME"]]
-    except Exception:
-        pass
+    except Exception as init_err:
+        log.error(f"Failed to initialize AsyncIOMotorClient: {init_err}")
+
     get_current_user = await get_current_user_factory(db)
-    await db.users.create_index("email", unique=True)
-    
-    # Safely create unique index for materials
-    try:
-        await db.materials.create_index("code", unique=True)
-    except Exception as e:
-        log.warning(f"Could not create unique index on materials.code directly: {e}. Dropping old index and retrying.")
-        try:
-            await db.materials.drop_index("code_1")
-            await db.materials.create_index("code", unique=True)
-        except Exception as drop_err:
-            log.error(f"Failed to force unique index on materials.code: {drop_err}")
-
-    # Safely create unique index for styles
-    try:
-        await db.styles.create_index("code", unique=True)
-    except Exception as e:
-        log.warning(f"Could not create unique index on styles.code directly: {e}. Dropping old index and retrying.")
-        try:
-            await db.styles.drop_index("code_1")
-            await db.styles.create_index("code", unique=True)
-        except Exception as drop_err:
-            log.error(f"Failed to force unique index on styles.code: {drop_err}")
-
-    # Safely create unique index for POs
-    try:
-        await db.pos.create_index("po_number", unique=True)
-    except Exception as e:
-        log.warning(f"Could not create unique index on pos.po_number directly: {e}. Dropping old index and retrying.")
-        try:
-            await db.pos.drop_index("po_number_1")
-            await db.pos.create_index("po_number", unique=True)
-        except Exception as drop_err:
-            log.error(f"Failed to force unique index on pos.po_number: {drop_err}")
-
-    # PO, Job, Invoice, and Dispatch query optimization indexes
-    try:
-        await db.production_jobs.create_index("po_id")
-        await db.production_jobs.create_index("style_id")
-        await db.production_jobs.create_index("style_code")
-        await db.production_jobs.create_index("po_number")
-    except Exception as e:
-        log.warning(f"Could not create production_jobs indexes: {e}")
-
-    try:
-        await db.invoices.create_index("po_id")
-        await db.invoices.create_index("po_ids")
-        await db.invoices.create_index("po_number")
-        await db.invoices.create_index("po_numbers")
-    except Exception as e:
-        log.warning(f"Could not create invoices indexes: {e}")
-
-    try:
-        await db.dispatch_records.create_index("po_id")
-        await db.dispatch_records.create_index("po_ids")
-        await db.dispatch_records.create_index("po_number")
-        await db.dispatch_records.create_index("po_numbers")
-    except Exception as e:
-        log.warning(f"Could not create dispatch_records indexes: {e}")
-
-    try:
-        await db.vendors.create_index("name")
-    except Exception as e:
-        log.warning(f"Could not create vendors index: {e}")
-
-    # Worker PIN login: phone index for fast lookup
-    try:
-        await db.workers.create_index("phone", name="workers_phone", sparse=True)
-    except Exception as e:
-        log.warning(f"Could not create workers.phone index: {e}")
-
-    # Notifications: unread + time index for efficient polling
-    try:
-        await db.notifications.create_index(
-            [("read", 1), ("at", -1)], name="notifications_unread_time"
-        )
-        await db.notifications.create_index("job_id", name="notifications_job_id")
-    except Exception as e:
-        log.warning(f"Could not create notifications indexes: {e}")
-
-    # SKU map indexes: unique compound on (source_type, source_name, external_sku) + style lookup
-    try:
-        await db.sku_map.create_index(
-            [("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)],
-            unique=True, name="sku_map_unique_normalized"
-        )
-        await db.sku_map.create_index("style_id", name="sku_map_style_id")
-    except Exception as e:
-        log.warning(f"Could not create sku_map indexes: {e}")
-
-    # Style lifecycle: unique per style_id + status index for fast pipeline filtering
-    try:
-        await db.style_lifecycle.create_index("style_id", unique=True, name="style_lifecycle_unique")
-        await db.style_lifecycle.create_index("online_status", name="style_lifecycle_status")
-    except Exception as e:
-        log.warning(f"Could not create style_lifecycle indexes: {e}")
-
-    # Password reset tokens: TTL index auto-purges expired rows + lookup index on hash.
-    try:
-        await db.password_resets.create_index("token_hash", unique=True, name="password_reset_token")
-        await db.password_resets.create_index("user_id", name="password_reset_user")
-        await db.password_resets.create_index("expires_at", expireAfterSeconds=0, name="password_reset_ttl")
-    except Exception as e:
-        log.warning(f"Could not create password_resets indexes: {e}")
-
-    # Component master: unique (code, color, size). Category & active for fast filter.
-    try:
-        await db.component_master.create_index(
-            [("component_code", 1), ("color", 1), ("size", 1)],
-            unique=True, name="component_master_unique"
-        )
-        await db.component_master.create_index("component_category", name="component_master_category")
-        await db.component_master.create_index("active", name="component_master_active")
-    except Exception as e:
-        log.warning(f"Could not create component_master indexes: {e}")
-
-    # Component stock movements ledger: hot queries are by component + time and by style.
-    try:
-        await db.component_stock_movements.create_index([("component_id", 1), ("created_at", -1)],
-                                                       name="component_moves_by_component")
-        await db.component_stock_movements.create_index("movement_type", name="component_moves_type")
-        await db.component_stock_movements.create_index("style_id", name="component_moves_style")
-        await db.component_stock_movements.create_index("created_at", name="component_moves_created")
-    except Exception as e:
-        log.warning(f"Could not create component_stock_movements indexes: {e}")
-
-    # Style ⇄ component mapping: one row per (style, component); reverse-index for shared components.
-    try:
-        await db.style_component_mapping.create_index(
-            [("style_id", 1), ("component_id", 1)],
-            unique=True, name="style_component_mapping_unique"
-        )
-        await db.style_component_mapping.create_index("component_id", name="style_component_mapping_component")
-    except Exception as e:
-        log.warning(f"Could not create style_component_mapping indexes: {e}")
-
-    # fg_inventory unique index
-    try:
-        await db.fg_inventory.create_index(
-            [("style_id", 1), ("color", 1), ("size", 1)],
-            unique=True, name="fg_inventory_unique"
-        )
-    except Exception as e:
-        log.warning(f"Could not create fg_inventory unique index: {e}")
-
-    # Phase 2: FG movements & inventory reservations indexes
-    try:
-        await db.fg_stock_movements.create_index(
-            [("style_id", 1), ("created_at", -1)], name="fg_mv_style_ts"
-        )
-        await db.fg_stock_movements.create_index("movement_type",  name="fg_mv_type")
-        await db.fg_stock_movements.create_index("reference_id",   name="fg_mv_ref_id")
-        await db.fg_stock_movements.create_index("created_at",     name="fg_mv_ts")
-    except Exception as e:
-        log.warning(f"Could not create fg_stock_movements indexes: {e}")
-
-    try:
-        await db.inventory_reservations.create_index(
-            [("online_order_id", 1), ("status", 1)], name="inv_res_order_status"
-        )
-        await db.inventory_reservations.create_index(
-            [("style_id", 1), ("color", 1), ("size", 1), ("status", 1)],
-            name="inv_res_sku_status"
-        )
-    except Exception as e:
-        log.warning(f"Could not create inventory_reservations indexes: {e}")
-
-    # WMS: warehouse_locations, fg_location_inventory, picklists
-    try:
-        await db.warehouse_locations.create_index("location_code", unique=True,
-                                                   name="warehouse_locations_unique")
-        await db.warehouse_locations.create_index("rack", name="warehouse_locations_rack")
-        await db.warehouse_locations.create_index("status", name="warehouse_locations_status")
-    except Exception as e:
-        log.warning(f"Could not create warehouse_locations indexes: {e}")
-
-    try:
-        await db.fg_location_inventory.create_index(
-            [("style_id", 1), ("color", 1), ("size", 1), ("location_code", 1)],
-            unique=True, name="fg_loc_inv_unique",
-        )
-        await db.fg_location_inventory.create_index("location_code", name="fg_loc_inv_location")
-        await db.fg_location_inventory.create_index(
-            [("style_id", 1), ("color", 1), ("size", 1), ("created_at", 1)],
-            name="fg_loc_inv_fifo",
-        )
-    except Exception as e:
-        log.warning(f"Could not create fg_location_inventory indexes: {e}")
-
-    try:
-        await db.picklists.create_index("picklist_no", unique=True, name="picklists_no_unique")
-        await db.picklists.create_index("order_id", name="picklists_order")
-        await db.picklists.create_index("status",   name="picklists_status")
-        await db.picklists.create_index("channel",  name="picklists_channel")
-        await db.picklists.create_index("created_at", name="picklists_created")
-        await db.online_orders.create_index(
-            [("platform_key", 1), ("order_id_key", 1)], unique=True,
-            partialFilterExpression={"order_id_key": {"$exists": True, "$type": "string"}},
-            name="online_orders_platform_order_unique",
-        )
-        await db.online_order_items.create_index(
-            [("platform_key", 1), ("order_id_key", 1), ("line_id_key", 1)], unique=True,
-            partialFilterExpression={"line_id_key": {"$exists": True, "$type": "string"}},
-            name="online_order_items_platform_order_line_unique",
-        )
-    except Exception as e:
-        log.warning(f"Could not create picklists indexes: {e}")
-
-    # Auto-seed 320 warehouse cells (idempotent)
-    try:
-        inserted = await _seed_warehouse_locations()
-        if inserted:
-            log.info(f"WMS: seeded {inserted} warehouse cells")
-    except Exception as e:
-        log.warning(f"WMS auto-seed failed: {e}")
-
-    # Marketplace SKU Resolver: indexes + seed default parser templates
-    try:
-        await db.sku_parser_templates.create_index("marketplace", unique=True,
-                                                    name="sku_parser_marketplace_unique")
-    except Exception as e:
-        log.warning(f"Could not create sku_parser_templates index: {e}")
-
-    try:
-        await db.marketplace_style_color_mapping.create_index(
-            [("marketplace_key", 1), ("marketplace_style_code_key", 1), ("marketplace_color_code_key", 1)],
-            unique=True, name="mp_scm_unique_normalized",
-        )
-        await db.marketplace_style_color_mapping.create_index("erp_style_code", name="mp_scm_erp_style")
-    except Exception as e:
-        log.warning(f"Could not create marketplace_style_color_mapping indexes: {e}")
-
-    try:
-        await db.unresolved_sku_queue.create_index(
-            [("marketplace", 1), ("marketplace_style_code", 1), ("marketplace_color_code", 1),
-             ("raw_sku", 1)], unique=True, name="unresolved_sku_unique",
-        )
-        await db.unresolved_sku_queue.create_index("status", name="unresolved_sku_status")
-    except Exception as e:
-        log.warning(f"Could not create unresolved_sku_queue indexes: {e}")
-
-    try:
-        seeded = await _seed_parser_templates()
-        if seeded:
-            log.info(f"Marketplace: seeded {seeded} default parser templates")
-    except Exception as e:
-        log.warning(f"Parser template seed failed: {e}")
-
-    # Cash accounts: unique per source_bank_account_id
-    try:
-        await db.cash_accounts.create_index(
-            "source_bank_account_id",
-            unique=True,
-            name="cash_accounts_source_bank_unique",
-        )
-    except Exception as e:
-        log.warning(f"Could not create cash_accounts index: {e}")
-
     await seed_admin(db)
-    try:
-        seeded = await _seed_color_master()
-        if seeded:
-            log.info(f"Color master: seeded {seeded} default colours")
-    except Exception as e:
-        log.warning(f"Color master seed failed: {e}")
 
+    # Lightweight database connectivity check
     try:
-        seeded_lfc = await _seed_listing_format_configs()
-        if seeded_lfc:
-            log.info(f"Listing format registry: seeded {seeded_lfc} platform configs (myntra/ajio/flipkart)")
-    except Exception as e:
-        log.warning(f"Listing format registry seed failed: {e}")
+        await db.command("ping")
+        log.info("MongoDB connectivity ping successful.")
+    except Exception as ping_err:
+        log.error(f"MongoDB ping failed on boot: {ping_err}")
 
-    try:
-        seeded_oifc = await _seed_order_import_format_configs(db)
-        if seeded_oifc:
-            log.info(f"Order import registry: seeded {seeded_oifc} platform configs (flipkart/myntra)")
-    except Exception as e:
-        log.warning(f"Order import registry seed failed: {e}")
+    # Run versioned schema migrations via distributed lock (DB-002, DB-004)
+    # Releases immediately, idempotent forward-only, safe across multiple workers.
+    if os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "true").lower() in ("true", "1", "yes"):
+        try:
+            from db.migrations.runner import run_mongo_migrations
+            mig_res = await run_mongo_migrations(db)
+            log.info(f"MongoDB schema migration check: {mig_res.get('status')}")
+        except Exception as mig_err:
+            log.warning(f"Startup migration runner execution notice: {mig_err}")
+
+    # Load custom company profile if present
     try:
         profile = await db.settings.find_one({"_id": "company_profile"})
         if profile:
@@ -1694,85 +1527,8 @@ async def on_startup():
             log.info("Loaded custom company profile from DB.")
     except Exception as e:
         log.warning(f"Could not load company profile from DB: {e}")
-    try:
-        await db.online_profitability_daily.create_index(
-            [("platform", 1), ("date_from", 1), ("date_to", 1), ("style_id", 1)],
-            unique=True, name="profitability_daily_key",
-        )
-    except Exception as e:
-        log.warning(f"Could not create online_profitability_daily index: {e}")
 
-    try:
-        await db.bank_accounts.create_index("name", unique=True, name="bank_account_name_unique")
-        await db.bank_accounts.create_index("account_type", name="bank_account_type")
-        await db.bank_accounts.create_index("active", name="bank_account_active")
-    except Exception as e:
-        log.warning(f"Could not create bank_accounts indexes: {e}")
-
-    try:
-        await db.bank_statement_lines.create_index("bank_account_id", name="statement_bank_acc")
-        await db.bank_statement_lines.create_index("date", name="statement_date")
-        await db.bank_statement_lines.create_index("match_status", name="statement_match_status")
-        await db.bank_statement_lines.create_index([("bank_account_id", 1), ("date", -1)], name="statement_acc_date")
-    except Exception as e:
-        log.warning(f"Could not create bank_statement_lines indexes: {e}")
-
-    try:
-        await db.po_ean_format_configs.create_index("name", unique=True, name="po_ean_format_name_unique")
-    except Exception as e:
-        log.warning(f"Could not create po_ean_format_configs indexes: {e}")
-
-    try:
-        await db.po_ean_codes.create_index(
-            [("po_id", 1), ("style_code", 1), ("color", 1), ("size", 1)],
-            unique=True, name="po_ean_codes_unique"
-        )
-        await db.po_ean_codes.create_index("po_id", name="po_ean_codes_po_id")
-    except Exception as e:
-        log.warning(f"Could not create po_ean_codes indexes: {e}")
-
-    try:
-        seeded_po_ean = await _seed_po_ean_format_configs(db)
-        if seeded_po_ean:
-            log.info(f"PO EAN formats registry: seeded {seeded_po_ean} default templates")
-    except Exception as e:
-        log.warning(f"PO EAN format registry seed failed: {e}")
-
-    # ── One-time URL rewrites for image URLs that predate the current shape.
-    # (1) legacy "/uploads/..." → "/api/uploads/..." so K8s ingress routes them
-    # (2) stale absolute "http(s)://<old-preview-host>/api/uploads/..." → relative "/api/uploads/..."
-    # Both idempotent — only touches docs that still carry the older shape.
-    try:
-        import re as _re
-        for coll, fields in (
-            ("styles",    ["image_url", "image_display_url", "image_thumbnail_url"]),
-            ("materials", ["image_url", "image_display_url", "image_thumbnail_url"]),
-        ):
-            for fld in fields:
-                # (1) legacy /uploads/ → /api/uploads/
-                q1 = {fld: {"$regex": r"^https?://[^/]+/uploads/(?!.*api/uploads)"}}
-                async for d in db[coll].find(q1, {fld: 1}):
-                    v = d.get(fld) or ""
-                    if "/api/uploads/" in v: continue
-                    await db[coll].update_one(
-                        {"_id": d["_id"]},
-                        {"$set": {fld: v.replace("/uploads/", "/api/uploads/", 1)}},
-                    )
-
-                # (2) absolute /api/uploads/ → relative /api/uploads/
-                q2 = {fld: {"$regex": r"^https?://[^/]+/api/uploads/"}}
-                cnt = 0
-                async for d in db[coll].find(q2, {fld: 1}):
-                    v = d.get(fld) or ""
-                    new_v = _re.sub(r"^https?://[^/]+", "", v)
-                    await db[coll].update_one({"_id": d["_id"]}, {"$set": {fld: new_v}})
-                    cnt += 1
-                if cnt:
-                    log.info(f"Migration: stripped hostname from {cnt} {coll}.{fld} values.")
-    except Exception as e:
-        log.warning(f"URL-rewrite migration failed (non-fatal): {e}")
-
-    log.info("Startup complete; admin seeded.")
+    log.info("Startup complete; admin verified; migrations evaluated.")
 
 @app.on_event("shutdown")
 async def on_shutdown():

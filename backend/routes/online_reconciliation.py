@@ -4,6 +4,7 @@ import re
 import io
 import csv
 import calendar
+import hashlib
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, date as _date, timedelta as _td
@@ -1516,11 +1517,14 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     content = await file.read()
+    file_hash = hashlib.sha256(content).hexdigest()
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
 
     settlements_inserted = 0
+    settlements_skipped = 0
     non_order_inserted = 0
+    non_order_skipped = 0
 
     for sheetname in wb.sheetnames:
         sheet = wb[sheetname]
@@ -1544,14 +1548,29 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
             row_dict = {header_row[i]: r_vals[i] for i in range(min(len(header_row), len(r_vals)))}
 
             if is_non_order:
+                seller_id = _get_str_val(row_dict, ["seller_id", "seller id"])
+                utr = _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "utr", "neft_ref", "reference"])
+                amt = _get_float_val(row_dict, ["settlement_amount", "amount"])
+                s_date = _get_str_val(row_dict, ["settlement_date", "date"])
+                inv_ref = _get_str_val(row_dict, ["invoice_ref", "invoice"])
+                row_raw = f"{sheetname}:{seller_id}:{utr}:{amt}:{s_date}:{inv_ref}"
+                row_hash = hashlib.sha256(row_raw.encode("utf-8")).hexdigest()
+
+                existing = await db.online_non_order_deductions.find_one({"row_hash": row_hash})
+                if existing:
+                    non_order_skipped += 1
+                    continue
+
                 ded_doc = {
+                    "row_hash": row_hash,
+                    "file_hash": file_hash,
                     "sheet_name": sheetname,
-                    "seller_id": _get_str_val(row_dict, ["seller_id", "seller id"]),
-                    "settlement_amount": _get_float_val(row_dict, ["settlement_amount", "amount"]),
+                    "seller_id": seller_id,
+                    "settlement_amount": amt,
                     "settlement_type": _get_str_val(row_dict, ["settlement_type", "type"]),
-                    "utr": _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "utr", "neft_ref", "reference"]),
-                    "invoice_ref": _get_str_val(row_dict, ["invoice_ref", "invoice"]),
-                    "settlement_date": _get_str_val(row_dict, ["settlement_date", "date"]),
+                    "utr": utr,
+                    "invoice_ref": inv_ref,
+                    "settlement_date": s_date,
                     "settlement_description": _get_str_val(row_dict, ["settlement_description", "description", "remarks"]),
                     "filename": file.filename,
                     "imported_at": now_iso(),
@@ -1560,17 +1579,34 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
                 await db.online_non_order_deductions.insert_one(ded_doc)
                 non_order_inserted += 1
             else:
+                rel_id = _get_str_val(row_dict, ["order_release_id", "release id"])
+                s_order_id = _get_str_val(row_dict, ["seller_order_id", "order id", "seller order id"])
+                sku_id = _get_str_val(row_dict, ["sku_id", "sku id"])
+                neft = _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "neft_ref", "utr", "payment_ref"])
+                postpaid_amt = _get_float_val(row_dict, ["settled_amount_postpaid"])
+                prepaid_amt = _get_float_val(row_dict, ["settled_amount_prepaid"])
+
+                row_raw = f"{sheetname}:{direction}:{rel_id}:{s_order_id}:{sku_id}:{neft}:{postpaid_amt}:{prepaid_amt}"
+                row_hash = hashlib.sha256(row_raw.encode("utf-8")).hexdigest()
+
+                existing = await db.online_settlements_detailed.find_one({"row_hash": row_hash})
+                if existing:
+                    settlements_skipped += 1
+                    continue
+
                 s_doc = {
+                    "row_hash": row_hash,
+                    "file_hash": file_hash,
                     "sheet_name": sheetname,
                     "settlement_status": settlement_status,
                     "direction": direction,
-                    "order_release_id": _get_str_val(row_dict, ["order_release_id", "release id"]),
-                    "seller_order_id": _get_str_val(row_dict, ["seller_order_id", "order id", "seller order id"]),
-                    "sku_id": _get_str_val(row_dict, ["sku_id", "sku id"]),
+                    "order_release_id": rel_id,
+                    "seller_order_id": s_order_id,
+                    "sku_id": sku_id,
                     "style_id": _get_str_val(row_dict, ["style_id", "style id"]),
                     "seller_sku_code": _get_str_val(row_dict, ["seller_sku_code", "seller sku"]),
-                    "settled_amount_postpaid": _get_float_val(row_dict, ["settled_amount_postpaid"]),
-                    "settled_amount_prepaid": _get_float_val(row_dict, ["settled_amount_prepaid"]),
+                    "settled_amount_postpaid": postpaid_amt,
+                    "settled_amount_prepaid": prepaid_amt,
                     "amount_pending_settlement_postpaid": _get_float_val(row_dict, ["amount_pending_settlement_postpaid"]),
                     "amount_pending_settlement_prepaid": _get_float_val(row_dict, ["amount_pending_settlement_prepaid"]),
                     "commission": _get_float_val(row_dict, ["commission_amount_incl_gst", "commission"]),
@@ -1585,7 +1621,7 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
                     "gst": _get_float_val(row_dict, ["gst"]),
                     "return_date": _get_str_val(row_dict, ["return_date", "return date"]),
                     "return_type": _get_str_val(row_dict, ["return_type", "return type"]),
-                    "neft_ref": _get_str_val(row_dict, ["utr_number_postpaid", "utr_number_prepaid", "neft_ref", "utr", "payment_ref"]),
+                    "neft_ref": neft,
                     "filename": file.filename,
                     "imported_at": now_iso(),
                     "imported_by": u.get("email") or u.get("name", ""),
@@ -1593,12 +1629,15 @@ async def import_settlements(request: Request, file: UploadFile = File(...)):
                 await db.online_settlements_detailed.insert_one(s_doc)
                 settlements_inserted += 1
 
-    await log_activity_db(db, "IMPORT", "online_settlements_detailed", f"Imported {settlements_inserted} settlement rows and {non_order_inserted} non-order deductions from '{file.filename}'", u.get("email") or u.get("name", ""))
+    await log_activity_db(db, "IMPORT", "online_settlements_detailed", f"Imported {settlements_inserted} settlement rows (skipped {settlements_skipped} duplicates) and {non_order_inserted} non-order deductions (skipped {non_order_skipped} duplicates) from '{file.filename}'", u.get("email") or u.get("name", ""))
     return {
         "ok": True,
         "settlements_count": settlements_inserted,
+        "settlements_skipped": settlements_skipped,
         "non_order_deductions_count": non_order_inserted,
+        "non_order_skipped": non_order_skipped,
         "filename": file.filename,
+        "file_hash": file_hash,
     }
 
 
@@ -1608,28 +1647,50 @@ async def import_monthly_reconciliation_report(request: Request, file: UploadFil
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     content = await file.read()
+    file_hash = hashlib.sha256(content).hexdigest()
     text = content.decode("utf-8-sig", errors="ignore")
     reader = csv.DictReader(io.StringIO(text))
 
     rows_to_insert = []
+    skipped_duplicates = 0
+    total_in_file = 0
+
     for row in reader:
+        total_in_file += 1
         seller_order_id = _get_str_val(row, ["seller order id", "seller_order_id", "order id"])
         if not seller_order_id:
             continue
+
+        rel_id = _get_str_val(row, ["order release id", "order_release_id"])
+        sku_id = _get_str_val(row, ["sku id", "sku_id"])
+        status = _get_str_val(row, ["order status", "status"])
+        packed_on = _get_str_val(row, ["packed on", "packed_on", "packed_date"])
+        final_amt = _get_float_val(row, ["final amount", "final_amount"])
+
+        row_raw = f"{seller_order_id}:{rel_id}:{sku_id}:{status}:{packed_on}:{final_amt}"
+        row_hash = hashlib.sha256(row_raw.encode("utf-8")).hexdigest()
+
+        existing = await db.online_monthly_order_reports.find_one({"row_hash": row_hash})
+        if existing:
+            skipped_duplicates += 1
+            continue
+
         m_doc = {
+            "row_hash": row_hash,
+            "file_hash": file_hash,
             "seller_order_id": seller_order_id,
-            "order_release_id": _get_str_val(row, ["order release id", "order_release_id"]),
-            "sku_id": _get_str_val(row, ["sku id", "sku_id"]),
+            "order_release_id": rel_id,
+            "sku_id": sku_id,
             "style_id": _get_str_val(row, ["style id", "style_id"]),
             "seller_sku_code": _get_str_val(row, ["seller sku code", "seller_sku_code"]),
             "size": _get_str_val(row, ["size"]),
-            "order_status": _get_str_val(row, ["order status", "status"]),
-            "packed_on": _get_str_val(row, ["packed on", "packed_on", "packed_date"]),
+            "order_status": status,
+            "packed_on": packed_on,
             "shipped_on": _get_str_val(row, ["shipped on", "shipped_on"]),
             "delivered_on": _get_str_val(row, ["delivered on", "delivered_on"]),
             "cancelled_on": _get_str_val(row, ["cancelled on", "cancelled_on"]),
             "rto_return_creation_date": _get_str_val(row, ["rto/return creation date", "return_date"]),
-            "final_amount": _get_float_val(row, ["final amount", "final_amount"]),
+            "final_amount": final_amt,
             "seller_price": _get_float_val(row, ["seller price", "seller_price"]),
             "filename": file.filename,
             "imported_at": now_iso(),
@@ -1639,8 +1700,15 @@ async def import_monthly_reconciliation_report(request: Request, file: UploadFil
 
     if rows_to_insert:
         await db.online_monthly_order_reports.insert_many(rows_to_insert)
-    await log_activity_db(db, "IMPORT", "online_monthly_order_reports", f"Imported {len(rows_to_insert)} monthly order report rows from '{file.filename}'", u.get("email") or u.get("name", ""))
-    return {"ok": True, "count": len(rows_to_insert), "filename": file.filename}
+    await log_activity_db(db, "IMPORT", "online_monthly_order_reports", f"Imported {len(rows_to_insert)} monthly order report rows (skipped {skipped_duplicates} duplicates) from '{file.filename}'", u.get("email") or u.get("name", ""))
+    return {
+        "ok": True,
+        "count": len(rows_to_insert),
+        "skipped_duplicates": skipped_duplicates,
+        "total_in_file": total_in_file,
+        "filename": file.filename,
+        "file_hash": file_hash,
+    }
 
 
 @online_reconciliation_router.post("/online-reconciliation/run")

@@ -138,26 +138,10 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
         due_date_str = str(invoice_doc.get("due_date") or inv_date_str)[:10]
         client_name = invoice_doc.get("client_name") or "Client"
 
-        # 2. Journal Entry
+        # 2. Journal Entry Lines (Double-Entry: Debit AR = Credit Sales Revenue + Taxes)
         je_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_INV_{inv_uuid}"))
         narration = f"Sales Tax Invoice {invoice_no} to {client_name}"
 
-        je_row = {
-            "id": je_id,
-            "entry_number": f"JE-INV-{invoice_no.replace('/', '-')}",
-            "entry_date": inv_date_str,
-            "entry_type": "SALES_INVOICE",
-            "status": "POSTED",
-            "narration": narration,
-            "source_document_ref": invoice_no,
-            "total_debit": grand_total,
-            "total_credit": grand_total,
-            "posted_by": invoice_doc.get("by") or "system",
-            "posted_at": datetime.now(timezone.utc).isoformat(),
-        }
-        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
-
-        # 3. Journal Lines (Double-Entry: Debit AR = Credit Sales Revenue + Taxes)
         lines: List[Dict[str, Any]] = [
             # Line 1: Debit Accounts Receivable (Grand Total)
             {
@@ -227,6 +211,26 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
                 "reconciliation_status": "RECONCILED",
             })
 
+        # ARCH-019 Double-Entry Invariant: Debit == Credit
+        calc_debit = round(sum(float(l.get("debit", 0.0)) for l in lines), 2)
+        calc_credit = round(sum(float(l.get("credit", 0.0)) for l in lines), 2)
+        if abs(calc_debit - calc_credit) > 0.01:
+            raise ValueError(f"Unbalanced journal entry for invoice {invoice_no}: debits ({calc_debit}) != credits ({calc_credit})")
+
+        je_row = {
+            "id": je_id,
+            "entry_number": f"JE-INV-{invoice_no.replace('/', '-')}",
+            "entry_date": inv_date_str,
+            "entry_type": "SALES_INVOICE",
+            "status": "POSTED",
+            "narration": narration,
+            "source_document_ref": invoice_no,
+            "total_debit": calc_debit,
+            "total_credit": calc_credit,
+            "posted_by": invoice_doc.get("by") or "system",
+            "posted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
         client.table("journal_lines").upsert(lines, on_conflict="id").execute()
 
         # 4. Sales Invoices
