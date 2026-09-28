@@ -136,22 +136,27 @@ def test_login_rate_limiting_production_ignores_test_ip(monkeypatch):
     app.include_router(auth_router)
     client = TestClient(app)
 
-    # In production, each failed login increments failures for the real client IP (testclient host),
-    # even if each request rotates the spoofed x-test-rate-limit-client-ip header.
-    for i in range(5):
-        r = client.post(
+    try:
+        # In production, each failed login increments failures for the real client IP (testclient host),
+        # even if each request rotates the spoofed x-test-rate-limit-client-ip header.
+        for i in range(5):
+            r = client.post(
+                "/api/auth/login",
+                json={"email": "victim@sskfootcare.com", "password": "WrongPassword"},
+                headers={"x-test-rate-limit-client-ip": f"10.0.0.{i}"},
+            )
+            assert r.status_code == 401, f"Attempt {i+1} got {r.status_code}"
+
+        # 6th attempt with another new test IP must be 429 because real client IP is blocked!
+        r6 = client.post(
             "/api/auth/login",
             json={"email": "victim@sskfootcare.com", "password": "WrongPassword"},
-            headers={"x-test-rate-limit-client-ip": f"10.0.0.{i}"},
+            headers={"x-test-rate-limit-client-ip": "10.0.0.99"},
         )
-        assert r.status_code == 401, f"Attempt {i+1} got {r.status_code}"
-
-    # 6th attempt with another new test IP must be 429 because real client IP is blocked!
-    r6 = client.post(
-        "/api/auth/login",
-        json={"email": "victim@sskfootcare.com", "password": "WrongPassword"},
-        headers={"x-test-rate-limit-client-ip": "10.0.0.99"},
-    )
-    assert r6.status_code == 429
-    assert "Too many failed login attempts" in r6.json()["detail"]
+        assert r6.status_code == 429
+        assert "Too many failed login attempts" in r6.json()["detail"]
+    finally:
+        server._login_failures.clear()
+        import routes.auth as _ar
+        _ar._login_failures.clear()
 

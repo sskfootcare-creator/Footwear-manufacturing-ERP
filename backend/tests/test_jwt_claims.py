@@ -1,6 +1,6 @@
-"""Unit tests for JWT iss (issuer) and aud (audience) claims validation."""
-
 import os
+os.environ["JWT_SECRET"] = "supersecretjwtkey12345!supersecretjwtkey12345!"
+os.environ["ENVIRONMENT"] = "test"
 import pytest
 import jwt
 from datetime import datetime, timezone, timedelta

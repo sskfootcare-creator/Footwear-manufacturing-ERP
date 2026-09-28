@@ -51,12 +51,17 @@ def oid(id_str: str) -> ObjectId:
         raise HTTPException(400, "Invalid object ID format")
 
 
+def _get_db(request: Request = None):
+    app = getattr(request, "app", None) if request is not None else None
+    return getattr(app, "mongodb", None) or getattr(__import__("server"), "db")
+
+
 async def _get_user(request: Request):
     import server
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
     from auth import get_current_user_factory
-    db = getattr(request.app, "mongodb", None) or server.db
+    db = _get_db(request)
     fn = await get_current_user_factory(db)
     return await fn(request)
 
@@ -562,7 +567,7 @@ async def _auto_consume_inventory(job: dict, by_email: str, db=None) -> bool:
 @materials_router.get("/materials")
 async def list_materials(request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     docs = await db.materials.find({}).sort("name", 1).to_list(2000)
     return [stringify(d) for d in docs]
 
@@ -571,7 +576,7 @@ async def list_materials(request: Request):
 async def create_material(payload: MaterialIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     code = payload.code.strip()
     if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}}):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
@@ -594,7 +599,7 @@ async def create_material(payload: MaterialIn, request: Request):
 async def update_material(mid: str, payload: MaterialIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     code = payload.code.strip()
     if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}, "_id": {"$ne": oid(mid)}}):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
@@ -619,7 +624,7 @@ async def update_material(mid: str, payload: MaterialIn, request: Request):
 async def delete_material(mid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     await db.materials.delete_one({"_id": oid(mid)})
     return {"ok": True}
 
@@ -632,7 +637,7 @@ async def delete_material(mid: str, request: Request):
 async def list_inventory(request: Request):
     """List all materials with computed stock balance and weighted-average valuation."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     materials = await db.materials.find({}).to_list(2000)
     movements = await db.inventory_movements.find({}).to_list(20000)
 
@@ -689,7 +694,7 @@ async def list_movements(
     type: Optional[str] = None,
 ):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     q: dict = {}
     if material_id:
         q["material_id"] = material_id
@@ -729,7 +734,7 @@ async def list_movements(
 async def create_movement(payload: InventoryMovement, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     try:
         mat = await db.materials.find_one({"_id": oid(payload.material_id)})
@@ -832,7 +837,7 @@ async def create_movement(payload: InventoryMovement, request: Request):
 async def delete_movement(mid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     mov = await db.inventory_movements.find_one({"_id": oid(mid)})
     await db.inventory_movements.delete_one({"_id": oid(mid)})
     if mov and mov.get("material_id"):
@@ -857,7 +862,7 @@ async def delete_movement(mid: str, request: Request):
 async def inventory_shortage(payload: dict, request: Request):
     """Given job_ids, compute material requirement and compare with current stock to expose shortage."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     job_ids = payload.get("job_ids", [])
     if not job_ids:
         raise HTTPException(400, "job_ids required")
@@ -908,7 +913,7 @@ async def inventory_shortage(payload: dict, request: Request):
 async def inventory_alerts(request: Request):
     """List materials whose balance <= reorder_level."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     inv_rows = await list_inventory(request)
     alerts = []
     materials = await db.materials.find({}).to_list(2000)
@@ -928,7 +933,7 @@ async def inventory_alerts(request: Request):
 @materials_router.post("/procurement/requirement")
 async def procurement_requirement(payload: dict, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     job_ids = payload.get("job_ids", [])
     if not job_ids:
         raise HTTPException(400, "job_ids required")
@@ -938,7 +943,7 @@ async def procurement_requirement(payload: dict, request: Request):
 @materials_router.post("/procurement/requirement.pdf")
 async def procurement_requirement_pdf(payload: dict, request: Request):
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     job_ids = payload.get("job_ids", [])
     if not job_ids:
         raise HTTPException(400, "job_ids required")

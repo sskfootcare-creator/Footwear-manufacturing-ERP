@@ -1257,9 +1257,12 @@ async def get_entity_revisions(entity_type: str, entity_id: str, request: Reques
         {"entity_type": entity_type, "entity_id": str(entity_id)}
     ).sort("created_at", -1).to_list(50)
 
+    formatted_revs = []
     for r in revs:
-        r["id"] = str(r.pop("_id"))
-    return {"entity_type": entity_type, "entity_id": entity_id, "revisions": revs}
+        item = dict(r)
+        item["id"] = str(item.pop("_id", ""))
+        formatted_revs.append(item)
+    return {"entity_type": entity_type, "entity_id": entity_id, "revisions": formatted_revs}
 
 
 @app.post("/api/revisions/{entity_type}/{entity_id}/revert")

@@ -39,7 +39,7 @@ class MockCollection:
                     match = False
             if match:
                 return d
-        return self.docs[0] if self.docs else None
+        return None
 
     async def insert_one(self, doc, *args, **kwargs):
         d = dict(doc)

@@ -57,9 +57,32 @@ jobs:
           DB_NAME: ssk_ci_db
           JWT_SECRET: supersecretjwtkey12345!supersecretjwtkey12345!
           ENVIRONMENT: test
+          DISABLE_LOGIN_RATE_LIMIT: "false"
+          REACT_APP_BACKEND_URL: http://127.0.0.1:8000
           PYTHONPATH: backend
         run: |
+          python -m uvicorn server:app --app-dir backend --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 &
+          SERVER_PID=$!
+          echo "Waiting for live backend server to start on port 8000..."
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:8000/healthz > /dev/null; then
+              echo "Backend server is up and healthy after ${i}s!"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          if [ $READY -ne 1 ]; then
+            echo "ERROR: Backend server failed to start within 30s. Logs:"
+            cat /tmp/uvicorn.log
+            exit 1
+          fi
+
           python -m pytest backend/tests/ -v --ignore=backend/tests/fixtures
+          TEST_EXIT_CODE=$?
+          kill -9 $SERVER_PID 2>/dev/null || true
+          exit $TEST_EXIT_CODE
 
   supabase-validation:
     name: Supabase Migrations & Declarative Schema Validation (DB-003)

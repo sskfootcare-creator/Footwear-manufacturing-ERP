@@ -31,6 +31,8 @@ def client():
     from fastapi.testclient import TestClient
     from server import app
     with TestClient(app, base_url="http://testserver/api") as tc:
+        import routes.auth as _auth_mod
+        _auth_mod._login_failures.clear()
         r = tc.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
         assert r.status_code == 200, f"Login failed: {r.text}"
         yield tc

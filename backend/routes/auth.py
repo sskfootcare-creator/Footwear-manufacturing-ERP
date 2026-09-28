@@ -80,6 +80,9 @@ async def check_rate_limit(
     max_attempts: int = LOGIN_MAX_ATTEMPTS,
     window_seconds: int = LOGIN_WINDOW_SECONDS,
 ) -> None:
+    if os.environ.get("DISABLE_LOGIN_RATE_LIMIT", "false").lower() in ("true", "1"):
+        return
+
     now_ts = datetime.now(timezone.utc).timestamp()
     window_start = now_ts - window_seconds
 
@@ -114,6 +117,8 @@ async def check_rate_limit(
 
 
 async def record_login_failure(key: str, window_seconds: int = LOGIN_WINDOW_SECONDS) -> int:
+    if os.environ.get("DISABLE_LOGIN_RATE_LIMIT", "false").lower() in ("true", "1"):
+        return 0
     now_ts = datetime.now(timezone.utc).timestamp()
     if redis_client is not None:
         try:
