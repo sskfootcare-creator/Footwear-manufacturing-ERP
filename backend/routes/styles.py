@@ -2543,8 +2543,10 @@ async def get_style_catalogue_codes(sid: str, request: Request):
         if not colors: colors = sorted(cset)
         if not sizes:
             def _ssort(x):
-                try:    return (0, int(x))
-                except: return (1, x)
+                try:
+                    return (0, int(x))
+                except (ValueError, TypeError):
+                    return (1, str(x))
             sizes = sorted(sset, key=_ssort)
 
     color_rows = []

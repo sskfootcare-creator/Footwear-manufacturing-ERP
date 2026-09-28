@@ -30,7 +30,19 @@ from auth import (
     set_auth_cookies, clear_auth_cookies,
     get_current_user_factory, require_roles, seed_admin,
     JWT_ALGORITHM, JWT_ISSUER, JWT_AUDIENCE, get_jwt_secret, validate_jwt_secret,
+    get_environment,
 )
+from constants import (
+    MAX_IMAGE_UPLOAD_BYTES,
+    MAX_IMAGE_PIXELS,
+    ALLOWED_IMAGE_MIME_TYPES,
+    ALLOWED_IMAGE_EXTENSIONS,
+    DASHBOARD_STATS_CACHE_TTL,
+    DASHBOARD_QUERY_BATCH_SIZE,
+    DASHBOARD_MAX_DOCS_LIMIT,
+)
+from circuit_breaker import get_circuit_breakers_status
+from secrets_manager import default_secrets_manager
 from routes.auth import (
     auth_router,
     # rate-limit state + helpers re-exported for backward-compat with tests
@@ -412,26 +424,24 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     require_roles("admin", "manager")(u)
 
     ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-    if ext not in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
         raise HTTPException(400, "Invalid image format")
 
-    valid_content_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg"}
-    if file.content_type and file.content_type.lower() not in valid_content_types:
+    if file.content_type and file.content_type.lower() not in ALLOWED_IMAGE_MIME_TYPES:
         raise HTTPException(400, f"Unsupported Content-Type '{file.content_type}'. Must be a valid image MIME type.")
 
-    # ── Read up to cap + 1 byte to enforce bounded memory allocation
-    MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB — server-side limit
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
+    # ── Read up to cap + 1 byte to enforce bounded memory allocation (CODE-004)
+    content = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
+    if len(content) > MAX_IMAGE_UPLOAD_BYTES:
         raise HTTPException(
             413,
-            "Image too large. Max allowed is 8 MB."
+            f"Image too large. Max allowed is {MAX_IMAGE_UPLOAD_BYTES // (1024 * 1024)} MB."
         )
 
-    # ── Verify it's really an image (spoofed extension → PIL will raise) & pixel-bomb protection (F-030)
+    # ── Verify it's really an image (spoofed extension → PIL will raise) & pixel-bomb protection (F-030, CODE-004)
     from PIL import Image, ImageOps, UnidentifiedImageError
-    # Prevent decompression bombs: limit max pixels to 10MP
-    Image.MAX_IMAGE_PIXELS = 10_000_000
+    # Prevent decompression bombs: limit max pixels to configured threshold
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     try:
         img = Image.open(BytesIO(content))
         img.verify()   # header check; must reopen for real decode
@@ -444,8 +454,8 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
         raise HTTPException(400, f"Image processing error: {e}")
 
     orig_w, orig_h = img.size
-    if orig_w * orig_h > 10_000_000:
-        raise HTTPException(400, "Image pixel dimensions exceed maximum allowed limit (10MP)")
+    if orig_w * orig_h > MAX_IMAGE_PIXELS:
+        raise HTTPException(400, f"Image pixel dimensions exceed maximum allowed limit ({MAX_IMAGE_PIXELS // 1_000_000}MP)")
 
     # ── Auto-orient by EXIF (phone photos often carry rotation flag)
     try:
@@ -919,9 +929,8 @@ def _overdue_hours(deadline_iso: str | None) -> float:
 #  endpoints extracted to routes/styles.py and mounted via styles_router)
 
 
-# In-memory dashboard stats cache
+# In-memory dashboard stats cache (CODE-004: configured via DASHBOARD_STATS_CACHE_TTL)
 _dashboard_stats_cache = {"data": None, "expires_at": 0.0}
-DASHBOARD_STATS_CACHE_TTL = 300  # 5 minutes
 
 
 def invalidate_dashboard_stats_cache():
@@ -930,56 +939,139 @@ def invalidate_dashboard_stats_cache():
     _dashboard_stats_cache["expires_at"] = 0.0
 
 
-async def _compute_dashboard_stats_live() -> dict:
+async def _fetch_bounded_collection(
+    collection,
+    query: Optional[dict] = None,
+    projection: Optional[dict] = None,
+    limit: int = DASHBOARD_MAX_DOCS_LIMIT,
+) -> list:
+    """Fetch documents with strict projection, bounded limits, and mock-safe execution.
+
+    Addresses DB-005 & PERF-003:
+    - Avoids loading entire unprojected documents into Python heap via field projections.
+    - Prevents unbounded memory usage by enforcing limit and date filters.
+    - Maintains 100% compatibility with Motor cursors and unit test mocks.
+    """
+    if collection is None:
+        return []
+    q = query or {}
+    try:
+        kwargs = {}
+        if projection:
+            kwargs["projection"] = projection
+        cursor = collection.find(q, **kwargs)
+        if hasattr(cursor, "to_list") and callable(cursor.to_list):
+            return await cursor.to_list(limit)
+        elif hasattr(cursor, "__aiter__"):
+            docs = []
+            count = 0
+            async for doc in cursor:
+                docs.append(doc)
+                count += 1
+                if limit and count >= limit:
+                    break
+            return docs
+        elif inspect.isawaitable(cursor):
+            res = await cursor
+            return res[:limit] if isinstance(res, list) else res
+        return list(cursor)[:limit] if isinstance(cursor, (list, tuple)) else []
+    except Exception as e:
+        log.warning(f"DB-005: Bounded query warning on collection '{getattr(collection, 'name', 'unknown')}': {e}")
+        return []
+
+
+async def _compute_dashboard_stats_live(start_date: Optional[str] = None, end_date: Optional[str] = None) -> dict:
+    """Compute real-time operational and financial dashboard KPIs.
+
+    Business Logic Context (DOC-001):
+    1. WIP (Work-in-Progress): Sum of all pairs currently in cutting, closing, bottom,
+       finishing, or packing stages (i.e. not yet marked 'dispatched').
+    2. B2B vs Online Disaggregation: Production jobs and orders are split by `source_type`
+       to provide dedicated visibility into wholesale manufacturing vs eCommerce channels.
+    3. Authoritative Physical Stock (F-032): Physical FG stock is calculated strictly from
+       the `fg_inventory` physical count (`ready_stock` / `quantity`), while commitments are
+       tracked in `reserved_fg_stock`.
+    4. Revenue Recognition (F-031):
+       - Recognized Revenue: Non-voided issued invoices form the single authoritative source
+         of realized B2B revenue (`grand_total`).
+       - Pipeline Revenue: For jobs not yet invoiced, approved non-cancelled PO totals serve
+         as the forward-looking B2B pipeline.
+       - Online Revenue: Sum of net order amounts for non-cancelled/rejected eCommerce jobs.
+    5. Scalability & Memory Bounds (DB-005, PERF-003):
+       - Uses field projections and cursor-bounded streaming instead of raw unindexed .to_list().
+    """
     total_pos = await db.pos.count_documents({})
     pending_pos = await db.pos.count_documents({"status": "pending"})
-    
-    jobs = await db.production_jobs.find({}).to_list(10000)
-    
-    # B2B vs Online WIP/dispatched
+
+    # Bounded query for production jobs with projection (DB-005, PERF-003)
+    job_query = {}
+    if start_date or end_date:
+        date_q = {}
+        if start_date:
+            date_q["$gte"] = start_date
+        if end_date:
+            date_q["$lte"] = end_date
+        job_query["created_at"] = date_q
+
+    jobs = await _fetch_bounded_collection(
+        db.production_jobs,
+        query=job_query,
+        projection={"quantity": 1, "stage": 1, "source_type": 1, "status": 1, "amount": 1, "created_at": 1, "id": 1, "_id": 1},
+        limit=DASHBOARD_MAX_DOCS_LIMIT,
+    )
+
+    # B2B vs Online WIP / dispatched pairs
     b2b_jobs = [j for j in jobs if j.get("source_type") != "online_channel"]
     online_jobs = [j for j in jobs if j.get("source_type") == "online_channel"]
-    
+
     b2b_wip = sum(j.get("quantity", 0) for j in b2b_jobs if j.get("stage") != "dispatched")
     b2b_dispatched = sum(j.get("quantity", 0) for j in b2b_jobs if j.get("stage") == "dispatched")
-    
+
     online_wip = sum(j.get("quantity", 0) for j in online_jobs if j.get("stage") != "dispatched")
     online_dispatched = sum(j.get("quantity", 0) for j in online_jobs if j.get("stage") == "dispatched")
-    
+
     pairs_in_wip = b2b_wip + online_wip
     dispatched = b2b_dispatched + online_dispatched
-    
+
     # F-032: Authoritative physical stock and dispatch ledgers
     physical_fg_stock = 0
     reserved_fg_stock = 0
     if hasattr(db, "fg_inventory") and db.fg_inventory is not None:
         try:
-            fg_docs = await db.fg_inventory.find({}).to_list(5000)
+            fg_docs = await _fetch_bounded_collection(
+                db.fg_inventory,
+                projection={"ready_stock": 1, "quantity": 1, "reserved": 1},
+                limit=5000,
+            )
             physical_fg_stock = sum(int(doc.get("ready_stock") or doc.get("quantity") or 0) for doc in fg_docs)
             reserved_fg_stock = sum(int(doc.get("reserved") or 0) for doc in fg_docs)
-        except Exception:
-            pass
+        except Exception as fg_err:
+            log.warning(f"CODE-003: Error aggregating fg_inventory ledger: {fg_err}")
 
     ledger_dispatched_pairs = 0
     if hasattr(db, "dispatch_records") and db.dispatch_records is not None:
         try:
-            dr_docs = await db.dispatch_records.find({}).to_list(5000)
+            dr_docs = await _fetch_bounded_collection(
+                db.dispatch_records,
+                projection={"total_pairs": 1, "total_quantity": 1},
+                limit=5000,
+            )
             ledger_dispatched_pairs = sum(int(dr.get("total_pairs") or dr.get("total_quantity") or 0) for dr in dr_docs)
-        except Exception:
-            pass
+        except Exception as dr_err:
+            log.warning(f"CODE-003: Error aggregating dispatch_records ledger: {dr_err}")
 
     total_returns_count = 0
     if hasattr(db, "online_returns_records") and db.online_returns_records is not None:
         try:
             total_returns_count = await db.online_returns_records.count_documents({})
-        except Exception:
-            pass
+        except Exception as ret_err:
+            log.warning(f"CODE-003: Error counting returns records: {ret_err}")
 
     # Stage counts
     stage_counts = {s: 0 for s in PRODUCTION_STAGES}
     b2b_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
     online_stage_counts = {s: 0 for s in PRODUCTION_STAGES}
-    
+
     for j in jobs:
         st = j.get("stage")
         qty = j.get("quantity", 0)
@@ -997,20 +1089,29 @@ async def _compute_dashboard_stats_live() -> dict:
                 b2b_stage_counts[st] += qty
             else:
                 b2b_stage_counts[st] = b2b_stage_counts.get(st, 0) + qty
-            
+
     # F-031: Clean revenue recognition
     # 1. Authoritative recognized invoiced revenue (active non-voided invoices)
     invoiced_revenue = 0.0
     if hasattr(db, "invoices") and db.invoices is not None:
         try:
-            inv_docs = await db.invoices.find({"status": {"$ne": "voided"}}).to_list(5000)
+            inv_docs = await _fetch_bounded_collection(
+                db.invoices,
+                query={"status": {"$ne": "voided"}},
+                projection={"grand_total": 1, "net_amount": 1, "subtotal": 1, "status": 1},
+                limit=5000,
+            )
             invoiced_revenue = sum(float(inv.get("grand_total") or inv.get("net_amount") or inv.get("subtotal") or 0.0) for inv in inv_docs)
-        except Exception:
-            pass
+        except Exception as inv_err:
+            log.warning(f"CODE-003: Error aggregating invoiced revenue: {inv_err}")
 
     # 2. Approved B2B PO revenue (excluding cancelled and rejected POs)
     b2b_po_pipeline = 0.0
-    pos = await db.pos.find({}).to_list(2000)
+    pos = await _fetch_bounded_collection(
+        db.pos,
+        projection={"status": 1, "grand_total": 1, "id": 1, "po_number": 1, "created_at": 1},
+        limit=2000,
+    )
     for p in pos:
         p_status = (p.get("status") or "").lower()
         if p_status not in ("cancelled", "rejected"):
@@ -1018,14 +1119,14 @@ async def _compute_dashboard_stats_live() -> dict:
 
     # Use invoiced revenue as recognized B2B revenue when invoices exist, fallback to valid PO pipeline
     b2b_revenue = invoiced_revenue if invoiced_revenue > 0 else b2b_po_pipeline
-        
+
     # Online revenue excluding cancelled jobs
     online_revenue = sum(
         float(j.get("amount", 0.0) or 0.0)
         for j in online_jobs
         if (j.get("status") or "").lower() not in ("cancelled", "rejected")
     )
-    
+
     recent_pos = [stringify(p) for p in pos[-5:][::-1]]
     recent_online = [stringify(j) for j in online_jobs[-5:][::-1]]
 
@@ -1033,8 +1134,13 @@ async def _compute_dashboard_stats_live() -> dict:
     cash_docs = []
     if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
         try:
-            cash_docs = await db.cash_ledger.find({}).to_list(2000)
-        except Exception:
+            cash_docs = await _fetch_bounded_collection(
+                db.cash_ledger,
+                projection={"remaining_balance": 1},
+                limit=2000,
+            )
+        except Exception as cash_err:
+            log.warning(f"CODE-003: Error reading cash ledger: {cash_err}")
             cash_docs = []
     total_cash_in_hand = round(sum(float(cd.get("remaining_balance") or 0.0) for cd in cash_docs), 2)
 
@@ -1489,12 +1595,24 @@ async def readyz():
     if not is_ready:
         raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
 
+    # Include circuit breaker statuses for external dependencies (DEPLOY-003)
+    checks["circuit_breakers"] = get_circuit_breakers_status()
+
     return {"status": "ready", "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/test-helpers/create-test-invoice")
 @app.post("/test-helpers/create-test-invoice")
 async def create_test_invoice_helper(payload: Dict[str, Any], request: Request):
+    """Test helper to generate mock invoices for ledger validation.
+
+    Guarded by OPS-003: strictly prohibited from executing in production environments.
+    """
+    if get_environment() == "production":
+        raise HTTPException(
+            status_code=403,
+            detail="OPS-003: Test helper endpoints are strictly disabled in production environments.",
+        )
     u = await _get_auth_user(request)
     doc = dict(payload)
     if "_id" not in doc:
@@ -1512,20 +1630,20 @@ async def _ensure_startup_indexes(database):
         return
     try:
         await database.users.create_index("email", unique=True)
-    except Exception:
-        pass
+    except Exception as err:
+        log.debug(f"Users email index notice: {err}")
     try:
         await database.materials.create_index("code", unique=True)
-    except Exception:
-        pass
+    except Exception as err:
+        log.debug(f"Materials code index notice: {err}")
     try:
         await database.styles.create_index("code", unique=True)
-    except Exception:
-        pass
+    except Exception as err:
+        log.debug(f"Styles code index notice: {err}")
     try:
         await database.pos.create_index("po_number", unique=True)
-    except Exception:
-        pass
+    except Exception as err:
+        log.debug(f"POs po_number index notice: {err}")
 
     try:
         await database.production_jobs.create_index("po_id")
@@ -1652,7 +1770,9 @@ async def _ensure_startup_indexes(database):
 
 @app.on_event("startup")
 async def on_startup():
-    """Decoupled, replica-safe startup initialization (DB-002, DB-004)."""
+    """Decoupled, replica-safe startup initialization (DB-002, DB-004, DEPLOY-004)."""
+    # Validate critical secrets and configuration on boot
+    default_secrets_manager.validate_all_secrets(get_environment())
     validate_jwt_secret()
     global get_current_user, client, db
     if db is None:
