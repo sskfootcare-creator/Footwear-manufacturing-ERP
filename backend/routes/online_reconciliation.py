@@ -1216,7 +1216,7 @@ async def _get_bank_holidays(db) -> set:
 
 
 @online_reconciliation_router.get("/online-reconciliation/daily-payments/progress")
-async def get_daily_payments_progress(request: Request, month: Optional[str] = None):
+async def get_daily_payments_progress(request: Request, month: Optional[str] = None, as_of: Optional[str] = None):
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
 
@@ -1242,7 +1242,15 @@ async def get_daily_payments_progress(request: Request, month: Optional[str] = N
     ]
     total_business_days_in_month = len(all_business_days)
 
-    today = now_dt.date()
+    # Support as_of override for testing (allows deterministic MTD calculation)
+    if as_of:
+        try:
+            today = _date.fromisoformat(as_of.strip())
+        except Exception:
+            today = now_dt.date()
+    else:
+        today = now_dt.date()
+
     if yr == today.year and mo == today.month:
         expected_mtd_business_days = [
             d.isoformat() for d in all_month_days

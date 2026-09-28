@@ -563,10 +563,6 @@ async def seed_admin(db) -> None:
             db, _SSK_SEED_EMAIL, _SSK_SEED_PASSWORD,
             "Test Admin", "ssk-test-admin"
         )
-        await _upsert_admin(
-            db, "sskfootcare@gmail.com", "Chandu@220494",
-            "Chandu Admin", "ssk-chandu-admin"
-        )
     else:
         log.info(f"[seed_admin] SKIPPED ssk-test-admin ({_SSK_SEED_EMAIL}) — environment={environment}")
 

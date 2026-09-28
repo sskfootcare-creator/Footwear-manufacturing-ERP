@@ -26,8 +26,11 @@ ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 @pytest.fixture(scope="module")
 def client():
+    import server as _server
     from fastapi.testclient import TestClient
     from server import app
+    # Reset server.db so the real MongoDB is used (prevents mock contamination from other test modules)
+    _server.db = None
     with TestClient(app, base_url="http://testserver/api") as tc:
         r = tc.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
         assert r.status_code == 200, f"Login failed: {r.text}"
@@ -333,10 +336,11 @@ class TestDailyPaymentUploadCadence:
         """
         client.post("/online-reconciliation/clear-test-data")
 
-        # Check initial state for Sep 2026 (today 2026-09-06 is Sunday)
-        # Weekdays MTD: 2026-09-01 (Tue), 02 (Wed), 03 (Thu), 04 (Fri) = 4 expected business days
-        # Sat 05 and Sun 06 are excluded!
-        res0 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        # Anchor to 2026-09-06 (Sunday) so MTD = Sep 01-04 (4 weekdays); Sep 05 Sat, Sep 06 Sun excluded.
+        # Use as_of=2026-09-06 so the test is date-independent.
+        AS_OF = "2026-09-06"
+
+        res0 = client.get(f"/online-reconciliation/daily-payments/progress?month=2026-09&as_of={AS_OF}")
         assert res0.status_code == 200
         d0 = res0.json()
 
@@ -357,7 +361,7 @@ class TestDailyPaymentUploadCadence:
         assert r_up1.status_code == 200
         assert r_up1.json()["inserted"] == 1
 
-        res1 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        res1 = client.get(f"/online-reconciliation/daily-payments/progress?month=2026-09&as_of={AS_OF}")
         d1 = res1.json()
         assert d1["uploaded_business_days_count"] == 1
         assert d1["expected_business_days_mtd"] == 4
@@ -374,7 +378,7 @@ class TestDailyPaymentUploadCadence:
         r_up2 = client.post("/online-reconciliation/import-daily-payments", files={"file": ("day2.csv", csv_day2.encode("utf-8"), "text/csv")})
         assert r_up2.status_code == 200
 
-        res2 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        res2 = client.get(f"/online-reconciliation/daily-payments/progress?month=2026-09&as_of={AS_OF}")
         d2 = res2.json()
         assert d2["uploaded_business_days_count"] == 2
         assert d2["expected_business_days_mtd"] == 4
@@ -391,7 +395,7 @@ class TestDailyPaymentUploadCadence:
         r_up3 = client.post("/online-reconciliation/import-daily-payments", files={"file": ("day3.csv", csv_day3.encode("utf-8"), "text/csv")})
         assert r_up3.status_code == 200
 
-        res3 = client.get("/online-reconciliation/daily-payments/progress?month=2026-09")
+        res3 = client.get(f"/online-reconciliation/daily-payments/progress?month=2026-09&as_of={AS_OF}")
         d3 = res3.json()
         assert d3["uploaded_business_days_count"] == 3
         assert d3["expected_business_days_mtd"] == 4
