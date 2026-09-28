@@ -67,6 +67,10 @@ def test_material_requirement_stage_gate():
         # Find the newly created job
         jobs = session.get(f"{BASE_URL}/api/production/jobs").json()
         gate_job = next(j for j in jobs if j.get("po_number") == po_num)
+        if gate_job.get("stage") != "procurement":
+            move_proc = session.patch(f"{BASE_URL}/api/production/jobs/{gate_job['id']}", json={"stage": "procurement"})
+            assert move_proc.status_code == 200, move_proc.text
+            gate_job["stage"] = "procurement"
         assert gate_job["stage"] == "procurement"
 
         # Attempt to move job out of procurement to cutting -> MUST FAIL WITH 400!

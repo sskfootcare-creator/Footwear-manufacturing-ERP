@@ -105,6 +105,14 @@ class MockCollection:
         if target:
             self.docs.remove(target)
 
+    async def delete_many(self, filter_dict=None):
+        res = [d for d in self.docs if match_filter(d, filter_dict or {})]
+        for d in res:
+            self.docs.remove(d)
+        class DeleteResult:
+            deleted_count = len(res)
+        return DeleteResult()
+
 
 class MockDB:
     def __init__(self):

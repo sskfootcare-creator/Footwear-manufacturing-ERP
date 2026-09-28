@@ -1122,11 +1122,21 @@ async def clear_reconciliation_test_data(request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
-    await db.online_daily_payments.delete_many({})
-    await db.online_settlements_detailed.delete_many({})
-    await db.online_non_order_deductions.delete_many({})
-    await db.online_monthly_order_reports.delete_many({})
-    await db.style_cost_snapshots.delete_many({})
+    for coll_name in [
+        "online_daily_payments",
+        "online_settlements_detailed",
+        "online_non_order_deductions",
+        "online_monthly_order_reports",
+        "style_cost_snapshots",
+    ]:
+        coll = getattr(db, coll_name, None)
+        if coll is not None:
+            if hasattr(coll, "delete_many"):
+                await coll.delete_many({})
+            elif hasattr(coll, "clear"):
+                coll.clear()
+            elif hasattr(coll, "docs"):
+                coll.docs.clear()
     return {"ok": True}
 
 

@@ -164,11 +164,11 @@ class MockPlanningDB:
 
 
 @pytest.fixture
-def mock_app():
+def mock_app(monkeypatch):
     app = FastAPI()
     db = MockPlanningDB()
     app.mongodb = db
-    server.db = db
+    monkeypatch.setattr(server, "db", db)
 
     app.include_router(vendors_router)
     app.include_router(pos_router)

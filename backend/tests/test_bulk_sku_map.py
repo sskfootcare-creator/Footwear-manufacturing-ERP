@@ -104,6 +104,13 @@ class MockCollection:
             deleted_count = before - len(self.docs)
         return R()
 
+    async def delete_many(self, f=None):
+        before = len(self.docs)
+        self.docs = [d for d in self.docs if not _match(d, f or {})]
+        class R:
+            deleted_count = before - len(self.docs)
+        return R()
+
     async def find_one_and_update(self, f, upd, upsert=False, return_document=True):
         for doc in self.docs:
             if _match(doc, f):

@@ -86,3 +86,33 @@ def admin_httpx_cookies(test_admin_email, test_admin_password, api_url) -> dict:
         f"Email: {test_admin_email} — check ADMIN_EMAIL / ADMIN_PASSWORD env vars."
     )
     return dict(r.cookies)
+
+
+@pytest.fixture(autouse=True)
+def clean_db_state():
+    """Ensure mock DB assignments on app.mongodb or server.db do not leak across tests."""
+    import server
+
+    db_name = os.environ.get("DB_NAME", "ssk_ci_db")
+    real_db = server.client[db_name] if hasattr(server, "client") and server.client is not None else None
+
+    # Reset before test
+    if hasattr(server.app, "mongodb"):
+        try:
+            delattr(server.app, "mongodb")
+        except AttributeError:
+            pass
+    if real_db is not None:
+        server.db = real_db
+
+    yield
+
+    # Reset after test
+    if hasattr(server.app, "mongodb"):
+        try:
+            delattr(server.app, "mongodb")
+        except AttributeError:
+            pass
+    if real_db is not None:
+        server.db = real_db
+

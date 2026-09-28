@@ -39,8 +39,8 @@ def test_channel_allocation_explanation(client_app):
 
     headers = {"Authorization": "Bearer test-token"}
 
-    with patch("routes.inventory._get_user", AsyncMock(return_value={"email": "alloc_mgr@ssk.com", "role": "manager"})):
-        app.mongodb = mock_db
+    with patch("routes.inventory._get_user", AsyncMock(return_value={"email": "alloc_mgr@ssk.com", "role": "manager"})), \
+         patch.object(app, "mongodb", mock_db, create=True):
 
         # 1. Query for online channel
         res_online = client_app.get("/api/inventory/channel-allocation?channel=online", headers=headers)

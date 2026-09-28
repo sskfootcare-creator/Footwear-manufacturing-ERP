@@ -63,6 +63,22 @@ class MockCollection:
         res.modified_count = 1
         return res
 
+    async def delete_many(self, *args, **kwargs):
+        res = MagicMock()
+        res.deleted_count = len(self.docs)
+        self.docs = []
+        return res
+
+    async def delete_one(self, q=None, *args, **kwargs):
+        res = MagicMock()
+        res.deleted_count = 0
+        if q:
+            doc = await self.find_one(q)
+            if doc and doc in self.docs:
+                self.docs.remove(doc)
+                res.deleted_count = 1
+        return res
+
 
 class MockDB:
     def __init__(self):
@@ -124,7 +140,7 @@ def mock_env(monkeypatch):
     monkeypatch.setattr("routes.invoice_packing._get_user", mock_get_user)
     monkeypatch.setattr("routes.invoice_packing._get_db", lambda r: mock_db)
 
-    app.mongodb = mock_db
+    monkeypatch.setattr(app, "mongodb", mock_db, raising=False)
     client = TestClient(app)
     return client, mock_db
 

@@ -1,13 +1,18 @@
 import pytest
 import requests
 
-BASE_URL = "http://localhost:8000"
+import os
+import time
+
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8000").rstrip("/")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+ADMIN_PASS  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 @pytest.fixture
 def admin_session():
     s = requests.Session()
     # Login as admin
-    res = s.post(f"{BASE_URL}/api/auth/login", json={"email": "sskfootcare@gmail.com", "password": "Chandu@220494"})
+    res = s.post(f"{BASE_URL}/api/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
     assert res.status_code == 200, f"Login failed: {res.text}"
     token = res.json().get("access_token")
     s.headers.update({"Authorization": f"Bearer {token}"})
@@ -15,10 +20,39 @@ def admin_session():
 
 def test_fix1_parallel_completion_gate(admin_session):
     """Verify parallel-completion gate before moving stage to 'lasting'."""
-    # Fetch existing jobs or grab first available job
+    # Fetch existing jobs or create one if none exist
     res = admin_session.get(f"{BASE_URL}/api/production/jobs")
     assert res.status_code == 200
     jobs = res.json()
+    if len(jobs) == 0:
+        # Create a style and PO to produce a job
+        style_res = admin_session.post(f"{BASE_URL}/api/styles", json={
+            "name": f"Test Style Fix1 {int(time.time())}",
+            "category": "Footwear",
+            "base_size": "8",
+            "bom": [],
+            "labor": [],
+        })
+        assert style_res.status_code == 200
+        style_code = style_res.json()["code"]
+        po_num = f"PO-FIX1-{int(time.time())}"
+        po_res = admin_session.post(f"{BASE_URL}/api/pos", json={
+            "po_number": po_num,
+            "client_name": "Test Client Fix1",
+            "po_date": "2026-08-08",
+            "line_items": [{
+                "style_code": style_code,
+                "external_sku": style_code,
+                "description": "Test fix1 item",
+                "color": "Black",
+                "size": "8",
+                "quantity": 5,
+                "unit_price": 100.0,
+                "amount": 500.0,
+            }]
+        })
+        assert po_res.status_code in [200, 201]
+        jobs = admin_session.get(f"{BASE_URL}/api/production/jobs").json()
     assert len(jobs) > 0, "No production jobs found"
     test_job = jobs[0]
     jid = test_job["id"]

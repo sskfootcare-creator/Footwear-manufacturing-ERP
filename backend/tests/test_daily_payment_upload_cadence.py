@@ -29,8 +29,15 @@ def client():
     import server as _server
     from fastapi.testclient import TestClient
     from server import app
-    # Reset server.db so the real MongoDB is used (prevents mock contamination from other test modules)
-    _server.db = None
+    # Ensure app.mongodb is removed and server.db connects to real database
+    if hasattr(app, "mongodb"):
+        try:
+            delattr(app, "mongodb")
+        except AttributeError:
+            pass
+    db_name = os.environ.get("DB_NAME", "ssk_ci_db")
+    if hasattr(_server, "client") and _server.client is not None:
+        _server.db = _server.client[db_name]
     with TestClient(app, base_url="http://testserver/api") as tc:
         r = tc.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
         assert r.status_code == 200, f"Login failed: {r.text}"

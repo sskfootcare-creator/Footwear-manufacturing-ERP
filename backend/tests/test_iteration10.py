@@ -17,10 +17,25 @@ ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 
 
+class AuthenticatedSession(requests.Session):
+    def request(self, method, url, *args, **kwargs):
+        res = super().request(method, url, *args, **kwargs)
+        if res.status_code == 401 and "/auth/login" not in str(url):
+            login_res = super().request(
+                "POST",
+                f"{BASE_URL}/api/auth/login",
+                json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+                timeout=30,
+            )
+            if login_res.status_code == 200:
+                res = super().request(method, url, *args, **kwargs)
+        return res
+
+
 # ---------- fixtures ----------
 @pytest.fixture(scope="session")
 def admin_session():
-    s = requests.Session()
+    s = AuthenticatedSession()
     r = s.post(
         f"{BASE_URL}/api/auth/login",
         json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},

@@ -29,9 +29,10 @@ def test_karigar_task_assignment_lifecycle():
     admin_session = _get_admin_session()
 
     # 1. Create worker or use existing
+    worker_phone = f"99{int(time.time()*1000) % 100000000:08d}"
     w_res = admin_session.post(f"{BASE_URL}/api/workers", json={
         "name": "Test Karigar Task Flow",
-        "phone": "9998887771",
+        "phone": worker_phone,
         "skill": "upper",
         "rate_per_pair": 15.0,
         "pin": "1234"
@@ -39,13 +40,16 @@ def test_karigar_task_assignment_lifecycle():
     if w_res.status_code == 200:
         worker_doc = w_res.json()
     else:
-        # Worker might exist, find by phone
         workers = admin_session.get(f"{BASE_URL}/api/workers").json()
-        worker_doc = next(w for w in workers if w.get("phone") == "9998887771")
+        worker_doc = next(w for w in workers if w.get("phone") == worker_phone)
+
+    wid = worker_doc.get("id") or str(worker_doc.get("_id"))
+    pin_res = admin_session.patch(f"{BASE_URL}/api/workers/{wid}/set-pin", json={"pin": "1234"})
+    assert pin_res.status_code == 200, f"set-pin failed: {pin_res.text}"
 
     # Login as worker
     w_session = requests.Session()
-    w_login = w_session.post(f"{BASE_URL}/api/auth/worker-login", json={"phone": "9998887771", "pin": "1234"})
+    w_login = w_session.post(f"{BASE_URL}/api/auth/worker-login", json={"phone": worker_phone, "pin": "1234"})
     assert w_login.status_code == 200, f"Worker login failed: {w_login.text}"
     worker_id = w_login.json()["worker_id"]
     w_token = w_login.json()["access_token"]
