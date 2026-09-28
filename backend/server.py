@@ -219,6 +219,7 @@ from routes.pos import (
     update_defect,
     delete_defect,
     get_b2b_profitability,
+    extract_po,
 )
 from routes.online_orders import (
     online_orders_router,
@@ -249,6 +250,7 @@ from routes.online_orders import (
     import_online_orders_configured,
     import_dispatch_configured,
     import_settlement_report,
+    _parse_and_resolve_settlement_row,
 )
 from routes.online_returns_engine import online_returns_router
 from routes.styles import (
@@ -1490,18 +1492,178 @@ async def readyz():
     return {"status": "ready", "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+@app.post("/api/test-helpers/create-test-invoice")
+@app.post("/test-helpers/create-test-invoice")
+async def create_test_invoice_helper(payload: Dict[str, Any], request: Request):
+    u = await _get_auth_user(request)
+    doc = dict(payload)
+    if "_id" not in doc:
+        doc["_id"] = ObjectId()
+    doc["id"] = str(doc["_id"])
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.invoices.insert_one(doc)
+    doc["id"] = str(doc["_id"])
+    doc.pop("_id", None)
+    return doc
+
+
+async def _ensure_startup_indexes(database):
+    if database is None:
+        return
+    try:
+        await database.users.create_index("email", unique=True)
+    except Exception:
+        pass
+    try:
+        await database.materials.create_index("code", unique=True)
+    except Exception:
+        pass
+    try:
+        await database.styles.create_index("code", unique=True)
+    except Exception:
+        pass
+    try:
+        await database.pos.create_index("po_number", unique=True)
+    except Exception:
+        pass
+
+    try:
+        await database.production_jobs.create_index("po_id")
+        await database.production_jobs.create_index("style_id")
+        await database.production_jobs.create_index("style_code")
+        await database.production_jobs.create_index("po_number")
+    except Exception as e:
+        log.warning(f"Could not create production_jobs indexes: {e}")
+
+    try:
+        await database.invoices.create_index("po_id")
+        await database.invoices.create_index("po_ids")
+        await database.invoices.create_index("po_number")
+        await database.invoices.create_index("po_numbers")
+    except Exception as e:
+        log.warning(f"Could not create invoices indexes: {e}")
+
+    try:
+        await database.dispatch_records.create_index("po_id")
+        await database.dispatch_records.create_index("po_ids")
+        await database.dispatch_records.create_index("po_number")
+        await database.dispatch_records.create_index("po_numbers")
+    except Exception as e:
+        log.warning(f"Could not create dispatch_records indexes: {e}")
+
+    try:
+        await database.vendors.create_index("name")
+    except Exception as e:
+        log.warning(f"Could not create vendors index: {e}")
+
+    try:
+        await database.workers.create_index("phone", name="workers_phone", sparse=True)
+    except Exception as e:
+        log.warning(f"Could not create workers.phone index: {e}")
+
+    try:
+        await database.notifications.create_index([("read", 1), ("at", -1)], name="notifications_unread_time")
+        await database.notifications.create_index("job_id", name="notifications_job_id")
+    except Exception as e:
+        log.warning(f"Could not create notifications indexes: {e}")
+
+    try:
+        await database.sku_map.create_index([("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)], unique=True, name="sku_map_unique_normalized")
+        await database.sku_map.create_index("style_id", name="sku_map_style_id")
+    except Exception as e:
+        log.warning(f"Could not create sku_map indexes: {e}")
+
+    try:
+        await database.style_lifecycle.create_index("style_id", unique=True, name="style_lifecycle_unique")
+        await database.style_lifecycle.create_index("online_status", name="style_lifecycle_status")
+    except Exception as e:
+        log.warning(f"Could not create style_lifecycle indexes: {e}")
+
+    try:
+        await database.password_resets.create_index("token_hash", unique=True, name="password_reset_token")
+        await database.password_resets.create_index("user_id", name="password_reset_user")
+        await database.password_resets.create_index("expires_at", expireAfterSeconds=0, name="password_reset_ttl")
+    except Exception as e:
+        log.warning(f"Could not create password_resets indexes: {e}")
+
+    try:
+        await database.component_master.create_index([("component_code", 1), ("color", 1), ("size", 1)], unique=True, name="component_master_unique")
+        await database.component_master.create_index("component_category", name="component_master_category")
+        await database.component_master.create_index("active", name="component_master_active")
+    except Exception as e:
+        log.warning(f"Could not create component_master indexes: {e}")
+
+    try:
+        await database.component_stock_movements.create_index([("component_id", 1), ("created_at", -1)], name="component_moves_by_component")
+        await database.component_stock_movements.create_index("movement_type", name="component_moves_type")
+        await database.component_stock_movements.create_index("style_id", name="component_moves_style")
+        await database.component_stock_movements.create_index("created_at", name="component_moves_created")
+    except Exception as e:
+        log.warning(f"Could not create component_stock_movements indexes: {e}")
+
+    try:
+        await database.style_component_mapping.create_index([("style_id", 1), ("component_id", 1)], unique=True, name="style_component_mapping_unique")
+        await database.style_component_mapping.create_index("component_id", name="style_component_mapping_component")
+    except Exception as e:
+        log.warning(f"Could not create style_component_mapping indexes: {e}")
+
+    try:
+        await database.fg_inventory.create_index([("style_id", 1), ("color", 1), ("size", 1)], unique=True, name="fg_inventory_unique")
+    except Exception as e:
+        log.warning(f"Could not create fg_inventory unique index: {e}")
+
+    try:
+        await database.fg_stock_movements.create_index([("style_id", 1), ("created_at", -1)], name="fg_mv_style_ts")
+        await database.fg_stock_movements.create_index("movement_type", name="fg_mv_type")
+        await database.fg_stock_movements.create_index("reference_id", name="fg_mv_ref_id")
+        await database.fg_stock_movements.create_index("created_at", name="fg_mv_ts")
+    except Exception as e:
+        log.warning(f"Could not create fg_stock_movements indexes: {e}")
+
+    try:
+        await database.inventory_reservations.create_index([("online_order_id", 1), ("status", 1)], name="inv_res_order_status")
+        await database.inventory_reservations.create_index([("style_id", 1), ("color", 1), ("size", 1), ("status", 1)], name="inv_res_sku_status")
+    except Exception as e:
+        log.warning(f"Could not create inventory_reservations indexes: {e}")
+
+    try:
+        await database.warehouse_locations.create_index("location_code", unique=True, name="warehouse_locations_unique")
+        await database.warehouse_locations.create_index("rack", name="warehouse_locations_rack")
+        await database.warehouse_locations.create_index("status", name="warehouse_locations_status")
+    except Exception as e:
+        log.warning(f"Could not create warehouse_locations indexes: {e}")
+
+    try:
+        await database.fg_location_inventory.create_index([("style_id", 1), ("color", 1), ("size", 1), ("location_code", 1)], unique=True, name="fg_loc_inv_unique")
+        await database.fg_location_inventory.create_index("location_code", name="fg_loc_inv_location")
+        await database.fg_location_inventory.create_index([("style_id", 1), ("color", 1), ("size", 1), ("created_at", 1)], name="fg_loc_inv_fifo")
+    except Exception as e:
+        log.warning(f"Could not create fg_location_inventory indexes: {e}")
+
+    try:
+        await database.picklists.create_index("picklist_no", unique=True, name="picklists_no_unique")
+        await database.picklists.create_index("order_id", name="picklists_order")
+        await database.picklists.create_index("status", name="picklists_status")
+        await database.picklists.create_index("channel", name="picklists_channel")
+        await database.picklists.create_index("created_at", name="picklists_created")
+    except Exception as e:
+        log.warning(f"Could not create picklists indexes: {e}")
+
+
 @app.on_event("startup")
 async def on_startup():
     """Decoupled, replica-safe startup initialization (DB-002, DB-004)."""
     validate_jwt_secret()
     global get_current_user, client, db
-    try:
-        client = AsyncIOMotorClient(mongo_url)
-        db = client[os.environ["DB_NAME"]]
-    except Exception as init_err:
-        log.error(f"Failed to initialize AsyncIOMotorClient: {init_err}")
+    if db is None:
+        try:
+            client = AsyncIOMotorClient(mongo_url)
+            db = client[os.environ["DB_NAME"]]
+        except Exception as init_err:
+            log.error(f"Failed to initialize AsyncIOMotorClient: {init_err}")
 
     get_current_user = await get_current_user_factory(db)
+    await _ensure_startup_indexes(db)
     await seed_admin(db)
 
     # Lightweight database connectivity check

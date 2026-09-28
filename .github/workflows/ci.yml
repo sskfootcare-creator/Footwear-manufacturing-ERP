@@ -57,7 +57,10 @@ jobs:
           DB_NAME: ssk_ci_db
           JWT_SECRET: supersecretjwtkey12345!supersecretjwtkey12345!
           ENVIRONMENT: test
+          COOKIE_SECURE: "false"
           DISABLE_LOGIN_RATE_LIMIT: "false"
+          ADMIN_EMAIL: admin@sskfootcare.com
+          ADMIN_PASSWORD: Admin@123
           REACT_APP_BACKEND_URL: http://127.0.0.1:8000
           PYTHONPATH: backend
         run: |

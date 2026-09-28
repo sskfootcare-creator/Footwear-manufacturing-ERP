@@ -26,7 +26,8 @@ async def test_reset_password_atomic_expiry_rejection():
 
     mock_db = MagicMock()
     # The atomic query searches for used_at: None, expires_at: {"$gt": now} -> returns None
-    mock_db.password_resets.find_one = AsyncMock(side_effect=lambda q: None if "$gt" in str(q) else {
+    mock_db.password_resets.find_one_and_update = AsyncMock(return_value=None)
+    mock_db.password_resets.find_one = AsyncMock(return_value={
         "_id": ObjectId(),
         "user_id": str(ObjectId()),
         "token_hash": token_hash,
@@ -59,7 +60,8 @@ async def test_reset_password_atomic_already_used_rejection():
 
     mock_db = MagicMock()
     # The atomic query searches for used_at: None -> returns None
-    mock_db.password_resets.find_one = AsyncMock(side_effect=lambda q: None if "$gt" in str(q) else {
+    mock_db.password_resets.find_one_and_update = AsyncMock(return_value=None)
+    mock_db.password_resets.find_one = AsyncMock(return_value={
         "_id": ObjectId(),
         "user_id": str(ObjectId()),
         "token_hash": token_hash,
@@ -105,11 +107,13 @@ async def test_reset_password_atomic_success():
     }
 
     mock_db = MagicMock()
+    mock_db.password_resets.find_one_and_update = AsyncMock(return_value=valid_row)
     mock_db.password_resets.find_one = AsyncMock(return_value=valid_row)
     mock_db.users.find_one = AsyncMock(return_value=mock_user)
     mock_db.users.update_one = AsyncMock(return_value=None)
     mock_db.password_resets.update_one = AsyncMock(return_value=None)
     mock_db.password_resets.update_many = AsyncMock(return_value=None)
+    mock_db.refresh_tokens.update_many = AsyncMock(return_value=None)
 
     import routes.auth
     orig_get_db = routes.auth._get_db
@@ -120,7 +124,7 @@ async def test_reset_password_atomic_success():
         res = await reset_password(payload)
         assert res["ok"] is True
         assert mock_db.users.update_one.called
-        assert mock_db.password_resets.update_one.called
+        assert mock_db.password_resets.find_one_and_update.called
     finally:
         routes.auth._get_db = orig_get_db
 

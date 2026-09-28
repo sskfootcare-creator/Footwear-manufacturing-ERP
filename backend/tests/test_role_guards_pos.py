@@ -8,7 +8,10 @@ from bson import ObjectId
 import server
 from routes.pos import pos_router
 from routes.workers import workers_router
-from tests.test_pos_routes import MockPosDB
+try:
+    from test_pos_routes import MockPosDB
+except ImportError:
+    from tests.test_pos_routes import MockPosDB
 
 
 @pytest.fixture

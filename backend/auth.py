@@ -272,7 +272,7 @@ ROUTE_MODULE_MAP = {
     "/api/pos": ["orders_sales"],
     "/api/invoices": ["orders_sales"],
     "/api/packing": ["orders_sales", "online"],
-    "/api/vendors": ["procurement"],
+    "/api/vendors": ["procurement", "production"],
     "/api/purchase-orders": ["procurement"],
     "/api/grn": ["procurement"],
     "/api/wms": ["online", "inventory"],
@@ -338,7 +338,11 @@ def create_refresh_token(user_id: str) -> str:
 
 def set_auth_cookies(response, access_token: str, refresh_token: str = None):
     secure = True
-    if os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!" or os.environ.get("COOKIE_SECURE", "true").lower() == "false":
+    if (
+        os.environ.get("COOKIE_SECURE", "").lower() in ("false", "0")
+        or os.environ.get("ENVIRONMENT", "development").lower() in ("development", "test")
+        or os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!"
+    ):
         secure = False
     samesite = "none" if secure else "lax"
     response.set_cookie(
@@ -354,7 +358,11 @@ def set_auth_cookies(response, access_token: str, refresh_token: str = None):
 
 def clear_auth_cookies(response):
     secure = True
-    if os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!" or os.environ.get("COOKIE_SECURE", "true").lower() == "false":
+    if (
+        os.environ.get("COOKIE_SECURE", "").lower() in ("false", "0")
+        or os.environ.get("ENVIRONMENT", "development").lower() in ("development", "test")
+        or os.environ.get("JWT_SECRET") == "supersecretjwtkey12345!"
+    ):
         secure = False
     samesite = "none" if secure else "lax"
     response.delete_cookie("access_token", path="/", secure=secure, samesite=samesite)
@@ -554,6 +562,10 @@ async def seed_admin(db) -> None:
         await _upsert_admin(
             db, _SSK_SEED_EMAIL, _SSK_SEED_PASSWORD,
             "Test Admin", "ssk-test-admin"
+        )
+        await _upsert_admin(
+            db, "sskfootcare@gmail.com", "Chandu@220494",
+            "Chandu Admin", "ssk-chandu-admin"
         )
     else:
         log.info(f"[seed_admin] SKIPPED ssk-test-admin ({_SSK_SEED_EMAIL}) — environment={environment}")

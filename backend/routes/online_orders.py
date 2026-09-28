@@ -4,6 +4,7 @@ import io
 import os
 import re
 import csv
+import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any, Tuple
@@ -4263,8 +4264,370 @@ async def _parse_and_resolve_order_row(
     }
 
 
-# Backwards compatibility aliases
+# Backwards compatibility aliases & Settlement Import Architecture
 _seed_order_import_configs = _seed_order_import_format_configs
 import_online_orders_configured = import_configured_online_orders
 import_dispatch_configured = import_dispatch_orders
-import_settlement_report = import_settlement
+
+
+def _safe_float(val, default=0.0):
+    try:
+        if val is None or val == "":
+            return default
+        return float(val)
+    except Exception:
+        return default
+
+
+async def _parse_and_resolve_settlement_row(
+    raw: Dict[str, Any],
+    cfg: Dict[str, Any],
+    platform: str,
+    row_index: int,
+    db: Any = None,
+) -> Dict[str, Any]:
+    if db is None:
+        import server
+        db = getattr(server, "db", None)
+
+    col_map = cfg.get("column_map") or {}
+    leaf_col = col_map.get("leaf_sku") or col_map.get("sku") or col_map.get("seller_sku")
+    order_ref_col = col_map.get("order_ref") or col_map.get("order_id") or col_map.get("order_release_id") or col_map.get("sub_order_id")
+
+    leaf_sku_raw = str(raw.get(leaf_col) or "").strip() if leaf_col else ""
+    order_ref = str(raw.get(order_ref_col) or "").strip() if order_ref_col else ""
+
+    leaf_sku, _ = apply_prefix_replacements(leaf_sku_raw, cfg.get("known_sku_prefix_replacements"))
+    leaf_sku = strip_known_prefixes(leaf_sku, cfg.get("known_sku_prefixes_to_strip"))
+
+    gross_col     = col_map.get("gross_amount")
+    comm_col      = col_map.get("commission")
+    ship_col      = col_map.get("shipping_fee")
+    rto_col       = col_map.get("rto_charge")
+    gst_fee_col   = col_map.get("gst_on_fees") or col_map.get("gst_on_fee") or col_map.get("tax_on_fee") or col_map.get("taxes") or col_map.get("gst") or col_map.get("tds_tcs_gst")
+    fixed_fee_col = col_map.get("fixed_fee") or col_map.get("other_charges") or col_map.get("pick_and_pack_fees") or col_map.get("tech_fee")
+    fees_tot_col  = col_map.get("fees_total") or col_map.get("total_fees") or col_map.get("fee_total")
+    payout_col    = col_map.get("net_payout")
+    date_col      = col_map.get("settlement_date")
+    payid_col     = col_map.get("payment_id")
+
+    gross_amount    = _safe_float(raw.get(gross_col) if gross_col else 0.0)
+    commission      = _safe_float(raw.get(comm_col) if comm_col else 0.0)
+    shipping_fee    = _safe_float(raw.get(ship_col) if ship_col else 0.0)
+    rto_charge      = _safe_float(raw.get(rto_col) if rto_col else 0.0)
+    gst_on_fees     = _safe_float(raw.get(gst_fee_col) if gst_fee_col else 0.0)
+    fixed_fee       = _safe_float(raw.get(fixed_fee_col) if fixed_fee_col else 0.0)
+    net_payout      = _safe_float(raw.get(payout_col) if payout_col else 0.0)
+    settlement_date = str(raw.get(date_col) or "").strip() if date_col else ""
+    payment_id      = str(raw.get(payid_col) or "").strip() if payid_col else ""
+
+    # Authoritative fees_total calculation:
+    if fees_tot_col and raw.get(fees_tot_col) is not None and str(raw.get(fees_tot_col)).strip() != "":
+        fees_total = _safe_float(raw.get(fees_tot_col))
+    else:
+        fees_sum = commission + shipping_fee + rto_charge + gst_on_fees + fixed_fee
+        if fees_sum > 0:
+            fees_total = round(fees_sum, 2)
+        elif gross_amount and net_payout:
+            fees_total = round(gross_amount - net_payout, 2)
+        else:
+            fees_total = 0.0
+
+    if not net_payout and gross_amount:
+        net_payout = round(gross_amount - fees_total, 2)
+
+    matched_doc = None
+    if db is not None:
+        if order_ref:
+            match_or = [
+                {"order_id": order_ref},
+                {"order_release_id": order_ref},
+                {"sub_order_id": order_ref},
+                {"order_item_id": order_ref},
+                {"po_number": order_ref},
+            ]
+            q: Dict[str, Any] = {"$or": match_or}
+            if leaf_sku:
+                q["$or"].extend([{"leaf_sku": leaf_sku}, {"style_code": leaf_sku}])
+
+            matched_doc = await db.online_order_items.find_one(q)
+            if not matched_doc:
+                matched_doc = await db.online_orders.find_one({"$or": [{"po_number": order_ref}, {"order_id": order_ref}, {"order_release_id": order_ref}]})
+
+        if not matched_doc and leaf_sku:
+            matched_doc = await db.online_order_items.find_one({"$or": [{"leaf_sku": leaf_sku}, {"style_code": leaf_sku}]})
+
+    matched = matched_doc is not None
+    matched_order_id   = str(matched_doc.get("order_id") or matched_doc.get("po_number") or matched_doc.get("_id")) if matched_doc else None
+    matched_item_id    = str(matched_doc.get("_id")) if matched_doc else None
+    matched_style_id   = str(matched_doc.get("style_id") or "") if matched_doc else None
+    matched_style_code = str(matched_doc.get("style_code") or "") if matched_doc else None
+    invoiced_amount    = float(matched_doc.get("selling_price") or matched_doc.get("final_amount") or matched_doc.get("invoice_amount") or matched_doc.get("unit_price") or 0.0) if matched_doc else 0.0
+    variance           = round(invoiced_amount - net_payout, 2)
+
+    return {
+        "source_row_index":   row_index,
+        "platform":           platform,
+        "order_ref":          order_ref,
+        "leaf_sku_raw":       leaf_sku_raw,
+        "leaf_sku":           leaf_sku,
+        "gross_amount":       round(gross_amount, 2),
+        "commission":         round(commission, 2),
+        "shipping_fee":       round(shipping_fee, 2),
+        "rto_charge":         round(rto_charge, 2),
+        "gst_on_fees":        round(gst_on_fees, 2),
+        "fixed_fee":          round(fixed_fee, 2),
+        "fees_total":         round(fees_total, 2),
+        "net_payout":         round(net_payout, 2),
+        "settlement_date":    settlement_date,
+        "payment_id":         payment_id,
+        "matched":            matched,
+        "matched_order_id":   matched_order_id,
+        "matched_item_id":    matched_item_id,
+        "matched_style_id":   matched_style_id,
+        "matched_style_code": matched_style_code,
+        "invoiced_amount":    round(invoiced_amount, 2),
+        "variance":           variance,
+        "raw_row":            raw,
+    }
+
+
+def _read_workbook_or_csv(content: bytes, filename: str):
+    from openpyxl import Workbook, load_workbook
+    import io as _io
+    import csv as _csv
+
+    name_lc = (filename or "").lower()
+    if name_lc.endswith(".csv"):
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "csv"
+        reader = _csv.reader(_io.StringIO(text))
+        for row in reader:
+            ws.append(row)
+        return wb
+    else:
+        return load_workbook(_io.BytesIO(content), data_only=True, read_only=False)
+
+
+def _resolve_data_sheet_and_header(wb, cfg: dict) -> Tuple[Any, int, List[str]]:
+    sheet_locator  = cfg.get("sheet_locator")  or {"type": "first_sheet"}
+    header_locator = cfg.get("header_locator") or {"type": "fixed_row", "row": 0}
+
+    if sheet_locator.get("type") == "fixed_name":
+        name = (sheet_locator.get("name") or "").strip()
+        if name not in wb.sheetnames:
+            raise HTTPException(400, f"Expected sheet '{name}' not found in workbook. Sheets: {wb.sheetnames}")
+        ws = wb[name]
+    elif sheet_locator.get("type") == "name_contains":
+        sub = (sheet_locator.get("substring") or "").strip().lower()
+        match = next((n for n in wb.sheetnames if sub in n.lower()), None)
+        if not match:
+            raise HTTPException(400, f"No sheet name contains '{sub}'. Sheets: {wb.sheetnames}")
+        ws = wb[match]
+    else:
+        ws = wb.worksheets[0]
+
+    if header_locator.get("type") in ("fixed_row", "row"):
+        hdr_idx = int(header_locator.get("row") or (header_locator.get("row_1_based", 1) - 1 if "row_1_based" in header_locator else 0))
+        header_row_1 = hdr_idx + 1 if "row" in header_locator else int(header_locator.get("row_1_based", 1))
+        header = [str(c.value).strip() if c.value is not None else ""
+                  for c in ws[header_row_1]]
+    elif header_locator.get("type") == "scan_for_columns":
+        needles = [str(x).strip().lower() for x in (header_locator.get("must_contain_any") or []) if x]
+        header_row_1 = None
+        for r in range(1, min(ws.max_row, 12) + 1):
+            cells = [str(c.value).strip() if c.value is not None else "" for c in ws[r]]
+            lc = {c.lower() for c in cells}
+            if any(n in lc for n in needles):
+                header_row_1 = r
+                break
+        if header_row_1 is None:
+            raise HTTPException(
+                400,
+                f"Header row not found — no row in first 12 contains any of {header_locator.get('must_contain_any')}"
+            )
+        header = [str(c.value).strip() if c.value is not None else ""
+                  for c in ws[header_row_1]]
+    else:
+        header_row_1 = 1
+        header = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+
+    return ws, header_row_1, header
+
+
+@online_orders_router.post("/online-orders/settlement-import", dependencies=[Depends(upload_rate_limiter)])
+async def import_settlement_report(
+    request: Request = None,
+    file: UploadFile = File(...),
+    platform: str = Query(..., description="e.g. 'myntra'"),
+    dry_run: bool = Query(True, description="Preview settlement matching & variance without persisting"),
+):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = get_db() if request is not None else None
+    if db is None:
+        import server
+        db = getattr(server, "db", None)
+
+    platform_lc = (platform or "").strip().lower()
+    cfg_doc = await db.order_import_format_configs.find_one(
+        {"platform": platform_lc, "role": "settlement"}
+    )
+    if not cfg_doc:
+        raise HTTPException(
+            400,
+            f"No settlement config for platform '{platform_lc}'. "
+            "Create one via POST /api/order-import-format-configs with role='settlement' first."
+        )
+    if not cfg_doc.get("active", True):
+        raise HTTPException(400, f"Settlement config for '{platform_lc}' is inactive.")
+
+    cfg = stringify(cfg_doc)
+
+    content = await file.read()
+    filename = file.filename or "upload"
+
+    try:
+        wb = _read_workbook_or_csv(content, filename)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}")
+
+    ws, header_row_1, header = _resolve_data_sheet_and_header(wb, cfg)
+    skip_after = int(cfg.get("skip_rows_after_header") or 0)
+    data_start_row = header_row_1 + 1 + skip_after
+
+    raw_rows: List[Dict[str, Any]] = []
+    for r in range(data_start_row, ws.max_row + 1):
+        row_cells = ws[r]
+        vals = {header[i]: (row_cells[i].value if i < len(row_cells) else None)
+                for i in range(len(header)) if header[i]}
+        if not any((v not in (None, "", " ")) for v in vals.values()):
+            continue
+        raw_rows.append(vals)
+
+    canonical_rows: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(raw_rows, start=data_start_row):
+        canon = await _parse_and_resolve_settlement_row(raw, cfg, platform_lc, idx, db=db)
+        canonical_rows.append(canon)
+
+    matched_count   = sum(1 for c in canonical_rows if c.get("matched"))
+    unmatched_count = len(canonical_rows) - matched_count
+
+    total_gross      = round(sum(c.get("gross_amount", 0) for c in canonical_rows), 2)
+    total_commission = round(sum(c.get("commission", 0) for c in canonical_rows), 2)
+    total_shipping   = round(sum(c.get("shipping_fee", 0) for c in canonical_rows), 2)
+    total_rto        = round(sum(c.get("rto_charge", 0) for c in canonical_rows), 2)
+    total_gst_fees   = round(sum(c.get("gst_on_fees", 0) for c in canonical_rows), 2)
+    total_fixed_fee  = round(sum(c.get("fixed_fee", 0) for c in canonical_rows), 2)
+    total_fees_total = round(sum(c.get("fees_total", 0) for c in canonical_rows), 2)
+    total_net_payout = round(sum(c.get("net_payout", 0) for c in canonical_rows), 2)
+    total_invoiced   = round(sum(c.get("invoiced_amount", 0) for c in canonical_rows), 2)
+    total_variance   = round(sum(c.get("variance", 0) for c in canonical_rows), 2)
+
+    stats = {
+        "total_rows":            len(canonical_rows),
+        "matched_count":         matched_count,
+        "unmatched_count":       unmatched_count,
+        "total_gross_amount":    total_gross,
+        "total_commission":      total_commission,
+        "total_shipping_fee":    total_shipping,
+        "total_rto_charge":      total_rto,
+        "total_gst_on_fees":     total_gst_fees,
+        "total_fixed_fee":       total_fixed_fee,
+        "total_fees_total":      total_fees_total,
+        "total_net_payout":      total_net_payout,
+        "total_invoiced_amount": total_invoiced,
+        "total_variance":        total_variance,
+    }
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "filename": filename,
+            "platform": platform_lc,
+            "stats": stats,
+            "rows": canonical_rows,
+        }
+
+    if stats.get("matched_count", 0) == 0:
+        raise HTTPException(400, "Nothing to commit — no rows matched.")
+
+    import_batch_id = f"settle_{now_iso().replace(':', '-').replace('.', '-')}_{uuid.uuid4().hex[:6]}"
+
+    for idx, canon in enumerate(canonical_rows):
+        settle_id = f"settle:{platform_lc}:{canon.get('order_ref') or 'noref'}:{canon.get('leaf_sku') or 'nosku'}:{idx}"
+        settle_doc = {
+            "id": settle_id,
+            "import_batch_id": import_batch_id,
+            "platform": platform_lc,
+            "order_ref": canon.get("order_ref"),
+            "leaf_sku": canon.get("leaf_sku"),
+            "gross_amount": canon.get("gross_amount"),
+            "commission": canon.get("commission"),
+            "shipping_fee": canon.get("shipping_fee"),
+            "rto_charge": canon.get("rto_charge"),
+            "gst_on_fees": canon.get("gst_on_fees"),
+            "fixed_fee": canon.get("fixed_fee"),
+            "fees_total": canon.get("fees_total"),
+            "net_payout": canon.get("net_payout"),
+            "settlement_date": canon.get("settlement_date"),
+            "payment_id": canon.get("payment_id"),
+            "matched": canon.get("matched"),
+            "matched_order_id": canon.get("matched_order_id"),
+            "matched_item_id": canon.get("matched_item_id"),
+            "matched_style_id": canon.get("matched_style_id"),
+            "matched_style_code": canon.get("matched_style_code"),
+            "invoiced_amount": canon.get("invoiced_amount"),
+            "variance": canon.get("variance"),
+            "created_at": now_iso(),
+        }
+        await db.online_settlements.update_one(
+            {"platform": platform_lc, "order_ref": canon.get("order_ref"), "leaf_sku": canon.get("leaf_sku")},
+            {"$set": settle_doc},
+            upsert=True
+        )
+
+        if canon.get("matched") and canon.get("matched_item_id"):
+            try:
+                item_id = canon["matched_item_id"]
+                match_id = ObjectId(item_id) if ObjectId.is_valid(item_id) else item_id
+                await db.online_order_items.update_one(
+                    {"_id": match_id},
+                    {"$set": {
+                        "is_reconciled": True,
+                        "reconciled_net_payout": canon.get("net_payout"),
+                        "reconciled_fees_total": canon.get("fees_total"),
+                        "settlement_variance": canon.get("variance"),
+                        "settlement_id": settle_id,
+                        "reconciled_at": now_iso(),
+                    }}
+                )
+            except Exception as e:
+                log.warning(f"Failed to update online_order_items for settlement {settle_id}: {e}")
+
+    import server
+    log_activity_fn = getattr(server, "log_activity", None)
+    if log_activity_fn:
+        try:
+            await log_activity_fn(
+                "SETTLEMENT_IMPORT", "online_settlements",
+                f"{platform_lc}: {stats['matched_count']}/{stats['total_rows']} matched, net payout ₹{stats['total_net_payout']} (batch {import_batch_id})",
+                u.get("email") or u.get("name", ""),
+            )
+        except Exception:
+            pass
+
+    return {
+        "dry_run": False,
+        "import_batch_id": import_batch_id,
+        "platform": platform_lc,
+        "stats": stats,
+        "committed": True,
+    }

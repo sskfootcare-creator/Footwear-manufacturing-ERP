@@ -50,16 +50,19 @@ class MockOnlineReconciliationDB:
 
         self.online_settlements_detailed = MagicMock()
         self.online_settlements_detailed.find = MagicMock(return_value=MockCursor(self.settlements_store))
+        self.online_settlements_detailed.find_one = AsyncMock(return_value=None)
         self.online_settlements_detailed.insert_one = AsyncMock(side_effect=self._insert_settlement)
         self.online_settlements_detailed.delete_many = AsyncMock(side_effect=self._clear_settlements)
 
         self.online_non_order_deductions = MagicMock()
         self.online_non_order_deductions.find = MagicMock(return_value=MockCursor(self.non_order_deductions_store))
+        self.online_non_order_deductions.find_one = AsyncMock(return_value=None)
         self.online_non_order_deductions.insert_one = AsyncMock(side_effect=self._insert_non_order_deduction)
         self.online_non_order_deductions.delete_many = AsyncMock(side_effect=self._clear_non_order_deductions)
 
         self.online_monthly_order_reports = MagicMock()
         self.online_monthly_order_reports.find = MagicMock(return_value=MockCursor(self.monthly_reports_store))
+        self.online_monthly_order_reports.find_one = AsyncMock(return_value=None)
         self.online_monthly_order_reports.insert_many = AsyncMock(side_effect=self._insert_many_monthly_reports)
         self.online_monthly_order_reports.delete_many = AsyncMock(side_effect=self._clear_monthly_reports)
 

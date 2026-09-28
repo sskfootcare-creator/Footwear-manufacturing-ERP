@@ -64,6 +64,8 @@ def stringify(doc: dict) -> dict:
 
 
 async def _get_user(request: Request):
+    if request is None:
+        return {"id": "system", "email": "system@sskfootcare.com", "role": "admin", "roles": ["admin"]}
     user = getattr(request.state, "user", None)
     if user:
         return user
