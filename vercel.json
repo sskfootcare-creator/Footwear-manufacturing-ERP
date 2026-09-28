@@ -2,6 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "cd frontend && npm install --legacy-peer-deps && CI=false npm run build",
   "outputDirectory": "frontend/build",
+  "functions": {
+    "api/index.py": {
+      "excludeFiles": "{frontend/**,tests/**,backend/tests/**,test_reports/**,mongodb-portable/**,docs/**,scratch/**,backend/scratch/**,uploads/**,backend/uploads/**,*.csv,*.log,*.md}"
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",

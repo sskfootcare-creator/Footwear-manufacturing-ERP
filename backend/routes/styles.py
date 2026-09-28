@@ -1554,27 +1554,52 @@ async def get_styles_template():
 async def bulk_upload_preview(file: UploadFile = File(...), request: Request = None):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    import pandas as pd
     content = await file.read()
     filename = (file.filename or "").lower()
+
+    def _is_empty(val) -> bool:
+        if val is None:
+            return True
+        s = str(val).strip()
+        return s == "" or s.lower() in ("nan", "none", "null")
+
+    raw_columns = []
+    raw_rows = []
     try:
         if filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
+            import csv
+            text = content.decode("utf-8-sig", errors="replace")
+            reader = csv.reader(io.StringIO(text))
+            all_cells = list(reader)
+            if all_cells:
+                raw_columns = [str(c).strip() if c is not None else "" for c in all_cells[0]]
+                for r in all_cells[1:]:
+                    if any(c is not None and str(c).strip() != "" for c in r):
+                        row_dict = {raw_columns[i]: r[i] if i < len(r) else None for i in range(len(raw_columns))}
+                        raw_rows.append(row_dict)
         else:
-            # Multi-sheet Excel: prefer "Styles Data", then "Styles Bulk Upload", else sheet index 0
-            xls = pd.ExcelFile(io.BytesIO(content))
-            target_sheet = 0
-            if "Styles Data" in xls.sheet_names:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            sheet_names = wb.sheetnames
+            target_sheet = sheet_names[0]
+            if "Styles Data" in sheet_names:
                 target_sheet = "Styles Data"
-            elif "Styles Bulk Upload" in xls.sheet_names:
+            elif "Styles Bulk Upload" in sheet_names:
                 target_sheet = "Styles Bulk Upload"
-            df = pd.read_excel(xls, sheet_name=target_sheet)
+            ws = wb[target_sheet]
+            all_cells = list(ws.iter_rows(values_only=True))
+            if all_cells:
+                raw_columns = [str(c).strip() if c is not None else "" for c in all_cells[0]]
+                for r in all_cells[1:]:
+                    if any(c is not None and str(c).strip() != "" for c in r):
+                        row_dict = {raw_columns[i]: r[i] if i < len(r) else None for i in range(len(raw_columns))}
+                        raw_rows.append(row_dict)
     except Exception as e:
         raise HTTPException(400, f"Invalid Excel/CSV file: {str(e)}")
 
     col_map = {}
     labor_cols = []
-    for col in df.columns:
+    for col in raw_columns:
         c_str = str(col).strip()
         c_lower = c_str.lower()
         norm = re.sub(r'[\s_]+', ' ', c_lower)
@@ -1636,10 +1661,10 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
     if "name" not in col_map.values():
         raise HTTPException(400, "Missing required column: Name or Style Name")
 
-    df = df.rename(columns=col_map)
-
     def _parse_float(val, default: Optional[float] = None) -> Optional[float]:
-        if pd.isna(val): return default
+        if _is_empty(val): return default
+        if isinstance(val, (int, float)):
+            return float(val)
         try:
             s = str(val).strip().rstrip("%")
             if not s or s.lower() == "nan": return default
@@ -1647,7 +1672,9 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         except Exception: return default
 
     def _parse_str(val, default: str = "") -> str:
-        if pd.isna(val): return default
+        if _is_empty(val): return default
+        if hasattr(val, "strftime"):
+            return val.strftime("%Y-%m-%d")
         s = str(val).strip()
         if not s or s.lower() == "nan": return default
         if s.endswith(".0"):
@@ -1658,7 +1685,7 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         return s
 
     def _parse_list(val) -> List[str]:
-        if pd.isna(val): return []
+        if _is_empty(val): return []
         if isinstance(val, (list, tuple)): return [str(x).strip() for x in val if str(x).strip()]
         s = str(val).strip()
         if not s or s.lower() == "nan": return []
@@ -1667,7 +1694,7 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
 
     def _parse_color_variants(val) -> (List[Dict[str, str]], List[str]):
         """Parses formats like 'Tan:OX-TAN, Black:OX-BLK' or 'Tan, Black'."""
-        if pd.isna(val): return [], []
+        if _is_empty(val): return [], []
         raw_items = []
         if isinstance(val, (list, tuple)):
             raw_items = [str(x).strip() for x in val if str(x).strip()]
@@ -1692,7 +1719,7 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         return variants, color_names
 
     def _parse_bool(val, default: bool = False) -> bool:
-        if pd.isna(val): return default
+        if _is_empty(val): return default
         if isinstance(val, bool): return val
         s = str(val).strip().lower()
         if s in ("1", "true", "yes", "y", "t"): return True
@@ -1704,7 +1731,7 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         return "active" if s in ("active", "live", "enabled", "1", "yes") else "inactive"
 
     def _parse_pairs_per_carton(val) -> Optional[Dict[str, Any]]:
-        if pd.isna(val): return None
+        if _is_empty(val): return None
         if isinstance(val, (int, float)):
             if float(val) > 0:
                 return {"default": int(val) if float(val).is_integer() else float(val)}
@@ -1724,9 +1751,10 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
 
     preview = []
     errors = []
-    total_rows = len(df)
+    total_rows = len(raw_rows)
 
-    for idx, row in df.iterrows():
+    for idx, raw_r in enumerate(raw_rows):
+        row = {col_map.get(k, k): v for k, v in raw_r.items()}
         row_num = idx + 2
         name = _parse_str(row.get("name"), "")
         if not name:
@@ -1773,8 +1801,8 @@ async def bulk_upload_preview(file: UploadFile = File(...), request: Request = N
         labor = []
         for lc in labor_cols:
             op_name = str(lc).split(":", 1)[1].strip()
-            val = row.get(lc)
-            if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "nan":
+            val = raw_r.get(lc)
+            if not _is_empty(val):
                 try:
                     rate = float(str(val).strip().rstrip("%"))
                     labor.append({"name": op_name, "rate": rate})

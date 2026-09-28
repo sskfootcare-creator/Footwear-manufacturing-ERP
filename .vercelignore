@@ -1,0 +1,37 @@
+# Virtual Environments
+.venv
+backend/.venv
+venv
+ENV
+
+# Local DBs and Storage
+mongodb-portable
+uploads
+backend/uploads
+*.db
+*.wt
+financial_erp.db
+backend/financial_erp.db
+
+# Tests and Test Artifacts
+tests
+backend/tests
+test_reports
+.pytest_cache
+backend/.pytest_cache
+pytest_run.log
+test_result.md
+
+# Scratch and Build Artifacts
+scratch
+backend/scratch
+backend/lib/bin
+
+# Logs and Data Dumps
+*.log
+*.csv
+
+# Documentation and Audit Notes
+docs
+SESSION_LOG.md
+ONLINE_COMMERCE_*.md
