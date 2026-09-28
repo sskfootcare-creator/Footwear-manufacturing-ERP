@@ -1,12 +1,9 @@
 import pytest
 import httpx
 
-BASE_URL = "http://localhost:8000/api"
-TIMEOUT = 10.0
-
-
-def test_material_component_sync(admin_requests_session):
+def test_material_component_sync(admin_requests_session, api_url):
     admin_session = admin_requests_session
+    BASE_URL = api_url
     # 1. Create a raw material marked as a component (e.g. Sole EVA-M100)
     mat_payload = {
         "code": "TEST-SOLE-M100",

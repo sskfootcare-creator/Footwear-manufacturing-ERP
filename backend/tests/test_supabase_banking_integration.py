@@ -16,6 +16,18 @@ from services.supabase_banking_service import (
     save_supabase_reconciliation_statement,
     list_supabase_bank_accounts,
 )
+from db.supabase_client import get_supabase_admin_client
+
+
+@pytest.fixture(autouse=True)
+def require_supabase():
+    client = get_supabase_admin_client()
+    if not client:
+        pytest.skip("Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing)")
+    try:
+        client.table("bank_accounts").select("id").limit(1).execute()
+    except Exception as e:
+        pytest.skip(f"Supabase unreachable: {e}")
 
 
 @pytest.fixture(scope="module")

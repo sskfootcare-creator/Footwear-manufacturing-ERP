@@ -13,6 +13,18 @@ from services.supabase_auth_service import (
     verify_supabase_token,
     delete_supabase_user,
 )
+from db.supabase_client import get_supabase_admin_client
+
+
+@pytest.fixture(autouse=True)
+def require_supabase_auth():
+    client = get_supabase_admin_client()
+    if not client:
+        pytest.skip("Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing)")
+    try:
+        client.auth.admin.list_users(page=1, per_page=1)
+    except Exception as e:
+        pytest.skip(f"Supabase Auth unreachable: {e}")
 
 
 def test_supabase_auth_full_lifecycle():
