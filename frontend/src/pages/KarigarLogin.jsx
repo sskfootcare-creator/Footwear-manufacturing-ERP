@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { http, friendlyAxiosError } from "@/lib/api";
 import { Delete, Loader2, HardHat } from "lucide-react";
@@ -13,8 +13,19 @@ export default function KarigarLogin() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const lastPressRef = useRef(0);
+
+  const triggerHaptic = useCallback(() => {
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      try {
+        navigator.vibrate(12);
+      } catch (_) {}
+    }
+  }, []);
+
   const handleKey = useCallback(
     (key) => {
+      setError("");
       if (key === "⌫") {
         if (step === "phone") setPhone((p) => p.slice(0, -1));
         else setPin((p) => p.slice(0, -1));
@@ -30,16 +41,29 @@ export default function KarigarLogin() {
     [step]
   );
 
-  const handlePhoneNext = () => {
+  const handleKeyPress = useCallback((key, e) => {
+    if (e) {
+      if (e.type === "pointerdown") {
+        lastPressRef.current = Date.now();
+      } else if (e.type === "click" && Date.now() - lastPressRef.current < 400) {
+        // Prevent duplicate activation from synthesized click
+        return;
+      }
+    }
+    triggerHaptic();
+    handleKey(key);
+  }, [handleKey, triggerHaptic]);
+
+  const handlePhoneNext = useCallback(() => {
     if (phone.length < 10) {
       setError("Please enter your 10-digit mobile number");
       return;
     }
     setError("");
     setStep("pin");
-  };
+  }, [phone]);
 
-  const handleLogin = async () => {
+  const handleLogin = useCallback(async () => {
     if (pin.length < 4) {
       setError("PIN must be at least 4 digits");
       return;
@@ -65,9 +89,34 @@ export default function KarigarLogin() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [pin, phone, navigate]);
 
   const handleEnter = step === "phone" ? handlePhoneNext : handleLogin;
+
+  // Keyboard support for physical keyboards, numpads, and barcode scanners
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.key >= "0" && e.key <= "9") {
+        e.preventDefault();
+        triggerHaptic();
+        handleKey(e.key);
+      } else if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        triggerHaptic();
+        handleKey("⌫");
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        handleEnter();
+      } else if (e.key === "Escape" && step === "pin" && !loading) {
+        setStep("phone");
+        setPin("");
+        setError("");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleKey, handleEnter, step, loading, triggerHaptic]);
 
   const PinDots = ({ value, max }) => (
     <div style={{ display: "flex", gap: "12px", justifyContent: "center", margin: "16px 0" }}>
@@ -106,16 +155,21 @@ export default function KarigarLogin() {
           -webkit-user-select: none;
           -webkit-touch-callout: none;
           -webkit-tap-highlight-color: transparent;
-          touch-action: manipulation;
-          transition: transform 0.1s ease, background-color 0.1s ease;
+          touch-action: none;
+          transition: transform 0.06s ease, background-color 0.06s ease;
         }
         .kl-key:active {
-          background: rgba(194,120,66,0.65) !important;
-          transform: scale(0.95) !important;
+          background: rgba(194,120,66,0.75) !important;
+          transform: scale(0.92) !important;
         }
-        .kl-btn { transition: all 0.2s ease; touch-action: manipulation; }
+        .kl-btn {
+          transition: transform 0.08s ease, box-shadow 0.15s ease;
+          touch-action: manipulation;
+          -webkit-tap-highlight-color: transparent;
+          user-select: none;
+        }
         .kl-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 25px rgba(194,120,66,0.45) !important; }
-        .kl-btn:active:not(:disabled) { transform: scale(0.98); }
+        .kl-btn:active:not(:disabled) { transform: scale(0.97); }
       `}</style>
 
       <div style={{
@@ -147,12 +201,15 @@ export default function KarigarLogin() {
             <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 6 }}>
               Mobile Number
             </div>
-            <div style={{
-              background: "rgba(15,23,42,0.6)", border: "1.5px solid rgba(255,255,255,0.1)",
-              borderRadius: 10, padding: "0.75rem 1rem",
-              fontSize: "1.4rem", fontWeight: 700, color: phone ? "#f1f5f9" : "#475569",
-              letterSpacing: "0.12em", textAlign: "center", minHeight: 48,
-            }}>
+            <div
+              data-testid="phone-display"
+              style={{
+                background: "rgba(15,23,42,0.6)", border: "1.5px solid rgba(255,255,255,0.1)",
+                borderRadius: 10, padding: "0.75rem 1rem",
+                fontSize: "1.4rem", fontWeight: 700, color: phone ? "#f1f5f9" : "#475569",
+                letterSpacing: "0.12em", textAlign: "center", minHeight: 48,
+              }}
+            >
               {phone
                 ? phone.replace(/(\d{5})(\d{0,5})/, "$1 $2").trim()
                 : "_ _ _ _ _  _ _ _ _ _"}
@@ -173,9 +230,11 @@ export default function KarigarLogin() {
             ) : (
               <button
                 key={i}
+                type="button"
                 className="kl-key"
                 style={d === "⌫" ? { color: "#f87171" } : {}}
-                onClick={() => handleKey(d)}
+                onPointerDown={(e) => handleKeyPress(d, e)}
+                onClick={(e) => handleKeyPress(d, e)}
                 aria-label={d === "⌫" ? "Delete" : `Digit ${d}`}
                 id={`kl-key-${d === "⌫" ? "del" : d}`}
               >
@@ -187,6 +246,7 @@ export default function KarigarLogin() {
 
         {/* Action */}
         <button
+          type="button"
           className="kl-btn"
           style={{
             width: "100%", marginTop: "1rem",
@@ -220,6 +280,7 @@ export default function KarigarLogin() {
 
         {step === "pin" && !loading && (
           <button
+            type="button"
             style={{
               background: "none", border: "none", color: "#64748b",
               fontSize: "0.8rem", cursor: "pointer", marginTop: 12,
