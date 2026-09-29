@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
-import { 
-  TrendingUp, Activity, AlertTriangle, ShieldCheck, 
-  Package, DollarSign, Clock, Users, ArrowUpRight, ArrowDownRight, RefreshCw
+import {
+  TrendingUp, Activity, ShieldCheck,
+  DollarSign, ArrowUpRight, Loader2, AlertTriangle,
 } from "lucide-react";
 
 /**
  * AnalyticsDashboard (U-009, A-001..A-006)
- * High-impact interactive visual dashboard with KPI tiles and SVG performance charts.
+ * Executive overview KPI tiles and production stage charts.
+ * Uses the ERP light theme (white cards, slate text, brand #C27842).
  */
 export default function AnalyticsDashboard({ onNavigateTab }) {
   const [velocityData, setVelocityData] = useState(null);
@@ -14,6 +15,7 @@ export default function AnalyticsDashboard({ onNavigateTab }) {
   const [varianceData, setVarianceData] = useState(null);
   const [scorecardData, setScorecardData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     fetchDashboardData();
@@ -22,11 +24,12 @@ export default function AnalyticsDashboard({ onNavigateTab }) {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
+      setError(null);
       const [velRes, turnRes, varRes, scoreRes] = await Promise.all([
-        fetch("/api/reports/production-velocity").then((r) => r.ok ? r.json() : null),
-        fetch("/api/reports/inventory-turnover").then((r) => r.ok ? r.json() : null),
-        fetch("/api/reports/cost-variance").then((r) => r.ok ? r.json() : null),
-        fetch("/api/reports/supplier-scorecards").then((r) => r.ok ? r.json() : null),
+        fetch("/api/reports/production-velocity").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/reports/inventory-turnover").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/reports/cost-variance").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/reports/supplier-scorecards").then((r) => (r.ok ? r.json() : null)).catch(() => null),
       ]);
       setVelocityData(velRes);
       setTurnoverData(turnRes);
@@ -34,143 +37,192 @@ export default function AnalyticsDashboard({ onNavigateTab }) {
       setScorecardData(scoreRes);
     } catch (e) {
       console.warn("Failed to load analytics dashboard data:", e);
+      setError("Could not fetch analytics data. Check API connectivity.");
     } finally {
       setLoading(false);
     }
   };
 
   const stages = [
-    { key: "cutting", label: "Cutting", hours: velocityData?.stage_cycle_hours?.cutting || 4.5, color: "#3b82f6" },
-    { key: "stitching", label: "Stitching", hours: velocityData?.stage_cycle_hours?.stitching || 8.0, color: "#8b5cf6" },
-    { key: "lasting", label: "Lasting", hours: velocityData?.stage_cycle_hours?.lasting || 6.0, color: "#ec4899" },
-    { key: "finishing", label: "Finishing", hours: velocityData?.stage_cycle_hours?.finishing || 3.5, color: "#f59e0b" },
-    { key: "qc_pack", label: "QC & Pack", hours: velocityData?.stage_cycle_hours?.qc_pack || 2.0, color: "#10b981" },
+    { key: "cutting",   label: "Cutting",   hours: velocityData?.stage_cycle_hours?.cutting   ?? 4.5, color: "#2563EB" },
+    { key: "stitching", label: "Stitching", hours: velocityData?.stage_cycle_hours?.stitching ?? 8.0, color: "#C27842" },
+    { key: "lasting",   label: "Lasting",   hours: velocityData?.stage_cycle_hours?.lasting   ?? 6.0, color: "#7C3AED" },
+    { key: "finishing", label: "Finishing", hours: velocityData?.stage_cycle_hours?.finishing  ?? 3.5, color: "#F59E0B" },
+    { key: "qc_pack",   label: "QC & Pack", hours: velocityData?.stage_cycle_hours?.qc_pack   ?? 2.0, color: "#16A34A" },
   ];
 
   const maxHours = Math.max(...stages.map((s) => s.hours), 10);
 
+  // Supplier data — API returns { suppliers: [], total_evaluated: N }
+  const topSupplier = scorecardData?.suppliers?.[0] ?? null;
+  const supplierRate = topSupplier?.on_time_delivery_rate ?? "96.4";
+  const supplierGrade = topSupplier?.grade ?? "A";
+  const supplierCount =
+    scorecardData?.total_evaluated ?? scorecardData?.suppliers?.length ?? 18;
+
+  // Inventory valuation — API returns value in rupees
+  const invValuation = turnoverData?.avg_inventory_valuation ?? 0;
+  const invValLabel =
+    invValuation >= 100000
+      ? `Rs.${(invValuation / 100000).toFixed(1)}L`
+      : `Rs.${invValuation.toLocaleString("en-IN")}`;
+
+  const bottlenecks = velocityData?.bottlenecks ?? [
+    { stage: "stitching", backlog_pairs: 340, severity: "HIGH",   recommendation: "Allocate +2 operators to stitching" },
+    { stage: "lasting",   backlog_pairs: 180, severity: "MEDIUM", recommendation: "Balance line pacing into lasting" },
+    { stage: "cutting",   backlog_pairs: 60,  severity: "LOW",    recommendation: "Stage pacing optimal" },
+  ];
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 gap-3">
+        <Loader2 className="w-8 h-8 animate-spin text-[#C27842]" />
+        <span className="text-sm text-slate-500 font-medium">Loading analytics data...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center gap-3 bg-red-50 border-2 border-red-200 p-5 text-sm text-red-700">
+        <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+        <span>{error}</span>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      {/* Top KPI Cards Row */}
+      {/* KPI Tiles */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* KPI 1: Velocity */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl relative overflow-hidden">
+        {/* KPI 1: Production Velocity */}
+        <div className="bg-white border-2 border-slate-200 p-5 relative overflow-hidden hover:border-[#2563EB] transition-colors">
+          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#2563EB]" />
           <div className="flex justify-between items-start">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-slate-500">
               Production Velocity
             </span>
-            <span className="p-2 rounded-2xl bg-blue-500/10 text-blue-400">
-              <Activity className="w-5 h-5" />
+            <span className="p-2 bg-blue-50 text-[#2563EB]">
+              <Activity className="w-4 h-4" />
             </span>
           </div>
           <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-white">
-              {velocityData?.summary?.velocity_pairs_per_day || "185"}
+            <span className="font-mono text-3xl font-black text-slate-900">
+              {velocityData?.summary?.velocity_pairs_per_day ?? "185"}
             </span>
             <span className="text-xs font-semibold text-slate-400">pairs / day</span>
           </div>
-          <div className="mt-2 text-xs flex items-center gap-1 text-emerald-400">
-            <ArrowUpRight className="w-4 h-4" />
-            <span>Optimal line throughput</span>
+          <div className="mt-2 text-xs flex items-center gap-1 text-[#16A34A] font-semibold">
+            <ArrowUpRight className="w-3.5 h-3.5" />
+            Optimal line throughput
           </div>
         </div>
 
         {/* KPI 2: Inventory Turnover */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl relative overflow-hidden">
+        <div className="bg-white border-2 border-slate-200 p-5 relative overflow-hidden hover:border-[#16A34A] transition-colors">
+          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#16A34A]" />
           <div className="flex justify-between items-start">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-slate-500">
               Inventory Turnover
             </span>
-            <span className="p-2 rounded-2xl bg-emerald-500/10 text-emerald-400">
-              <TrendingUp className="w-5 h-5" />
+            <span className="p-2 bg-green-50 text-[#16A34A]">
+              <TrendingUp className="w-4 h-4" />
             </span>
           </div>
           <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-white">
-              {turnoverData?.inventory_turnover_ratio || "4.2"}x
+            <span className="font-mono text-3xl font-black text-slate-900">
+              {turnoverData?.inventory_turnover_ratio ?? "4.2"}x
             </span>
             <span className="text-xs font-semibold text-slate-400">
-              ({turnoverData?.days_sales_of_inventory || "86"} DSI)
+              ({turnoverData?.days_sales_of_inventory ?? "86"} DSI)
             </span>
           </div>
-          <div className="mt-2 text-xs text-slate-400">
-            Valuation: <strong className="text-slate-200">₹{Math.round((turnoverData?.avg_inventory_valuation || 0) / 100000)}L</strong>
+          <div className="mt-2 text-xs text-slate-500">
+            Valuation: <strong className="text-slate-700">{invValLabel}</strong>
           </div>
         </div>
 
-        {/* KPI 3: Cost Variance */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl relative overflow-hidden">
+        {/* KPI 3: BOM Cost Variance */}
+        <div className="bg-white border-2 border-slate-200 p-5 relative overflow-hidden hover:border-[#F59E0B] transition-colors">
+          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#F59E0B]" />
           <div className="flex justify-between items-start">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-slate-500">
               BOM Cost Variance
             </span>
-            <span className="p-2 rounded-2xl bg-amber-500/10 text-amber-400">
-              <DollarSign className="w-5 h-5" />
+            <span className="p-2 bg-amber-50 text-[#F59E0B]">
+              <DollarSign className="w-4 h-4" />
             </span>
           </div>
           <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-white">
-              {varianceData?.summary?.net_variance_percentage || "+1.8"}%
+            <span className="font-mono text-3xl font-black text-slate-900">
+              {varianceData?.summary?.net_variance_percentage ?? "+1.8"}%
             </span>
-            <span className="text-xs font-semibold text-amber-400">
-              {varianceData?.summary?.overall_status || "WITHIN BUDGET"}
+            <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 bg-amber-100 text-amber-700 border border-amber-200">
+              {varianceData?.summary?.overall_status ?? "WITHIN BUDGET"}
             </span>
           </div>
-          <div className="mt-2 text-xs text-slate-400">
-            Across {varianceData?.summary?.total_jobs || 42} active jobs
+          <div className="mt-2 text-xs text-slate-500">
+            Across {varianceData?.summary?.total_jobs ?? 42} active jobs
           </div>
         </div>
 
-        {/* KPI 4: Supplier SLA */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl relative overflow-hidden">
+        {/* KPI 4: Supplier On-Time Rate */}
+        <div className="bg-white border-2 border-slate-200 p-5 relative overflow-hidden hover:border-[#7C3AED] transition-colors">
+          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#7C3AED]" />
           <div className="flex justify-between items-start">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-slate-500">
               Supplier On-Time Rate
             </span>
-            <span className="p-2 rounded-2xl bg-purple-500/10 text-purple-400">
-              <ShieldCheck className="w-5 h-5" />
+            <span className="p-2 bg-purple-50 text-[#7C3AED]">
+              <ShieldCheck className="w-4 h-4" />
             </span>
           </div>
           <div className="mt-4 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-white">
-              {scorecardData?.suppliers?.[0]?.on_time_delivery_rate || "96.4"}%
+            <span className="font-mono text-3xl font-black text-slate-900">
+              {supplierRate}%
             </span>
-            <span className="text-xs font-semibold text-purple-400">Grade A</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 bg-purple-100 text-purple-700 border border-purple-200">
+              Grade {supplierGrade}
+            </span>
           </div>
-          <div className="mt-2 text-xs text-slate-400">
-            {scorecardData?.total_evaluated || 18} procurement partners
+          <div className="mt-2 text-xs text-slate-500">
+            {supplierCount} procurement partners
           </div>
         </div>
       </div>
 
-      {/* Visual Charts Grid */}
+      {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Chart 1: Stage Cycle Times & Bottleneck Scorecard (A-001) */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <div className="flex justify-between items-center">
+        {/* Chart 1: Stage Cycle Times */}
+        <div className="bg-white border-2 border-slate-200 p-6 space-y-4">
+          <div className="flex justify-between items-start gap-3">
             <div>
-              <h3 className="font-bold text-white text-base">Stage Duration & Cycle Time</h3>
-              <p className="text-xs text-slate-400">Average hours spent per production stage</p>
+              <h3 className="font-black text-slate-900 text-base tracking-tight">
+                Stage Duration &amp; Cycle Time
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Average hours spent per production stage
+              </p>
             </div>
             {velocityData?.summary?.primary_bottleneck_stage && (
-              <span className="px-3 py-1 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 text-xs font-bold uppercase">
+              <span className="flex-shrink-0 px-2.5 py-1 bg-red-50 text-[#DC2626] border border-red-200 text-[10px] font-bold uppercase tracking-wider">
                 Bottleneck: {velocityData.summary.primary_bottleneck_stage}
               </span>
             )}
           </div>
 
-          <div className="space-y-3 pt-2">
+          <div className="space-y-3 pt-1">
             {stages.map((st) => {
               const widthPct = Math.round((st.hours / maxHours) * 100);
               return (
-                <div key={st.key} className="space-y-1">
+                <div key={st.key} className="space-y-1.5">
                   <div className="flex justify-between text-xs font-semibold">
-                    <span className="text-slate-300">{st.label}</span>
-                    <span className="text-slate-400">{st.hours} hrs</span>
+                    <span className="text-slate-700">{st.label}</span>
+                    <span className="font-mono text-slate-500">{st.hours} hrs</span>
                   </div>
-                  <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+                  <div className="w-full h-2.5 bg-slate-100 border border-slate-200 overflow-hidden">
                     <div
-                      className="h-full rounded-full transition-all duration-500"
+                      className="h-full transition-all duration-500"
                       style={{ width: `${widthPct}%`, backgroundColor: st.color }}
                     />
                   </div>
@@ -179,57 +231,72 @@ export default function AnalyticsDashboard({ onNavigateTab }) {
             })}
           </div>
 
-          <div className="pt-2 text-xs text-slate-400 flex items-center justify-between border-t border-slate-800">
+          <div className="pt-3 text-xs text-slate-500 flex items-center justify-between border-t-2 border-slate-100">
             <span>Target Lead Time: 24h floor turnaround</span>
             <button
-              onClick={() => onNavigateTab && onNavigateTab("velocity")}
-              className="text-blue-400 hover:text-blue-300 font-bold"
+              onClick={() => onNavigateTab && onNavigateTab("dead_stock")}
+              className="text-[#2563EB] hover:text-[#1E3A8A] font-bold underline underline-offset-2"
             >
-              Detailed Bottleneck Scorecard →
+              Detailed Bottleneck Scorecard &rarr;
             </button>
           </div>
         </div>
 
-        {/* Chart 2: Top Bottleneck Load & Actions */}
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4">
-          <div className="flex justify-between items-center">
-            <div>
-              <h3 className="font-bold text-white text-base">Stage Queue Backlog & Pacing</h3>
-              <p className="text-xs text-slate-400">Pairs waiting in stage queues</p>
-            </div>
+        {/* Chart 2: Stage Queue Backlog */}
+        <div className="bg-white border-2 border-slate-200 p-6 space-y-4">
+          <div>
+            <h3 className="font-black text-slate-900 text-base tracking-tight">
+              Stage Queue Backlog &amp; Pacing
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">Pairs waiting in stage queues</p>
           </div>
 
           <div className="space-y-2.5">
-            {(velocityData?.bottlenecks || [
-              { stage: "stitching", backlog_pairs: 340, severity: "HIGH", recommendation: "Allocate +2 operators to stitching" },
-              { stage: "lasting", backlog_pairs: 180, severity: "MEDIUM", recommendation: "Balance line pacing into lasting" },
-              { stage: "cutting", backlog_pairs: 60, severity: "LOW", recommendation: "Stage pacing optimal" },
-            ]).slice(0, 3).map((bn, idx) => (
-              <div
-                key={idx}
-                className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-3.5 flex items-center justify-between text-xs"
-              >
-                <div>
-                  <div className="font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                    <span>{bn.stage}</span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      bn.severity === "HIGH"
-                        ? "bg-rose-500/20 text-rose-300"
-                        : bn.severity === "MEDIUM"
-                        ? "bg-amber-500/20 text-amber-300"
-                        : "bg-emerald-500/20 text-emerald-300"
-                    }`}>
-                      {bn.severity}
+            {bottlenecks.slice(0, 3).map((bn, idx) => {
+              const severityStyle =
+                bn.severity === "HIGH"
+                  ? { badge: "bg-red-100 text-[#DC2626] border-red-200" }
+                  : bn.severity === "MEDIUM"
+                  ? { badge: "bg-amber-100 text-amber-700 border-amber-200" }
+                  : { badge: "bg-green-100 text-[#16A34A] border-green-200" };
+
+              return (
+                <div
+                  key={idx}
+                  className="border-2 border-slate-200 p-4 flex items-center justify-between hover:border-slate-400 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-black text-slate-900 text-sm uppercase tracking-wide">
+                        {bn.stage}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider border ${severityStyle.badge}`}
+                      >
+                        {bn.severity}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1 truncate">
+                      {bn.recommendation}
+                    </p>
+                  </div>
+                  <div className="text-right ml-4 flex-shrink-0">
+                    <span className="font-mono text-xl font-black text-slate-900">
+                      {bn.backlog_pairs}
+                    </span>
+                    <span className="text-[10px] text-slate-500 block font-semibold uppercase tracking-wider">
+                      pairs queue
                     </span>
                   </div>
-                  <p className="text-slate-400 mt-1">{bn.recommendation}</p>
                 </div>
-                <div className="text-right">
-                  <span className="text-lg font-black text-white">{bn.backlog_pairs}</span>
-                  <span className="text-[11px] text-slate-400 block">pairs queue</span>
-                </div>
+              );
+            })}
+
+            {bottlenecks.length === 0 && (
+              <div className="text-center py-8 text-sm text-slate-400">
+                No stage backlogs detected.
               </div>
-            ))}
+            )}
           </div>
         </div>
       </div>
