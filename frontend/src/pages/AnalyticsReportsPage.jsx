@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { PageHeader } from "../components/ui-kit";
 import AnalyticsDashboard from "../components/AnalyticsDashboard";
+import { http } from "../lib/api";
 
 /**
  * AnalyticsReportsPage (A-001..A-006, U-009)
@@ -44,20 +45,13 @@ export default function AnalyticsReportsPage() {
       setError(null);
 
       if (tab === "dead_stock" && (force || !deadStockData)) {
-        const res = await fetch("/api/reports/dead-stock?idle_days_threshold=90");
-        if (!res.ok) throw new Error(`Dead stock API error: ${res.status}`);
-        setDeadStockData(await res.json());
+        const res = await http.get("/reports/dead-stock?idle_days_threshold=90");
+        setDeadStockData(res.data);
 
       } else if (tab === "scorecards" && (force || !supplierData)) {
         const [sup, cust] = await Promise.all([
-          fetch("/api/reports/supplier-scorecards").then((r) => {
-            if (!r.ok) throw new Error("Supplier scorecards API error");
-            return r.json();
-          }),
-          fetch("/api/reports/customer-scorecards").then((r) => {
-            if (!r.ok) throw new Error("Customer scorecards API error");
-            return r.json();
-          }),
+          http.get("/reports/supplier-scorecards").then((r) => r.data),
+          http.get("/reports/customer-scorecards").then((r) => r.data),
         ]);
         setSupplierData({
           suppliers: sup.suppliers || [],
@@ -65,31 +59,28 @@ export default function AnalyticsReportsPage() {
         });
 
       } else if (tab === "costing" && (force || !costVarianceData)) {
-        const res = await fetch("/api/reports/cost-variance");
-        if (!res.ok) throw new Error(`Cost variance API error: ${res.status}`);
-        setCostVarianceData(await res.json());
+        const res = await http.get("/reports/cost-variance");
+        setCostVarianceData(res.data);
 
       } else if (tab === "warehouse" && (force || !warehouseHeatmap)) {
-        const res = await fetch("/api/wms/analytics/utilization-heatmap");
-        if (!res.ok) throw new Error(`Warehouse API error: ${res.status}`);
-        setWarehouseHeatmap(await res.json());
+        const res = await http.get("/wms/analytics/utilization-heatmap");
+        setWarehouseHeatmap(res.data);
 
       } else if (tab === "forecasting" && (force || !safetyStockData)) {
         const [ss, df] = await Promise.all([
-          fetch("/api/reports/safety-stock").then((r) => {
-            if (!r.ok) throw new Error("Safety stock API error");
-            return r.json();
-          }),
-          fetch("/api/reports/demand-forecasting").then((r) => {
-            if (!r.ok) throw new Error("Demand forecasting API error");
-            return r.json();
-          }),
+          http.get("/reports/safety-stock").then((r) => r.data),
+          http.get("/reports/demand-forecasting").then((r) => r.data),
         ]);
         setSafetyStockData({ ...ss, demandForecast: df });
       }
     } catch (e) {
       console.warn("Failed to load tab data:", e);
-      setError(e?.message || "Failed to load data. Please try again.");
+      const status = e?.response?.status;
+      if (status === 401) {
+        setError("Session expired. Please refresh the page.");
+      } else {
+        setError(e?.response?.data?.detail || e?.message || "Failed to load data. Please try again.");
+      }
     } finally {
       setLoading(false);
     }

@@ -123,6 +123,17 @@ let webpackConfig = {
 
 
 webpackConfig.devServer = (devServerConfig) => {
+  // Proxy /api/* requests to FastAPI backend (avoids HTML fallback from CRA dev server)
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+  devServerConfig.proxy = {
+    "/api": {
+      target: backendUrl,
+      changeOrigin: true,
+      secure: false,
+      logLevel: "warn",
+    },
+  };
+
   // Add health check endpoints if enabled
   if (config.enableHealthCheck && setupHealthEndpoints && healthPluginInstance) {
     const originalSetupMiddlewares = devServerConfig.setupMiddlewares;

@@ -3,6 +3,7 @@ import {
   TrendingUp, Activity, ShieldCheck,
   DollarSign, ArrowUpRight, Loader2, AlertTriangle,
 } from "lucide-react";
+import { http } from "../lib/api";
 
 /**
  * AnalyticsDashboard (U-009, A-001..A-006)
@@ -25,16 +26,16 @@ export default function AnalyticsDashboard({ onNavigateTab }) {
     try {
       setLoading(true);
       setError(null);
-      const [velRes, turnRes, varRes, scoreRes] = await Promise.all([
-        fetch("/api/reports/production-velocity").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/reports/inventory-turnover").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/reports/cost-variance").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/reports/supplier-scorecards").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      const [velRes, turnRes, varRes, scoreRes] = await Promise.allSettled([
+        http.get("/reports/production-velocity").then((r) => r.data).catch(() => null),
+        http.get("/reports/inventory-turnover").then((r) => r.data).catch(() => null),
+        http.get("/reports/cost-variance").then((r) => r.data).catch(() => null),
+        http.get("/reports/supplier-scorecards").then((r) => r.data).catch(() => null),
       ]);
-      setVelocityData(velRes);
-      setTurnoverData(turnRes);
-      setVarianceData(varRes);
-      setScorecardData(scoreRes);
+      setVelocityData(velRes.value ?? null);
+      setTurnoverData(turnRes.value ?? null);
+      setVarianceData(varRes.value ?? null);
+      setScorecardData(scoreRes.value ?? null);
     } catch (e) {
       console.warn("Failed to load analytics dashboard data:", e);
       setError("Could not fetch analytics data. Check API connectivity.");

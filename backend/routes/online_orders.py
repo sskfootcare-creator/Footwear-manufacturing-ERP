@@ -1,5 +1,6 @@
 """Marketplace Online Orders, Configured Imports, Dispatch Imports, Monthly Reports, and Settlement Routes."""
 
+import hashlib
 import io
 import os
 import re
@@ -3727,6 +3728,7 @@ async def import_settlement(
 
     matched_count = 0
     unresolved_count = 0
+    skipped_duplicates = 0
     records = []
 
     for r in rows:
@@ -3752,6 +3754,18 @@ async def import_settlement(
         ship = float(r.get(resolved_cols.get("shipping_fee", ""), 0.0) or 0.0) if resolved_cols.get("shipping_fee") else 0.0
         rto = float(r.get(resolved_cols.get("rto_charge", ""), 0.0) or 0.0) if resolved_cols.get("rto_charge") else 0.0
         net = float(r.get(resolved_cols.get("net_payout", ""), 0.0) or 0.0) if resolved_cols.get("net_payout") else 0.0
+        payment_id = (
+            r.get(resolved_cols.get("payment_id", ""), "") if resolved_cols.get("payment_id") else ""
+        ) or ""
+        settlement_date = (
+            r.get(resolved_cols.get("settlement_date", ""), "") if resolved_cols.get("settlement_date") else now_iso()[:10]
+        ) or ""
+
+        # OC-004: Compute a stable idempotency key from authoritative platform-level fields.
+        # Key = platform + payment_id + order_ref + leaf_sku so that re-importing the
+        # exact same settlement file produces zero new documents.
+        _row_raw = f"{platform_lc}:{payment_id}:{order_ref}:{cleaned_leaf}:{settlement_date}"
+        row_idempotency_key = hashlib.sha256(_row_raw.encode("utf-8")).hexdigest()
 
         if result["matched"]:
             matched_count += 1
@@ -3768,8 +3782,10 @@ async def import_settlement(
                 "shipping_fee": ship,
                 "rto_charge": rto,
                 "net_payout": net,
-                "settlement_date": r.get(resolved_cols.get("settlement_date", ""), "") if resolved_cols.get("settlement_date") else now_iso()[:10],
-                "payment_id": r.get(resolved_cols.get("payment_id", ""), "") if resolved_cols.get("payment_id") else "",
+                "settlement_date": settlement_date,
+                "payment_id": payment_id,
+                # idempotency fields (OC-004)
+                "settlement_row_key": row_idempotency_key,
                 "created_at": now_iso(),
             })
         else:
@@ -3779,13 +3795,25 @@ async def import_settlement(
         raise HTTPException(status_code=400, detail="Nothing to commit — no rows matched.")
 
     if not dry_run and records:
-        await db.online_settlements.insert_many(records)
+        # OC-004: Use update_one/upsert keyed on `settlement_row_key` instead of insert_many.
+        # Re-importing the same file is fully idempotent; only new rows are inserted.
+        for rec in records:
+            key = rec["settlement_row_key"]
+            res = await db.online_settlements.update_one(
+                {"settlement_row_key": key},
+                {"$setOnInsert": rec},
+                upsert=True,
+            )
+            if res.upserted_id is None:
+                # Document with this key already existed — it is a duplicate.
+                skipped_duplicates += 1
 
     return {
         "platform": platform_lc,
         "total_rows": len(rows),
         "matched_count": matched_count,
         "unresolved_count": unresolved_count,
+        "skipped_duplicates": skipped_duplicates,
         "dry_run": dry_run,
     }
 

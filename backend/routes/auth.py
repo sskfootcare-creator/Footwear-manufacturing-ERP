@@ -249,7 +249,20 @@ async def _maybe_await(val):
 
 def _current_user_fn():
     """Return the bound get_current_user coroutine function."""
-    return _server().get_current_user
+    fn = getattr(_server(), "get_current_user", None)
+    if fn is not None:
+        return fn
+
+    async def _fallback_get_current_user(request: Request):
+        s = _server()
+        resolved_fn = getattr(s, "get_current_user", None)
+        if resolved_fn is None or resolved_fn == _fallback_get_current_user:
+            from auth import get_current_user_factory
+            resolved_fn = await get_current_user_factory(_get_db())
+            s.get_current_user = resolved_fn
+        return await resolved_fn(request)
+
+    return _fallback_get_current_user
 
 
 def _oid(v):
@@ -288,66 +301,75 @@ async def login(payload: LoginInput, request: Request, response: Response):
     db = _get_db()
     email = payload.email.lower().strip()
 
-    # ── 1. Attempt Supabase Auth credential validation ───────────────────────
-    supa_auth_res = None
-    try:
-        from services.supabase_auth_service import authenticate_with_supabase
-        supa_auth_res = authenticate_with_supabase(email, payload.password)
-    except Exception as _supa_err:
-        log.warning("Supabase auth check fallback: %s", _supa_err)
-
     user = await db.users.find_one({"email": email})
     is_authenticated = False
     access = None
     refresh = None
 
-    if supa_auth_res and getattr(supa_auth_res, "session", None) is not None:
+    # ── 1. Fast local MongoDB password authentication ────────────────────────
+    if user and user.get("active", True) and verify_password(payload.password, user.get("password_hash", "")):
         is_authenticated = True
-        access = supa_auth_res.session.access_token
-        refresh = supa_auth_res.session.refresh_token
-        if not user:
-            supa_u = getattr(supa_auth_res, "user", None)
-            meta = getattr(supa_u, "user_metadata", {}) or {}
-            # F-002: NEVER trust client-supplied user_metadata for privileged ERP roles.
-            # Only server-controlled mapping or default safe 'viewer' role can be assigned.
-            server_mapped_role = None
-            mapping = await db.role_mappings.find_one({"email": email}) if hasattr(db, "role_mappings") else None
-            if mapping and mapping.get("role"):
-                server_mapped_role = mapping["role"]
-            elif email in ("admin@sskfootcare.com", "admin@example.com"):
-                server_mapped_role = "admin"
-            else:
-                server_mapped_role = "viewer"
-
-            user_doc = {
-                "email": email,
-                "name": meta.get("name", email.split("@")[0]),
-                "role": server_mapped_role,
-                "role_title": meta.get("role_title", "Viewer"),
-                "active": True,
-                "created_at": _now_iso(),
-            }
-            res_ins = await db.users.insert_one(user_doc)
-            user_doc["_id"] = res_ins.inserted_id
-            user = user_doc
-    elif user and user.get("active", True) and verify_password(payload.password, user.get("password_hash", "")):
-        is_authenticated = True
-        # Auto-sync user into Supabase Auth for seamless migration
-        try:
-            from services.supabase_auth_service import create_or_sync_supabase_user
-            create_or_sync_supabase_user(
-                email=email,
-                password=payload.password,
-                name=user.get("name", ""),
-                role=user.get("role", "custom"),
-                allowed_modules=user.get("allowed_modules"),
-            )
-        except Exception as _e:
-            log.debug("Auto-sync to Supabase warning: %s", _e)
         uid = str(user["_id"])
         allowed_modules = user.get("allowed_modules")
         access = create_access_token(uid, email, user["role"], allowed_modules=allowed_modules)
         refresh = create_refresh_token(uid)
+
+        # Background sync user into Supabase Auth if Supabase is reachable (non-blocking)
+        try:
+            from services.supabase_auth_service import is_supabase_available, create_or_sync_supabase_user
+            if is_supabase_available():
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: create_or_sync_supabase_user(
+                        email=email,
+                        password=payload.password,
+                        name=user.get("name", ""),
+                        role=user.get("role", "custom"),
+                        allowed_modules=user.get("allowed_modules"),
+                    )
+                )
+        except Exception as _e:
+            log.debug("Auto-sync to Supabase warning: %s", _e)
+
+    # ── 2. Fallback to Supabase Auth (for users managed exclusively in Supabase) ──
+    else:
+        supa_auth_res = None
+        try:
+            from services.supabase_auth_service import authenticate_with_supabase, is_supabase_available
+            if is_supabase_available():
+                supa_auth_res = authenticate_with_supabase(email, payload.password)
+        except Exception as _supa_err:
+            log.warning("Supabase auth check fallback: %s", _supa_err)
+
+        if supa_auth_res and getattr(supa_auth_res, "session", None) is not None:
+            is_authenticated = True
+            access = supa_auth_res.session.access_token
+            refresh = supa_auth_res.session.refresh_token
+            if not user:
+                supa_u = getattr(supa_auth_res, "user", None)
+                meta = getattr(supa_u, "user_metadata", {}) or {}
+                # F-002: NEVER trust client-supplied user_metadata for privileged ERP roles.
+                # Only server-controlled mapping or default safe 'viewer' role can be assigned.
+                server_mapped_role = None
+                mapping = await db.role_mappings.find_one({"email": email}) if hasattr(db, "role_mappings") else None
+                if mapping and mapping.get("role"):
+                    server_mapped_role = mapping["role"]
+                elif email in ("admin@sskfootcare.com", "admin@example.com"):
+                    server_mapped_role = "admin"
+                else:
+                    server_mapped_role = "viewer"
+
+                user_doc = {
+                    "email": email,
+                    "name": meta.get("name", email.split("@")[0]),
+                    "role": server_mapped_role,
+                    "role_title": meta.get("role_title", "Viewer"),
+                    "active": True,
+                    "created_at": _now_iso(),
+                }
+                res_ins = await db.users.insert_one(user_doc)
+                user_doc["_id"] = res_ins.inserted_id
+                user = user_doc
 
         # F-003: Persist refresh session
         try:

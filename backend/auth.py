@@ -385,7 +385,65 @@ async def get_current_user_factory(db):
         if not token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # ── 1. Check Supabase Auth token ────────────────────────────────────
+        # ── 1. Fast path: Decode internal ERP JWT immediately (0.05ms, zero network overhead) ──
+        is_internal_token = False
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+            if unverified.get("iss") == JWT_ISSUER:
+                is_internal_token = True
+        except Exception:
+            pass
+
+        if is_internal_token:
+            try:
+                payload = jwt.decode(
+                    token,
+                    get_jwt_secret(),
+                    algorithms=[JWT_ALGORITHM],
+                    issuer=JWT_ISSUER,
+                    audience=JWT_AUDIENCE,
+                )
+                if payload.get("type") != "access":
+                    raise HTTPException(status_code=401, detail="Invalid token type")
+
+                # ── Worker tokens resolve from db.workers, not db.users ──────────
+                if payload.get("role") == "worker":
+                    worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
+                    if not worker or not worker.get("active", True):
+                        raise HTTPException(status_code=401, detail="Worker not found or inactive")
+                    w_user = {
+                        "id": str(worker["_id"]),
+                        "worker_id": str(worker["_id"]),
+                        "name": worker.get("name", ""),
+                        "phone": worker.get("phone", ""),
+                        "role": "worker",
+                        "email": payload.get("email", ""),  # synthetic — phone used as email in token
+                        "skill": worker.get("skill", ""),
+                        "modules": ["workers"],
+                    }
+                    path = getattr(request, "url", None) and getattr(request.url, "path", None)
+                    if path:
+                        check_route_module_access(w_user, path)
+                    return w_user
+
+                # ── Regular user token ────────────────────────────────────────────
+                user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+                if not user:
+                    raise HTTPException(status_code=401, detail="User not found")
+                user["id"] = str(user["_id"])
+                user.pop("_id", None)
+                user.pop("password_hash", None)
+                user["modules"] = get_user_modules(user)
+                path = getattr(request, "url", None) and getattr(request.url, "path", None)
+                if path:
+                    check_route_module_access(user, path)
+                return user
+            except jwt.ExpiredSignatureError:
+                raise HTTPException(status_code=401, detail="Token expired")
+            except jwt.InvalidTokenError:
+                raise HTTPException(status_code=401, detail="Invalid token")
+
+        # ── 2. External Supabase Auth token check (only for non-internal tokens) ──
         try:
             from services.supabase_auth_service import verify_supabase_token
             supa_user = verify_supabase_token(token)
@@ -405,7 +463,7 @@ async def get_current_user_factory(db):
         except Exception as _supa_err:
             log.debug("Supabase token verification fallback: %s", _supa_err)
 
-        # ── 2. Fallback to internal JWT decoding (workers & test suites) ────
+        # ── 3. Fallback to internal JWT decoding ──────────────────────────────
         try:
             payload = jwt.decode(
                 token,
@@ -417,7 +475,6 @@ async def get_current_user_factory(db):
             if payload.get("type") != "access":
                 raise HTTPException(status_code=401, detail="Invalid token type")
 
-            # ── Worker tokens resolve from db.workers, not db.users ──────────
             if payload.get("role") == "worker":
                 worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
                 if not worker or not worker.get("active", True):
@@ -428,7 +485,7 @@ async def get_current_user_factory(db):
                     "name": worker.get("name", ""),
                     "phone": worker.get("phone", ""),
                     "role": "worker",
-                    "email": payload.get("email", ""),  # synthetic — phone used as email in token
+                    "email": payload.get("email", ""),
                     "skill": worker.get("skill", ""),
                     "modules": ["workers"],
                 }
@@ -437,7 +494,6 @@ async def get_current_user_factory(db):
                     check_route_module_access(w_user, path)
                 return w_user
 
-            # ── Regular user token ────────────────────────────────────────────
             user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")

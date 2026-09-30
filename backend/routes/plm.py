@@ -35,6 +35,15 @@ def stringify(doc: dict) -> dict:
     return d
 
 
+def _get_db(request: Optional[Request] = None):
+    if request and hasattr(request, "app"):
+        mongodb = getattr(request.app, "mongodb", None)
+        if mongodb is not None:
+            return mongodb
+    import server
+    return getattr(server, "db", None)
+
+
 async def _get_user(request: Request):
     user = getattr(request.state, "user", None)
     if user:
@@ -67,7 +76,7 @@ async def log_plm_audit(db, action: str, style_code: str, user_email: str, detai
 @plm_router.get("/styles/{style_id}/folders")
 async def get_or_create_style_folders(style_id: str, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     # Validate style exists
     try:
@@ -131,7 +140,7 @@ async def list_style_documents(
     search: Optional[str] = None,
 ):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         s_oid = ObjectId(style_id)
@@ -165,7 +174,7 @@ async def list_style_documents(
 @plm_router.post("/styles/{style_id}/documents/upload")
 async def upload_plm_document(style_id: str, payload: PLMDocumentIn, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         s_oid = ObjectId(style_id)
@@ -256,7 +265,7 @@ async def upload_plm_document(style_id: str, payload: PLMDocumentIn, request: Re
 @plm_router.post("/styles/{style_id}/documents/{doc_id}/replace")
 async def replace_plm_document_version(style_id: str, doc_id: str, payload: dict, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         d_oid = ObjectId(doc_id)
@@ -316,7 +325,7 @@ async def replace_plm_document_version(style_id: str, doc_id: str, payload: dict
 @plm_router.post("/styles/{style_id}/documents/{doc_id}/rollback")
 async def rollback_plm_document_version(style_id: str, doc_id: str, target_version: int, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         d_oid = ObjectId(doc_id)
@@ -360,7 +369,7 @@ async def rollback_plm_document_version(style_id: str, doc_id: str, target_versi
 @plm_router.delete("/styles/{style_id}/documents/{doc_id}")
 async def delete_plm_document(style_id: str, doc_id: str, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         d_oid = ObjectId(doc_id)
@@ -386,7 +395,7 @@ async def delete_plm_document(style_id: str, doc_id: str, request: Request):
 @plm_router.get("/patterns")
 async def list_patterns(request: Request, category: Optional[str] = None, style_code: Optional[str] = None):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     q = {}
     if category:
@@ -401,7 +410,7 @@ async def list_patterns(request: Request, category: Optional[str] = None, style_
 @plm_router.post("/patterns")
 async def create_pattern(payload: PLMPatternIn, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
@@ -421,7 +430,7 @@ async def create_pattern(payload: PLMPatternIn, request: Request):
 @plm_router.post("/patterns/scan")
 async def scan_and_digitize_pattern(payload: dict, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     # Digital Pattern Scan Processing Simulation / Metadata record
     scanning_meta = ScanningMetadata(
@@ -469,7 +478,7 @@ async def scan_and_digitize_pattern(payload: dict, request: Request):
 @plm_router.get("/tooling")
 async def list_tooling(request: Request, category: Optional[str] = None, vendor: Optional[str] = None):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     q = {}
     if category:
@@ -484,7 +493,7 @@ async def list_tooling(request: Request, category: Optional[str] = None, vendor:
 @plm_router.post("/tooling")
 async def create_tooling(payload: PLMToolingIn, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
@@ -508,7 +517,7 @@ async def create_tooling(payload: PLMToolingIn, request: Request):
 @plm_router.get("/tooling/{tool_id}")
 async def get_tooling_details(tool_id: str, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         t_oid = ObjectId(tool_id)
@@ -524,7 +533,7 @@ async def get_tooling_details(tool_id: str, request: Request):
 @plm_router.put("/tooling/{tool_id}")
 async def update_tooling(tool_id: str, payload: dict, request: Request):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     try:
         t_oid = ObjectId(tool_id)
@@ -546,7 +555,7 @@ async def update_tooling(tool_id: str, payload: dict, request: Request):
 async def get_sole_mould_by_material(material_code: str, request: Request):
     """Auto-Linking: When a Sole material is selected in BOM, fetch its linked Sole Mould details."""
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     mould = await db.plm_tooling.find_one({
         "tool_category": "Sole Mould",
@@ -578,7 +587,7 @@ async def get_sole_mould_by_material(material_code: str, request: Request):
 async def link_tooling_to_pattern(payload: dict, request: Request):
     """Maintain many-to-many relationships between Patterns and Cutting Dies/Tools."""
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     pattern_id = payload.get("pattern_id")
     tool_code = payload.get("tool_code")
@@ -608,7 +617,7 @@ async def link_tooling_to_pattern(payload: dict, request: Request):
 @plm_router.get("/search")
 async def global_plm_search(q: str = Query(..., min_length=1), request: Request = None):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     regex = {"$regex": re.escape(q), "$options": "i"}
 
@@ -651,7 +660,7 @@ async def global_plm_search(q: str = Query(..., min_length=1), request: Request 
 @plm_router.get("/audit-log")
 async def get_plm_audit_log(request: Request, style_code: Optional[str] = None, limit: int = 200):
     u = await _get_user(request)
-    db = request.app.mongodb
+    db = _get_db(request)
 
     query = {}
     if style_code:

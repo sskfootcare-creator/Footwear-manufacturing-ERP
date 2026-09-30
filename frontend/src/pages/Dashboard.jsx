@@ -23,6 +23,8 @@ const STAGE_LABEL = {
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState(null);
   const [overdue, setOverdue] = useState([]);
   const [overdueInvoices, setOverdueInvoices] = useState([]);
   const [unmatchedStyles, setUnmatchedStyles] = useState([]);
@@ -36,8 +38,25 @@ export default function Dashboard() {
     setDashTab(workspace === "management" ? "consolidated" : workspace);
   }, [workspace]);
 
+  const loadStats = () => {
+    setStatsLoading(true);
+    setStatsError(null);
+    http.get("/dashboard/stats")
+      .then((r) => { setStats(r.data); setStatsLoading(false); })
+      .catch((err) => {
+        // If axios interceptor already retried (token refresh) and still failed, surface the error
+        const status = err?.response?.status;
+        if (status === 401) {
+          setStatsError("Session expired. Please refresh the page or sign in again.");
+        } else {
+          setStatsError("Could not load dashboard data. Check that the backend server is running.");
+        }
+        setStatsLoading(false);
+      });
+  };
+
   useEffect(() => {
-    http.get("/dashboard/stats").then((r) => setStats(r.data)).catch(() => {});
+    loadStats();
     http.get("/dashboard/overdue").then((r) => setOverdue(r.data || [])).catch(() => {});
     http.get("/invoices/overdue").then((r) => setOverdueInvoices(r.data || [])).catch(() => {});
     http.get("/production/unmatched-styles").then((r) => setUnmatchedStyles(r.data || [])).catch(() => {});
@@ -54,7 +73,28 @@ export default function Dashboard() {
     return stats.online.stage_counts;
   }, [stats, dashTab]);
 
-  if (!stats) return <div className="p-8 text-sm text-slate-500">Loading factory data...</div>;
+  if (statsLoading) return (
+    <div className="flex flex-col items-center justify-center py-24 gap-3">
+      <div className="w-8 h-8 border-4 border-[#C27842] border-t-transparent rounded-full animate-spin" />
+      <span className="text-sm text-slate-500 font-medium">Loading factory data...</span>
+    </div>
+  );
+
+  if (statsError) return (
+    <div className="flex flex-col items-center justify-center py-24 gap-4">
+      <AlertTriangle className="w-10 h-10 text-amber-500" />
+      <div className="text-center">
+        <p className="text-sm font-semibold text-slate-700">{statsError}</p>
+        <p className="text-xs text-slate-400 mt-1">The dashboard will load once the connection is restored.</p>
+      </div>
+      <button
+        onClick={loadStats}
+        className="px-5 py-2 bg-[#C27842] text-white text-sm font-bold rounded hover:bg-[#A65D24] transition-colors"
+      >
+        Retry
+      </button>
+    </div>
+  );
 
   const maxStage = Math.max(...Object.values(currentStageCounts), 1);
 

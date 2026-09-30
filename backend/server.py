@@ -761,7 +761,13 @@ log = logging.getLogger("ssk")
 #   delete_user, ForgotPasswordInput, ResetPasswordInput
 
 
-get_current_user = None
+async def _default_get_current_user(request: Request):
+    global get_current_user
+    fn = await get_current_user_factory(db)
+    get_current_user = fn
+    return await fn(request)
+
+get_current_user = _default_get_current_user
 
 
 # ---------- Keep Awake Job ----------
@@ -882,8 +888,7 @@ DEFAULT_STAGE_HOURS = {
 }
 
 
-# ---------- Dependencies ----------
-get_current_user = None  # set after startup
+# get_current_user is bound above and refreshed on startup
 
 
 async def _get_stage_durations() -> Dict[str, float]:
@@ -1650,6 +1655,12 @@ async def _ensure_startup_indexes(database):
         await database.production_jobs.create_index("style_id")
         await database.production_jobs.create_index("style_code")
         await database.production_jobs.create_index("po_number")
+        # PERF: Critical indexes for dashboard queries (stage counts, WIP, source_type filter)
+        await database.production_jobs.create_index("stage", name="pjobs_stage")
+        await database.production_jobs.create_index("status", name="pjobs_status")
+        await database.production_jobs.create_index("source_type", name="pjobs_source_type")
+        await database.production_jobs.create_index("created_at", name="pjobs_created_at")
+        await database.production_jobs.create_index("archived", name="pjobs_archived")
     except Exception as e:
         log.warning(f"Could not create production_jobs indexes: {e}")
 
@@ -1658,6 +1669,9 @@ async def _ensure_startup_indexes(database):
         await database.invoices.create_index("po_ids")
         await database.invoices.create_index("po_number")
         await database.invoices.create_index("po_numbers")
+        # PERF: status filter is used on almost every invoice query
+        await database.invoices.create_index("status", name="invoices_status")
+        await database.invoices.create_index("created_at", name="invoices_created_at")
     except Exception as e:
         log.warning(f"Could not create invoices indexes: {e}")
 
@@ -1666,8 +1680,32 @@ async def _ensure_startup_indexes(database):
         await database.dispatch_records.create_index("po_ids")
         await database.dispatch_records.create_index("po_number")
         await database.dispatch_records.create_index("po_numbers")
+        # PERF: date-range queries on dispatch records
+        await database.dispatch_records.create_index("created_at", name="dispatch_created_at")
     except Exception as e:
         log.warning(f"Could not create dispatch_records indexes: {e}")
+
+    try:
+        # PERF: expenses filtered by date range constantly
+        await database.expenses.create_index("date", name="expenses_date")
+        await database.expenses.create_index("category", name="expenses_category")
+        await database.expenses.create_index("created_at", name="expenses_created_at")
+    except Exception as e:
+        log.warning(f"Could not create expenses indexes: {e}")
+
+    try:
+        # PERF: fg_inventory scanned fully for dead-stock and turnover reports
+        await database.fg_inventory.create_index("updated_at", name="fg_inventory_updated_at")
+        await database.fg_inventory.create_index("ready_stock_qty", name="fg_inventory_ready_qty")
+    except Exception as e:
+        log.warning(f"Could not create fg_inventory perf indexes: {e}")
+
+    try:
+        # PERF: POs filtered by status for pipeline revenue
+        await database.pos.create_index("status", name="pos_status")
+        await database.pos.create_index("created_at", name="pos_created_at")
+    except Exception as e:
+        log.warning(f"Could not create pos perf indexes: {e}")
 
     try:
         await database.vendors.create_index("name")
