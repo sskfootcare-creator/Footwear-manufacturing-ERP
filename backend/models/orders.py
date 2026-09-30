@@ -87,7 +87,18 @@ class ProductionJobDoc(BaseModel):
     vendor_po_numbers: Optional[List[str]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    components: Optional[Dict[str, Any]] = None
+    component_tracks: Optional[Dict[str, Any]] = None
+    component_specs: Optional[Dict[str, Any]] = None
     history: Optional[List[dict]] = None
+
+
+class ComponentStageUpdate(BaseModel):
+    component: Literal["upper", "bottom", "sole", "heel_gola"]
+    stage: str
+    completed_qty: Optional[int] = None
+    worker_id: Optional[str] = None
+    notes: Optional[str] = ""
 
 
 class ArchiveJobsRequest(BaseModel):

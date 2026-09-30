@@ -6,6 +6,7 @@ import { SafeImage } from "../components/ImageUploader";
 import { useAuth } from "../lib/auth";
 import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
+import ComponentProductionBoard from "../components/ComponentProductionBoard";
 
 const STAGES = [
   { key: "planning", label: "Planning", color: "#8B5CF6" },
@@ -25,6 +26,7 @@ const COMPONENT_LAYERS = {
   upper: ["Upper Top", "Mid Layer / Reinforcement", "Lining"],
   bottom: ["Bottom Layer", "Insole Board + Cushion", "Insole Cover (PU/Leather)"],
   sole: ["Sole"],
+  heel_gola: ["Heel / Platform", "Cover / Gola"],
 };
 
 const ASSIGNMENT_ROLES = [
@@ -112,6 +114,9 @@ function groupJobsByColor(jobs) {
       sizes: Array.from(g.sizes).sort(sortSizes),
       totalQty: g.rows.reduce((s, r) => s + (r.quantity || 0), 0),
       components: aggregateComponents(g.rows),
+      component_tracks: g.rows[0]?.component_tracks || {},
+      component_specs: g.rows[0]?.component_specs || {},
+      footwear_type: g.rows[0]?.component_specs?.footwear_type || "flat",
       assignments: aggregateAssignments(g.rows),
       overdueHours: aggregateOverdue(g.rows),
     };
@@ -196,7 +201,13 @@ export function clusterArchivedGroups(groups, dispatchRecordByJobId = {}, invoic
 
 function aggregateComponents(rows) {
   const all = (key) => rows.every(r => r.components?.[key]);
-  return { upper_done: all("upper_done"), bottom_done: all("bottom_done"), sole_done: all("sole_done") };
+  const heelReady = rows.every(r => r.component_tracks?.heel_gola?.status === "ready");
+  return {
+    upper_done: all("upper_done"),
+    bottom_done: all("bottom_done"),
+    sole_done: all("sole_done"),
+    heel_gola_done: heelReady,
+  };
 }
 
 // take assignment from the first row for display (all rows in the group share)
@@ -266,6 +277,7 @@ export default function Production() {
   const [bulkConfirm, setBulkConfirm] = useState(null);
   const [waFor, setWaFor] = useState(null);
   const [viewArchive, setViewArchive] = useState(false);
+  const [boardMode, setBoardMode] = useState("assembly"); // "assembly" | "component"
   const [archivedJobs, setArchivedJobs] = useState([]);
   const [detailFor, setDetailFor] = useState(null);
   const [packingFor, setPackingFor] = useState(null); // {kind:'single'|'merged', group?, jobs?}
@@ -337,6 +349,10 @@ export default function Production() {
   const archivedGroupsCount = useMemo(() => {
     return groupJobsByColor(archivedJobs).length;
   }, [archivedJobs]);
+
+  const allGroups = useMemo(() => {
+    return groupJobsByColor(jobs);
+  }, [jobs]);
 
 
   const printCard = async (group, variant = "dual") => {
@@ -459,7 +475,17 @@ export default function Production() {
     }
   };
   const toggleComponent = async (group, key, val) => {
-    await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}/components`, { [key]: val })));
+    if (key === "heel_gola_done") {
+      await Promise.all(group.rows.map(j =>
+        http.patch(`/production/jobs/${j.id}/component-stage`, {
+          component: "heel_gola",
+          stage: val ? "ready" : (j.component_specs?.components?.heel_gola?.stages?.[0] || "cover_cutting"),
+          completed_qty: j.quantity,
+        })
+      ));
+    } else {
+      await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}/components`, { [key]: val })));
+    }
     load();
   };
   const assignWorker = async (group, role, workerId, rate) => {
@@ -726,6 +752,34 @@ export default function Production() {
         testId="production-header"
         action={
           <div className="flex gap-2 items-center">
+            {/* Board Mode Switcher */}
+            <div className="inline-flex rounded border border-slate-300 p-0.5 bg-slate-100 mr-1 shadow-xs">
+              <button
+                type="button"
+                onClick={() => { setBoardMode("assembly"); setViewArchive(false); }}
+                className={`text-xs font-bold uppercase tracking-wider px-3 py-1.5 rounded transition-all ${
+                  !viewArchive && boardMode === "assembly"
+                    ? "bg-[#0F172A] text-white shadow-xs"
+                    : "text-slate-700 hover:text-slate-900"
+                }`}
+                data-testid="toggle-assembly-board"
+              >
+                Assembly &amp; Finishing
+              </button>
+              <button
+                type="button"
+                onClick={() => { setBoardMode("component"); setViewArchive(false); }}
+                className={`text-xs font-bold uppercase tracking-wider px-3 py-1.5 rounded transition-all ${
+                  !viewArchive && boardMode === "component"
+                    ? "bg-[#C27842] text-white shadow-xs"
+                    : "text-slate-700 hover:text-slate-900"
+                }`}
+                data-testid="toggle-component-board"
+              >
+                Component Production
+              </button>
+            </div>
+
             {canEdit && (
               <button onClick={() => setDockOpen(d => !d)} data-testid="toggle-karigar-dock"
                 className={`text-xs font-bold uppercase tracking-wider px-3 py-2 border-2 flex items-center gap-1 ${dockOpen ? "bg-[#C27842] text-white border-[#C27842]" : "bg-white text-slate-900 border-slate-300 hover:border-[#0F172A]"}`}>
@@ -829,6 +883,15 @@ export default function Production() {
             onDownloadDispatchFile={downloadDispatchFile}
             onDownloadInvoice={downloadGroupInvoice}
             invoices={invoices}
+          />
+        ) : boardMode === "component" ? (
+          <ComponentProductionBoard
+            jobs={jobs}
+            groups={allGroups}
+            workers={workers}
+            styleByCode={styleByCode}
+            canEdit={canEdit}
+            onRefresh={load}
           />
         ) : (
         <div className="overflow-x-auto pb-4">
@@ -1743,13 +1806,17 @@ function ColorGroupCard(props) {
             Upper {group.components.upper_done ? "✓" : "pending"} / Bottom {group.components.bottom_done ? "✓" : "pending"}
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className={`grid ${group.footwear_type === "heel" ? "grid-cols-4" : "grid-cols-3"} gap-2`}>
           <ComponentCell label="Upper" done={group.components.upper_done} layers={COMPONENT_LAYERS.upper}
             disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "upper_done", v)} />
           <ComponentCell label="Bottom/Insole" done={group.components.bottom_done} layers={COMPONENT_LAYERS.bottom}
             disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "bottom_done", v)} />
           <ComponentCell label="Sole" done={group.components.sole_done} layers={COMPONENT_LAYERS.sole}
             disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "sole_done", v)} />
+          {group.footwear_type === "heel" && (
+            <ComponentCell label="Heel/Gola" done={group.components.heel_gola_done} layers={COMPONENT_LAYERS.heel_gola}
+              disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "heel_gola_done", v)} />
+          )}
         </div>
       </div>
 
@@ -1926,7 +1993,7 @@ function ColorGroupCard(props) {
   );
 }
 
-function ComponentCell({ label, done, layers, onToggle, disabled }) {
+function ComponentCell({ label, done, layers = [], onToggle, disabled }) {
   return (
     <div className={`border-2 p-2 ${done ? "border-[#16A34A] bg-green-50" : "border-slate-200 bg-white"}`}>
       <button type="button" disabled={disabled} onClick={() => onToggle(!done)}
@@ -1937,7 +2004,7 @@ function ComponentCell({ label, done, layers, onToggle, disabled }) {
         </span>
       </button>
       <div className="mt-1 space-y-0.5">
-        {layers.map(l => <div key={l} className="text-[9px] text-slate-500 leading-tight">• {l}</div>)}
+        {(layers || []).map(l => <div key={l} className="text-[9px] text-slate-500 leading-tight">• {l}</div>)}
       </div>
     </div>
   );

@@ -584,3 +584,4 @@ backend/scripts/seed_test_picklist_data.py
 backend/scripts/test_live_db_import.py
 aug.csv
 record.csv
+docs/component-aware-kanban-plan.md

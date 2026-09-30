@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -27,6 +27,16 @@ class MaterialIn(BaseModel):
     weighted_avg_rate:   Optional[float] = None
     last_purchase_rate:  Optional[float] = None
     balance:             Optional[float] = 0.0
+    stage_requirements:  Optional[List[str]] = None
+
+    @field_validator("stage_requirements", mode="before")
+    @classmethod
+    def _validate_stage_requirements(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return [str(s).strip() for s in v if s and str(s).strip()]
+        return v
 
 
 class BomItem(BaseModel):

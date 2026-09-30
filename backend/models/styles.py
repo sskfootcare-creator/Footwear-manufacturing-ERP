@@ -41,6 +41,7 @@ class StyleIn(BaseModel):
     code: Optional[str] = ""
     name: str
     category: Optional[str] = "Footwear"
+    footwear_type: Literal["flat", "heel"] = "flat"
     image_url: Optional[str] = ""
     image_display_url:   Optional[str] = ""
     image_thumbnail_url: Optional[str] = ""

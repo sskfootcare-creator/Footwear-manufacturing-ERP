@@ -160,6 +160,8 @@ class GenericMockCollection:
             new_doc = dict(q)
             if "$set" in update:
                 new_doc.update(update["$set"])
+            if "$setOnInsert" in update:
+                new_doc.update(update["$setOnInsert"])
             new_doc["_id"] = ObjectId()
             self.store[str(new_doc["_id"])] = new_doc
             res = MagicMock()

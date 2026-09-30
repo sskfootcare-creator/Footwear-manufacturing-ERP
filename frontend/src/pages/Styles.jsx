@@ -101,6 +101,7 @@ const emptyStyle = {
   code: "",
   name: "",
   category: "Footwear",
+  footwear_type: "flat",
   image_url: "",
   image_display_url: "",
   image_thumbnail_url: "",
@@ -588,6 +589,7 @@ export default function Styles() {
         code: fullStyle.code,
         name: fullStyle.name,
         category: fullStyle.category,
+        footwear_type: fullStyle.footwear_type || "flat",
         image_url: fullStyle.image_url || "",
         image_original_url: fullStyle.image_original_url || fullStyle.image_url || "",
         image_display_url: fullStyle.image_display_url || "",
@@ -629,6 +631,7 @@ export default function Styles() {
     try {
       const body = {
         ...form,
+        footwear_type: form.footwear_type || "flat",
         insole_mould_name: form.insole_mould_name ? form.insole_mould_name.trim() : null,
         sole_mould_name: form.sole_mould_name ? form.sole_mould_name.trim() : null,
         overhead_pct: Number(form.overhead_pct),
@@ -1345,6 +1348,11 @@ export default function Styles() {
                                 {s.status === "active" ? "Active" : "Inactive"}
                               </Badge>
                               <Badge color="orange">{s.category}</Badge>
+                              {s.footwear_type === "heel" ? (
+                                <Badge color="purple" data-testid={`style-type-badge-${s.code}`}>Heel</Badge>
+                              ) : (
+                                <Badge color="slate" data-testid={`style-type-badge-${s.code}`}>Flat</Badge>
+                              )}
                               {s.in_online_pipeline && (
                                 <Badge color="blue" data-testid={`online-badge-${s.code}`}>
                                   <Globe2 className="w-3 h-3 inline mr-0.5" /> Online
@@ -1647,7 +1655,7 @@ export default function Styles() {
                       testId="form-style-name"
                     />
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <Input
                       label="Category"
                       value={form.category}
@@ -1655,6 +1663,22 @@ export default function Styles() {
                         setForm({ ...form, category: e.target.value })
                       }
                     />
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-neutral-500 mb-1">
+                        Footwear Type
+                      </label>
+                      <select
+                        value={form.footwear_type || "flat"}
+                        onChange={(e) =>
+                          setForm({ ...form, footwear_type: e.target.value })
+                        }
+                        className="w-full h-10 border border-neutral-300 rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#C27842]/30 focus:border-[#C27842]"
+                        data-testid="form-style-footwear-type"
+                      >
+                        <option value="flat">Flat (Upper, Bottom, Sole)</option>
+                        <option value="heel">Heel (Upper, Bottom, Heel/Gola, Sole)</option>
+                      </select>
+                    </div>
                     <Input
                       label="Base Size"
                       value={form.base_size}

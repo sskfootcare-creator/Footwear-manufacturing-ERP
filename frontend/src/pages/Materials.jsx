@@ -18,6 +18,7 @@ import { Plus, Trash2, Pencil, X, Save } from "lucide-react";
 const CATEGORIES = [
   "upper",
   "sole",
+  "heel",
   "lining",
   "accessory",
   "consumable",
@@ -47,8 +48,23 @@ const isTexonRelated = (name = "", category = "") => {
   return n.includes("texon") || c.includes("texon") || n.includes("insole board") || n.includes("board");
 };
 
+export const getStagePresets = (category = "", componentCat = "") => {
+  const cat = (category || "").toLowerCase();
+  const comp = (componentCat || "").toLowerCase();
+  if (cat === "sole" || comp === "sole") {
+    return ["cutting", "finishing", "splitting", "beveling"];
+  }
+  if (cat === "heel" || comp === "heel") {
+    return ["cover_cutting", "folding", "pasting", "finishing"];
+  }
+  if (cat === "upper" || comp === "upper") {
+    return ["cutting", "folding", "attachment", "stitching"];
+  }
+  return ["cutting", "finishing", "cover_cutting", "folding"];
+};
+
 const COMPONENT_CATEGORIES = [
-  "Upper", "Sole", "Insole", "Sockliner", "Bottom",
+  "Upper", "Sole", "Heel", "Insole", "Sockliner", "Bottom",
   "Lace", "Box", "Tag", "Label", "Packaging", "Other",
 ];
 
@@ -69,6 +85,7 @@ const emptyForm = {
   is_component: false,
   component_category: "Sole",
   default_yield_per_unit: "",
+  stage_requirements: [],
 };
 
 export default function Materials() {
@@ -78,6 +95,7 @@ export default function Materials() {
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState(emptyForm);
+  const [newStageInput, setNewStageInput] = useState("");
   const [formError, setFormError] = useState("");
   const [confirm, setConfirm] = useState(null);
 
@@ -107,6 +125,7 @@ export default function Materials() {
   const startNew = () => {
     setEdit(null);
     setForm(emptyForm);
+    setNewStageInput("");
     setFormError("");
     setOpen(true);
   };
@@ -129,7 +148,9 @@ export default function Materials() {
       is_component: m.is_component || false,
       component_category: m.component_category || "Sole",
       default_yield_per_unit: m.default_yield_per_unit != null ? m.default_yield_per_unit : "",
+      stage_requirements: Array.isArray(m.stage_requirements) ? [...m.stage_requirements] : [],
     });
+    setNewStageInput("");
     setFormError("");
     setOpen(true);
   };
@@ -145,6 +166,9 @@ export default function Materials() {
           form.default_yield_per_unit !== "" && form.default_yield_per_unit != null
             ? Number(form.default_yield_per_unit)
             : null,
+        stage_requirements: Array.isArray(form.stage_requirements)
+          ? form.stage_requirements.map((s) => String(s).trim()).filter(Boolean)
+          : [],
       };
       if (edit) {
         await http.patch(`/materials/${edit}`, body);
@@ -159,6 +183,17 @@ export default function Materials() {
       setFormError(e.response?.data?.detail || e.message);
     }
   };
+
+  const handleAddStage = () => {
+    const val = (newStageInput || "").trim().toLowerCase();
+    if (!val) return;
+    const cur = form.stage_requirements || [];
+    if (!cur.includes(val)) {
+      setForm({ ...form, stage_requirements: [...cur, val] });
+    }
+    setNewStageInput("");
+  };
+
   const remove = (id) => {
     setConfirm({
       title: "Delete Material",
@@ -298,6 +333,22 @@ export default function Materials() {
                               Component: {m.component_category || m.category}
                             </Badge>
                           )}
+                          {m.stage_requirements && m.stage_requirements.length > 0 ? (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200"
+                              title={`Stages: ${m.stage_requirements.join(" → ")}`}
+                              data-testid={`material-stages-${m.code}`}
+                            >
+                              Stages: {m.stage_requirements.join(", ")}
+                            </span>
+                          ) : (m.category === "sole" || m.category === "heel" || m.component_category === "Sole" || m.component_category === "Heel") ? (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              data-testid={`material-ready-${m.code}`}
+                            >
+                              Ready-to-use
+                            </span>
+                          ) : null}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-xs" data-testid={`material-vendor-${m.code}`}>
@@ -554,6 +605,120 @@ export default function Materials() {
                 </Select>
               )}
             </div>
+
+            {/* Component Kanban Stage Requirements */}
+            <div className="border border-slate-200 bg-slate-50/70 p-3.5 rounded-lg space-y-2.5" data-testid="stage-requirements-section">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    Stage Requirements
+                    <span className="text-[10px] font-normal normal-case text-slate-500">
+                      (Component Kanban stages)
+                    </span>
+                  </label>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Sub-processes required for this material. Leave empty for ready-to-use materials (e.g. PVC/PU soles or vendor heels).
+                  </p>
+                </div>
+                {form.stage_requirements && form.stage_requirements.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, stage_requirements: [] })}
+                    className="text-[10px] text-red-600 hover:text-red-700 font-semibold underline"
+                    data-testid="clear-stage-reqs-btn"
+                  >
+                    Clear (Mark Ready-to-Use)
+                  </button>
+                )}
+              </div>
+
+              {/* Active stage chips */}
+              <div className="flex flex-wrap gap-1.5 min-h-[34px] p-2 bg-white border border-slate-200 rounded-md items-center">
+                {(!form.stage_requirements || form.stage_requirements.length === 0) ? (
+                  <span className="text-xs text-slate-400 italic" data-testid="no-stage-reqs-indicator">
+                    No processing stages (Ready-to-use / Vendor-supplied — advances straight to Ready in Kanban)
+                  </span>
+                ) : (
+                  form.stage_requirements.map((stage, idx) => (
+                    <span
+                      key={`${stage}-${idx}`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-900 border border-amber-300 shadow-xs"
+                      data-testid={`stage-req-chip-${stage}`}
+                    >
+                      <span className="text-[10px] font-mono text-amber-700 font-bold mr-0.5">{idx + 1}.</span>
+                      {stage}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = form.stage_requirements.filter((_, i) => i !== idx);
+                          setForm({ ...form, stage_requirements: updated });
+                        }}
+                        className="ml-1 text-amber-700 hover:text-red-700 hover:bg-amber-200 rounded-full p-0.5 inline-flex items-center justify-center w-3.5 h-3.5"
+                        data-testid={`remove-stage-req-${stage}`}
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+
+              {/* Add stage input */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="e.g. cutting, finishing, cover_cutting, folding..."
+                  value={newStageInput}
+                  onChange={(e) => setNewStageInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleAddStage();
+                    }
+                  }}
+                  className="flex-1 border border-slate-300 rounded px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-[#2563EB]/30 focus:border-[#2563EB] outline-none bg-white"
+                  data-testid="input-stage-req"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddStage}
+                  className="px-3 py-1.5 text-xs font-semibold rounded bg-slate-800 text-white hover:bg-slate-700 flex items-center gap-1"
+                  data-testid="add-stage-req-btn"
+                >
+                  <Plus className="w-3 h-3" /> Add Stage
+                </button>
+              </div>
+
+              {/* Presets suggestions */}
+              <div className="pt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+                <span className="font-semibold text-slate-600">Quick Presets:</span>
+                {getStagePresets(form.category, form.component_category).map((preset) => {
+                  const alreadyAdded = (form.stage_requirements || []).includes(preset);
+                  return (
+                    <button
+                      key={preset}
+                      type="button"
+                      disabled={alreadyAdded}
+                      onClick={() => {
+                        const cur = form.stage_requirements || [];
+                        if (!cur.includes(preset)) {
+                          setForm({ ...form, stage_requirements: [...cur, preset] });
+                        }
+                      }}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors ${
+                        alreadyAdded
+                          ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+                          : "bg-white text-slate-700 border-slate-300 hover:border-amber-400 hover:bg-amber-50"
+                      }`}
+                      data-testid={`preset-stage-${preset}`}
+                    >
+                      + {preset}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="flex gap-2 pt-3">
               <BtnPrimary onClick={save} data-testid="save-material-btn">
                 <Save className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Save

@@ -269,11 +269,24 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
 
     # --- Components with Swatches ---
     comp = job_group.get("components", {}) or {}
-    c1 = _build_comp_cell("UPPER", comp.get("upper_done"), ["Upper Top", "Mid Layer / Reinforce", "Lining"], compact=compact)
-    c2 = _build_comp_cell("BOTTOM / INSOLE", comp.get("bottom_done"), ["Bottom Layer", "Insole Board+Cushion", "Insole Cover"], compact=compact)
-    c3 = _build_comp_cell("SOLE", comp.get("sole_done"), ["Outsole"], compact=compact)
+    tracks = job_group.get("component_tracks", {}) or {}
+    specs = job_group.get("component_specs", {}) or {}
+    is_heel = specs.get("footwear_type") == "heel"
 
-    comp_t = Table([[c1, c2, c3]], colWidths=[60 * mm, 60 * mm, 60 * mm])
+    upper_done = (tracks.get("upper", {}).get("status") == "ready") if "upper" in tracks else comp.get("upper_done")
+    bottom_done = (tracks.get("bottom", {}).get("status") == "ready") if "bottom" in tracks else comp.get("bottom_done")
+    sole_done = (tracks.get("sole", {}).get("status") == "ready") if "sole" in tracks else comp.get("sole_done")
+
+    c1 = _build_comp_cell("UPPER", upper_done, ["Upper Top", "Mid Layer / Reinforce", "Lining"], compact=compact)
+    c2 = _build_comp_cell("BOTTOM / INSOLE", bottom_done, ["Bottom Layer", "Insole Board+Cushion", "Insole Cover"], compact=compact)
+    c3 = _build_comp_cell("SOLE", sole_done, ["Outsole"], compact=compact)
+
+    if is_heel:
+        heel_done = (tracks.get("heel_gola", {}).get("status") == "ready") if "heel_gola" in tracks else False
+        c4 = _build_comp_cell("HEEL / GOLA", heel_done, ["Heel / Platform", "Cover / Gola"], compact=compact)
+        comp_t = Table([[c1, c2, c3, c4]], colWidths=[45 * mm, 45 * mm, 45 * mm, 45 * mm])
+    else:
+        comp_t = Table([[c1, c2, c3]], colWidths=[60 * mm, 60 * mm, 60 * mm])
     comp_t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1, BLACK),
         ("LINEAFTER", (0, 0), (-2, -1), 1, LINE),

@@ -16,9 +16,15 @@ from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
 
 from auth import get_current_user_factory, require_roles
-from models.orders import POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES, ArchiveJobsRequest
+from models.orders import POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES, ArchiveJobsRequest, ComponentStageUpdate
 from models.materials import QuantityUpdate
 from models.components import ComponentUpdate
+from services.component_spec_service import (
+    derive_component_specs,
+    init_component_tracks,
+    check_merge_gates,
+    MERGE_GATES,
+)
 from models.workers import AssignmentUpdate, BulkAssign
 from models.vendors import GRNIn, GRNLineItem, DefectIn, PaymentIn
 from models.clients import extract_state_code, INDIAN_STATES_MAP
@@ -1558,6 +1564,39 @@ async def create_po(payload: POIn, request: Request):
             "history": [{"stage": "planning", "at": now_iso(), "by": u["email"], "notes": "Job created in planning"}],
         })
     if jobs:
+        # Pre-populate component_specs and component_tracks for all created jobs
+        style_ids = [j.get("style_id") for j in jobs if j.get("style_id")]
+        style_codes = [j.get("style_code") for j in jobs if j.get("style_code")]
+        style_query = []
+        if style_ids:
+            style_query.append({"_id": {"$in": [oid(sid) for sid in style_ids]}})
+        if style_codes:
+            style_query.append({"code": {"$in": style_codes}})
+        styles_found = await db.styles.find({"$or": style_query}).to_list(100) if style_query else []
+        styles_by_id = {str(s["_id"]): s for s in styles_found}
+        styles_by_code = {str(s.get("code")).strip().upper(): s for s in styles_found if s.get("code")}
+
+        all_mat_ids = []
+        for s in styles_found:
+            for b in (s.get("bom") or []):
+                mid = b.get("material_id")
+                if mid and mid not in all_mat_ids:
+                    all_mat_ids.append(mid)
+        mats_found = await db.materials.find({"_id": {"$in": [oid(m) for m in all_mat_ids]}}).to_list(500) if all_mat_ids else []
+        materials_map = {str(m["_id"]): m for m in mats_found}
+
+        for j in jobs:
+            s_doc = styles_by_id.get(str(j.get("style_id"))) or styles_by_code.get(str(j.get("style_code")).strip().upper())
+            specs = derive_component_specs(s_doc or {}, j.get("color"), materials_map)
+            tracks = init_component_tracks(specs)
+            j["component_specs"] = specs
+            j["component_tracks"] = tracks
+            j["components"] = {
+                "upper_done": tracks.get("upper", {}).get("status") == "ready",
+                "bottom_done": tracks.get("bottom", {}).get("status") == "ready",
+                "sole_done": tracks.get("sole", {}).get("status") == "ready",
+            }
+
         await db.production_jobs.insert_many(jobs)
 
     await _sync_po_sku_mappings(doc.get("client_name"), doc.get("line_items", []), u.get("email", "system"), db=db)
@@ -2867,19 +2906,16 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
                     detail=f"Cannot move out of Procurement: Material requirement failed — {str(e)}"
                 )
 
-    # Parallel-completion gate before moving to lasting stage
-    if payload.stage == "lasting":
-        comp = job.get("components") or {}
-        upper_done = bool(comp.get("upper_done"))
-        bottom_done = bool(comp.get("bottom_done"))
-        if not upper_done or not bottom_done:
-            if not upper_done and not bottom_done:
-                msg = "Cannot move to lasting: upper and bottom/insole not completed"
-            elif not upper_done:
-                msg = "Cannot move to lasting: upper not completed"
-            else:
-                msg = "Cannot move to lasting: bottom/insole not completed"
-            raise HTTPException(status_code=400, detail=msg)
+    # Generalized parallel-completion merge gates (lasting, sole_pasting)
+    if payload.stage:
+        allowed, gate_err = check_merge_gates(
+            target_stage=payload.stage,
+            component_tracks=job.get("component_tracks"),
+            component_specs=job.get("component_specs"),
+            fallback_components=job.get("components"),
+        )
+        if not allowed:
+            raise HTTPException(status_code=400, detail=gate_err)
 
     update = {"updated_at": now_iso()}
     if getattr(payload, "planning_notes", None) is not None:
@@ -2962,12 +2998,163 @@ async def update_job_components(jid: str, payload: ComponentUpdate, request: Req
         v = getattr(payload, k)
         if v is not None:
             comps[k] = bool(v)
+
+    tracks = dict(job.get("component_tracks") or {})
+    specs_comps = (job.get("component_specs") or {}).get("components") or {}
+
+    if "upper_done" in comps:
+        if "upper" in tracks:
+            if comps["upper_done"]:
+                tracks["upper"]["status"] = "ready"
+                tracks["upper"]["current_stage"] = "ready"
+            else:
+                stages = specs_comps.get("upper", {}).get("stages") or ["cutting"]
+                tracks["upper"]["status"] = "in_progress"
+                tracks["upper"]["current_stage"] = stages[0]
+                tracks["upper"]["stages_completed"] = []
+    if "bottom_done" in comps:
+        if "bottom" in tracks:
+            if comps["bottom_done"]:
+                tracks["bottom"]["status"] = "ready"
+                tracks["bottom"]["current_stage"] = "ready"
+            else:
+                stages = specs_comps.get("bottom", {}).get("stages") or ["cutting"]
+                tracks["bottom"]["status"] = "in_progress"
+                tracks["bottom"]["current_stage"] = stages[0]
+                tracks["bottom"]["stages_completed"] = []
+    if "sole_done" in comps:
+        if "sole" in tracks:
+            if comps["sole_done"]:
+                tracks["sole"]["status"] = "ready"
+                tracks["sole"]["current_stage"] = "ready"
+            else:
+                stages = specs_comps.get("sole", {}).get("stages") or []
+                tracks["sole"]["status"] = "ready" if not stages else "in_progress"
+                tracks["sole"]["current_stage"] = "ready" if not stages else stages[0]
+                tracks["sole"]["stages_completed"] = []
+
+    update_doc = {"components": comps, "updated_at": now_iso()}
+    if tracks:
+        update_doc["component_tracks"] = tracks
+
     await db.production_jobs.update_one(
         {"_id": oid(jid)},
-        {"$set": {"components": comps, "updated_at": now_iso()},
+        {"$set": update_doc,
          "$push": {"history": {"event": "component_update", "components": comps,
                                "at": now_iso(), "by": u["email"], "notes": payload.notes or ""}}}
     )
+    return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
+
+
+@pos_router.patch("/production/jobs/{jid}/component-stage")
+async def update_job_component_stage(jid: str, payload: ComponentStageUpdate, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    job = await db.production_jobs.find_one({"_id": oid(jid)})
+    if not job:
+        raise HTTPException(404, "Not found")
+
+    comp = payload.component
+    stage = payload.stage
+    composite_stage = f"{comp}.{stage}"
+
+    specs = job.get("component_specs")
+    tracks = job.get("component_tracks")
+    
+    if not specs or not tracks:
+        style_doc = None
+        if job.get("style_id"):
+            style_doc = await db.styles.find_one({"_id": oid(job["style_id"])})
+        elif job.get("style_code"):
+            style_doc = await db.styles.find_one({"code": job["style_code"]})
+        specs = derive_component_specs(style_doc or {}, job.get("color"))
+        tracks = init_component_tracks(specs)
+
+    comp_spec = (specs.get("components") or {}).get(comp)
+    if not comp_spec:
+        raise HTTPException(400, f"Component '{comp}' is not active for this job")
+
+    stages_list = comp_spec.get("stages") or []
+    if stage not in stages_list and stage != "ready":
+        raise HTTPException(400, f"Stage '{stage}' is not a valid stage for component '{comp}'. Valid stages: {stages_list}")
+
+    track = tracks.get(comp) or {"current_stage": stage, "status": "in_progress", "stages_completed": []}
+    completed_stages = list(track.get("stages_completed") or [])
+    if stage not in completed_stages:
+        completed_stages.append(stage)
+    track["stages_completed"] = completed_stages
+
+    stage_idx = stages_list.index(stage) if stage in stages_list else -1
+    if stage_idx >= 0 and stage_idx + 1 < len(stages_list):
+        track["current_stage"] = stages_list[stage_idx + 1]
+        track["status"] = "in_progress"
+    else:
+        track["current_stage"] = "ready"
+        track["status"] = "ready"
+    tracks[comp] = track
+
+    legacy_comps = dict(job.get("components") or {})
+    if comp == "upper":
+        legacy_comps["upper_done"] = (track["status"] == "ready")
+    elif comp == "bottom":
+        legacy_comps["bottom_done"] = (track["status"] == "ready")
+    elif comp == "sole":
+        legacy_comps["sole_done"] = (track["status"] == "ready")
+
+    completed_qty = payload.completed_qty if payload.completed_qty is not None else int(job.get("quantity") or 0)
+    asgn = (job.get("assignments") or {}).get(composite_stage) or (job.get("assignments") or {}).get(stage) or {}
+    wid = payload.worker_id or asgn.get("worker_id")
+    completed_by = None
+    update_dict = {
+        "component_tracks": tracks,
+        "component_specs": specs,
+        "components": legacy_comps,
+        "updated_at": now_iso(),
+    }
+
+    if wid:
+        w_doc = await db.workers.find_one({"_id": oid(wid)})
+        w_name = w_doc.get("name", "") if w_doc else asgn.get("worker_name", "")
+        w_rate = asgn.get("rate_per_pair")
+        if w_rate is None and w_doc:
+            w_rate = float(w_doc.get("rate_per_pair", 0) or 0)
+        else:
+            w_rate = float(w_rate or 0)
+
+        completed_by = {
+            "worker_id": str(wid),
+            "worker_name": w_name,
+            "rate_per_pair": w_rate,
+            "at": now_iso(),
+        }
+        assignments = dict(job.get("assignments") or {})
+        assignments[composite_stage] = {
+            "worker_id": str(wid),
+            "worker_name": w_name,
+            "rate_per_pair": w_rate,
+            "completed_by": completed_by,
+            "completed_qty": completed_qty,
+            "completed_at": now_iso(),
+        }
+        update_dict["assignments"] = assignments
+
+    history_entry = {
+        "stage": composite_stage,
+        "component": comp,
+        "component_stage": stage,
+        "at": now_iso(),
+        "by": u["email"],
+        "notes": payload.notes or f"Completed {comp} stage {stage}",
+        "completed_qty": completed_qty,
+        "completed_by": completed_by,
+    }
+
+    await db.production_jobs.update_one(
+        {"_id": oid(jid)},
+        {"$set": update_dict, "$push": {"history": history_entry}}
+    )
+
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
 
 
