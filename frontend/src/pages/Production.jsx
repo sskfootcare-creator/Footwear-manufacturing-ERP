@@ -3,8 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
+import ImageViewModal from "../components/ImageViewModal";
 import { useAuth } from "../lib/auth";
-import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart } from "lucide-react";
+import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart, Maximize2 } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 import ComponentProductionBoard from "../components/ComponentProductionBoard";
 
@@ -398,6 +399,7 @@ export default function Production() {
   const [vendors, setVendors] = useState([]);
   const [dispatchDetailFor, setDispatchDetailFor] = useState(null);
   const [planningAllocationFor, setPlanningAllocationFor] = useState(null);
+  const [previewImageModal, setPreviewImageModal] = useState(null);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
@@ -1143,6 +1145,7 @@ export default function Production() {
             onDownloadDispatchFile={downloadDispatchFile}
             onDownloadInvoice={downloadGroupInvoice}
             invoices={invoices}
+            onPreviewImage={(img) => setPreviewImageModal(img)}
           />
         ) : boardMode === "component" ? (
           <ComponentProductionBoard
@@ -1248,6 +1251,7 @@ export default function Production() {
                         onDownloadDispatchFile={downloadDispatchFile}
                         onOpenDispatchDetails={(group) => setDispatchDetailFor(group)}
                         onArchiveDispatched={(jids, lbl) => archiveDispatchedJobs(jids, lbl)}
+                        onPreviewImage={(img) => setPreviewImageModal(img)}
                         onOpenPlanningAllocation={(group, req) => setPlanningAllocationFor({ group, req })}
                         onDropWorkerToComponent={(grp, role, worker) => assignWorker(grp, role, worker.id, worker.rate_per_pair)}
                         draggingWorker={draggingWorker}
@@ -1338,6 +1342,18 @@ export default function Production() {
           onClose={() => setDispatchDetailFor(null)}
           onDownloadDispatchFile={downloadDispatchFile}
           onArchive={archiveDispatchedJobs}
+          onPreviewImage={(img) => setPreviewImageModal(img)}
+        />
+      )}
+
+      {previewImageModal && (
+        <ImageViewModal
+          isOpen={!!previewImageModal}
+          src={previewImageModal.src || previewImageModal.url}
+          title={previewImageModal.title || "Style Preview"}
+          subtitle={previewImageModal.subtitle}
+          alt={previewImageModal.alt || "Style Preview"}
+          onClose={() => setPreviewImageModal(null)}
         />
       )}
 
@@ -1691,8 +1707,10 @@ function ColorGroupCard(props) {
     isQcPack, isQcPackSelected, onToggleQcPackSelect, isQcPackSelectDisabled, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
     dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails, onArchiveDispatched,
-    onOpenPlanningAllocation, onDropWorkerToComponent, draggingWorker, workers = [], vendors = [] } = props;
+    onOpenPlanningAllocation, onDropWorkerToComponent, draggingWorker, workers = [], vendors = [],
+    onPreviewImage } = props;
   const navigate = useNavigate();
+  const [localPreview, setLocalPreview] = useState(null);
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
   // Track which parallel component is selected/expanded for karigar assignment
@@ -1946,28 +1964,60 @@ function ColorGroupCard(props) {
 
       {/* 2-COLUMN HEADER: Left = Image, Right = PO Number, Style, SKU, Details & Dates */}
       <div className="p-2.5 border-b border-slate-200 bg-white flex gap-3 items-center">
-        {/* Left Column: Image (resized to fit, with rounded border & fallback) */}
-        <div className="w-24 h-24 sm:w-28 sm:h-28 flex-shrink-0 rounded-md overflow-hidden border border-slate-200 bg-slate-50 relative flex items-center justify-center shadow-xs">
-          {(style?.image_url || style?.image_display_url || style?.image_thumbnail_url) ? (
-            <SafeImage
-              image={{
-                url: style.image_url,
-                display_url: style.image_display_url,
-                thumbnail_url: style.image_thumbnail_url,
-              }}
-              alt={style.name || group.style_code}
-              aspectRatio="1/1"
-              fit="cover"
-              className="w-full h-full object-cover"
-              testId={`card-img-${group.key}`}
-            />
-          ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center text-slate-300 p-2">
-              <Package className="w-6 h-6 text-slate-300 stroke-[1.5]" />
-              <span className="text-[8.5px] uppercase tracking-wider font-semibold text-slate-400 mt-1">No Image</span>
+        {/* Left Column: Image (resized to fit, with rounded border & fallback, clickable to view in modal) */}
+        {(() => {
+          const styleImgUrl = style?.image_url || style?.image_display_url || style?.image_thumbnail_url;
+          return (
+            <div
+              className={`w-24 h-24 sm:w-28 sm:h-28 flex-shrink-0 rounded-md overflow-hidden border border-slate-200 bg-slate-50 relative flex items-center justify-center shadow-xs ${
+                styleImgUrl ? "cursor-pointer group hover:border-[#C27842] hover:ring-2 hover:ring-[#C27842]/30 transition-all" : ""
+              }`}
+              onClick={styleImgUrl ? () => {
+                const data = {
+                  src: style.image_url || style.image_display_url || style.image_thumbnail_url,
+                  title: `${style.name ? `${style.name} (${group.style_code})` : group.style_code}${group.color ? ` · ${group.color}` : ""}`,
+                  subtitle: `PO #${group.po_number || "—"}${group.totalQty ? ` · ${group.totalQty} pairs` : ""}`,
+                  alt: style.name || group.style_code,
+                };
+                if (onPreviewImage) onPreviewImage(data);
+                else setLocalPreview(data);
+              } : undefined}
+              title={styleImgUrl ? "Click to view full image in modal" : undefined}
+              data-testid={`card-img-container-${group.key}`}
+            >
+              {styleImgUrl ? (
+                <>
+                  <SafeImage
+                    image={{
+                      url: style.image_url,
+                      display_url: style.image_display_url,
+                      thumbnail_url: style.image_thumbnail_url,
+                    }}
+                    alt={style.name || group.style_code}
+                    aspectRatio="1/1"
+                    fit="cover"
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                    testId={`card-img-${group.key}`}
+                  />
+                  <div
+                    className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white pointer-events-none"
+                    data-testid={`card-img-overlay-${group.key}`}
+                  >
+                    <Maximize2 className="w-5 h-5 drop-shadow" />
+                    <span className="text-[9px] font-bold uppercase tracking-wider mt-1 bg-black/60 px-1.5 py-0.5 rounded shadow">
+                      View
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-slate-300 p-2">
+                  <Package className="w-6 h-6 text-slate-300 stroke-[1.5]" />
+                  <span className="text-[8.5px] uppercase tracking-wider font-semibold text-slate-400 mt-1">No Image</span>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })()}
 
         {/* Right Column: PO Number, Style Number, SKU / External ID, Color, Qty, and Dates */}
         <div className="flex-1 min-w-0 flex flex-col justify-between self-stretch py-0.5">
@@ -2483,6 +2533,16 @@ function ColorGroupCard(props) {
           })()}
         </div>
       </div>
+      {localPreview && (
+        <ImageViewModal
+          isOpen={!!localPreview}
+          src={localPreview.src}
+          title={localPreview.title}
+          subtitle={localPreview.subtitle}
+          alt={localPreview.alt}
+          onClose={() => setLocalPreview(null)}
+        />
+      )}
     </Card>
   );
 }
@@ -3490,7 +3550,7 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 
 
 /* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [] }) {
+function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [], onPreviewImage }) {
   const [expandedClusters, setExpandedClusters] = useState({});
   const toggleExpand = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
 
@@ -3605,7 +3665,20 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
                                 <img
                                   src={styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url}
                                   alt=""
-                                  className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0"
+                                  className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842] hover:scale-110 transition-all"
+                                  title="Click to view full image in modal"
+                                  onClick={() => {
+                                    const st = styleByCode[g.style_code];
+                                    const url = st?.image_url || st?.image_display_url || st?.image_thumbnail_url;
+                                    if (url) {
+                                      onPreviewImage?.({
+                                        src: url,
+                                        title: `${st?.name ? `${st.name} (${g.style_code})` : g.style_code}${g.color ? ` · ${g.color}` : ""}`,
+                                        subtitle: `Invoice: ${cluster.invoice_no || "—"} · ${g.totalQty || 0} pairs`,
+                                      });
+                                    }
+                                  }}
+                                  data-testid={`archive-merged-thumb-${g.key}`}
                                 />
                               )}
                               <div className="truncate">
@@ -3799,18 +3872,41 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
                 {(styleByCode[g.style_code]?.image_url ||
                   styleByCode[g.style_code]?.image_display_url ||
                   styleByCode[g.style_code]?.image_thumbnail_url) && (
-                  <SafeImage
-                    image={{
-                      url: styleByCode[g.style_code]?.image_url,
-                      display_url:
-                        styleByCode[g.style_code]?.image_display_url,
-                      thumbnail_url:
-                        styleByCode[g.style_code]?.image_thumbnail_url,
+                  <div
+                    className="relative cursor-pointer group overflow-hidden"
+                    title="Click to view full image in modal"
+                    onClick={() => {
+                      const st = styleByCode[g.style_code];
+                      const url = st?.image_url || st?.image_display_url || st?.image_thumbnail_url;
+                      if (url) {
+                        onPreviewImage?.({
+                          src: url,
+                          title: `${st?.name ? `${st.name} (${g.style_code})` : g.style_code}${g.color ? ` · ${g.color}` : ""}`,
+                          subtitle: `PO #${g.po_number || "—"} · ${g.totalQty || 0} pairs`,
+                        });
+                      }
                     }}
-                    alt=""
-                    aspectRatio="16/8"
-                    testId={`archive-img-${g.key}`}
-                  />
+                    data-testid={`archive-img-container-${g.key}`}
+                  >
+                    <SafeImage
+                      image={{
+                        url: styleByCode[g.style_code]?.image_url,
+                        display_url:
+                          styleByCode[g.style_code]?.image_display_url,
+                        thumbnail_url:
+                          styleByCode[g.style_code]?.image_thumbnail_url,
+                      }}
+                      alt=""
+                      aspectRatio="16/8"
+                      className="group-hover:scale-102 transition-transform duration-200"
+                      testId={`archive-img-${g.key}`}
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white pointer-events-none">
+                      <span className="text-[10px] font-bold uppercase tracking-wider bg-black/60 px-2 py-1 rounded flex items-center gap-1 shadow">
+                        <Maximize2 className="w-3.5 h-3.5" /> View Image
+                      </span>
+                    </div>
+                  </div>
                 )}
                 <div className="p-4">
                   <div className="flex items-baseline justify-between mb-2">
@@ -4178,7 +4274,8 @@ function DLPair({ label, value }) {
 
 
 /* -------------------- DISPATCH DETAILS MODAL -------------------- */
-function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [], styleByCode = {}, onClose, onDownloadDispatchFile, onArchive }) {
+function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [], styleByCode = {}, onClose, onDownloadDispatchFile, onArchive, onPreviewImage }) {
+  const [modalPreview, setModalPreview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dispatchRecord, setDispatchRecord] = useState(null);
   const [cartons, setCartons] = useState([]);
@@ -4458,6 +4555,7 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
                   <table className="w-full text-xs" data-testid="dispatch-size-breakdown-table">
                     <thead className="bg-slate-100 border-b border-slate-200">
                       <tr className="text-left font-bold text-slate-700 uppercase text-[10px]">
+                        <th className="px-3 py-2 w-12 text-center">Image</th>
                         <th className="px-3 py-2">Style Code</th>
                         <th className="px-3 py-2">Color</th>
                         <th className="px-3 py-2 text-center">Size</th>
@@ -4467,23 +4565,60 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
                     <tbody className="divide-y divide-slate-100">
                       {sizeBreakdown.length === 0 ? (
                         <tr>
-                          <td colSpan="4" className="px-3 py-4 text-center text-slate-400">No size breakdown available.</td>
+                          <td colSpan="5" className="px-3 py-4 text-center text-slate-400">No size breakdown available.</td>
                         </tr>
                       ) : (
-                        sizeBreakdown.map((row, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50">
-                            <td className="px-3 py-2 font-mono font-bold">{row.style_code}</td>
-                            <td className="px-3 py-2 font-medium">{row.color}</td>
-                            <td className="px-3 py-2 text-center font-mono font-bold text-slate-800">{row.size}</td>
-                            <td className="px-3 py-2 text-right font-mono font-bold text-[#C27842]">{row.qty} prs</td>
-                          </tr>
-                        ))
+                        sizeBreakdown.map((row, idx) => {
+                          const st = styleByCode[row.style_code];
+                          const thumb = st?.image_thumbnail_url || st?.image_display_url || st?.image_url;
+                          const fullImg = st?.image_url || st?.image_display_url || st?.image_thumbnail_url;
+                          return (
+                            <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                              <td className="px-3 py-1.5 text-center">
+                                {thumb ? (
+                                  <div
+                                    className="relative group w-9 h-9 mx-auto rounded border border-slate-200 bg-slate-50 overflow-hidden cursor-pointer shadow-2xs hover:border-[#C27842] hover:ring-2 hover:ring-[#C27842]/30 transition-all flex items-center justify-center"
+                                    onClick={() => {
+                                      const data = {
+                                        src: fullImg || thumb,
+                                        title: `${row.style_name || row.style_code} (${row.color})`,
+                                        subtitle: `Size: ${row.size} · Dispatched: ${row.qty} prs`,
+                                        alt: row.style_code,
+                                      };
+                                      if (onPreviewImage) onPreviewImage(data);
+                                      else setModalPreview(data);
+                                    }}
+                                    title="Click to view full image in modal"
+                                    data-testid={`dispatch-row-img-${idx}`}
+                                  >
+                                    <img
+                                      src={thumb}
+                                      alt={row.style_code}
+                                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-200"
+                                    />
+                                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white pointer-events-none">
+                                      <Maximize2 className="w-3.5 h-3.5" />
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="w-9 h-9 mx-auto rounded border border-slate-100 bg-slate-50 flex items-center justify-center text-slate-300">
+                                    <Package className="w-4 h-4 text-slate-300" />
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 font-mono font-bold">{row.style_code}</td>
+                              <td className="px-3 py-2 font-medium">{row.color}</td>
+                              <td className="px-3 py-2 text-center font-mono font-bold text-slate-800">{row.size}</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-[#C27842]">{row.qty} prs</td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                     {sizeBreakdown.length > 0 && (
                       <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold">
                         <tr>
-                          <td colSpan="3" className="px-3 py-2 text-right uppercase text-[10px] text-slate-600">Total Dispatched Pairs:</td>
+                          <td colSpan="4" className="px-3 py-2 text-right uppercase text-[10px] text-slate-600">Total Dispatched Pairs:</td>
                           <td className="px-3 py-2 text-right font-mono text-sm text-[#C27842]">{totalDispatchedPairs} prs</td>
                         </tr>
                       </tfoot>
@@ -4562,6 +4697,16 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
           )}
         </div>
       </div>
+      {modalPreview && (
+        <ImageViewModal
+          isOpen={!!modalPreview}
+          src={modalPreview.src}
+          title={modalPreview.title}
+          subtitle={modalPreview.subtitle}
+          alt={modalPreview.alt}
+          onClose={() => setModalPreview(null)}
+        />
+      )}
     </div>
   );
 }

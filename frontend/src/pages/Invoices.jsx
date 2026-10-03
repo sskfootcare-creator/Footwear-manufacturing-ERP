@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { http, inr, API } from "../lib/api";
+import ImageViewModal from "../components/ImageViewModal";
 import {
 
   PageHeader,
@@ -35,6 +36,8 @@ import {
   Percent,
   Check,
   Users,
+  Maximize2,
+  Package,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -65,18 +68,21 @@ export default function Invoices() {
   const [showForecast, setShowForecast] = useState(true);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [cashAccounts, setCashAccounts] = useState([]);
+  const [styles, setStyles] = useState([]);
   const [showDirectModal, setShowDirectModal] = useState(false);
 
   const load = async () => {
     try {
-      const [{ data: invData }, { data: forecastData }, bankRes, cashRes] = await Promise.all([
+      const [{ data: invData }, { data: forecastData }, bankRes, cashRes, stylesRes] = await Promise.all([
         http.get("/invoices"),
         http.get("/invoices/cash-forecast").catch(() => ({ data: null })),
         http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
         http.get("/banking/cash-accounts").catch(() => ({ data: [] })),
+        http.get("/styles").catch(() => ({ data: [] })),
       ]);
       setRows(invData || []);
       setForecast(forecastData || null);
+      setStyles(Array.isArray(stylesRes?.data) ? stylesRes.data : []);
       setBankAccounts(Array.isArray(bankRes?.data) ? bankRes.data : bankRes?.data?.items || []);
       setCashAccounts(
         Array.isArray(cashRes?.data?.cash_accounts)
@@ -91,6 +97,14 @@ export default function Invoices() {
       console.error("Failed to load invoices or forecast", err);
     }
   };
+
+  const styleByCode = useMemo(() => {
+    const m = {};
+    for (const s of styles) {
+      if (s.code) m[s.code] = s;
+    }
+    return m;
+  }, [styles]);
   useEffect(() => {
     load();
   }, []);
@@ -529,7 +543,7 @@ export default function Invoices() {
         </Card>
       </div>
 
-      {view && <InvoiceDetailModal inv={view} onClose={() => setView(null)} />}
+      {view && <InvoiceDetailModal inv={view} styleByCode={styleByCode} onClose={() => setView(null)} />}
       {grnFor && (
         <GRNDialog
           invoiceMeta={grnFor}
@@ -616,7 +630,25 @@ function Tile({
 }
 
 /* ------------------- INVOICE DETAIL MODAL ------------------- */
-function InvoiceDetailModal({ inv, onClose }) {
+function InvoiceDetailModal({ inv, onClose, styleByCode = {} }) {
+  const [localStyles, setLocalStyles] = useState(styleByCode);
+  const [previewImage, setPreviewImage] = useState(null);
+
+  useEffect(() => {
+    if (styleByCode && Object.keys(styleByCode).length > 0) {
+      setLocalStyles(styleByCode);
+      return;
+    }
+    http.get("/styles")
+      .then((res) => {
+        const m = {};
+        for (const s of res.data || []) {
+          if (s.code) m[s.code] = s;
+        }
+        setLocalStyles(m);
+      })
+      .catch(() => {});
+  }, [styleByCode]);
   return (
     <div
       className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4"
@@ -730,6 +762,7 @@ function InvoiceDetailModal({ inv, onClose }) {
             <table className="w-full text-xs border-2 border-slate-200">
               <thead className="bg-slate-50">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                  <th className="px-3 py-2 font-bold w-14 text-center">Thumbnail</th>
                   <th className="px-3 py-2 font-bold">Style</th>
                   <th className="px-3 py-2 font-bold">Color</th>
                   <th className="px-3 py-2 font-bold">Size</th>
@@ -739,22 +772,59 @@ function InvoiceDetailModal({ inv, onClose }) {
                 </tr>
               </thead>
               <tbody>
-                {(inv.line_items_snapshot || []).map((li, i) => (
-                  <tr key={i} className="border-t border-slate-100">
-                    <td className="px-3 py-1.5 font-mono">{li.style_code}</td>
-                    <td className="px-3 py-1.5">{li.color}</td>
-                    <td className="px-3 py-1.5 font-mono">{li.size || "—"}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">
-                      {li.quantity ?? li.qty ?? 0}
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono">
-                      {inr(li.unit_price || 0)}
-                    </td>
-                    <td className="px-3 py-1.5 text-right font-mono font-bold">
-                      {inr(li.amount || 0)}
-                    </td>
-                  </tr>
-                ))}
+                {(inv.line_items_snapshot || inv.line_items || []).map((li, i) => {
+                  const st = localStyles[li.style_code] || localStyles[li.style_id];
+                  const thumb = li.thumbnail_url || st?.image_thumbnail_url || st?.image_display_url || st?.image_url || li.image_url;
+                  const fullImg = li.image_url || st?.image_url || st?.image_display_url || st?.image_thumbnail_url || li.thumbnail_url;
+                  return (
+                    <tr key={i} className="border-t border-slate-100 hover:bg-slate-50 transition-colors">
+                      <td className="px-3 py-1.5 text-center">
+                        {thumb ? (
+                          <div
+                            className="relative group w-10 h-10 mx-auto rounded border border-slate-200 bg-slate-50 overflow-hidden cursor-pointer shadow-2xs hover:border-[#C27842] hover:ring-2 hover:ring-[#C27842]/30 transition-all flex items-center justify-center"
+                            onClick={() => setPreviewImage({
+                              src: fullImg || thumb,
+                              title: `${st?.name ? `${st.name} (${li.style_code})` : li.style_code}${li.color ? ` · ${li.color}` : ""}`,
+                              subtitle: `Invoice #${inv.invoice_no || "—"} · Size: ${li.size || "—"} · Qty: ${li.quantity ?? li.qty ?? 0}`,
+                              alt: li.style_code,
+                            })}
+                            title="Click to view full image in modal"
+                            data-testid={`inv-line-item-thumb-${i}`}
+                          >
+                            <img
+                              src={thumb}
+                              alt={li.style_code}
+                              className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-200"
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white pointer-events-none">
+                              <Maximize2 className="w-3.5 h-3.5" />
+                            </div>
+                          </div>
+                        ) : (
+                          <div
+                            className="w-10 h-10 mx-auto rounded border border-slate-100 bg-slate-50 flex items-center justify-center text-slate-300"
+                            title="No image"
+                            data-testid={`inv-line-item-no-thumb-${i}`}
+                          >
+                            <Package className="w-4 h-4 text-slate-300" />
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 font-mono font-bold text-slate-900">{li.style_code}</td>
+                      <td className="px-3 py-1.5">{li.color}</td>
+                      <td className="px-3 py-1.5 font-mono">{li.size || "—"}</td>
+                      <td className="px-3 py-1.5 text-right font-mono">
+                        {li.quantity ?? li.qty ?? 0}
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono">
+                        {inr(li.unit_price || 0)}
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono font-bold">
+                        {inr(li.amount || 0)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </Section>
@@ -842,6 +912,16 @@ function InvoiceDetailModal({ inv, onClose }) {
           )}
         </div>
       </div>
+      {previewImage && (
+        <ImageViewModal
+          isOpen={!!previewImage}
+          src={previewImage.src}
+          title={previewImage.title}
+          subtitle={previewImage.subtitle}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 }
