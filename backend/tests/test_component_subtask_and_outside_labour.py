@@ -1,3 +1,4 @@
+import os
 import pytest
 from httpx import AsyncClient, ASGITransport
 import server
@@ -9,8 +10,10 @@ async def test_subtask_bulk_assignment_and_outside_labour_flow():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Login as admin
-        login_res = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "admin123"})
-        assert login_res.status_code == 200
+        _email = os.environ.get("ADMIN_EMAIL", "admin@example.com")
+        _pass  = os.environ.get("ADMIN_PASSWORD", "admin123")
+        login_res = await client.post("/api/auth/login", json={"email": _email, "password": _pass})
+        assert login_res.status_code == 200, f"Login failed ({login_res.status_code}): {login_res.text}"
         token = login_res.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 

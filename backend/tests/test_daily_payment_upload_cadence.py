@@ -28,20 +28,47 @@ ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "Admin@123")
 def client():
     import server as _server
     from fastapi.testclient import TestClient
+    from motor.motor_asyncio import AsyncIOMotorClient
     from server import app
-    # Ensure app.mongodb is removed and server.db connects to real database
+
+    # Ensure app.mongodb is removed so routes use server.db, not a stale mock.
     if hasattr(app, "mongodb"):
         try:
             delattr(app, "mongodb")
         except AttributeError:
             pass
-    db_name = os.environ.get("DB_NAME", "ssk_ci_db")
-    if hasattr(_server, "client") and _server.client is not None:
-        _server.db = _server.client[db_name]
+
+    db_name    = os.environ.get("DB_NAME",   "ssk_ci_db")
+    mongo_url  = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+
+    # Save whatever server.client / server.db exist so we can restore them after
+    # the module finishes (keep other tests isolated).
+    old_client = getattr(_server, "client", None)
+    old_db     = getattr(_server, "db",     None)
+
+    # Create a fresh client owned by this fixture — immune to motor_reconnect
+    # tearing down server.client between async tests in other modules.
+    fresh_client = AsyncIOMotorClient(mongo_url)
+    _server.client = fresh_client
+    _server.db     = fresh_client[db_name]
+
     with TestClient(app, base_url="http://testserver/api") as tc:
         r = tc.post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASS})
         assert r.status_code == 200, f"Login failed: {r.text}"
+        tok = r.json().get("access_token", "")
+        tc.headers.update({"Authorization": f"Bearer {tok}"})
         yield tc
+
+    # Teardown: close the fixture-owned client and restore original state.
+    try:
+        fresh_client.close()
+    except Exception:
+        pass
+    if old_client is not None:
+        _server.client = old_client
+    if old_db is not None:
+        _server.db = old_db
+
 
 
 class TestDailyPaymentUploadCadence:

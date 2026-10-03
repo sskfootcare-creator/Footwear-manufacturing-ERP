@@ -153,6 +153,14 @@ def motor_reconnect(request):
     loadscope: each test gets a fresh event loop from anyio, but Motor's client
     was bound to the previous (now-closed) loop.  Recreating the client before
     every async test avoids 'RuntimeError: Event loop is closed'.
+
+    NOTE: we deliberately do NOT call old_client.close() before creating the
+    new client, and we do NOT close new_client in teardown.  Motor.close()
+    schedules async cleanup on the client's internal event loop; calling it
+    when that loop is already torn down (teardown) or not yet running (setup
+    for the next test) raises RuntimeError / InvalidOperation and corrupts the
+    client state for subsequent tests.  Overwriting the reference is sufficient
+    — Motor is lazy and the old client becomes GC-eligible.
     """
     # Only do the reconnect for async (anyio-backed) tests to avoid overhead
     # on synchronous tests that don't need it.
@@ -166,26 +174,15 @@ def motor_reconnect(request):
     mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
     db_name   = os.environ.get("DB_NAME",   "ssk_footwear_erp")
 
-    # Close the old client (best-effort) so we don't leak connections.
-    old_client = getattr(server, "client", None)
-    if old_client is not None:
-        try:
-            old_client.close()
-        except Exception:
-            pass
-
     # Create a brand-new client bound to the current event loop.
+    # Do NOT close the old client here — see docstring above.
     new_client = AsyncIOMotorClient(mongo_url)
     server.client = new_client
     server.db     = new_client[db_name]
 
     yield
+    # No teardown close — see docstring above.
 
-    # Teardown: close the client we just created.
-    try:
-        new_client.close()
-    except Exception:
-        pass
 
 
 @pytest.fixture(autouse=True)
