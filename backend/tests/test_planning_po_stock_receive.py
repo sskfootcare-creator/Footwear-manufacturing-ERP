@@ -3,16 +3,22 @@ from httpx import AsyncClient, ASGITransport
 import uuid
 import os
 import server
+from auth import seed_admin
 
 
 @pytest.mark.anyio
 async def test_planning_po_receipt_adds_to_inventory_stock():
+    # Ensure the admin account exists before attempting login.
+    # ASGITransport does NOT trigger the live server's on_startup, so when this
+    # test runs first in an xdist worker the DB is empty and login returns 401.
+    # seed_admin() is idempotent — safe to call even if the user already exists.
+    _email = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+    _pass  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
+    await seed_admin(server.db)
+
     app = server.app
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Login as admin — use canonical credentials from env (same as conftest defaults)
-        _email = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
-        _pass  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
         login_res = await client.post("/api/auth/login", json={"email": _email, "password": _pass})
         assert login_res.status_code == 200, login_res.text
         token = login_res.json().get("access_token")
