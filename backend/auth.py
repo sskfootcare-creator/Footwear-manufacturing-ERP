@@ -385,6 +385,12 @@ async def get_current_user_factory(db):
         if not token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
+        # Resolve active database dynamically so test suites under pytest-xdist/anyio
+        # that rebind server.db to new event loops do not encounter stale/closed event loop clients.
+        import server
+        server_db = getattr(server, "db", None)
+        active_db = server_db if server_db is not None else db
+
         # ── 1. Fast path: Decode internal ERP JWT immediately (0.05ms, zero network overhead) ──
         is_internal_token = False
         try:
@@ -408,7 +414,7 @@ async def get_current_user_factory(db):
 
                 # ── Worker tokens resolve from db.workers, not db.users ──────────
                 if payload.get("role") == "worker":
-                    worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
+                    worker = await active_db.workers.find_one({"_id": ObjectId(payload["sub"])})
                     if not worker or not worker.get("active", True):
                         raise HTTPException(status_code=401, detail="Worker not found or inactive")
                     w_user = {
@@ -427,7 +433,7 @@ async def get_current_user_factory(db):
                     return w_user
 
                 # ── Regular user token ────────────────────────────────────────────
-                user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+                user = await active_db.users.find_one({"_id": ObjectId(payload["sub"])})
                 if not user:
                     raise HTTPException(status_code=401, detail="User not found")
                 user["id"] = str(user["_id"])
@@ -449,7 +455,7 @@ async def get_current_user_factory(db):
             supa_user = verify_supabase_token(token)
             if supa_user:
                 email = getattr(supa_user, "email", "").strip().lower()
-                user = await db.users.find_one({"email": email})
+                user = await active_db.users.find_one({"email": email})
                 if user and user.get("active", True):
                     user["id"] = str(user["_id"])
                     user.pop("_id", None)
@@ -476,7 +482,7 @@ async def get_current_user_factory(db):
                 raise HTTPException(status_code=401, detail="Invalid token type")
 
             if payload.get("role") == "worker":
-                worker = await db.workers.find_one({"_id": ObjectId(payload["sub"])})
+                worker = await active_db.workers.find_one({"_id": ObjectId(payload["sub"])})
                 if not worker or not worker.get("active", True):
                     raise HTTPException(status_code=401, detail="Worker not found or inactive")
                 w_user = {
@@ -494,7 +500,7 @@ async def get_current_user_factory(db):
                     check_route_module_access(w_user, path)
                 return w_user
 
-            user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+            user = await active_db.users.find_one({"_id": ObjectId(payload["sub"])})
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")
             user["id"] = str(user["_id"])

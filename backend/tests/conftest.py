@@ -190,7 +190,7 @@ def clean_db_state():
     """Ensure mock DB assignments on app.mongodb or server.db do not leak across tests."""
     import server
 
-    db_name = os.environ.get("DB_NAME", "ssk_ci_db")
+    db_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
     real_db = server.client[db_name] if hasattr(server, "client") and server.client is not None else None
 
     # Reset before test
