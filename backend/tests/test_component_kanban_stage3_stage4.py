@@ -12,8 +12,8 @@ async def test_component_stage_update_and_payroll_flow():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Login as admin
-        _email = os.environ.get("ADMIN_EMAIL", "admin@example.com")
-        _pass  = os.environ.get("ADMIN_PASSWORD", "admin123")
+        _email = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+        _pass  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
         login_res = await client.post("/api/auth/login", json={"email": _email, "password": _pass})
         assert login_res.status_code == 200, f"Login failed ({login_res.status_code}): {login_res.text}"
         token = login_res.json()["access_token"]
