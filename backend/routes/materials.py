@@ -251,27 +251,35 @@ async def _compute_material_inventory_summary(material_id: str, mat_doc: Optiona
             mat_doc = await db.materials.find_one({"_id": oid(material_id)})
         except Exception:
             mat_doc = None
-    movements = await db.inventory_movements.find({"material_id": material_id}).to_list(10000)
-    return _calculate_material_weighted_avg(mat_doc or {}, movements)
+    if mat_doc is None and material_id:
+        mat_doc = await db.materials.find_one({"code": material_id})
+
+    mat_code = (mat_doc or {}).get("code")
+    query_conds = [{"material_id": str(material_id)}]
+    try:
+        query_conds.append({"material_id": oid(material_id)})
+    except Exception:
+        pass
+    if mat_code:
+        query_conds.append({"material_code": mat_code})
+
+    movements = await db.inventory_movements.find({"$or": query_conds}).to_list(10000)
+    unique_movs = []
+    seen = set()
+    for m in movements:
+        mid_val = str(m.get("_id", ""))
+        if mid_val and mid_val in seen:
+            continue
+        seen.add(mid_val)
+        unique_movs.append(m)
+
+    return _calculate_material_weighted_avg(mat_doc or {}, unique_movs)
 
 
 async def _get_material_balance(material_id: str, db=None) -> float:
     """Calculate the net balance of a raw material from its inventory movements."""
-    if db is None:
-        import server
-        db = server.db
-    movements = await db.inventory_movements.find({"material_id": material_id}).to_list(10000)
-    stock = 0.0
-    for m in movements:
-        qty = float(m.get("quantity", 0) or 0)
-        mtype = m.get("type")
-        if mtype == "in":
-            stock += qty
-        elif mtype == "out":
-            stock -= qty
-        else:
-            stock += qty
-    return stock
+    summary = await _compute_material_inventory_summary(material_id, db=db)
+    return float(summary.get("balance", 0.0) or 0.0)
 
 
 async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
@@ -292,7 +300,10 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
     style_map = {s["code"]: stringify(s) for s in styles}
 
     materials = await db.materials.find({}).to_list(2000)
-    mat_map = {str(m["_id"]): stringify(m) for m in materials}
+    mat_by_id = {str(m["_id"]): stringify(m) for m in materials}
+    mat_by_code = {str(m.get("code", "")).strip().lower(): stringify(m) for m in materials if m.get("code")}
+    mat_by_name = {str(m.get("name", "")).strip().lower(): stringify(m) for m in materials if m.get("name")}
+    mat_map = mat_by_id
     vendors = []
     try:
         if hasattr(db, "vendors") and hasattr(db.vendors, "find"):
@@ -332,7 +343,16 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             code = b.get("material_code") or ""
             name = b.get("material_name") or ""
             unit = b.get("unit") or ""
-            mat_info = mat_map.get(str(mid)) or mat_map.get(code) or {}
+            mid_val = str(mid or "").strip()
+            code_val = str(code or "").strip().lower()
+            name_val = str(name or "").strip().lower()
+            mat_info = (
+                mat_by_id.get(mid_val)
+                or mat_by_code.get(code_val)
+                or mat_by_code.get(mid_val.lower())
+                or mat_by_name.get(name_val)
+                or {}
+            )
             raw_yld = b.get("yield_per_unit")
             def_yld = b.get("default_yield_per_unit") or mat_info.get("default_yield_per_unit")
             if raw_yld is not None and float(raw_yld) > 0:
@@ -361,17 +381,25 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             key = (code or mid, color)
             is_sole = (cat or "").strip().lower() == "sole"
             job_size = str(j.get("size", "") or "").strip()
-            mid_str = str(mat_info.get("_id") or mat_info.get("id") or mid or "")
+            real_mid = str(mat_info.get("_id") or mat_info.get("id") or mid or "")
+            cur_stk = float(mat_info.get("balance") if mat_info.get("balance") is not None else (mat_info.get("current_stock") or 0.0))
             pref_vid = str(mat_info.get("preferred_vendor_id") or "")
             pref_vname = vendor_map.get(pref_vid, mat_info.get("preferred_vendor_name") or "")
 
             if key not in requirements:
                 requirements[key] = {
-                    "material_id": mid_str,
-                    "code": code, "name": name, "category": cat, "unit": unit, "color": color,
-                    "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
-                    "preferred_vendor_id": pref_vid, "preferred_vendor_name": pref_vname,
-                    "current_stock": float(mat_info.get("current_stock") or 0.0),
+                    "material_id": real_mid,
+                    "code": code or mat_info.get("code", ""),
+                    "name": name or mat_info.get("name", ""),
+                    "category": cat,
+                    "unit": unit or mat_info.get("unit", ""),
+                    "color": color,
+                    "rate": rate,
+                    "total_qty_required": 0.0,
+                    "total_cost": 0.0,
+                    "preferred_vendor_id": pref_vid,
+                    "preferred_vendor_name": pref_vname,
+                    "current_stock": cur_stk,
                 }
                 if is_sole:
                     requirements[key]["size_breakdown"] = {}
@@ -391,11 +419,18 @@ async def _compute_material_requirement(job_ids: list[str], db=None) -> dict:
             c_dict = color_requirements[job_color]
             if key not in c_dict:
                 c_dict[key] = {
-                    "material_id": mid_str,
-                    "code": code, "name": name, "category": cat, "unit": unit, "color": color,
-                    "rate": rate, "total_qty_required": 0.0, "total_cost": 0.0,
-                    "preferred_vendor_id": pref_vid, "preferred_vendor_name": pref_vname,
-                    "current_stock": float(mat_info.get("current_stock") or 0.0),
+                    "material_id": real_mid,
+                    "code": code or mat_info.get("code", ""),
+                    "name": name or mat_info.get("name", ""),
+                    "category": cat,
+                    "unit": unit or mat_info.get("unit", ""),
+                    "color": color,
+                    "rate": rate,
+                    "total_qty_required": 0.0,
+                    "total_cost": 0.0,
+                    "preferred_vendor_id": pref_vid,
+                    "preferred_vendor_name": pref_vname,
+                    "current_stock": cur_stk,
                 }
                 if is_sole:
                     c_dict[key]["size_breakdown"] = {}
@@ -572,6 +607,16 @@ async def list_materials(request: Request):
     return [stringify(d) for d in docs]
 
 
+@materials_router.get("/materials/{mid}")
+async def get_material(mid: str, request: Request):
+    await _get_user(request)
+    db = _get_db(request)
+    doc = await db.materials.find_one({"_id": oid(mid)})
+    if not doc:
+        raise HTTPException(404, "Material not found")
+    return stringify(doc)
+
+
 @materials_router.post("/materials")
 async def create_material(payload: MaterialIn, request: Request):
     u = await _get_user(request)
@@ -641,11 +686,15 @@ async def list_inventory(request: Request):
     materials = await db.materials.find({}).to_list(2000)
     movements = await db.inventory_movements.find({}).to_list(20000)
 
-    mov_by_mat = defaultdict(list)
+    mov_by_id = defaultdict(list)
+    mov_by_code = defaultdict(list)
     for m in movements:
         mid = m.get("material_id")
         if mid:
-            mov_by_mat[mid].append(m)
+            mov_by_id[str(mid)].append(m)
+        mcode = m.get("material_code")
+        if mcode:
+            mov_by_code[str(mcode).strip().lower()].append(m)
 
     vendors = await db.vendors.find({}).to_list(1000)
     vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
@@ -653,8 +702,44 @@ async def list_inventory(request: Request):
     out = []
     for mat in materials:
         mat_id = str(mat["_id"])
-        summary = _calculate_material_weighted_avg(mat, mov_by_mat.get(mat_id, []))
+        mat_code = str(mat.get("code") or "").strip().lower()
+
+        # Combine movements matching either id or code, deduplicating by movement _id
+        cand_movs = []
+        cand_movs.extend(mov_by_id.get(mat_id, []))
+        if mat_code:
+            cand_movs.extend(mov_by_code.get(mat_code, []))
+
+        unique_movs = []
+        seen_mov_ids = set()
+        for mov in cand_movs:
+            mov_id_str = str(mov.get("_id", id(mov)))
+            if mov_id_str not in seen_mov_ids:
+                seen_mov_ids.add(mov_id_str)
+                unique_movs.append(mov)
+
+        summary = _calculate_material_weighted_avg(mat, unique_movs)
         pref_vid = str(mat.get("preferred_vendor_id") or "")
+        calc_bal = round(summary["balance"], 2)
+
+        # Sync db.materials balance & current_stock if drifted
+        cur_bal = mat.get("balance")
+        cur_stock = mat.get("current_stock")
+        if cur_bal != calc_bal or cur_stock != calc_bal:
+            try:
+                await db.materials.update_one(
+                    {"_id": mat["_id"]},
+                    {"$set": {
+                        "balance": calc_bal,
+                        "current_stock": calc_bal,
+                        "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
+                        "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else mat.get("rate", 0),
+                        "updated_at": now_iso(),
+                    }}
+                )
+            except Exception:
+                pass
+
         out.append({
             "material_id": mat_id,
             "code": mat.get("code"),
@@ -669,7 +754,8 @@ async def list_inventory(request: Request):
             "stock_in": round(summary["stock_in"], 2),
             "stock_out": round(summary["stock_out"], 2),
             "adjustments": round(summary["adjustments"], 2),
-            "balance": round(summary["balance"], 2),
+            "balance": calc_bal,
+            "current_stock": calc_bal,
             "value": summary["value"],
             "image_url": mat.get("image_url", ""),
             "image_display_url": mat.get("image_display_url", ""),
@@ -695,33 +781,50 @@ async def list_movements(
 ):
     await _get_user(request)
     db = _get_db(request)
-    q: dict = {}
+    and_clauses = []
     if material_id:
-        q["material_id"] = material_id
+        conds = [{"material_id": str(material_id)}]
+        try:
+            conds.append({"material_id": oid(material_id)})
+        except Exception:
+            pass
+        mat_doc = None
+        try:
+            mat_doc = await db.materials.find_one({"_id": oid(material_id)})
+        except Exception:
+            pass
+        if not mat_doc:
+            mat_doc = await db.materials.find_one({"code": material_id})
+        if mat_doc:
+            conds.append({"material_id": str(mat_doc["_id"])})
+            if mat_doc.get("code"):
+                conds.append({"material_code": mat_doc["code"]})
+        and_clauses.append({"$or": conds})
     if type:
-        q["type"] = type
+        and_clauses.append({"type": type})
 
-    if start_date or end_date:
-        conds = []
-        if start_date:
-            conds.append({
-                "$or": [
-                    {"created_at": {"$gte": start_date[:10]}},
-                    {"date": {"$gte": start_date[:10]}},
-                ]
-            })
-        if end_date:
-            end_val = end_date[:10] + "T23:59:59.999999Z" if "T" not in end_date else end_date
-            conds.append({
-                "$or": [
-                    {"created_at": {"$lte": end_val}},
-                    {"date": {"$lte": end_date[:10]}},
-                ]
-            })
-        if len(conds) == 1:
-            q.update(conds[0])
-        elif len(conds) > 1:
-            q["$and"] = conds
+    if start_date:
+        and_clauses.append({
+            "$or": [
+                {"created_at": {"$gte": start_date[:10]}},
+                {"date": {"$gte": start_date[:10]}},
+            ]
+        })
+    if end_date:
+        end_val = end_date[:10] + "T23:59:59.999999Z" if "T" not in end_date else end_date
+        and_clauses.append({
+            "$or": [
+                {"created_at": {"$lte": end_val}},
+                {"date": {"$lte": end_date[:10]}},
+            ]
+        })
+
+    if len(and_clauses) == 1:
+        q = and_clauses[0]
+    elif len(and_clauses) > 1:
+        q = {"$and": and_clauses}
+    else:
+        q = {}
 
     if page and page > 0:
         skip = (page - 1) * limit
@@ -811,8 +914,10 @@ async def create_movement(payload: InventoryMovement, request: Request):
 
     try:
         summary = await _compute_material_inventory_summary(payload.material_id, mat, db=db)
+        calc_bal = round(summary["balance"], 2)
         mat_update = {
-            "balance": round(summary["balance"], 2),
+            "balance": calc_bal,
+            "current_stock": calc_bal,
             "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
             "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else (mat.get("rate") or 0.0),
             "updated_at": now_iso(),
@@ -845,9 +950,12 @@ async def delete_movement(mid: str, request: Request):
             summary = await _compute_material_inventory_summary(mov["material_id"], db=db)
             mat_doc = await db.materials.find_one({"_id": oid(mov["material_id"])})
             fallback_rate = (mat_doc.get("rate") or 0.0) if mat_doc else 0.0
+            calc_bal = round(summary.get("balance", 0.0), 2)
             await db.materials.update_one(
                 {"_id": oid(mov["material_id"])},
                 {"$set": {
+                    "balance": calc_bal,
+                    "current_stock": calc_bal,
                     "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
                     "last_purchase_rate": round(summary["last_rate"], 2) if summary["last_rate"] else fallback_rate,
                     "updated_at": now_iso(),

@@ -301,10 +301,14 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     # --- Karigar Assignments ---
     assigns = job_group.get("assignments", {}) or {}
     role_labels = [
-        ("cutting", "CUTTING"), ("upper", "UPPER"), ("bottom", "BOTTOM"),
-        ("stitching", "STITCHING"), ("lasting", "LASTING"),
-        ("sole_pasting", "SOLE PASTING"), ("finishing", "FINISHING"),
+        ("upper", "UPPER"), ("bottom", "BOTTOM"), ("sole", "SOLE"),
+        ("lasting", "LASTING"), ("sole_pasting", "SOLE PASTING"),
+        ("finishing", "FINISHING"), ("qc_pack", "QC & PACK"),
     ]
+    if assigns.get("heel_gola"):
+        role_labels.insert(3, ("heel_gola", "HEEL / GOLA"))
+    if assigns.get("cutting") and not assigns.get("upper"):
+        role_labels.insert(0, ("cutting", "CUTTING"))
 
     if with_rates:
         kar_rows = [["ROLE", "KARIGAR", "RATE / PAIR", "SIGN"]]

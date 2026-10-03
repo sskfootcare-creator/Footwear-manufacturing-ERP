@@ -16,7 +16,11 @@ from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
 
 from auth import get_current_user_factory, require_roles
-from models.orders import POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES, ArchiveJobsRequest, ComponentStageUpdate
+from models.orders import (
+    POIn, POLineItem, ProductionStageUpdate, PRODUCTION_STAGES,
+    ArchiveJobsRequest, ComponentStageUpdate, OutsideLabourWork,
+    SubTaskAssignment, ComponentBulkAssign,
+)
 from models.materials import QuantityUpdate
 from models.components import ComponentUpdate
 from services.component_spec_service import (
@@ -1596,6 +1600,9 @@ async def create_po(payload: POIn, request: Request):
                 "bottom_done": tracks.get("bottom", {}).get("status") == "ready",
                 "sole_done": tracks.get("sole", {}).get("status") == "ready",
             }
+            j["outside_labour"] = (s_doc or {}).get("outside_labour") or [
+                l for l in (s_doc or {}).get("labor", []) if l.get("is_outside")
+            ]
 
         await db.production_jobs.insert_many(jobs)
 
@@ -2729,35 +2736,40 @@ async def _enrich_jobs(docs: list, db) -> list:
     if not docs:
         return docs
 
-    missing_styles = [
-        d for d in docs
-        if not d.get("po_style_code") and not d.get("mapped_from_sku") and not d.get("external_sku")
-    ]
-    if missing_styles:
-        po_nums = list({d.get("po_number") for d in missing_styles if d.get("po_number")})
-        if po_nums:
-            po_docs = await db.pos.find(
-                {"po_number": {"$in": po_nums}},
-                {"po_number": 1, "line_items": 1}
-            ).to_list(len(po_nums) + 50)
-            po_map = {p.get("po_number"): p for p in po_docs if p.get("po_number")}
-            for d in missing_styles:
-                po_doc = po_map.get(d.get("po_number"))
-                if po_doc and po_doc.get("line_items"):
-                    for li in po_doc["line_items"]:
-                        if li.get("style_code") == d.get("style_code") and (
-                            not d.get("color") or not li.get("color") or str(li.get("color")).strip().lower() == str(d.get("color")).strip().lower()
-                        ):
-                            ext = (
-                                li.get("external_sku") or
-                                li.get("mapped_from_sku") or
-                                li.get("customer_style_code") or
-                                li.get("raw_style_code") or
-                                li.get("po_style_code")
-                            )
-                            if ext:
-                                d["po_style_code"] = ext
-                                break
+    all_po_nums = list({d.get("po_number") for d in docs if d.get("po_number")})
+    if all_po_nums:
+        po_docs = await db.pos.find(
+            {"po_number": {"$in": all_po_nums}},
+            {"po_number": 1, "po_date": 1, "delivery_date": 1, "expected_delivery_date": 1, "client_name": 1, "line_items": 1}
+        ).to_list(len(all_po_nums) + 50)
+        po_map = {p.get("po_number"): p for p in po_docs if p.get("po_number")}
+
+        for d in docs:
+            po_doc = po_map.get(d.get("po_number"))
+            if po_doc:
+                if not d.get("po_date") and po_doc.get("po_date"):
+                    d["po_date"] = po_doc.get("po_date")
+                if not d.get("delivery_date"):
+                    d["delivery_date"] = po_doc.get("delivery_date") or po_doc.get("expected_delivery_date")
+                if not d.get("client_name") and po_doc.get("client_name"):
+                    d["client_name"] = po_doc.get("client_name")
+
+                if not d.get("po_style_code") and not d.get("mapped_from_sku") and not d.get("external_sku"):
+                    if po_doc.get("line_items"):
+                        for li in po_doc["line_items"]:
+                            if li.get("style_code") == d.get("style_code") and (
+                                not d.get("color") or not li.get("color") or str(li.get("color")).strip().lower() == str(d.get("color")).strip().lower()
+                            ):
+                                ext = (
+                                    li.get("external_sku") or
+                                    li.get("mapped_from_sku") or
+                                    li.get("customer_style_code") or
+                                    li.get("raw_style_code") or
+                                    li.get("po_style_code")
+                                )
+                                if ext:
+                                    d["po_style_code"] = ext
+                                    break
 
     for d in docs:
         if not d.get("created_at"):
@@ -2922,6 +2934,8 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         update["planning_notes"] = payload.planning_notes
     if getattr(payload, "material_vendor_allocations", None) is not None:
         update["material_vendor_allocations"] = payload.material_vendor_allocations
+    if getattr(payload, "outside_labour", None) is not None:
+        update["outside_labour"] = payload.outside_labour
 
     if payload.stage is not None and job.get("stage") != payload.stage:
         try:
@@ -3197,6 +3211,375 @@ async def update_job_assignment(jid: str, payload: AssignmentUpdate, request: Re
                                "at": now_iso(), "by": u["email"]}}}
     )
     return stringify(await db.production_jobs.find_one({"_id": oid(jid)}))
+ 
+ 
+@pos_router.patch("/production/jobs/{jid}/sub-task-assignment")
+async def update_sub_task_assignment(jid: str, payload: SubTaskAssignment, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    job = await db.production_jobs.find_one({"_id": oid(jid)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    job_ids = payload.job_ids if payload.job_ids else [jid]
+    comp = payload.component
+    substage = payload.substage
+    role_key = f"{comp}.{substage}"
+
+    if comp == "sole":
+        specs = job.get("component_specs") or {}
+        style_doc = None
+        if job.get("style_id"):
+            style_doc = await db.styles.find_one({"_id": oid(job["style_id"])})
+        elif job.get("style_code"):
+            style_doc = await db.styles.find_one({"code": job["style_code"]})
+        if not specs or "sole" not in (specs.get("components") or {}):
+            specs = derive_component_specs(style_doc or {}, job.get("color"))
+        sole_spec = (specs.get("components") or {}).get("sole") or {}
+        is_ready = (
+            sole_spec.get("is_ready_to_use") or
+            (style_doc and bool(style_doc.get("sole_ready_to_use") or style_doc.get("ready_to_use_sole") or style_doc.get("sole_type") == "ready_to_use")) or
+            (len(sole_spec.get("stages") or []) == 0 and sole_spec.get("ready_if_empty", True))
+        )
+        if is_ready:
+            raise HTTPException(400, "Sub-task assignment is disabled for ready-to-use sole")
+
+    worker_name = ""
+    worker_rate = payload.rate_per_pair
+    if payload.worker_id:
+        w_doc = await db.workers.find_one({"_id": oid(payload.worker_id)})
+        if not w_doc:
+            raise HTTPException(404, "Worker not found")
+        worker_name = w_doc.get("name", "")
+        if worker_rate is None:
+            worker_rate = float(w_doc.get("rate_per_pair", 0) or 0)
+        else:
+            worker_rate = float(worker_rate or 0)
+
+    for target_jid in job_ids:
+        j_doc = await db.production_jobs.find_one({"_id": oid(target_jid)})
+        if not j_doc:
+            continue
+        assignments = dict(j_doc.get("assignments") or {})
+        prev_asgn = assignments.get(role_key) or {}
+        if payload.worker_id:
+            assignments[role_key] = {
+                "worker_id": str(payload.worker_id),
+                "worker_name": worker_name,
+                "rate_per_pair": worker_rate,
+                "assigned_at": now_iso(),
+                "completed_qty": prev_asgn.get("completed_qty"),
+                "completed_by": prev_asgn.get("completed_by"),
+                "completed_at": prev_asgn.get("completed_at"),
+            }
+        else:
+            assignments.pop(role_key, None)
+
+        history_entry = {
+            "stage": role_key,
+            "role": role_key,
+            "component": comp,
+            "substage": substage,
+            "event": "subtask_assignment",
+            "worker_id": str(payload.worker_id) if payload.worker_id else None,
+            "worker_name": worker_name,
+            "rate_per_pair": worker_rate,
+            "at": now_iso(),
+            "by": u.get("email", ""),
+        }
+        await db.production_jobs.update_one(
+            {"_id": oid(target_jid)},
+            {"$set": {"assignments": assignments, "updated_at": now_iso()},
+             "$push": {"history": history_entry}}
+        )
+
+    updated_job = await db.production_jobs.find_one({"_id": oid(jid)})
+    return stringify(updated_job)
+
+
+@pos_router.post("/production/jobs/{jid}/components/{component}/bulk-assign")
+async def bulk_assign_component(jid: str, component: str, payload: ComponentBulkAssign, request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    job = await db.production_jobs.find_one({"_id": oid(jid)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    if component == "sole":
+        specs = job.get("component_specs") or {}
+        style_doc = None
+        if job.get("style_id"):
+            style_doc = await db.styles.find_one({"_id": oid(job["style_id"])})
+        elif job.get("style_code"):
+            style_doc = await db.styles.find_one({"code": job["style_code"]})
+        if not specs or "sole" not in (specs.get("components") or {}):
+            specs = derive_component_specs(style_doc or {}, job.get("color"))
+        sole_spec = (specs.get("components") or {}).get("sole") or {}
+        is_ready = (
+            sole_spec.get("is_ready_to_use") or
+            (style_doc and bool(style_doc.get("sole_ready_to_use") or style_doc.get("ready_to_use_sole") or style_doc.get("sole_type") == "ready_to_use")) or
+            (len(sole_spec.get("stages") or []) == 0 and sole_spec.get("ready_if_empty", True))
+        )
+        if is_ready:
+            raise HTTPException(400, "Sub-task assignment is disabled for ready-to-use sole")
+
+    w_doc = await db.workers.find_one({"_id": oid(payload.worker_id)})
+    if not w_doc:
+        raise HTTPException(404, "Worker not found")
+    worker_name = w_doc.get("name", "")
+    worker_rate = payload.rate_per_pair
+    if worker_rate is None:
+        worker_rate = float(w_doc.get("rate_per_pair", 0) or 0)
+    else:
+        worker_rate = float(worker_rate or 0)
+
+    job_ids = payload.job_ids if payload.job_ids else [jid]
+
+    for target_jid in job_ids:
+        j_doc = await db.production_jobs.find_one({"_id": oid(target_jid)})
+        if not j_doc:
+            continue
+        assignments = dict(j_doc.get("assignments") or {})
+        assignments[component] = {
+            "worker_id": str(payload.worker_id),
+            "worker_name": worker_name,
+            "rate_per_pair": worker_rate,
+            "assigned_at": now_iso(),
+        }
+
+        specs = j_doc.get("component_specs")
+        if not specs:
+            style_doc = None
+            if j_doc.get("style_id"):
+                style_doc = await db.styles.find_one({"_id": oid(j_doc["style_id"])})
+            elif j_doc.get("style_code"):
+                style_doc = await db.styles.find_one({"code": j_doc["style_code"]})
+            specs = derive_component_specs(style_doc or {}, j_doc.get("color"))
+
+        comp_spec = (specs.get("components") or {}).get(component) or {}
+        if "stages" in comp_spec and comp_spec["stages"] is not None:
+            stages_list = comp_spec["stages"]
+        elif component == "upper":
+            stages_list = ["cutting", "stitching", "folding", "attachment"]
+        elif component == "bottom":
+            stages_list = ["cutting", "stitching", "stamping"]
+        else:
+            stages_list = []
+
+        for st in stages_list:
+            role_key = f"{component}.{st}"
+            prev_asgn = assignments.get(role_key) or {}
+            if payload.overwrite or not prev_asgn.get("worker_id"):
+                assignments[role_key] = {
+                    "worker_id": str(payload.worker_id),
+                    "worker_name": worker_name,
+                    "rate_per_pair": worker_rate,
+                    "assigned_at": now_iso(),
+                    "completed_qty": prev_asgn.get("completed_qty"),
+                    "completed_by": prev_asgn.get("completed_by"),
+                    "completed_at": prev_asgn.get("completed_at"),
+                }
+
+        history_entry = {
+            "stage": component,
+            "role": component,
+            "component": component,
+            "event": "component_bulk_assignment",
+            "worker_id": str(payload.worker_id),
+            "worker_name": worker_name,
+            "rate_per_pair": worker_rate,
+            "overwrite": payload.overwrite,
+            "at": now_iso(),
+            "by": u.get("email", ""),
+        }
+        await db.production_jobs.update_one(
+            {"_id": oid(target_jid)},
+            {"$set": {"assignments": assignments, "updated_at": now_iso()},
+             "$push": {"history": history_entry}}
+        )
+
+    updated_job = await db.production_jobs.find_one({"_id": oid(jid)})
+    return stringify(updated_job)
+
+
+@pos_router.patch("/production/jobs/{jid}/outside-labour")
+async def update_job_outside_labour(jid: str, payload: Dict[str, Any], request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    items = payload.get("outside_labour", [])
+
+    # Validate vendors
+    import uuid
+    validated_items = []
+    for it in items:
+        it_dict = dict(it)
+        if not it_dict.get("id"):
+            it_dict["id"] = uuid.uuid4().hex[:12]
+        vid = it_dict.get("vendor_id")
+        vname = it_dict.get("vendor") or it_dict.get("vendor_name")
+        vendor = None
+        if vid:
+            try:
+                vendor = await db.vendors.find_one({"_id": oid(vid)})
+            except Exception:
+                pass
+        if not vendor and vname:
+            vendor = await db.vendors.find_one({"name": vname.strip()})
+
+        if not vendor and (vid or vname):
+            raise HTTPException(400, f"Vendor '{vname or vid}' not registered in Vendor Master. Please select an existing vendor.")
+
+        if vendor:
+            it_dict["vendor_id"] = str(vendor["_id"])
+            it_dict["vendor_name"] = vendor.get("name", "")
+            it_dict["vendor"] = vendor.get("name", "")
+        validated_items.append(it_dict)
+
+    await db.production_jobs.update_one(
+        {"_id": oid(jid)},
+        {"$set": {"outside_labour": validated_items, "updated_at": now_iso()}}
+    )
+    return {"status": "ok", "outside_labour": validated_items}
+
+
+@pos_router.post("/production/job-groups/outside-labour")
+async def update_group_outside_labour(payload: Dict[str, Any], request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    job_ids = payload.get("job_ids", [])
+    items = payload.get("outside_labour", [])
+
+    import uuid
+    validated_items = []
+    for it in items:
+        it_dict = dict(it)
+        if not it_dict.get("id"):
+            it_dict["id"] = uuid.uuid4().hex[:12]
+        vid = it_dict.get("vendor_id")
+        vname = it_dict.get("vendor") or it_dict.get("vendor_name")
+        vendor = None
+        if vid:
+            try:
+                vendor = await db.vendors.find_one({"_id": oid(vid)})
+            except Exception:
+                pass
+        if not vendor and vname:
+            vendor = await db.vendors.find_one({"name": vname.strip()})
+
+        if not vendor and (vid or vname):
+            raise HTTPException(400, f"Vendor '{vname or vid}' not registered in Vendor Master. Please select an existing vendor.")
+
+        if vendor:
+            it_dict["vendor_id"] = str(vendor["_id"])
+            it_dict["vendor_name"] = vendor.get("name", "")
+            it_dict["vendor"] = vendor.get("name", "")
+        validated_items.append(it_dict)
+
+    if job_ids:
+        await db.production_jobs.update_many(
+            {"_id": {"$in": [oid(jid) for jid in job_ids]}},
+            {"$set": {"outside_labour": validated_items, "updated_at": now_iso()}}
+        )
+    return {"status": "ok", "count": len(job_ids), "outside_labour": validated_items}
+
+
+@pos_router.post("/production/jobs/{jid}/outside-labour/{item_id}/complete")
+async def complete_job_outside_labour(jid: str, item_id: str, payload: Dict[str, Any], request: Request):
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    job = await db.production_jobs.find_one({"_id": oid(jid)})
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    items = list(job.get("outside_labour") or [])
+    target_idx = None
+    for idx, it in enumerate(items):
+        if str(it.get("id")) == str(item_id) or str(it.get("name")) == str(item_id):
+            target_idx = idx
+            break
+
+    if target_idx is None:
+        raise HTTPException(404, "Outside labour item not found")
+
+    target_item = dict(items[target_idx])
+    if target_item.get("completed"):
+        return {"status": "ok", "message": "Already completed", "outside_labour": items}
+
+    vendor = None
+    if target_item.get("vendor_id"):
+        try:
+            vendor = await db.vendors.find_one({"_id": oid(target_item["vendor_id"])})
+        except Exception:
+            pass
+    if not vendor and target_item.get("vendor"):
+        vendor = await db.vendors.find_one({"name": target_item["vendor"]})
+
+    if not vendor:
+        raise HTTPException(400, "Vendor not found in vendor master. Cannot complete outside work without a registered vendor.")
+
+    rate = float(target_item.get("rate") or 0)
+    qty = float(payload.get("completed_qty") or target_item.get("qty") or job.get("quantity") or 0)
+    total_amount = round(rate * qty, 2)
+
+    bill_no = f"VPO-OUTSIDE-{datetime.now().strftime('%Y%m%d%H%M%S')}-{item_id[:6]}"
+    bill_doc = {
+        "bill_no": bill_no,
+        "po_number": bill_no,
+        "vendor_id": str(vendor["_id"]),
+        "vendor_name": vendor.get("name", ""),
+        "bill_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "total_amount": total_amount,
+        "amount": total_amount,
+        "subtotal": total_amount,
+        "status": "pending",
+        "paid_amount": 0.0,
+        "type": "outside_labour",
+        "description": f"Outside Labour: {target_item.get('name') or target_item.get('substage')} for {job.get('po_number')} ({job.get('style_code')})",
+        "source_job_id": jid,
+        "component": target_item.get("component"),
+        "substage": target_item.get("substage"),
+        "rate": rate,
+        "created_at": now_iso(),
+        "line_items": [{
+            "material_id": f"outside_{target_item.get('component')}_{target_item.get('substage') or 'work'}",
+            "material_name": f"Outside Labour: {target_item.get('name') or target_item.get('substage')}",
+            "quantity": qty,
+            "rate": rate,
+            "amount": total_amount,
+            "received_quantity": qty,
+        }],
+    }
+    bill_res = await db.vendor_purchase_orders.insert_one(bill_doc)
+    bill_doc["_id"] = bill_res.inserted_id
+    try:
+        await db.vendor_pos.insert_one(dict(bill_doc))
+    except Exception:
+        pass
+
+    # Sync to Supabase AP vendor bills (non-blocking)
+    try:
+        from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
+        sync_vendor_po_to_supabase(bill_doc, vendor)
+    except Exception as e:
+        log.warning("Supabase AP vendor bill sync failed (non-blocking): %s", e)
+
+    target_item["completed"] = True
+    target_item["completed_at"] = now_iso()
+    target_item["completed_qty"] = qty
+    target_item["vendor_bill_id"] = str(bill_res.inserted_id)
+    target_item["vendor_bill_no"] = bill_no
+    items[target_idx] = target_item
+
+    await db.production_jobs.update_one(
+        {"_id": oid(jid)},
+        {"$set": {"outside_labour": items, "updated_at": now_iso()}}
+    )
+    return {"status": "ok", "completed_item": target_item, "outside_labour": items, "vendor_bill_id": str(bill_res.inserted_id)}
 
 
 @pos_router.patch("/production/jobs/{jid}/quantity")
@@ -3583,6 +3966,63 @@ async def compute_payroll(db=None, from_date: Optional[str] = None, to_date: Opt
                         "earning": earn,
                         "bonus": bonus_amt,
                     })
+
+        # Process Contract / Outside Labour assigned to Karigars
+        for ol in (j.get("outside_labour") or []):
+            wid = ol.get("worker_id")
+            if not wid and ol.get("vendor"):
+                v_clean = str(ol.get("vendor")).strip().lower()
+                for w_cand_id, w_cand in worker_map.items():
+                    if str(w_cand.get("name", "")).strip().lower() == v_clean:
+                        wid = w_cand_id
+                        break
+            if not wid or str(wid) not in worker_data:
+                continue
+
+            wid = str(wid)
+            rate = float(ol.get("rate") or 0.0)
+            if rate <= 0:
+                continue
+
+            comp = str(ol.get("component") or "upper").lower()
+            comp_done = bool(
+                (j.get("components") or {}).get(f"{comp}_done")
+                or (j.get("component_tracks") or {}).get(comp, {}).get("status") == "ready"
+                or j.get("stage") in ("lasting", "sole_pasting", "finishing", "qc_pack", "dispatched", "completed")
+            )
+            completed_qty = j.get("completed_qty", 0) or 0
+            total_qty = j.get("quantity", 0) or 0
+            role_comp = int(completed_qty) if completed_qty > 0 else (int(total_qty) if comp_done else 0)
+            if role_comp <= 0:
+                continue
+
+            earn = round(rate * role_comp, 2)
+            comp_date = (j.get("updated_at") or j.get("created_at") or "")[:10]
+            if to_date and comp_date and comp_date > to_date:
+                continue
+
+            is_prior = bool(from_date and comp_date and comp_date < from_date)
+            role_label = f"Contract: {ol.get('name') or comp.capitalize()}"
+
+            if is_prior:
+                worker_data[wid]["prior_earning"] = round(worker_data[wid]["prior_earning"] + earn, 2)
+            else:
+                worker_data[wid]["total_pairs"] += role_comp
+                worker_data[wid]["total_earning"] = round(worker_data[wid]["total_earning"] + earn, 2)
+                worker_data[wid]["by_role"][role_label] = worker_data[wid]["by_role"].get(role_label, 0) + role_comp
+
+                raw_jobs_by_worker.setdefault(wid, []).append({
+                    "job_id": str(j["_id"]),
+                    "po_number": j.get("po_number"),
+                    "style_code": j.get("style_code"),
+                    "color": j.get("color"),
+                    "size": j.get("size"),
+                    "role": role_label,
+                    "pairs": role_comp,
+                    "rate": rate,
+                    "earning": earn,
+                    "bonus": 0.0,
+                })
 
     # Group job cards for current period
     for wid, raw_list in raw_jobs_by_worker.items():

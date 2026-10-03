@@ -137,3 +137,32 @@ def test_check_merge_gates_logic():
     allowed, msg = check_merge_gates("sole_pasting", tracks, specs)
     assert allowed is True
     assert msg is None
+
+
+def test_bottom_stages_include_cutting_stitching_stamping():
+    """Bottom component must include cutting, stitching, and stamping subtasks."""
+    style = {"code": "STYLE-BOT", "footwear_type": "flat", "bom": []}
+    specs = derive_component_specs(style, materials_by_id={})
+    bottom_stages = specs["components"]["bottom"]["stages"]
+    assert bottom_stages == ["cutting", "stitching", "stamping"]
+
+
+def test_ready_to_use_sole_flag():
+    """Ready to use sole in style disables sole processing stages and marks sole ready."""
+    style = {
+        "code": "STYLE-READY-SOLE",
+        "footwear_type": "flat",
+        "sole_ready_to_use": True,
+        "bom": [{"material_id": "m_sole", "section": "sole"}],
+    }
+    materials = {
+        "m_sole": {"category": "sole", "stage_requirements": ["cutting", "finishing"]}
+    }
+    specs = derive_component_specs(style, materials_by_id=materials)
+    assert specs["components"]["sole"]["is_ready_to_use"] is True
+    assert specs["components"]["sole"]["stages"] == []
+
+    tracks = init_component_tracks(specs)
+    assert tracks["sole"]["status"] == "ready"
+    assert tracks["sole"]["current_stage"] == "ready"
+

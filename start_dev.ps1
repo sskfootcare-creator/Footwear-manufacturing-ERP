@@ -37,21 +37,49 @@ Write-Host "==========================================================" -Foregro
 Write-Host "Starting SSK Footwear ERP (Live Consolidated Logs)..." -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# Ensure local Supabase via Docker is running
-Write-Host "[0/4] Checking local Supabase (Docker)..." -ForegroundColor Yellow
-$supaRunning = $false
+# Ensure Docker & local Supabase are running
+Write-Host "[0/4] Checking Docker Engine & Local Supabase..." -ForegroundColor Yellow
+$dockerReady = $false
 try {
-    $supaCheck = cmd.exe /c "npx supabase status 2>&1"
-    if ($LASTEXITCODE -eq 0 -and $supaCheck -match "API URL:") {
-        $supaRunning = $true
-    }
+    $null = cmd.exe /c "docker info 2>&1"
+    if ($LASTEXITCODE -eq 0) { $dockerReady = $true }
 } catch {}
 
-if (!$supaRunning) {
-    Write-Host "Starting local Supabase via Docker..." -ForegroundColor Yellow
-    cmd.exe /c "npx supabase start"
+if (!$dockerReady) {
+    $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    if (Test-Path $dockerExe) {
+        Write-Host "Docker Desktop is not active. Launching Docker Desktop..." -ForegroundColor Cyan
+        Start-Process $dockerExe
+        Write-Host "Waiting for Docker Engine to be ready (up to 45s)..." -ForegroundColor Gray
+        for ($i = 1; $i -le 45; $i++) {
+            Start-Sleep -Seconds 1
+            $null = cmd.exe /c "docker info 2>&1"
+            if ($LASTEXITCODE -eq 0) {
+                $dockerReady = $true
+                Write-Host "Docker Engine is now active!" -ForegroundColor Green
+                break
+            }
+        }
+    }
+}
+
+if ($dockerReady) {
+    $supaRunning = $false
+    try {
+        $supaCheck = cmd.exe /c "npx supabase status 2>&1"
+        if ($LASTEXITCODE -eq 0 -and $supaCheck -match "API URL:") {
+            $supaRunning = $true
+        }
+    } catch {}
+
+    if (!$supaRunning) {
+        Write-Host "Starting local Supabase via Docker..." -ForegroundColor Yellow
+        cmd.exe /c "npx supabase start"
+    } else {
+        Write-Host "Local Supabase is already running." -ForegroundColor Green
+    }
 } else {
-    Write-Host "Local Supabase is already running." -ForegroundColor Green
+    Write-Host "Note: Docker is not active. Continuing with MongoDB, FastAPI backend, and React frontend (Supabase calls will use graceful fallback)." -ForegroundColor Magenta
 }
 
 # Start MongoDB job

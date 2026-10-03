@@ -1,6 +1,7 @@
 import { useEffect, useState, Fragment } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
+import { broadcastSync } from "../lib/sync";
 import {
   PageHeader,
   Card,
@@ -290,7 +291,13 @@ export default function VendorPOs() {
     setReceiveForm({
       receipt_id: rId,
       items: (po.line_items || []).map((li) => {
-        const mat = materials.find((m) => m.id === li.material_id);
+        const mat = materials.find(
+          (m) =>
+            (m.id && m.id === li.material_id) ||
+            (m._id && m._id === li.material_id) ||
+            (m.code && li.material_code && m.code.toLowerCase() === li.material_code.toLowerCase()) ||
+            (m.name && li.material_name && m.name.toLowerCase() === li.material_name.toLowerCase())
+        );
         const ordered = Number(li.quantity || 0);
         const received = Number(li.received_quantity || 0);
         const remaining = Math.max(
@@ -298,7 +305,7 @@ export default function VendorPOs() {
           Math.round((ordered - received) * 10000) / 10000
         );
         return {
-          material_id: li.material_id,
+          material_id: mat ? (mat.id || mat._id || li.material_id) : li.material_id,
           quantity: 0,
           material_code:
             mat?.code || li.material_code || "",
@@ -351,6 +358,8 @@ export default function VendorPOs() {
       };
       await http.post(`/vendor-pos/${receiveModal.id}/receive`, payload);
       await load();
+      broadcastSync("materials", { action: "received", po_id: receiveModal.id });
+      broadcastSync("inventory", { action: "received", po_id: receiveModal.id });
       setReceiveModal(null);
     } catch (e) {
       setError(e.response?.data?.detail || e.message);

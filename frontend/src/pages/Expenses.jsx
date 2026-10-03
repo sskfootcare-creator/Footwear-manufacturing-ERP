@@ -44,6 +44,8 @@ import {
 
 const EXPENSE_CATEGORIES = [
   "wages",
+  "Contract Labour",
+  "Labor & Wages",
   "Rent",
   "Electricity",
   "Salary",
@@ -51,7 +53,6 @@ const EXPENSE_CATEGORIES = [
   "Rent & Utilities",
   "Raw Materials",
   "Machinery & Maintenance",
-  "Labor & Wages",
   "Transport & Logistics",
   "Packaging & Printing",
   "Office & Administrative",

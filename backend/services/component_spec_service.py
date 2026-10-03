@@ -12,7 +12,7 @@ MERGE_GATES = {
 }
 
 DEFAULT_UPPER_STAGES = ["cutting", "stitching"]
-DEFAULT_BOTTOM_STAGES = ["cutting"]
+DEFAULT_BOTTOM_STAGES = ["cutting", "stitching", "stamping"]
 
 
 def classify_bom_line_component(
@@ -107,10 +107,22 @@ def derive_component_specs(
             stages = extra if len(extra) > 0 else list(DEFAULT_UPPER_STAGES)
             ready_if_empty = False
         elif c == "bottom":
-            stages = extra if len(extra) > 0 else (list(DEFAULT_BOTTOM_STAGES) if comp_has_material[c] else [])
-            ready_if_empty = True
+            base_stages = list(DEFAULT_BOTTOM_STAGES)
+            stages = base_stages + [s for s in extra if s not in base_stages]
+            ready_if_empty = False
         elif c == "sole":
-            stages = list(extra)
+            sole_mat_ready = any(
+                bool(line.get("ready_to_use") or line.get("is_ready_to_use"))
+                for line in (effective_bom if isinstance(effective_bom, list) else [])
+                if isinstance(line, dict) and classify_bom_line_component(line, materials_map.get(str(line.get("material_id") or "")) or {}) == "sole"
+            )
+            is_ready_to_use = bool(
+                style.get("sole_ready_to_use")
+                or style.get("ready_to_use_sole")
+                or style.get("sole_type") == "ready_to_use"
+                or sole_mat_ready
+            )
+            stages = [] if is_ready_to_use else list(extra)
             ready_if_empty = True
         elif c == "heel_gola":
             stages = list(extra)
@@ -119,11 +131,14 @@ def derive_component_specs(
             stages = list(extra)
             ready_if_empty = True
 
-        components_spec[c] = {
+        comp_dict = {
             "stages": stages,
             "extra_stages": extra,
             "ready_if_empty": ready_if_empty,
         }
+        if c == "sole":
+            comp_dict["is_ready_to_use"] = is_ready_to_use
+        components_spec[c] = comp_dict
 
     return {
         "footwear_type": footwear_type,
@@ -134,13 +149,13 @@ def derive_component_specs(
 def init_component_tracks(component_specs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Initialize component_tracks from derived component_specs.
-    Each active component starts at its first stage, or immediately at 'ready' if stages is empty.
+    Each active component starts at its first stage, or immediately at 'ready' if stages is empty or marked ready_to_use.
     """
     tracks = {}
     comps = component_specs.get("components") or {}
     for comp_name, spec in comps.items():
         stages = spec.get("stages") or []
-        if not stages:
+        if not stages or (comp_name == "sole" and spec.get("is_ready_to_use")):
             tracks[comp_name] = {
                 "current_stage": "ready",
                 "status": "ready",

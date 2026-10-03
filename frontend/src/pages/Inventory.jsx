@@ -62,6 +62,9 @@ export default function Inventory() {
   useCrossTabSync("materials", () => {
     load();
   });
+  useCrossTabSync("inventory", () => {
+    load();
+  });
 
   const openType = (type, material = null) => setOpen({ type, material });
 

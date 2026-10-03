@@ -8,7 +8,24 @@ echo ==========================================================
 set "ROOT_DIR=%~dp0"
 
 :: Check and start local Supabase via Docker
-echo [0/4] Checking local Supabase (Docker)...
+echo [0/4] Checking Docker Engine ^& Local Supabase...
+docker info >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo Docker Desktop is not running. Launching Docker Desktop...
+    if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
+        start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+        echo Waiting for Docker Engine to initialize (up to 45s)...
+        for /L %%i in (1,1,45) do (
+            timeout /t 1 /nobreak >nul
+            docker info >nul 2>&1
+            if errorlevel 0 (
+                echo Docker is now ready!
+                goto docker_ready
+            )
+        )
+    )
+)
+:docker_ready
 cmd /c "npx supabase status >nul 2>&1 || npx supabase start"
 
 :: Start MongoDB in a separate terminal window

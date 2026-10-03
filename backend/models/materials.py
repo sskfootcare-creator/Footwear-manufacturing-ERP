@@ -169,6 +169,10 @@ BomLineOverride = ColorBomOverride
 class LaborItem(BaseModel):
     name: str
     rate: float
+    component: Optional[str] = None  # "upper", "bottom", "sole"
+    is_outside: Optional[bool] = False
+    vendor: Optional[str] = None
+    notes: Optional[str] = ""
 
 
 class QuantityUpdate(BaseModel):

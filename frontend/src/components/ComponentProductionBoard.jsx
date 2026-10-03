@@ -268,7 +268,28 @@ export default function ComponentProductionBoard({
                 {/* Component Tracks Swimlanes */}
                 <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 bg-slate-50/40">
                   {activeComps.map(({ key, label, track, spec }) => {
-                    const stagesList = spec?.stages || [];
+                    const defaultStages = key === "upper" ? ["cutting", "stitching"] : key === "bottom" ? ["cutting", "stitching", "stamping"] : [];
+                    let stagesList = (spec?.stages && spec.stages.length > 0) ? [...spec.stages] : defaultStages;
+                    if (key === "bottom") {
+                      const reqBottom = ["cutting", "stitching", "stamping"];
+                      reqBottom.forEach((b) => {
+                        if (!stagesList.includes(b) && !stagesList.some(s => s.includes("stamp") || s.includes("brand"))) {
+                          stagesList.push(b);
+                        }
+                      });
+                    }
+                    if (key === "sole" && spec?.is_ready_to_use) {
+                      stagesList = [];
+                    }
+
+                    const formatStageName = (st) => {
+                      if (!st) return "";
+                      if (st === "stamping" || st === "brand_marking" || st === "stamping_brand_marking") {
+                        return "Stamping / Brand Marking";
+                      }
+                      return st.charAt(0).toUpperCase() + st.slice(1).replace(/_/g, " ");
+                    };
+
                     const isReady = track.status === "ready";
                     const isVendorReady = stagesList.length === 0;
 
@@ -301,8 +322,9 @@ export default function ComponentProductionBoard({
 
                           {/* Sub-stages visualization */}
                           {isVendorReady ? (
-                            <div className="text-xs text-slate-500 italic py-2">
-                              Ready-to-use / Vendor-supplied (no stages required)
+                            <div className="text-xs text-slate-500 italic py-2 flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                              <span>Ready-to-use / Vendor-supplied (no stages required)</span>
                             </div>
                           ) : (
                             <div className="space-y-1.5 my-2">
@@ -327,7 +349,7 @@ export default function ComponentProductionBoard({
                                         data-testid={`stage-step-${key}-${st}`}
                                       >
                                         {completed && <CheckCircle2 className="w-2.5 h-2.5 text-emerald-700" />}
-                                        {st}
+                                        {formatStageName(st)}
                                       </div>
                                       {idx < stagesList.length - 1 && (
                                         <ChevronRight className="w-3 h-3 text-slate-400 flex-shrink-0" />
@@ -347,7 +369,7 @@ export default function ComponentProductionBoard({
                                       "Unassigned"}
                                   </span>
                                   <span className="font-mono text-[10px]">
-                                    Stage: <b className="text-slate-800">{track.current_stage}</b>
+                                    Stage: <b className="text-slate-800">{formatStageName(track.current_stage)}</b>
                                   </span>
                                 </div>
                               )}
@@ -356,7 +378,7 @@ export default function ComponentProductionBoard({
                         </div>
 
                         {/* Action: Advance stage button */}
-                        {!isReady && canEdit && (
+                        {!isReady && !isVendorReady && canEdit && (
                           <div className="pt-2 border-t border-slate-100 mt-2">
                             <button
                               type="button"
@@ -364,7 +386,7 @@ export default function ComponentProductionBoard({
                               className="w-full py-1.5 px-2 rounded bg-slate-900 hover:bg-[#C27842] text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-xs"
                               data-testid={`advance-btn-${key}-${g.key || g.id}`}
                             >
-                              <span>Complete {track.current_stage}</span>
+                              <span>Complete {formatStageName(track.current_stage)}</span>
                               <ArrowRight className="w-3 h-3" />
                             </button>
                           </div>
@@ -389,7 +411,7 @@ export default function ComponentProductionBoard({
                   {`Complete ${advanceModal.component} Sub-Stage`}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Advance <b className="text-slate-800">{advanceModal.stage}</b> to the next stage or Ready status.
+                  Advance <b className="text-slate-800">{advanceModal.stage === "stamping" || advanceModal.stage === "brand_marking" || advanceModal.stage === "stamping_brand_marking" ? "Stamping / Brand Marking" : advanceModal.stage}</b> to the next stage or Ready status.
                 </p>
               </div>
               <button

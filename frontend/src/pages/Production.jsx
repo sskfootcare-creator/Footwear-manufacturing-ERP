@@ -29,23 +29,108 @@ const COMPONENT_LAYERS = {
   heel_gola: ["Heel / Platform", "Cover / Gola"],
 };
 
+// Process sub-tasks specific to each parallel component that can be assigned to other workers
+const COMPONENT_SUBTASK_ROLES = {
+  upper: [
+    { key: "upper.cutting", fallbackKey: "upper", label: "Cutting", icon: "✂" },
+    { key: "upper.stitching", fallbackKey: "stitching", label: "Stitching", icon: "🧵" },
+    { key: "upper.folding", fallbackKey: null, label: "Folding", icon: "📐" },
+    { key: "upper.attachment", fallbackKey: null, label: "Attachment", icon: "🔧" },
+  ],
+  bottom: [
+    { key: "bottom.cutting", fallbackKey: "bottom", label: "Cutting", icon: "✂" },
+    { key: "bottom.stitching", fallbackKey: null, label: "Stitching", icon: "🧵" },
+    { key: "bottom.stamping", fallbackKey: null, label: "Stamping / Brand Marking", icon: "🏷️" },
+    { key: "bottom.assembly", fallbackKey: null, label: "Assembly", icon: "🔧" },
+  ],
+  sole: [
+    { key: "sole.prep", fallbackKey: "sole", label: "Sole Prep", icon: "👟" },
+  ],
+  heel_gola: [
+    { key: "heel_gola.cutting", fallbackKey: "heel_gola", label: "Cover Cutting", icon: "✂" },
+    { key: "heel_gola.assembly", fallbackKey: null, label: "Assembly", icon: "🔧" },
+  ],
+};
+
+const COMPONENT_KARIGAR_ROLES = COMPONENT_SUBTASK_ROLES;
+
+export const isSoleReadyToUse = (group, style) => {
+  if (style?.sole_ready_to_use || style?.ready_to_use_sole || style?.sole_type === "ready_to_use") return true;
+  const firstRow = group?.rows?.[0];
+  if (firstRow?.sole_ready_to_use || firstRow?.ready_to_use_sole) return true;
+  const soleSpec = group?.component_specs?.components?.sole || firstRow?.component_specs?.components?.sole;
+  if (soleSpec?.is_ready_to_use) return true;
+  // Check style BOM
+  if (style?.bom && Array.isArray(style.bom)) {
+    const soleBom = style.bom.find(b => {
+      const sec = (b.section || "").toLowerCase();
+      const comp = (b.component || "").toLowerCase();
+      return sec.includes("sole") || comp.includes("sole");
+    });
+    if (soleBom && (soleBom.ready_to_use || soleBom.is_ready_to_use)) return true;
+  }
+  return false;
+};
+
 const ASSIGNMENT_ROLES = [
-  { key: "cutting", label: "Cutting" },
-  { key: "upper", label: "Upper" },
-  { key: "bottom", label: "Bottom/Insole" },
-  { key: "stitching", label: "Stitching" },
-  { key: "lasting", label: "Lasting" },
-  { key: "sole_pasting", label: "Sole Pasting" },
-  { key: "finishing", label: "Finishing" },
-  { key: "qc_pack", label: "QC & Pack" },
+  // Component parallel tracks (Main component assigned person)
+  { key: "upper", label: "Upper Track", category: "component" },
+  { key: "bottom", label: "Bottom Track", category: "component" },
+  { key: "sole", label: "Sole Track", category: "component" },
+  { key: "heel_gola", label: "Heel/Gola Track", category: "component" },
+  // Component sub-process roles (assigned to other workers)
+  { key: "upper.cutting", label: "Upper — Cutting", category: "component" },
+  { key: "upper.stitching", label: "Upper — Stitching", category: "component" },
+  { key: "upper.folding", label: "Upper — Folding", category: "component" },
+  { key: "upper.attachment", label: "Upper — Attachment", category: "component" },
+  { key: "bottom.cutting", label: "Bottom — Cutting", category: "component" },
+  { key: "bottom.stitching", label: "Bottom — Stitching", category: "component" },
+  { key: "bottom.stamping", label: "Bottom — Stamping / Brand Marking", category: "component" },
+  { key: "bottom.brand_marking", label: "Bottom — Stamping / Brand Marking", category: "component" },
+  { key: "bottom.assembly", label: "Bottom — Assembly", category: "component" },
+  { key: "sole.prep", label: "Sole Prep", category: "component" },
+  { key: "heel_gola.cutting", label: "Heel/Gola — Cover Cutting", category: "component" },
+  { key: "heel_gola.assembly", label: "Heel/Gola — Assembly", category: "component" },
+  // Legacy / prep roles
+  { key: "cutting", label: "Cutting", category: "prep" },
+  { key: "stitching", label: "Stitching", category: "prep" },
+  // Assembly line roles
+  { key: "lasting", label: "Lasting", category: "assembly" },
+  { key: "sole_pasting", label: "Sole Pasting", category: "assembly" },
+  { key: "finishing", label: "Finishing", category: "assembly" },
+  { key: "qc_pack", label: "QC & Pack", category: "assembly" },
 ];
+
+const ASSEMBLY_ROLES = [
+  { key: "lasting", label: "Lasting", stageKey: "lasting" },
+  { key: "sole_pasting", label: "Sole Pasting", stageKey: "sole_pasting" },
+  { key: "finishing", label: "Finishing", stageKey: "finishing" },
+  { key: "qc_pack", label: "QC & Pack", stageKey: "qc_pack" },
+];
+
+function getComponentAssignment(assignments = {}, compKey) {
+  if (!assignments) return null;
+  if (compKey === "upper") {
+    return assignments["upper"] || assignments["upper.cutting"] || assignments["cutting"] || assignments["stitching"] || null;
+  }
+  if (compKey === "bottom") {
+    return assignments["bottom"] || assignments["bottom.cutting"] || null;
+  }
+  if (compKey === "sole") {
+    return assignments["sole"] || assignments["sole.cutting"] || null;
+  }
+  if (compKey === "heel_gola") {
+    return assignments["heel_gola"] || assignments["heel_gola.cover_cutting"] || null;
+  }
+  return assignments[compKey] || null;
+}
 
 // Stage → most likely role mapping for bulk-drag assignment
 const STAGE_TO_ROLE = {
-  cutting: "cutting",
+  cutting: "upper",
   folding: "upper",
   attachment: "upper",
-  stitching: "stitching",
+  stitching: "upper",
   lasting: "lasting",
   sole_pasting: "sole_pasting",
   finishing: "finishing",
@@ -69,6 +154,7 @@ function groupJobsByColor(jobs) {
         po_style_code: j.po_style_code || j.mapped_from_sku || j.customer_style_code || j.external_sku || "",
         created_at: j.created_at || j.stage_entered_at || "",
         client_name: j.client_name, description: j.description, delivery_date: j.delivery_date,
+        po_date: j.po_date || j.po_created_date || "",
         color, rows: [], sizes: new Set(),
       };
     }
@@ -80,9 +166,24 @@ function groupJobsByColor(jobs) {
     if (!groups[key].created_at && (j.created_at || j.stage_entered_at)) {
       groups[key].created_at = j.created_at || j.stage_entered_at;
     }
+    if (!groups[key].po_date && (j.po_date || j.po_created_date)) {
+      groups[key].po_date = j.po_date || j.po_created_date;
+    }
+    if (!groups[key].delivery_date && (j.delivery_date || j.expected_delivery_date)) {
+      groups[key].delivery_date = j.delivery_date || j.expected_delivery_date;
+    }
   }
   return Object.values(groups).map(g => {
     const poStyleCode = g.po_style_code || g.rows.find(r => r.po_style_code || r.mapped_from_sku || r.customer_style_code || r.external_sku)?.po_style_code || g.rows.find(r => r.mapped_from_sku)?.mapped_from_sku || g.rows.find(r => r.customer_style_code)?.customer_style_code || g.rows.find(r => r.external_sku)?.external_sku || "";
+    const skuId = (
+      g.rows.find(r => r.sku_id)?.sku_id ||
+      g.rows.find(r => r.sku)?.sku ||
+      g.rows.find(r => r.external_sku)?.external_sku ||
+      g.rows.find(r => r.mapped_from_sku)?.mapped_from_sku ||
+      g.rows.find(r => r.customer_style_code)?.customer_style_code ||
+      poStyleCode ||
+      ""
+    );
     const hasMappedCode = !!(poStyleCode && String(poStyleCode).trim() && String(poStyleCode).trim().toUpperCase() !== String(g.style_code || "").trim().toUpperCase());
     const styleDisplay = hasMappedCode ? `${g.style_code}/${poStyleCode}` : (g.style_code || "—");
 
@@ -103,13 +204,21 @@ function groupJobsByColor(jobs) {
       }
     }
 
+    const rawPoDate = g.po_date || g.rows.find(r => r.po_date)?.po_date || g.rows[0]?.po_date || "";
+    const rawDeliveryDate = g.delivery_date || g.rows.find(r => r.delivery_date)?.delivery_date || g.rows[0]?.delivery_date || "";
+    const poDateFormatted = rawPoDate ? String(rawPoDate).slice(0, 10) : "";
+    const deliveryDateFormatted = rawDeliveryDate ? String(rawDeliveryDate).slice(0, 10) : "";
+
     return {
       ...g,
       po_style_code: poStyleCode,
+      sku_id: skuId,
       has_mapped_code: hasMappedCode,
       style_display: styleDisplay,
       created_at: rawCreated,
       card_created_date: cardCreatedDate,
+      po_date: poDateFormatted,
+      delivery_date: deliveryDateFormatted,
       stage: g.rows[0]?.stage,
       sizes: Array.from(g.sizes).sort(sortSizes),
       totalQty: g.rows.reduce((s, r) => s + (r.quantity || 0), 0),
@@ -286,13 +395,14 @@ export default function Production() {
   const [savedPackingLists, setSavedPackingLists] = useState([]);
   const [dispatchRecords, setDispatchRecords] = useState([]);
   const [invoices, setInvoices] = useState([]);
+  const [vendors, setVendors] = useState([]);
   const [dispatchDetailFor, setDispatchDetailFor] = useState(null);
   const [planningAllocationFor, setPlanningAllocationFor] = useState(null);
   const { user } = useAuth();
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
   const load = async () => {
-    const [j, w, s, ar, pl, dr, invs] = await Promise.all([
+    const [j, w, s, ar, pl, dr, invs, vends] = await Promise.all([
       http.get("/production/jobs"),
       http.get("/workers"),
       http.get("/styles"),
@@ -300,11 +410,13 @@ export default function Production() {
       http.get("/packing-lists"),
       http.get("/dispatch-records?limit=1000"),
       http.get("/invoices").catch(() => ({ data: [] })),
+      http.get("/vendors").catch(() => ({ data: [] })),
     ]);
     setJobs(j.data); setWorkers(w.data); setStyles(s.data);
     setArchivedJobs(ar.data); setSavedPackingLists(pl.data || []);
     setDispatchRecords(dr.data || []);
     setInvoices(invs.data || []);
+    setVendors(vends.data || []);
   };
   useEffect(() => { load(); }, []);
 
@@ -488,15 +600,163 @@ export default function Production() {
     }
     load();
   };
-  const assignWorker = async (group, role, workerId, rate) => {
-    await Promise.all(group.rows.map(j =>
-      http.patch(`/production/jobs/${j.id}/assignment`, {
-        role, worker_id: workerId || null,
-        rate_per_pair: rate === undefined || rate === "" ? null : Number(rate),
-      })
-    ));
-    setAssignFor(null);
-    load();
+  const assignWorker = async (group, role, workerId, rate, overwrite = false) => {
+    if ((role === "sole" || role.startsWith("sole.")) && isSoleReadyToUse(group, styleByCode[group.style_code])) {
+      alert("Sub-task assignment is disabled: this style uses a ready-to-use sole.");
+      return;
+    }
+
+    const rateNum = (rate === undefined || rate === "" || rate === null) ? null : Number(rate);
+    const worker = workers.find(w => w.id === workerId);
+    const workerName = worker?.name || "";
+    const effectiveRate = rateNum !== null ? rateNum : (worker?.rate_per_pair || 0);
+
+    try {
+      if (role.includes(".")) {
+        // Sub-task assignment (e.g. upper.cutting, upper.stitching)
+        const [comp, substage] = role.split(".");
+        await Promise.all(group.rows.map(j =>
+          http.patch(`/production/jobs/${j.id}/sub-task-assignment`, {
+            component: comp,
+            substage,
+            worker_id: workerId || null,
+            rate_per_pair: rateNum,
+            job_ids: [j.id],
+          })
+        ));
+        group.rows.forEach(r => {
+          r.assignments = r.assignments || {};
+          if (workerId) {
+            r.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+          } else {
+            delete r.assignments[role];
+          }
+        });
+        if (group.assignments) {
+          if (workerId) {
+            group.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+          } else {
+            delete group.assignments[role];
+          }
+        }
+      } else if (["upper", "bottom", "sole", "heel_gola"].includes(role)) {
+        // Component-level assignment: bulk-assigns all unassigned subtasks under this component
+        if (workerId) {
+          await Promise.all(group.rows.map(j =>
+            http.post(`/production/jobs/${j.id}/components/${role}/bulk-assign`, {
+              worker_id: workerId,
+              rate_per_pair: rateNum,
+              overwrite: Boolean(overwrite),
+              job_ids: [j.id],
+            })
+          ));
+          const compStages = group.component_specs?.components?.[role]?.stages || (
+            role === "upper" ? ["cutting", "stitching", "folding", "attachment"] :
+            role === "bottom" ? ["cutting", "stitching", "stamping"] :
+            []
+          );
+          group.rows.forEach(r => {
+            r.assignments = r.assignments || {};
+            r.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+            compStages.forEach(st => {
+              const stKey = `${role}.${st}`;
+              if (overwrite || !r.assignments[stKey]?.worker_id) {
+                r.assignments[stKey] = {
+                  worker_id: workerId,
+                  worker_name: workerName,
+                  rate_per_pair: effectiveRate,
+                  assigned_at: new Date().toISOString(),
+                };
+              }
+            });
+          });
+          if (group.assignments) {
+            group.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+            compStages.forEach(st => {
+              const stKey = `${role}.${st}`;
+              if (overwrite || !group.assignments[stKey]?.worker_id) {
+                group.assignments[stKey] = {
+                  worker_id: workerId,
+                  worker_name: workerName,
+                  rate_per_pair: effectiveRate,
+                  assigned_at: new Date().toISOString(),
+                };
+              }
+            });
+          }
+        } else {
+          // Unassign main component
+          await Promise.all(group.rows.map(j =>
+            http.patch(`/production/jobs/${j.id}/assignment`, {
+              role, worker_id: null, rate_per_pair: null,
+            })
+          ));
+          group.rows.forEach(r => {
+            if (r.assignments) delete r.assignments[role];
+          });
+          if (group.assignments) delete group.assignments[role];
+        }
+      } else {
+        // Assembly roles: lasting, sole_pasting, finishing, qc_pack
+        await Promise.all(group.rows.map(j =>
+          http.patch(`/production/jobs/${j.id}/assignment`, {
+            role, worker_id: workerId || null,
+            rate_per_pair: rateNum,
+          })
+        ));
+        group.rows.forEach(r => {
+          r.assignments = r.assignments || {};
+          if (workerId) {
+            r.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+          } else {
+            delete r.assignments[role];
+          }
+        });
+        if (group.assignments) {
+          if (workerId) {
+            group.assignments[role] = {
+              worker_id: workerId,
+              worker_name: workerName,
+              rate_per_pair: effectiveRate,
+              assigned_at: new Date().toISOString(),
+            };
+          } else {
+            delete group.assignments[role];
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Assignment error:", err);
+      alert("Failed to assign: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setAssignFor(null);
+      load();
+    }
   };
   const saveQuantity = async (rowId, body) => {
     await http.patch(`/production/jobs/${rowId}/quantity`, body);
@@ -957,6 +1217,7 @@ export default function Production() {
                         group={g}
                         style={styleByCode[g.style_code]}
                         workers={workers}
+                        vendors={vendors}
                         stageColor={s.color}
                         stageIdx={STAGES.findIndex(x => x.key === s.key)}
                         canEdit={canEdit}
@@ -988,6 +1249,8 @@ export default function Production() {
                         onOpenDispatchDetails={(group) => setDispatchDetailFor(group)}
                         onArchiveDispatched={(jids, lbl) => archiveDispatchedJobs(jids, lbl)}
                         onOpenPlanningAllocation={(group, req) => setPlanningAllocationFor({ group, req })}
+                        onDropWorkerToComponent={(grp, role, worker) => assignWorker(grp, role, worker.id, worker.rate_per_pair)}
+                        draggingWorker={draggingWorker}
                       />
                     ))}
                   </div>
@@ -1007,8 +1270,9 @@ export default function Production() {
           group={assignFor.group}
           role={assignFor.role}
           workers={workers}
+          styleByCode={styleByCode}
           current={assignFor.group.assignments?.[assignFor.role]}
-          onSave={(wid, rate) => assignWorker(assignFor.group, assignFor.role, wid, rate)}
+          onSave={(wid, rate, overwrite) => assignWorker(assignFor.group, assignFor.role, wid, rate, overwrite)}
           onClose={() => setAssignFor(null)}
         />
       )}
@@ -1427,10 +1691,12 @@ function ColorGroupCard(props) {
     isQcPack, isQcPackSelected, onToggleQcPackSelect, isQcPackSelectDisabled, onMatReq,
     procSelected, onToggleProcSelect, isSelected, onToggleSelect, onDownloadInvoice, onPackCartons, onDispatch,
     dispatchRecordByJobId, onDownloadDispatchFile, isSelectDisabled, onOpenDispatchDetails, onArchiveDispatched,
-    onOpenPlanningAllocation } = props;
+    onOpenPlanningAllocation, onDropWorkerToComponent, draggingWorker, workers = [], vendors = [] } = props;
   const navigate = useNavigate();
   const nextStage = STAGES[stageIdx + 1];
   const prevStage = STAGES[stageIdx - 1];
+  // Track which parallel component is selected/expanded for karigar assignment
+  const [activeComp, setActiveComp] = useState(null);
 
   const consumeError = group.rows.find(r => r.inventory_consume_error);
 
@@ -1460,6 +1726,98 @@ function ColorGroupCard(props) {
 
   const isInactive = style?.status === "inactive";
   const effectiveCanEdit = canEdit && !isInactive;
+
+  // ─── Outside Labour Work state (from jobs or style master fallback) ──────
+  const initialOutsideLabour = useMemo(() => {
+    if (group.rows?.[0]?.outside_labour && group.rows[0].outside_labour.length > 0) {
+      return group.rows[0].outside_labour;
+    }
+    const fromStyle = (style?.outside_labour || []).concat(
+      (style?.labor || []).filter(l => l.is_outside)
+    );
+    return fromStyle;
+  }, [group, style]);
+
+  const [outsideLabour, setOutsideLabour] = useState(initialOutsideLabour);
+  useEffect(() => {
+    setOutsideLabour(initialOutsideLabour);
+  }, [initialOutsideLabour]);
+
+  const handleUpdateOutsideLabour = async (newItems) => {
+    setOutsideLabour(newItems);
+    try {
+      await http.post("/production/job-groups/outside-labour", {
+        job_ids: group.rows.map(r => r.id),
+        outside_labour: newItems,
+      });
+      group.rows.forEach(r => { r.outside_labour = newItems; });
+    } catch (e) {
+      console.error("Failed to update outside labour", e);
+      alert("Failed to update outside labour: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const handleCompleteOutsideLabour = async (itemId) => {
+    try {
+      const res = await http.post(`/production/jobs/${group.rows[0].id}/outside-labour/${itemId}/complete`, {
+        completed_qty: group.totalQty,
+      });
+      const updatedList = res.data.outside_labour;
+      if (updatedList) {
+        setOutsideLabour(updatedList);
+        group.rows.forEach(r => { r.outside_labour = updatedList; });
+      }
+      alert("Outside Labour marked complete! Vendor Bill posted to AP ledger.");
+    } catch (e) {
+      console.error("Failed to complete outside labour", e);
+      alert("Failed to complete outside labour: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  // Derive dynamic sub-tasks from component_specs.{compKey}.stages
+  const getSubtasksForComp = useCallback((compKey) => {
+    if (!compKey) return [];
+    if (compKey === "sole" && isSoleReadyToUse(group, style)) {
+      return [];
+    }
+    const compSpecs = group.component_specs?.components?.[compKey];
+    let compStages = compSpecs?.stages;
+    if (compKey === "bottom") {
+      const baseBottom = ["cutting", "stitching", "stamping"];
+      if (!Array.isArray(compStages) || compStages.length === 0) {
+        compStages = baseBottom;
+      } else {
+        const merged = [...compStages];
+        baseBottom.forEach(b => {
+          if (!merged.includes(b) && !merged.some(s => s.includes("stamp") || s.includes("brand"))) {
+            merged.push(b);
+          }
+        });
+        compStages = merged;
+      }
+    }
+    if (Array.isArray(compStages)) {
+      return compStages.map(st => {
+        const predefined = (COMPONENT_SUBTASK_ROLES[compKey] || []).find(
+          r => r.key === `${compKey}.${st}` || r.key.endsWith(`.${st}`) || r.substage === st || (st.includes("stamp") && r.key === "bottom.stamping")
+        );
+        const formatLabel = (s) => {
+          if (s === "stamping" || s === "brand_marking" || s === "stamping_brand_marking") return "Stamping / Brand Marking";
+          return s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ");
+        };
+        return {
+          key: `${compKey}.${st}`,
+          substage: st,
+          fallbackKey: predefined?.fallbackKey || null,
+          label: predefined?.label || formatLabel(st),
+          icon: predefined?.icon || (st.includes("cut") ? "✂" : st.includes("stitch") ? "🧵" : st.includes("stamp") || st.includes("brand") ? "🏷️" : st.includes("fold") ? "📐" : "🔧"),
+        };
+      });
+    }
+    return COMPONENT_SUBTASK_ROLES[compKey] || [];
+  }, [group, style]);
+
+  const dynamicSubtasks = useMemo(() => getSubtasksForComp(activeComp), [activeComp, getSubtasksForComp]);
 
   // ─── Planning stage: material requirement preview ───────────────────────
   const [planMatReq, setPlanMatReq] = useState(null);
@@ -1529,31 +1887,169 @@ function ColorGroupCard(props) {
           <span>⚠ {consumeError.inventory_consume_error}</span>
         </div>
       )}
-      {(style?.image_url ||
-        style?.image_display_url ||
-        style?.image_thumbnail_url) && (
-        <SafeImage
-          image={{
-            url: style.image_url,
-            display_url: style.image_display_url,
-            thumbnail_url: style.image_thumbnail_url,
-          }}
-          alt={style.name}
-          aspectRatio="16/7"
-          className="border-b border-slate-200"
-          testId={`card-img-${group.key}`}
-        />
-      )}
+      {/* Top Header Bar: Top Left = Card Creation Date, Top Right = Combine / Merge Checkbox */}
+      <div className="px-3 py-1 bg-slate-50/90 border-b border-slate-100 flex items-center justify-between gap-2 text-[10px] min-h-[26px]">
+        {/* Top Left Corner: Date of creation */}
+        <div className="flex items-center gap-1 font-mono text-slate-500" data-testid={`created-date-${group.key}`}>
+          <Clock className="w-3 h-3 text-slate-400 flex-shrink-0" />
+          <span className="text-slate-400 uppercase font-semibold text-[8.5px] tracking-wider">Created: </span>
+          <span className="text-slate-700 font-bold text-[10px]">
+            {group.card_created_date || (group.created_at ? String(group.created_at).slice(0, 10) : "—")}
+          </span>
+        </div>
+
+        {/* Top Right Corner: Combine / Merge checkbox */}
+        <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
+          {isProc && (
+            <label className="inline-flex items-center gap-1.5 cursor-pointer bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2 py-0.5 rounded shadow-2xs transition-colors" data-testid={`proc-combine-label-${group.key}`}>
+              <input
+                type="checkbox"
+                checked={procSelected}
+                onChange={() => onToggleProcSelect(group)}
+                className="w-3.5 h-3.5 accent-[#2563EB]"
+                data-testid={`proc-select-${group.key}`}
+              />
+              <span className="text-[10px] uppercase tracking-wider font-bold text-blue-900">Combine</span>
+            </label>
+          )}
+          {isQcPack && (
+            <label
+              className="inline-flex items-center gap-1.5 cursor-pointer bg-teal-50 hover:bg-teal-100 border border-teal-200 px-2 py-0.5 rounded shadow-2xs transition-colors"
+              title={isQcPackSelectDisabled && !isQcPackSelected ? "Cannot merge with cards from a different PO" : "Select card to merge dispatch docs"}
+            >
+              <input
+                type="checkbox"
+                checked={isQcPackSelected}
+                disabled={isQcPackSelectDisabled && !isQcPackSelected}
+                onChange={() => onToggleQcPackSelect(group)}
+                className={`w-3.5 h-3.5 accent-[#0D9488] ${isQcPackSelectDisabled && !isQcPackSelected ? "cursor-not-allowed opacity-50" : ""}`}
+                data-testid={`qc-pack-select-${group.key}`}
+              />
+              <span className="text-[10px] uppercase tracking-wider font-bold text-teal-800">Merge</span>
+            </label>
+          )}
+          {isDispatched && (
+            <label className="inline-flex items-center gap-1.5 cursor-pointer bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2 py-0.5 rounded shadow-2xs transition-colors">
+              <input
+                type="checkbox"
+                checked={isSelected}
+                disabled={isSelectDisabled && !isSelected}
+                onChange={() => onToggleSelect(group)}
+                className={`w-3.5 h-3.5 accent-[#C27842] ${isSelectDisabled && !isSelected ? "cursor-not-allowed opacity-50" : ""}`}
+                data-testid={`select-${group.key}`}
+              />
+              <span className="text-[10px] uppercase tracking-wider font-bold text-amber-900">Merge</span>
+            </label>
+          )}
+        </div>
+      </div>
+
+      {/* 2-COLUMN HEADER: Left = Image, Right = PO Number, Style, SKU, Details & Dates */}
+      <div className="p-2.5 border-b border-slate-200 bg-white flex gap-3 items-center">
+        {/* Left Column: Image (resized to fit, with rounded border & fallback) */}
+        <div className="w-24 h-24 sm:w-28 sm:h-28 flex-shrink-0 rounded-md overflow-hidden border border-slate-200 bg-slate-50 relative flex items-center justify-center shadow-xs">
+          {(style?.image_url || style?.image_display_url || style?.image_thumbnail_url) ? (
+            <SafeImage
+              image={{
+                url: style.image_url,
+                display_url: style.image_display_url,
+                thumbnail_url: style.image_thumbnail_url,
+              }}
+              alt={style.name || group.style_code}
+              aspectRatio="1/1"
+              fit="cover"
+              className="w-full h-full object-cover"
+              testId={`card-img-${group.key}`}
+            />
+          ) : (
+            <div className="w-full h-full flex flex-col items-center justify-center text-slate-300 p-2">
+              <Package className="w-6 h-6 text-slate-300 stroke-[1.5]" />
+              <span className="text-[8.5px] uppercase tracking-wider font-semibold text-slate-400 mt-1">No Image</span>
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: PO Number, Style Number, SKU / External ID, Color, Qty, and Dates */}
+        <div className="flex-1 min-w-0 flex flex-col justify-between self-stretch py-0.5">
+          <div>
+            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                <span
+                  className="text-[11px] font-mono font-bold text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200"
+                  title="PO Number"
+                  data-testid={`po-number-${group.key}`}
+                >
+                  {group.po_number}
+                </span>
+                <span
+                  className="font-mono font-bold text-xs text-slate-900"
+                  title={group.style_display || group.style_code}
+                  data-testid={`style-code-${group.key}`}
+                >
+                  {group.style_display || group.style_code}
+                </span>
+                {group.sku_id && (
+                  <span
+                    className="text-[10px] font-mono font-semibold text-violet-800 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded"
+                    title={`SKU ID: ${group.sku_id}`}
+                    data-testid={`sku-id-${group.key}`}
+                  >
+                    SKU: {group.sku_id}
+                  </span>
+                )}
+                <span className="text-slate-300">·</span>
+                <span className="text-xs font-bold text-[#C27842]">{group.color}</span>
+                <span className="text-slate-400">·</span>
+                <span className="text-xs text-slate-600 font-mono font-medium">{group.totalQty} pairs</span>
+                {group.client_name && (
+                  <>
+                    <span className="text-slate-400">·</span>
+                    <span
+                      className="text-xs uppercase tracking-wider font-semibold text-slate-700 truncate max-w-[180px]"
+                      title={`Client: ${group.client_name}`}
+                      data-testid={`client-name-${group.key}`}
+                    >
+                      {group.client_name}
+                    </span>
+                  </>
+                )}
+                {completedTotal > 0 && (
+                  <>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-xs text-green-700 font-mono font-semibold">{completedTotal} done</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Dates row: PO date, delivery date */}
+          <div className="flex items-center gap-3 text-[10px] text-slate-500 flex-wrap pt-1.5 border-t border-slate-100 mt-1.5">
+            {group.po_date && (
+              <div className="flex items-center gap-1 font-mono">
+                <Calendar className="w-3 h-3 text-slate-400" />
+                <span className="text-slate-400 uppercase font-semibold text-[9px]">PO:</span>
+                <span className="text-slate-700 font-medium">{group.po_date}</span>
+              </div>
+            )}
+            {group.delivery_date && (
+              <div className="flex items-center gap-1 font-mono">
+                <Truck className="w-3 h-3 text-[#C27842]" />
+                <span className="text-slate-400 uppercase font-semibold text-[9px]">Deliver:</span>
+                <span className="text-slate-800 font-bold">{group.delivery_date}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {isPlanning && (
         <div className="border-b-2 border-violet-200 bg-gradient-to-br from-violet-50 to-indigo-50" data-testid={`planning-panel-${group.key}`}>
           {/* Planning header */}
           <div className="flex items-center justify-between px-3 py-2 bg-violet-700 text-white">
             <div className="flex items-center gap-2">
               <Layers className="w-3.5 h-3.5" />
-              <div>
-                <div className="text-[9px] uppercase tracking-[0.2em] font-bold opacity-80">Planning Stage</div>
-                <div className="text-[11px] font-bold">{group.style_display || group.style_code} · <span className="text-violet-200">{group.color}</span></div>
-              </div>
+              <span className="text-[10px] uppercase tracking-[0.15em] font-bold">Planning Stage</span>
             </div>
             {canEdit && (
               <button
@@ -1710,56 +2206,7 @@ function ColorGroupCard(props) {
           </div>
         </div>
       )}
-      <div className="p-3 pb-2 border-b border-slate-100">
-        <div className="flex items-baseline justify-between mb-0.5">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{group.po_number}</div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">{group.client_name}</div>
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="font-mono font-bold text-sm" title={group.style_display || group.style_code} data-testid={`style-code-${group.key}`}>{group.style_display || group.style_code}</div>
-            <div className="text-xs">
-              <span className="font-bold text-[#C27842]">{group.color}</span>
-              <span className="text-slate-400 mx-1">·</span>
-              <span className="text-slate-600 font-mono">{group.totalQty} pairs</span>
-              {completedTotal > 0 && (
-                <>
-                  <span className="text-slate-400 mx-1">·</span>
-                  <span className="text-green-700 font-mono">{completedTotal} done</span>
-                </>
-              )}
-            </div>
-          </div>
-          {isDispatched && (
-            <label className="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="checkbox" checked={isSelected} disabled={isSelectDisabled && !isSelected} onChange={() => onToggleSelect(group)} className={`w-4 h-4 accent-[#C27842] ${isSelectDisabled && !isSelected ? "cursor-not-allowed opacity-50" : ""}`} data-testid={`select-${group.key}`} />
-              <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Merge</span>
-            </label>
-          )}
-          {isQcPack && (
-            <label
-              className="inline-flex items-center gap-1.5 cursor-pointer"
-              title={isQcPackSelectDisabled && !isQcPackSelected ? "Cannot merge with cards from a different PO" : "Select card to merge dispatch docs"}
-            >
-              <input
-                type="checkbox"
-                checked={isQcPackSelected}
-                disabled={isQcPackSelectDisabled && !isQcPackSelected}
-                onChange={() => onToggleQcPackSelect(group)}
-                className={`w-4 h-4 accent-[#0D9488] ${isQcPackSelectDisabled && !isQcPackSelected ? "cursor-not-allowed opacity-50" : ""}`}
-                data-testid={`qc-pack-select-${group.key}`}
-              />
-              <span className="text-[10px] uppercase tracking-wider font-bold text-teal-700">Merge</span>
-            </label>
-          )}
-          {isProc && (
-            <label className="inline-flex items-center gap-1.5 cursor-pointer">
-              <input type="checkbox" checked={procSelected} onChange={() => onToggleProcSelect(group)} className="w-4 h-4 accent-[#2563EB]" data-testid={`proc-select-${group.key}`} />
-              <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Combine</span>
-            </label>
-          )}
-        </div>
-      </div>
+
 
       {/* Size matrix with click-to-edit qty */}
       <div className="p-3 overflow-x-auto">
@@ -1789,72 +2236,119 @@ function ColorGroupCard(props) {
             </tr>
           </tbody>
         </table>
-        {effectiveCanEdit && (
-          <div className="text-[9px] text-slate-400 mt-1 italic">Click any qty cell to edit / adjust completed / rejected</div>
-        )}
       </div>
 
-      {/* Components */}
-      <div className="px-3 pb-2">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500">Components</div>
-          <div className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
-            group.components.upper_done && group.components.bottom_done
-              ? "bg-green-50 text-green-700 border-green-200"
-              : "bg-amber-50 text-amber-700 border-amber-200"
-          }`}>
-            Upper {group.components.upper_done ? "✓" : "pending"} / Bottom {group.components.bottom_done ? "✓" : "pending"}
-          </div>
-        </div>
+      {/* --- UNIFIED PARALLEL COMPONENTS & KARIGAR ASSIGNMENT --- */}
+      <div className="px-3 pb-2.5">
+        {/* Component Cards: Upper, Bottom/Insole, Sole, Heel (if heel) */}
+        {/* Click a component to expand its karigar assignment panel below */}
         <div className={`grid ${group.footwear_type === "heel" ? "grid-cols-4" : "grid-cols-3"} gap-2`}>
-          <ComponentCell label="Upper" done={group.components.upper_done} layers={COMPONENT_LAYERS.upper}
-            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "upper_done", v)} />
-          <ComponentCell label="Bottom/Insole" done={group.components.bottom_done} layers={COMPONENT_LAYERS.bottom}
-            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "bottom_done", v)} />
-          <ComponentCell label="Sole" done={group.components.sole_done} layers={COMPONENT_LAYERS.sole}
-            disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "sole_done", v)} />
-          {group.footwear_type === "heel" && (
-            <ComponentCell label="Heel/Gola" done={group.components.heel_gola_done} layers={COMPONENT_LAYERS.heel_gola}
-              disabled={!effectiveCanEdit} onToggle={(v) => onToggleComponent(group, "heel_gola_done", v)} />
-          )}
-        </div>
-      </div>
-
-      {/* Karigar assignments */}
-      <div className="px-3 pb-2">
-        <div className="text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500 mb-1.5">Karigars</div>
-        <div className="grid grid-cols-2 gap-1.5">
-          {ASSIGNMENT_ROLES.map(r => (
-            <button
-              key={r.key}
+          {[
+            { compKey: "upper", label: "Upper", doneKey: "upper_done", done: group.components.upper_done },
+            { compKey: "bottom", label: "Bottom", doneKey: "bottom_done", done: group.components.bottom_done },
+            { compKey: "sole", label: "Sole", doneKey: "sole_done", done: group.components.sole_done },
+            ...(group.footwear_type === "heel"
+              ? [{ compKey: "heel_gola", label: "Heel/Gola", doneKey: "heel_gola_done", done: group.components.heel_gola_done }]
+              : []),
+          ].map(({ compKey, label, doneKey, done }) => (
+            <ParallelComponentCard
+              key={compKey}
+              compKey={compKey}
+              label={label}
+              done={done}
+              layers={COMPONENT_LAYERS[compKey]}
+              assignment={getComponentAssignment(a, compKey)}
+              assignments={a}
+              subtasks={getSubtasksForComp(compKey)}
+              outsideCount={(outsideLabour || []).filter(o => (o.component || "").toLowerCase() === compKey).length}
               disabled={!effectiveCanEdit}
-              onClick={() => onOpenAssign(r.key)}
-              data-testid={`assign-${group.key}-${r.key}`}
-              className={`flex items-center justify-between gap-1 px-2 py-1 border ${a[r.key] ? "border-[#C27842] bg-orange-50" : "border-dashed border-slate-300 bg-white"} hover:border-slate-900 text-left transition-colors`}
-            >
-              <span className="text-[9px] uppercase tracking-wider font-bold text-slate-500">{r.label}</span>
-              <div className="text-right">
-                <div className={`text-[10px] font-bold truncate ${a[r.key] ? "text-[#0F172A]" : "text-slate-400 italic"}`}>
-                  {a[r.key]?.worker_name || "Assign…"}
-                </div>
-                {a[r.key]?.rate_per_pair !== undefined && a[r.key]?.rate_per_pair !== null && (
-                  <div className="text-[9px] font-mono text-[#C27842]">₹{a[r.key].rate_per_pair}/pr</div>
-                )}
-              </div>
-            </button>
+              groupKey={group.key}
+              isActive={activeComp === compKey}
+              onSelect={() => setActiveComp(prev => prev === compKey ? null : compKey)}
+              onToggle={(v) => onToggleComponent(group, doneKey, v)}
+              onOpenAssign={onOpenAssign}
+              onDropWorker={onDropWorkerToComponent ? (w) => onDropWorkerToComponent(group, compKey, w) : undefined}
+              draggingWorker={draggingWorker}
+              isReadySole={compKey === "sole" && isSoleReadyToUse(group, style)}
+            />
           ))}
         </div>
+
+        {/* Inline Karigar Assignment Panel — shows when a component is selected */}
+        {activeComp && (
+          <ComponentKarigarPanel
+            compKey={activeComp}
+            label={activeComp === "upper" ? "Upper" : activeComp === "bottom" ? "Bottom / Insole" : activeComp === "sole" ? "Sole" : "Heel / Gola"}
+            subtasks={dynamicSubtasks}
+            assignments={a}
+            outsideLabour={outsideLabour}
+            workers={workers}
+            vendors={vendors}
+            canEdit={effectiveCanEdit}
+            onOpenAssign={onOpenAssign}
+            onSaveOutsideLabour={handleUpdateOutsideLabour}
+            onCompleteOutsideLabour={handleCompleteOutsideLabour}
+            groupKey={group.key}
+            totalQty={group.totalQty}
+            isReadySole={activeComp === "sole" && isSoleReadyToUse(group, style)}
+          />
+        )}
+
+        {/* --- COMPACT ASSEMBLY LINE KARIGARS --- */}
+        <div className="mt-2.5 pt-2 border-t border-slate-100">
+          <div className="text-[9px] uppercase tracking-wider font-bold text-slate-400 mb-1">
+            <span>Assembly Karigars</span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+            {ASSEMBLY_ROLES.map((r) => {
+              const asgn = a[r.key];
+              const isCurrentStage = group.stage === r.stageKey;
+              return (
+                <button
+                  key={r.key}
+                  type="button"
+                  disabled={!effectiveCanEdit}
+                  onClick={() => onOpenAssign(r.key)}
+                  data-testid={`assign-${group.key}-${r.key}`}
+                  title={`Assign ${r.label} Karigar`}
+                  className={`flex items-center justify-between gap-1 px-2 py-1 rounded text-left transition-all border ${
+                    isCurrentStage
+                      ? "border-[#A65D24] bg-amber-50/80 ring-1 ring-[#A65D24]/40"
+                      : asgn
+                      ? "border-slate-300 bg-slate-50/80 hover:border-slate-400"
+                      : "border-dashed border-slate-200 bg-white hover:border-slate-400"
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      <span className={`text-[8.5px] uppercase font-bold tracking-wider ${
+                        isCurrentStage ? "text-[#A65D24]" : "text-slate-500"
+                      }`}>
+                        {r.label}
+                      </span>
+                      {isCurrentStage && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#A65D24] animate-pulse" />
+                      )}
+                    </div>
+                    <div className={`text-[10px] font-bold truncate ${
+                      asgn ? "text-slate-900" : "text-slate-400 italic"
+                    }`}>
+                      {asgn?.worker_name || "+ Assign"}
+                    </div>
+                  </div>
+                  {asgn?.rate_per_pair != null && (
+                    <span className="text-[9px] font-mono text-[#C27842] flex-shrink-0 font-semibold">
+                      {`₹${asgn.rate_per_pair}`}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
-      <div className="px-3 pb-3 flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex flex-col gap-0.5">
-          {group.card_created_date && (
-            <div className="text-[10px] text-slate-400 font-medium" data-testid={`created-date-${group.key}`}>
-              Created: {group.card_created_date}
-            </div>
-          )}
-          {group.delivery_date && <div className="text-[10px] text-slate-500">Deliver: {group.delivery_date}</div>}
-        </div>
+      <div className="px-3 pb-3 flex items-center justify-end gap-2 flex-wrap">
         <div className="flex gap-2 ml-auto items-center flex-wrap">
           {effectiveCanEdit && (
             <button onClick={onPrint} title="Print production card" data-testid={`print-${group.key}`}
@@ -1993,6 +2487,626 @@ function ColorGroupCard(props) {
   );
 }
 
+/**
+ * ParallelComponentCard — clickable tab-style card for each component track.
+ * Displays the primary assigned person for this component, status toggle,
+ * and quick summary of subtasks & outside work.
+ * Clicking expands the full inline assignment & outside work panel below.
+ */
+function ParallelComponentCard({
+  compKey,
+  label,
+  done,
+  layers = [],
+  assignment,
+  assignments = {},
+  outsideCount = 0,
+  subtasks: propSubtasks,
+  onToggle,
+  onSelect,
+  onOpenAssign,
+  isActive,
+  disabled,
+  groupKey,
+  onDropWorker,
+  draggingWorker,
+  isReadySole = false,
+}) {
+  const [isOver, setIsOver] = useState(false);
+  const subtasks = propSubtasks !== undefined ? propSubtasks : (COMPONENT_SUBTASK_ROLES[compKey] || []);
+
+  return (
+    <div
+      onDragOver={(e) => {
+        if (!draggingWorker || !onDropWorker || isReadySole) return;
+        e.preventDefault();
+        setIsOver(true);
+      }}
+      onDragLeave={() => setIsOver(false)}
+      onDrop={(e) => {
+        if (!draggingWorker || !onDropWorker || isReadySole) return;
+        e.preventDefault();
+        setIsOver(false);
+        onDropWorker(draggingWorker);
+      }}
+      className={`rounded-lg flex flex-col border-2 transition-all cursor-pointer select-none ${
+        isOver
+          ? "border-[#C27842] bg-orange-100/70 shadow-md scale-[1.02]"
+          : isActive
+          ? "border-[#C27842] bg-amber-50/60 shadow-md ring-2 ring-[#C27842]/20"
+          : done
+          ? "border-emerald-300 bg-emerald-50/40 shadow-xs hover:border-emerald-400"
+          : "border-slate-200 bg-white hover:border-[#C27842]/50 shadow-xs"
+      }`}
+      data-testid={`component-card-${compKey}`}
+      onClick={onSelect}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
+      aria-expanded={isActive}
+      aria-label={`${label} component — click to ${isActive ? "collapse" : "expand"} karigar assignment`}
+    >
+      {/* Component name + status badge */}
+      <div className="px-2 pt-2 pb-1">
+        <div className="flex items-center justify-between gap-1">
+          <span className={`text-[11px] uppercase font-black tracking-wider truncate ${
+            isActive ? "text-[#A65D24]" : done ? "text-emerald-700" : "text-slate-800"
+          }`} title={label}>
+            {label}
+          </span>
+          <span className={`text-[10px] transition-transform duration-200 ${
+            isActive ? "rotate-180 text-[#C27842]" : "text-slate-400"
+          }`}>▼</span>
+        </div>
+
+        {/* Ready / Pending toggle */}
+        <div className="mt-1 flex items-center justify-between gap-1" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onToggle(!done)}
+            data-testid={`toggle-comp-${groupKey}-${compKey}`}
+            title={done ? "Click to mark In Progress" : "Click to mark Ready"}
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold transition-all border ${
+              done
+                ? "bg-emerald-600 text-white border-emerald-600 shadow-xs hover:bg-emerald-700"
+                : "bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200"
+            }`}
+          >
+            {done ? (
+              <><Check className="w-2.5 h-2.5 stroke-[3]" /><span>Ready</span></>
+            ) : (
+              <span>Pending</span>
+            )}
+          </button>
+
+          {outsideCount > 0 && (
+            <span
+              className="text-[8px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-0.5"
+              title={`${outsideCount} Outside Labour operation(s)`}
+            >
+              {`🏭 ${outsideCount} Outside`}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Main Assigned Person for this component */}
+      <div className="px-2 pb-1.5">
+        {isReadySole ? (
+          <div className="px-2 py-1.5 rounded bg-emerald-50/70 border border-emerald-200" data-testid={`ready-sole-indicator-${groupKey}`}>
+            <div className="flex items-center justify-between gap-1">
+              <div className="text-[10px] font-bold text-emerald-800 truncate flex items-center gap-1 min-w-0">
+                <Check className="w-3 h-3 text-emerald-600 flex-shrink-0" />
+                <span>Ready-to-use Sole</span>
+              </div>
+              <span className="text-[8px] uppercase font-bold text-emerald-700 bg-emerald-100/90 px-1 py-0.5 rounded border border-emerald-300">
+                No Sub-tasks
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={true}
+              data-testid={`assign-${groupKey}-${compKey}`}
+              className="sr-only"
+              aria-label="Sole assignment disabled - ready to use"
+            >
+              Disabled
+            </button>
+          </div>
+        ) : (
+          <div
+            className="px-2 py-1.5 rounded bg-slate-50 border border-slate-200 hover:border-[#C27842]/60 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenAssign?.(compKey);
+            }}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <div className="text-[10.5px] font-bold text-slate-900 truncate flex items-center gap-1 min-w-0">
+                {assignment?.worker_name ? (
+                  <>
+                    <span className="text-[10px] flex-shrink-0">👤</span>
+                    <span className="truncate">{assignment.worker_name}</span>
+                  </>
+                ) : (
+                  <span className="text-slate-400 italic font-normal text-[10px]">+ Assign Person</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  data-testid={`assign-${groupKey}-${compKey}`}
+                  className="text-[8.5px] uppercase font-bold text-[#C27842] hover:text-[#A65D24] px-1 py-0.5 rounded hover:bg-orange-50 transition-colors"
+                >
+                  {assignment?.worker_name ? "Change" : "Assign"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Subtasks summary badges (only assigned specialists) */}
+      {!isReadySole && subtasks.some(st => assignments[st.key]?.worker_name) && (
+        <div className="px-2 pb-1.5 mt-auto">
+          <div className="flex items-center gap-1 flex-wrap">
+            {subtasks.filter(st => assignments[st.key]?.worker_name).map((st) => {
+              const stAsgn = assignments[st.key];
+              return (
+                <span
+                  key={st.key}
+                  title={`${st.label}: ${stAsgn.worker_name}`}
+                  className="inline-flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full border bg-[#C27842]/10 text-[#A65D24] border-[#C27842]/30"
+                >
+                  <span>{st.icon}</span>
+                  <span className="truncate max-w-[44px]">
+                    {stAsgn.worker_name.split(" ")[0]}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ComponentKarigarPanel — shown below the component grid when a component is selected.
+ * Displays:
+ * 1. Component Main Assigned Person (Lead / Karigar)
+ * 2. Process Sub-tasks (Cutting, Stitching, Folding, etc.) assigned to other workers
+ * 3. Extra Outside Labour Work (Job Work / Outsourced) belonging strictly to Upper, Bottom, or Sole
+ */
+function ComponentKarigarPanel({
+  compKey,
+  label,
+  subtasks = [],
+  assignments = {},
+  outsideLabour = [],
+  workers = [],
+  vendors = [],
+  canEdit,
+  onOpenAssign,
+  onSaveOutsideLabour,
+  onCompleteOutsideLabour,
+  groupKey,
+  totalQty = 0,
+  isReadySole = false,
+}) {
+  const compColors = {
+    upper: { bg: "bg-sky-50/60", border: "border-sky-300", header: "bg-sky-700", accent: "text-sky-700", badge: "bg-sky-100 text-sky-800 border-sky-200" },
+    bottom: { bg: "bg-violet-50/60", border: "border-violet-300", header: "bg-violet-700", accent: "text-violet-700", badge: "bg-violet-100 text-violet-800 border-violet-200" },
+    sole: { bg: "bg-teal-50/60", border: "border-teal-300", header: "bg-teal-700", accent: "text-teal-700", badge: "bg-teal-100 text-teal-800 border-teal-200" },
+    heel_gola: { bg: "bg-rose-50/60", border: "border-rose-300", header: "bg-rose-700", accent: "text-rose-700", badge: "bg-rose-100 text-rose-800 border-rose-200" },
+  };
+  const c = compColors[compKey] || compColors.upper;
+
+  // Filter outside labour belonging strictly to this component
+  const compOutsideLabour = (outsideLabour || []).filter(o => (o.component || "").toLowerCase() === compKey);
+  const isEligibleForOutside = ["upper", "bottom", "sole"].includes(compKey);
+
+  const mainAssignee = assignments[compKey];
+  const [showAddOutside, setShowAddOutside] = useState(false);
+  const [newOutsideName, setNewOutsideName] = useState("");
+  const [newOutsideSubstage, setNewOutsideSubstage] = useState("");
+  const [newOutsideVendorId, setNewOutsideVendorId] = useState("");
+  const [newOutsideVendor, setNewOutsideVendor] = useState("");
+  const [newOutsideRate, setNewOutsideRate] = useState("");
+  const [newOutsideQty, setNewOutsideQty] = useState(totalQty || "");
+  const [newOutsideNotes, setNewOutsideNotes] = useState("");
+
+  const handleAddOutside = () => {
+    if (!newOutsideName.trim()) {
+      alert("Please enter work / operation name.");
+      return;
+    }
+    if (!newOutsideVendorId && !newOutsideVendor.trim()) {
+      alert("Vendor is required for outside labour work. Please select a registered vendor.");
+      return;
+    }
+    const newItem = {
+      id: Math.random().toString(36).slice(2, 11),
+      name: newOutsideName.trim(),
+      component: compKey,
+      substage: newOutsideSubstage || "job_work",
+      vendor_id: newOutsideVendorId,
+      vendor_name: newOutsideVendor.trim(),
+      vendor: newOutsideVendor.trim(),
+      rate: Number(newOutsideRate) || 0,
+      qty: Number(newOutsideQty) || (totalQty || 0),
+      notes: newOutsideNotes.trim(),
+      is_outside: true,
+      completed: false,
+    };
+    onSaveOutsideLabour?.([...(outsideLabour || []), newItem]);
+    setNewOutsideName("");
+    setNewOutsideSubstage("");
+    setNewOutsideVendorId("");
+    setNewOutsideVendor("");
+    setNewOutsideRate("");
+    setNewOutsideQty(totalQty || "");
+    setNewOutsideNotes("");
+    setShowAddOutside(false);
+  };
+
+  const handleDeleteOutside = (idxToDelete) => {
+    const updated = (outsideLabour || []).filter((_, idx) => idx !== idxToDelete);
+    onSaveOutsideLabour?.(updated);
+  };
+
+  return (
+    <div className={`mt-2 rounded-lg border-2 ${c.border} ${c.bg} overflow-hidden shadow-xs`}
+      data-testid={`comp-karigar-panel-${compKey}`}
+    >
+      {/* Panel header */}
+      <div className={`${c.header} text-white px-3 py-1.5 flex items-center justify-between`}>
+        <div className="flex items-center gap-2">
+          <HardHat className="w-3.5 h-3.5" />
+          <span className="text-[11px] font-black uppercase tracking-wider">{label} Track Assignment</span>
+        </div>
+      </div>
+
+      <div className="p-2.5 space-y-3">
+        {/* SECTION 1: COMPONENT ASSIGNED PERSON */}
+        <div>
+          <div className="text-[9.5px] uppercase tracking-wider font-black text-slate-700 mb-1 flex items-center gap-1">
+            <span>👤</span>
+            <span>1. Component Assigned Person</span>
+          </div>
+          <div className="bg-white border-2 border-slate-200 rounded-lg p-2.5 flex items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0 ${
+                mainAssignee?.worker_name ? "bg-amber-100 text-amber-800 border border-amber-300" : "bg-slate-100 text-slate-400"
+              }`}>
+                👤
+              </div>
+              <div className="min-w-0">
+                <div className="text-[12px] font-bold text-slate-900 truncate">
+                  {isReadySole ? (
+                    <span className="text-emerald-800 font-semibold flex items-center gap-1">
+                      <Check className="w-3.5 h-3.5 text-emerald-600" /> Ready-to-Use Sole (Vendor-Supplied)
+                    </span>
+                  ) : (
+                    mainAssignee?.worker_name || <span className="text-slate-400 italic">No Karigar Assigned</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {mainAssignee?.rate_per_pair != null && (
+                <span className="text-[11px] font-mono font-bold text-[#C27842] px-2 py-0.5 rounded bg-orange-50 border border-orange-200">
+                  ₹{mainAssignee.rate_per_pair}/pr
+                </span>
+              )}
+              {isReadySole ? (
+                <button
+                  type="button"
+                  disabled={true}
+                  className="text-[10px] uppercase tracking-wider font-bold bg-slate-100 text-slate-400 px-3 py-1.5 rounded border border-slate-200 cursor-not-allowed"
+                  title="Sub-task and karigar assignment is disabled because this style uses a ready-to-use sole"
+                >
+                  Assignment Disabled
+                </button>
+              ) : (
+                canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenAssign(compKey)}
+                    data-testid={`assign-lead-${groupKey}-${compKey}`}
+                    className="text-[10px] uppercase tracking-wider font-bold bg-[#0F172A] text-white hover:bg-slate-800 px-3 py-1.5 rounded shadow-xs transition-colors"
+                  >
+                    {mainAssignee?.worker_name ? "Change Person" : "Assign Person"}
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* SECTION 2: PROCESS SUB-TASKS */}
+        <div>
+          <div className="text-[9.5px] uppercase tracking-wider font-black text-slate-700 mb-1 flex items-center gap-1">
+            <span>⚡</span>
+            <span>2. Process Sub-tasks</span>
+          </div>
+
+          {isReadySole ? (
+            <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-lg flex items-start gap-2.5" data-testid="sole-ready-to-use-disabled-banner">
+              <Check className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                  <span>Ready-to-Use Sole</span>
+                  <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-emerald-200 text-emerald-900 font-extrabold">Sub-tasks Disabled</span>
+                </div>
+                <div className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+                  This style uses a pre-formed / vendor-supplied sole. Sub-task assignment is disabled because no in-house sole cutting, prep, or processing is required.
+                </div>
+              </div>
+            </div>
+          ) : subtasks.length === 0 ? (
+            <div className="text-[10px] text-slate-400 italic bg-white/70 border border-dashed border-slate-300 rounded px-3 py-2 text-center">
+              Vendor-supplied / Ready-to-use component. No internal sub-tasks required.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {subtasks.map((st) => {
+                const asgn = assignments[st.key] || (st.fallbackKey ? assignments[st.fallbackKey] : null);
+                const isDirectlyAssigned = !!assignments[st.key]?.worker_name;
+                return (
+                  <button
+                    key={st.key}
+                    type="button"
+                    disabled={!canEdit}
+                    onClick={(e) => { e.stopPropagation(); onOpenAssign(st.key); }}
+                    data-testid={`assign-${groupKey}-${st.key}`}
+                    className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-all group ${
+                      asgn?.worker_name
+                        ? "bg-white border-[#C27842]/40 hover:border-[#C27842] shadow-xs"
+                        : "bg-white/70 border-dashed border-slate-300 hover:border-[#C27842] hover:bg-white"
+                    } ${!canEdit ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    <span className="text-base flex-shrink-0" aria-hidden>{st.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[9.5px] uppercase font-bold text-slate-500 tracking-wider">
+                        {st.label}
+                      </div>
+                      <div className={`text-[11px] font-bold truncate ${
+                        asgn?.worker_name ? "text-slate-900" : "text-slate-400 italic"
+                      }`}>
+                        {asgn?.worker_name ? (
+                          <span>
+                            {asgn.worker_name}
+                            {!isDirectlyAssigned && (
+                              <span className="ml-1 text-[8.5px] text-slate-400 font-normal">(Component Lead)</span>
+                            )}
+                          </span>
+                        ) : (
+                          "+ Assign other worker"
+                        )}
+                      </div>
+                    </div>
+                    {asgn?.rate_per_pair != null ? (
+                      <span className="text-[10px] font-mono font-bold text-[#C27842] flex-shrink-0">
+                        ₹{asgn.rate_per_pair}/pr
+                      </span>
+                    ) : (
+                      canEdit && <UserPlus className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#C27842] flex-shrink-0 transition-colors" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* SECTION 3: OUTSIDE LABOUR WORK */}
+        {isEligibleForOutside && (
+          <div className="pt-2 border-t border-slate-200">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs">🏭</span>
+                <span className="text-[9.5px] uppercase tracking-wider font-black text-amber-900">
+                  3. Outside Labour Work
+                </span>
+              </div>
+              {canEdit && !showAddOutside && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddOutside(true)}
+                  className="text-[9px] uppercase font-bold text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-2 py-0.5 rounded shadow-xs transition-colors"
+                >
+                  + Add Outside Work
+                </button>
+              )}
+            </div>
+
+            {/* List existing outside labour work for this component */}
+            {compOutsideLabour.length === 0 && !showAddOutside && (
+              <div className="text-[9.5px] text-slate-400 italic bg-white/60 border border-dashed border-slate-300 rounded px-3 py-1.5 flex items-center justify-between">
+                <span>No outside job work linked to {label}.</span>
+                {canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddOutside(true)}
+                    className="text-[9px] font-bold text-amber-700 hover:underline"
+                  >
+                    + Add now
+                  </button>
+                )}
+              </div>
+            )}
+
+            {compOutsideLabour.length > 0 && (
+              <div className="space-y-1">
+                {compOutsideLabour.map((item, idx) => {
+                  const globalIdx = (outsideLabour || []).indexOf(item);
+                  return (
+                    <div
+                      key={item.id || idx}
+                      className="bg-white border border-amber-200 rounded px-2.5 py-1.5 flex items-center justify-between gap-2 shadow-xs"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[10.5px] font-bold text-slate-900 flex items-center gap-1.5 truncate">
+                          <span>{item.name}</span>
+                          {item.completed ? (
+                            <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-300 px-1.5 py-0.2 rounded uppercase font-semibold">
+                              ✓ Billed (AP)
+                            </span>
+                          ) : (
+                            <span className="text-[8px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded uppercase font-semibold">
+                              Outsourced
+                            </span>
+                          )}
+                        </div>
+                        {item.vendor && (
+                          <div className="text-[9.5px] text-slate-500 truncate flex items-center gap-1.5">
+                            <span>Vendor: <span className="font-semibold text-slate-700">{item.vendor}</span></span>
+                            {item.qty && <span className="text-slate-400">· {item.qty} pr</span>}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {item.rate != null && (
+                          <span className="text-[10px] font-mono font-bold text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                            ₹{item.rate}/pr
+                          </span>
+                        )}
+                        {!item.completed && canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onCompleteOutsideLabour?.(item.id || item.name)}
+                            data-testid={`complete-outside-${item.id || idx}`}
+                            className="text-[8.5px] uppercase font-bold text-white bg-amber-700 hover:bg-amber-800 px-2 py-0.5 rounded shadow-xs transition-colors"
+                            title="Mark completed and post vendor bill to Accounts Payable"
+                          >
+                            Mark Done &amp; Bill
+                          </button>
+                        )}
+                        {canEdit && !item.completed && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOutside(globalIdx)}
+                            className="text-slate-400 hover:text-red-600 p-0.5 transition-colors"
+                            title="Remove outside work"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Inline Add Form */}
+            {showAddOutside && (
+              <div className="mt-1.5 p-2 bg-amber-50/70 border border-amber-300 rounded-lg shadow-xs space-y-2">
+                <div className="text-[9.5px] font-bold uppercase text-amber-900 flex items-center gap-1">
+                  <span>🏭</span>
+                  <span>New Outside Labour Work for {label} (AP Vendor Payable)</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  <input
+                    value={newOutsideName}
+                    onChange={(e) => setNewOutsideName(e.target.value)}
+                    placeholder="Work name (e.g. Screen Printing, Embossing)"
+                    className="border border-slate-300 rounded px-2 py-1 text-xs focus:border-amber-500 focus:outline-none bg-white"
+                    data-testid="outside-work-name-input"
+                  />
+                  <div>
+                    <select
+                      value={newOutsideVendorId}
+                      onChange={(e) => {
+                        const vid = e.target.value;
+                        setNewOutsideVendorId(vid);
+                        const v = vendors.find(vend => (vend.id || vend._id) === vid);
+                        setNewOutsideVendor(v ? v.name : "");
+                      }}
+                      className="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-amber-500 focus:outline-none bg-white font-medium"
+                      data-testid="outside-vendor-select"
+                    >
+                      <option value="">-- Select Vendor / Contractor --</option>
+                      {vendors.map((v) => (
+                        <option key={v.id || v._id} value={v.id || v._id}>
+                          {v.name} ({v.category || "Vendor"})
+                        </option>
+                      ))}
+                    </select>
+                    {vendors.length === 0 && (
+                      <div className="text-[9px] text-amber-800 mt-0.5 italic">
+                        No vendors found. Add in Vendor Master first.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <label className="text-[9px] font-bold uppercase text-slate-500">Rate (₹/pr)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={newOutsideRate}
+                      onChange={(e) => setNewOutsideRate(e.target.value)}
+                      placeholder="Rate ₹"
+                      className="w-full border border-slate-300 rounded px-2 py-1 text-xs font-mono focus:border-amber-500 focus:outline-none bg-white"
+                      data-testid="outside-rate-input"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[9px] font-bold uppercase text-slate-500">Pairs (Qty)</label>
+                    <input
+                      type="number"
+                      value={newOutsideQty}
+                      onChange={(e) => setNewOutsideQty(e.target.value)}
+                      placeholder="Qty"
+                      className="w-full border border-slate-300 rounded px-2 py-1 text-xs font-mono focus:border-amber-500 focus:outline-none bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[9px] font-bold uppercase text-slate-500">Substage / Notes</label>
+                    <input
+                      value={newOutsideNotes}
+                      onChange={(e) => setNewOutsideNotes(e.target.value)}
+                      placeholder="Notes (optional)"
+                      className="w-full border border-slate-300 rounded px-2 py-1 text-xs focus:border-amber-500 focus:outline-none bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1 border-t border-amber-200">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddOutside(false)}
+                    className="text-[9.5px] font-bold text-slate-500 hover:text-slate-700 px-2 py-1"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddOutside}
+                    data-testid="save-outside-labour-btn"
+                    className="text-[9.5px] font-bold uppercase tracking-wider bg-amber-700 hover:bg-amber-800 text-white px-3 py-1 rounded shadow-xs"
+                  >
+                    Save Outside Work
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ComponentCell({ label, done, layers = [], onToggle, disabled }) {
   return (
     <div className={`border-2 p-2 ${done ? "border-[#16A34A] bg-green-50" : "border-slate-200 bg-white"}`}>
@@ -2010,13 +3124,37 @@ function ComponentCell({ label, done, layers = [], onToggle, disabled }) {
   );
 }
 
-function AssignDialog({ group, role, workers, current, onSave, onClose }) {
+function AssignDialog({ group, role, workers, current, onSave, onClose, styleByCode = {} }) {
   const [selectedWid, setSelectedWid] = useState(current?.worker_id || "");
   const [rate, setRate] = useState(current?.rate_per_pair ?? "");
+  const [overwriteSubtasks, setOverwriteSubtasks] = useState(false);
   const selectedWorker = workers.find(w => w.id === selectedWid);
 
+  const style = styleByCode[group.style_code];
+  const isReadySoleDisabled = (role === "sole" || role.startsWith("sole.")) && isSoleReadyToUse(group, style);
+
+  const isComponentRole = ["upper", "bottom", "sole", "heel_gola"].includes(role);
+  const isSubTaskRole = role.includes(".");
   const roleObj = ASSIGNMENT_ROLES.find(r => r.key === role);
-  const matchingSkill = role;
+
+  let roleLabel = roleObj?.label;
+  if (!roleLabel && isSubTaskRole) {
+    const [c, ...s] = role.split(".");
+    const substageName = s.join(" ");
+    if (substageName === "stamping" || substageName === "brand_marking" || substageName === "stamping_brand_marking") {
+      roleLabel = `${c.toUpperCase()} · Stamping / Brand Marking`;
+    } else {
+      roleLabel = `${c.toUpperCase()} · ${substageName.replace(/_/g, " ")}`;
+    }
+  } else if (!roleLabel) {
+    roleLabel = role.replace(/_/g, " ");
+  }
+
+  const matchingSkill =
+    role.includes("stitch") ? "stitching" :
+    role.startsWith("upper") || role.startsWith("bottom") ? "cutting" :
+    role.startsWith("sole") || role.startsWith("heel_gola") ? "finishing" :
+    role;
   const sorted = [...workers]
     .filter(w => w.active !== false || w.id === selectedWid)
     .sort((a, b) => {
@@ -2046,6 +3184,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
   }, [group, role]);
 
   const onPickWorker = (w) => {
+    if (isReadySoleDisabled) return;
     setSelectedWid(w.id);
     if (rate === "" || rate === null || rate === undefined) setRate(w.rate_per_pair);
   };
@@ -2055,10 +3194,22 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
         <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Assign Karigar</div>
-            <div className="font-bold text-base">{group.style_code} · {group.color} · {roleObj?.label}</div>
+            <div className="font-bold text-base">{group.style_code} · {group.color} · {roleLabel}</div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 touch-manipulation"><X className="w-5 h-5" /></button>
         </div>
+
+        {isReadySoleDisabled && (
+          <div className="px-5 py-3 bg-amber-50 border-b border-amber-200 text-xs text-amber-900 flex items-start gap-2.5" data-testid="assign-sole-disabled-warning">
+            <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold">Sub-task Assignment Disabled</div>
+              <div className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
+                This style uses a ready-to-use / vendor-supplied sole. Sub-task and karigar assignment is disabled because no in-house sole preparation is required.
+              </div>
+            </div>
+          </div>
+        )}
 
         {current?.worker_name && (
           <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-200 text-xs flex items-center justify-between" data-testid="current-assignee-banner">
@@ -2073,12 +3224,16 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
         )}
 
         <div className="p-5 max-h-[40vh] overflow-y-auto">
-          {sorted.length === 0 ? (
+          {isReadySoleDisabled ? (
+            <div className="text-center text-xs text-slate-500 py-8 bg-slate-50 border border-dashed border-slate-200 rounded-lg" data-testid="assign-sole-disabled-placeholder">
+              Karigar assignment is disabled for ready-to-use soles.
+            </div>
+          ) : sorted.length === 0 ? (
             <div className="text-center text-sm text-slate-500 py-8">No karigars yet.</div>
           ) : (
             <div className="space-y-1.5">
               <button
-                onClick={() => onSave(null, null)}
+                onClick={() => onSave(null, null, overwriteSubtasks)}
                 data-testid="assign-clear"
                 className="w-full text-left px-3 py-3 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider min-h-[44px] touch-manipulation"
               >
@@ -2142,7 +3297,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
           </div>
         )}
 
-        {selectedWid && (
+        {!isReadySoleDisabled && selectedWid && (
           <div className="px-5 py-4 border-t-2 border-slate-200 bg-slate-50 space-y-3">
             <div>
               <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
@@ -2160,8 +3315,20 @@ function AssignDialog({ group, role, workers, current, onSave, onClose }) {
                 Different styles can have different rates per role. This is the negotiated rate for this card.
               </div>
             </div>
+            {isComponentRole && (
+              <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-700 bg-amber-50/60 p-2.5 rounded border border-amber-200" data-testid="assign-overwrite-container">
+                <input
+                  type="checkbox"
+                  checked={overwriteSubtasks}
+                  onChange={(e) => setOverwriteSubtasks(e.target.checked)}
+                  className="rounded text-[#C27842] focus:ring-[#C27842] w-4 h-4"
+                  data-testid="assign-overwrite-checkbox"
+                />
+                <span>Overwrite already-assigned sub-tasks</span>
+              </label>
+            )}
             <div className="flex gap-2">
-              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate)} className="min-h-[44px]" data-testid="assign-save">
+              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate, overwriteSubtasks)} className="min-h-[44px]" data-testid="assign-save">
                 <Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Assign at ₹{rate || selectedWorker?.rate_per_pair || 0}/pair
               </BtnPrimary>
               <BtnSecondary onClick={onClose} className="min-h-[44px]">Cancel</BtnSecondary>

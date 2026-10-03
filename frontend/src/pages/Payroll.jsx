@@ -1170,7 +1170,7 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
                       <td className="px-2 py-1.5">{j.color}</td>
                       <td className="px-2 py-1.5 font-mono">{j.size}</td>
                       <td className="px-2 py-1.5">
-                        <Badge color="slate">
+                        <Badge color={j.role?.startsWith("Contract:") ? "orange" : "slate"}>
                           {(ROLE_LABEL[j.role] || j.role).toUpperCase()}
                         </Badge>
                       </td>

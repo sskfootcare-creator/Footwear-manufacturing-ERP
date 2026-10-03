@@ -673,6 +673,11 @@ async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, req
     if not jobs:
         raise HTTPException(404, "No matching production jobs found")
 
+    all_materials = await db.materials.find({}).to_list(5000)
+    mat_by_id = {str(m["_id"]): m for m in all_materials}
+    mat_by_code = {str(m.get("code", "")).strip().lower(): m for m in all_materials if m.get("code")}
+    mat_by_name = {str(m.get("name", "")).strip().lower(): m for m in all_materials if m.get("name")}
+
     vendor_groups = defaultdict(list)
     for alloc in payload.allocations:
         if not alloc.vendor_id:
@@ -691,12 +696,26 @@ async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, req
         for it in items:
             amt = round(float(it.quantity) * float(it.rate), 2)
             total_amt += amt
+
+            mat = None
+            if it.material_id:
+                mat = mat_by_id.get(str(it.material_id))
+            if not mat and it.material_code:
+                mat = mat_by_code.get(str(it.material_code).strip().lower())
+            if not mat and it.material_name:
+                mat = mat_by_name.get(str(it.material_name).strip().lower())
+
+            resolved_mat_id = str(mat["_id"]) if mat else str(it.material_id)
+            resolved_code = (mat.get("code") if mat else None) or it.material_code
+            resolved_name = (mat.get("name") if mat else None) or it.material_name
+            resolved_unit = (mat.get("unit") if mat else None) or it.unit
+
             line_items.append({
-                "material_id": it.material_id,
-                "material_code": it.material_code,
-                "material_name": it.material_name,
-                "color": it.color or "",
-                "unit": it.unit,
+                "material_id": resolved_mat_id,
+                "material_code": resolved_code,
+                "material_name": resolved_name,
+                "color": it.color or (mat.get("color", "") if mat else ""),
+                "unit": resolved_unit,
                 "quantity": float(it.quantity),
                 "rate": float(it.rate),
                 "amount": amt,
@@ -888,26 +907,47 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
         if "received_quantity" not in li:
             li["received_quantity"] = 0.0
             
-    li_map = {li["material_id"]: li for li in line_items}
-    
+    all_materials = await db.materials.find({}).to_list(5000)
+    mat_by_id = {str(m["_id"]): m for m in all_materials}
+    mat_by_code = {str(m.get("code", "")).strip().lower(): m for m in all_materials if m.get("code")}
+    mat_by_name = {str(m.get("name", "")).strip().lower(): m for m in all_materials if m.get("name")}
+
+    def find_line_item(item_mid: str):
+        target = str(item_mid).strip().lower()
+        for li in line_items:
+            if str(li.get("material_id", "")).strip().lower() == target:
+                return li
+        for li in line_items:
+            if str(li.get("material_code", "")).strip().lower() == target:
+                return li
+        m = mat_by_id.get(str(item_mid)) or mat_by_code.get(target) or mat_by_name.get(target)
+        if m:
+            m_id = str(m["_id"])
+            m_code = str(m.get("code", "")).strip().lower()
+            m_name = str(m.get("name", "")).strip().lower()
+            for li in line_items:
+                if str(li.get("material_id")) == m_id:
+                    return li
+                if str(li.get("material_code", "")).strip().lower() == m_code:
+                    return li
+                if str(li.get("material_name", "")).strip().lower() == m_name:
+                    return li
+        return None
+
     movements = []
-    material_ids = [item.material_id for item in payload.items]
-    materials_list = await db.materials.find({"_id": {"$in": [oid(mid) for mid in material_ids]}}).to_list(100)
-    materials_map = {str(m["_id"]): m for m in materials_list}
-    
     for item in payload.items:
-        if item.material_id not in li_map:
+        li = find_line_item(item.material_id)
+        if not li:
             raise HTTPException(400, f"Material {item.material_id} is not in PO line items")
         if item.quantity <= 0:
             continue
             
-        li = li_map[item.material_id]
         ordered_qty = float(li.get("quantity") or 0.0)
         curr_rec = float(li.get("received_quantity") or 0.0)
         rem_qty = round(max(0.0, ordered_qty - curr_rec), 4)
 
         if round(item.quantity, 4) > rem_qty:
-            mat_name = (materials_map.get(item.material_id) or {}).get("name") or li.get("material_name") or item.material_id
+            mat_name = li.get("material_name") or item.material_id
             raise HTTPException(
                 400,
                 f"Cannot receive {item.quantity} for '{mat_name}'. Only {rem_qty} remaining to be received."
@@ -915,18 +955,27 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
 
         li["received_quantity"] = round(curr_rec + item.quantity, 4)
         
-        mat = materials_map.get(item.material_id)
+        mat = (
+            mat_by_id.get(str(item.material_id))
+            or mat_by_id.get(str(li.get("material_id")))
+            or mat_by_code.get(str(li.get("material_code", "")).strip().lower())
+            or mat_by_code.get(str(item.material_id).strip().lower())
+            or mat_by_name.get(str(li.get("material_name", "")).strip().lower())
+        )
         if not mat:
             raise HTTPException(404, f"Material {item.material_id} not found in DB")
+
+        canonical_mat_id = str(mat["_id"])
+        li["material_id"] = canonical_mat_id
             
         movements.append({
-            "material_id": item.material_id,
-            "material_code": mat.get("code"),
-            "material_name": mat.get("name"),
-            "unit": mat.get("unit"),
+            "material_id": canonical_mat_id,
+            "material_code": mat.get("code") or li.get("material_code"),
+            "material_name": mat.get("name") or li.get("material_name"),
+            "unit": mat.get("unit") or li.get("unit"),
             "type": "in",
             "quantity": item.quantity,
-            "rate": li.get("rate") or mat.get("rate") or 0.0,
+            "rate": float(li.get("rate") or mat.get("rate") or 0.0),
             "party": vendor_name,
             "vendor_po_id": str(po["_id"]),
             "receipt_id": receipt_id,
@@ -970,21 +1019,23 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
             try:
                 mid = m.get("material_id")
                 if mid:
-                    import server
-                    if hasattr(server, "_compute_material_inventory_summary"):
-                        summary = await server._compute_material_inventory_summary(mid)
-                        await db.materials.update_one(
-                            {"_id": oid(mid)},
-                            {"$set": {
-                                "balance": round(summary.get("balance", 0.0), 2),
-                                "current_stock": round(summary.get("balance", 0.0), 2),
-                                "weighted_avg_rate": round(summary["weighted_avg_rate"], 2),
-                                "last_purchase_rate": round(summary["last_rate"], 2),
-                                "updated_at": now_iso(),
-                            }}
-                        )
-            except Exception:
-                pass
+                    from routes.materials import _compute_material_inventory_summary
+                    summary = await _compute_material_inventory_summary(mid, db=db)
+                    new_bal = round(summary.get("balance", 0.0), 2)
+                    new_w_avg = round(summary.get("weighted_avg_rate", 0.0), 2)
+                    last_rate = round(summary.get("last_rate", 0.0), 2) if summary.get("last_rate") is not None else float(m.get("rate", 0.0))
+                    await db.materials.update_one(
+                        {"_id": oid(mid)},
+                        {"$set": {
+                            "balance": new_bal,
+                            "current_stock": new_bal,
+                            "weighted_avg_rate": new_w_avg,
+                            "last_purchase_rate": last_rate,
+                            "updated_at": now_iso(),
+                        }}
+                    )
+            except Exception as ex:
+                log.error(f"Failed to update material inventory balance for {mid}: {ex}")
         total_receive_amount = sum(round(float(m["quantity"]) * float(m["rate"]), 2) for m in movements)
 
         receive_doc = {

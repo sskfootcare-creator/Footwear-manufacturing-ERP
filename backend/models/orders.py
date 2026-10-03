@@ -57,6 +57,7 @@ class ProductionStageUpdate(BaseModel):
     confirm_skip: bool = False
     planning_notes: Optional[str] = None
     material_vendor_allocations: Optional[Dict[str, Any]] = None
+    outside_labour: Optional[List[Dict[str, Any]]] = None
 
 
 class ProductionJobDoc(BaseModel):
@@ -99,6 +100,36 @@ class ComponentStageUpdate(BaseModel):
     completed_qty: Optional[int] = None
     worker_id: Optional[str] = None
     notes: Optional[str] = ""
+
+
+class OutsideLabourWork(BaseModel):
+    id: Optional[str] = None
+    component: Literal["upper", "bottom", "sole", "heel_gola"]
+    substage: Optional[str] = None
+    vendor_id: str
+    vendor_name: Optional[str] = ""
+    rate: float
+    qty: Optional[float] = None
+    notes: Optional[str] = ""
+    completed: Optional[bool] = False
+    completed_at: Optional[str] = None
+    vendor_bill_id: Optional[str] = None
+
+
+class SubTaskAssignment(BaseModel):
+    component: str
+    substage: str
+    worker_id: Optional[str] = None
+    rate_per_pair: Optional[float] = None
+    job_ids: Optional[List[str]] = None
+
+
+class ComponentBulkAssign(BaseModel):
+    worker_id: str
+    rate_per_pair: Optional[float] = None
+    overwrite: bool = False
+    apply_to_subtasks: bool = False
+    job_ids: Optional[List[str]] = None
 
 
 class ArchiveJobsRequest(BaseModel):

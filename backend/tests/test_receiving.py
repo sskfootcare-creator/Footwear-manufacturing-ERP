@@ -51,9 +51,10 @@ def test_vendor(admin_session):
 @pytest.fixture(scope="module")
 def test_material(admin_session, test_vendor):
     # Create material with preferred vendor
+    unique_code = f"RCV-MAT-{uuid.uuid4().hex[:6].upper()}"
     r = httpx.post(f"{BASE}/materials",
                    json={
-                       "code": "RCV-MAT-01",
+                       "code": unique_code,
                        "name": "Receiving Test Material",
                        "category": "upper",
                        "unit": "sqft",

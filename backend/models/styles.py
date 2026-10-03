@@ -49,8 +49,10 @@ class StyleIn(BaseModel):
     base_size: Optional[str] = "7"
     insole_mould_name: Optional[str] = None   # die/mold used to cut insole pieces
     sole_mould_name:   Optional[str] = None   # mold used for the sole
+    sole_ready_to_use: Optional[bool] = False # True if using ready-to-use/vendor-supplied sole
     bom: List[BomItem] = []
     labor: List[LaborItem] = []
+    outside_labour: Optional[List[LaborItem]] = Field(default_factory=list)
     overhead_pct: float = 0
     packing_cost: float = 0
     margin_pct: float = 25
@@ -107,6 +109,7 @@ class StyleLifecycleUpsert(BaseModel):
     planned_sizes:            Optional[List[str]] = None
     sole_mould_name:          Optional[str] = None
     sole_shape:               Optional[str] = None
+    sole_ready_to_use:        Optional[bool] = None
     pattern_number:           Optional[str] = None
     photoshoot_link:          Optional[str] = None
     catalogue_link:           Optional[str] = None

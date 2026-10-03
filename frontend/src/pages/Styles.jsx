@@ -109,8 +109,10 @@ const emptyStyle = {
   base_size: "7",
   insole_mould_name: "",
   sole_mould_name: "",
+  sole_ready_to_use: false,
   bom: [],
   labor: [],
+  outside_labour: [],
   overhead_pct: 8,
   packing_cost: 12,
   margin_pct: 25,
@@ -460,8 +462,8 @@ export default function Styles() {
   const [quickMaterialForm, setQuickMaterialForm] = useState({
     code: "", name: "", category: "upper", unit: "sqft", rate: 0, preferred_vendor_id: "",
   });
-  const [quickMaterialSaving, setQuickMaterialSaving] = useState(false);
   const [quickMaterialError, setQuickMaterialError] = useState("");
+  const [workers, setWorkers] = useState([]);
 
   const openQuickAddMaterial = () => {
     http.get("/vendors?include_inactive=false").then((res) => {
@@ -506,13 +508,15 @@ export default function Styles() {
     if (filter) queryParams.append("status", filter);
     if (search) queryParams.append("search", search);
     const qs = queryParams.toString() ? `?${queryParams.toString()}` : "";
-    const [s, mList, cm] = await Promise.all([
+    const [s, mList, cm, wList] = await Promise.all([
       http.get(`/styles/summary${qs}`),
       fetchMaterials(),
       http.get("/color-master?active=true").catch(() => ({ data: [] })),
+      http.get("/workers").catch(() => ({ data: [] })),
     ]);
     setStyles(s.data);
     setColorMasterList(cm.data || []);
+    setWorkers(wList.data || []);
 
     const params = new URLSearchParams(window.location.search);
     const editCode = params.get("edit");
@@ -598,8 +602,10 @@ export default function Styles() {
         base_size: fullStyle.base_size || "7",
         insole_mould_name: fullStyle.insole_mould_name || "",
         sole_mould_name: fullStyle.sole_mould_name || "",
+        sole_ready_to_use: Boolean(fullStyle.sole_ready_to_use),
         bom: ensuredBom,
         labor: fullStyle.labor || [],
+        outside_labour: fullStyle.outside_labour || [],
         overhead_pct: fullStyle.overhead_pct,
         packing_cost: fullStyle.packing_cost,
         margin_pct: fullStyle.margin_pct,
@@ -634,6 +640,7 @@ export default function Styles() {
         footwear_type: form.footwear_type || "flat",
         insole_mould_name: form.insole_mould_name ? form.insole_mould_name.trim() : null,
         sole_mould_name: form.sole_mould_name ? form.sole_mould_name.trim() : null,
+        sole_ready_to_use: Boolean(form.sole_ready_to_use),
         overhead_pct: Number(form.overhead_pct),
         packing_cost: Number(form.packing_cost),
         margin_pct: Number(form.margin_pct),
@@ -651,6 +658,12 @@ export default function Styles() {
           color: (b.color || "").trim(),
         })),
         labor: form.labor.map((l) => ({ ...l, rate: Number(l.rate) })),
+        outside_labour: (form.outside_labour || []).map((l) => ({
+          ...l,
+          rate: Number(l.rate || 0),
+          component: l.component || "upper",
+          is_outside: true,
+        })),
       };
       if (editId) {
         // Never send `code` on update — it's immutable server-side and rejected
@@ -794,6 +807,27 @@ export default function Styles() {
     setForm((f) => ({ ...f, labor: [...f.labor, { name: "Labor", rate: 0 }] }));
   const removeLabor = (i) =>
     setForm((f) => ({ ...f, labor: f.labor.filter((_, idx) => idx !== i) }));
+
+  const addOutsideLabour = () =>
+    setForm((f) => ({
+      ...f,
+      outside_labour: [
+        ...(f.outside_labour || []),
+        { name: "Outside Job Work", component: "upper", rate: 0, vendor: "", is_outside: true },
+      ],
+    }));
+  const updateOutsideLabour = (i, key, val) =>
+    setForm((f) => ({
+      ...f,
+      outside_labour: (f.outside_labour || []).map((r, idx) =>
+        idx === i ? { ...r, [key]: val } : r
+      ),
+    }));
+  const removeOutsideLabour = (i) =>
+    setForm((f) => ({
+      ...f,
+      outside_labour: (f.outside_labour || []).filter((_, idx) => idx !== i),
+    }));
 
   // Color-specific BOM Overrides Helpers
   const allColorOptions = useMemo(() => {
@@ -1203,9 +1237,10 @@ export default function Styles() {
           (1 + Number(b.waste_pct || 0) / 100)
       );
     }, 0);
-    const laborKnown = form.labor.length > 0;
+    const allLabor = [...(form.labor || []), ...(form.outside_labour || [])];
+    const laborKnown = allLabor.length > 0;
     const labCost = laborKnown
-      ? form.labor.reduce((s, l) => s + Number(l.rate || 0), 0)
+      ? allLabor.reduce((s, l) => s + Number(l.rate || 0), 0)
       : 0;
     // When no labor is set, base excludes labor so Total Cost is not misleadingly understated
     const base = matCost + (laborKnown ? labCost : 0);
@@ -1375,6 +1410,11 @@ export default function Styles() {
                                   data-testid={`gst-mismatch-badge-${s.code}`}
                                 >
                                   <AlertTriangle className="w-3 h-3 inline mr-0.5 text-amber-600" /> Price suggests {suggestedGstRate}% GST (currently {s.gst_pct}%)
+                                </Badge>
+                              )}
+                              {s.sole_ready_to_use && (
+                                <Badge color="emerald" data-testid={`style-ready-sole-badge-${s.code}`}>
+                                  Ready-to-Use Sole
                                 </Badge>
                               )}
                             </div>
@@ -1706,6 +1746,27 @@ export default function Styles() {
                       }
                       testId="form-style-sole-mould"
                     />
+                  </div>
+                  <div className="flex items-center gap-2 py-1 px-1">
+                    <input
+                      type="checkbox"
+                      id="form-style-sole-ready-to-use"
+                      checked={Boolean(form.sole_ready_to_use)}
+                      onChange={(e) =>
+                        setForm({ ...form, sole_ready_to_use: e.target.checked })
+                      }
+                      className="rounded border-slate-300 text-[#C27842] focus:ring-[#C27842] w-4 h-4 cursor-pointer"
+                      data-testid="form-style-sole-ready-to-use"
+                    />
+                    <label
+                      htmlFor="form-style-sole-ready-to-use"
+                      className="text-xs font-semibold text-slate-700 cursor-pointer select-none"
+                    >
+                      Ready to Use Sole{" "}
+                      <span className="text-[11px] font-normal text-slate-500">
+                        (Pre-formed / vendor supplied sole — disables sub-task assignment in production)
+                      </span>
+                    </label>
                   </div>
                   <Input
                     label="Description"
@@ -2710,6 +2771,154 @@ export default function Styles() {
                   </table>
                 </div>
                 )}
+            </div>
+
+            {/* Extra Outside Labour Work (Job Work) */}
+            <div className="pt-2 border-t border-slate-200">
+              <div className="flex items-baseline justify-between mt-3 mb-1">
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    <span>Extra Outside Labour Work</span>
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 lowercase">
+                      outsourced / job work
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 italic mt-0.5">
+                    Operations outsourced to external vendors — strictly mapped to Upper, Bottom, or Sole components.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={addOutsideLabour}
+                  className="text-xs uppercase font-bold tracking-wider text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-2.5 py-1 rounded shadow-xs transition-colors"
+                  data-testid="outside-labour-add"
+                >
+                  + Add Outside Labour
+                </button>
+              </div>
+
+              {(form.outside_labour || []).length === 0 ? (
+                <div className="border-2 border-dashed border-amber-200 bg-amber-50/40 px-4 py-3 text-xs text-slate-500 italic rounded">
+                  No outside labour operations added. Use "+ Add Outside Labour" above to record job work (e.g. screen printing, embroidery, laser cutting) tied to Upper, Bottom, or Sole.
+                </div>
+              ) : (
+                <div className="overflow-x-auto border-2 border-slate-200 rounded">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th className="px-2 py-1.5 text-left w-36">Component</th>
+                        <th className="px-2 py-1.5 text-left">Work / Operation Name</th>
+                        <th className="px-2 py-1.5 text-left w-44">Contractor / Vendor</th>
+                        <th className="px-2 py-1.5 text-right w-28">Rate (₹/pr)</th>
+                        <th className="px-2 py-1.5 w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(form.outside_labour || []).map((l, i) => (
+                        <tr
+                          key={i}
+                          className="border-t border-slate-200 first:border-t-0 hover:bg-amber-50/30"
+                        >
+                          <td className="px-2 py-1.5">
+                            <select
+                              value={l.component || "upper"}
+                              onChange={(e) =>
+                                updateOutsideLabour(i, "component", e.target.value)
+                              }
+                              className="w-full text-xs font-bold bg-white border border-slate-300 rounded px-1.5 py-1 focus:border-amber-500 focus:outline-none"
+                            >
+                              <option value="upper">Upper</option>
+                              <option value="bottom">Bottom</option>
+                              <option value="sole">Sole</option>
+                            </select>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              value={l.name || ""}
+                              placeholder="e.g. Screen Printing, Laser Cutting, Hand Embroidery"
+                              onChange={(e) =>
+                                updateOutsideLabour(i, "name", e.target.value)
+                              }
+                              className="w-full border border-slate-200 rounded px-2 py-1 bg-white focus:border-amber-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <div className="space-y-1">
+                              <select
+                                value={l.worker_id || (l.vendor ? "__custom__" : "")}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  if (val === "__custom__") {
+                                    updateOutsideLabour(i, "worker_id", "");
+                                  } else if (!val) {
+                                    updateOutsideLabour(i, "worker_id", "");
+                                    updateOutsideLabour(i, "worker_name", "");
+                                    updateOutsideLabour(i, "vendor", "");
+                                  } else {
+                                    const w = workers.find((wk) => (wk.id || wk._id) === val);
+                                    if (w) {
+                                      updateOutsideLabour(i, "worker_id", val);
+                                      updateOutsideLabour(i, "worker_name", w.name);
+                                      updateOutsideLabour(i, "vendor", w.name);
+                                      if (!l.rate && w.rate_per_pair) {
+                                        updateOutsideLabour(i, "rate", w.rate_per_pair);
+                                      }
+                                    }
+                                  }
+                                }}
+                                className="w-full text-xs bg-white border border-slate-300 rounded px-1.5 py-1 focus:border-amber-500 focus:outline-none"
+                              >
+                                <option value="">Select Karigar / Contractor</option>
+                                {workers.length > 0 && (
+                                  <optgroup label="Registered Karigars / Contractors">
+                                    {workers.map((w) => (
+                                      <option key={w.id || w._id} value={w.id || w._id}>
+                                        {w.name} ({w.skill || "Karigar"})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                <option value="__custom__">Other Outside Contractor (manual)</option>
+                              </select>
+                              {(!l.worker_id || l.worker_id === "__custom__") && (
+                                <input
+                                  value={l.vendor || ""}
+                                  placeholder="Vendor / Contractor name"
+                                  onChange={(e) =>
+                                    updateOutsideLabour(i, "vendor", e.target.value)
+                                  }
+                                  className="w-full border border-slate-200 rounded px-2 py-1 bg-white focus:border-amber-500 focus:outline-none text-xs"
+                                />
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={l.rate ?? 0}
+                              onChange={(e) =>
+                                updateOutsideLabour(i, "rate", e.target.value)
+                              }
+                              className="w-full text-right font-mono font-bold border border-slate-300 rounded px-2 py-1 focus:border-amber-500 focus:outline-none"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeOutsideLabour(i)}
+                              className="text-slate-400 hover:text-red-600 transition-colors"
+                              title="Delete outside labour row"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
