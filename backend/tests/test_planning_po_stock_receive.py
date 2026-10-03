@@ -10,10 +10,10 @@ async def test_planning_po_receipt_adds_to_inventory_stock():
     app = server.app
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Login as admin
-        login_res = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "admin123"})
-        if login_res.status_code != 200:
-            login_res = await client.post("/api/auth/login", json={"email": "admin@sskfootcare.com", "password": "Admin@123"})
+        # Login as admin — use canonical credentials from env (same as conftest defaults)
+        _email = os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com")
+        _pass  = os.environ.get("ADMIN_PASSWORD", "Admin@123")
+        login_res = await client.post("/api/auth/login", json={"email": _email, "password": _pass})
         assert login_res.status_code == 200, login_res.text
         token = login_res.json().get("access_token")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
