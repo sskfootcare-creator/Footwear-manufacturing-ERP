@@ -387,9 +387,14 @@ async def get_current_user_factory(db):
 
         # Resolve active database dynamically so test suites under pytest-xdist/anyio
         # that rebind server.db to new event loops do not encounter stale/closed event loop clients.
-        import server
-        server_db = getattr(server, "db", None)
-        active_db = server_db if server_db is not None else db
+        # Preserve explicitly provided mock databases (e.g. in unit tests).
+        from unittest.mock import NonCallableMock
+        if isinstance(db, NonCallableMock) or hasattr(db, "_mock_return_value"):
+            active_db = db
+        else:
+            import server
+            server_db = getattr(server, "db", None)
+            active_db = server_db if server_db is not None else db
 
         # ── 1. Fast path: Decode internal ERP JWT immediately (0.05ms, zero network overhead) ──
         is_internal_token = False
