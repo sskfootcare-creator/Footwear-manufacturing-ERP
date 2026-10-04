@@ -176,15 +176,21 @@ export default function ImageUploader({
   const pasteUrl = (e) => {
     const rawVal = e.target.value;
     const val = normalizeImageUrl(rawVal);
+    const isImageKit = val && typeof val === "string" && val.includes("ik.imagekit.io");
+    const baseUrl = isImageKit ? val.split("?")[0] : val;
+    const displayUrl = isImageKit ? `${baseUrl}?tr=w-800,q-85` : val;
+    const thumbUrl = isImageKit ? `${baseUrl}?tr=w-150,h-150,cm-pad_resize,bg-F3F4F6` : val;
+
     onChange({
       url: val,
       original_url: rawVal,
-      display_url: val,
-      thumbnail_url: val,
+      display_url: displayUrl,
+      thumbnail_url: thumbUrl,
     });
     setFallbackToThumb(false);
     setFallbackToPlaceholder(false);
   };
+
 
   return (
     <div data-testid={`${testIdPrefix}-uploader`}>

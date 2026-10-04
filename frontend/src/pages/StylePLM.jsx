@@ -51,6 +51,7 @@ export default function StylePLM({ initialStyleCode, onBack }) {
 
   // Upload state
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [fileUploading, setFileUploading] = useState(false);
   const [uploadForm, setUploadForm] = useState({
     folder_code: "01",
     folder_name: "01 Reference Images",
@@ -62,6 +63,33 @@ export default function StylePLM({ initialStyleCode, onBack }) {
     pattern_category: "",
     remarks: "",
   });
+
+  const handleDirectFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await http.post(`/upload/file?folder=/ssk-erp/plm/${selectedStyleCode || "general"}`, fd);
+      const data = res.data;
+      setUploadForm((prev) => ({
+        ...prev,
+        url: data.url,
+        thumbnail_url: data.thumbnail_url || data.url,
+        file_name: data.file_name || file.name,
+        file_size: data.size || file.size,
+        imagekit_file_id: data.file_id,
+        document_name: prev.document_name || (data.file_name ? data.file_name.replace(/\.[^/.]+$/, "") : ""),
+      }));
+    } catch (err) {
+      alert("File upload failed: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setFileUploading(false);
+      e.target.value = "";
+    }
+  };
+
 
   // Load Styles List
   useEffect(() => {
@@ -527,16 +555,36 @@ export default function StylePLM({ initialStyleCode, onBack }) {
               </div>
 
               <div>
-                <label className="block text-slate-300 font-bold mb-1">File URL / ImageKit Storage Link</label>
+                <label className="block text-slate-300 font-bold mb-1">Upload Asset File (PDF, DXF, Image, Tech Pack)</label>
+                <div className="flex items-center gap-3 mb-2">
+                  <label className={`flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-bold text-xs rounded-xl shadow cursor-pointer transition ${fileUploading ? "opacity-50 pointer-events-none" : ""}`}>
+                    <Upload className="w-4 h-4" />
+                    {fileUploading ? "Uploading to ImageKit..." : "Choose & Upload File"}
+                    <input
+                      type="file"
+                      className="hidden"
+                      onChange={handleDirectFileUpload}
+                      disabled={fileUploading}
+                    />
+                  </label>
+                  {uploadForm.file_name && (
+                    <span className="text-xs text-amber-300 font-mono truncate max-w-[260px]">
+                      ✓ {uploadForm.file_name} ({(uploadForm.file_size / 1024).toFixed(0)} KB)
+                    </span>
+                  )}
+                </div>
+
+                <label className="block text-slate-400 text-[11px] mb-1">Or Direct File / ImageKit Storage Link</label>
                 <input
                   type="text"
                   value={uploadForm.url}
                   onChange={(e) => setUploadForm({ ...uploadForm, url: e.target.value, file_name: e.target.value.split("/").pop() || "asset.pdf" })}
                   placeholder="https://ik.imagekit.io/ssk/... or file link"
-                  className="w-full bg-slate-950 border border-slate-700 text-white p-2.5 rounded-xl outline-none focus:border-amber-500"
+                  className="w-full bg-slate-950 border border-slate-700 text-white p-2.5 rounded-xl outline-none focus:border-amber-500 text-xs"
                   required
                 />
               </div>
+
 
               <div>
                 <label className="block text-slate-300 font-bold mb-1">Engineering Remarks / ECO Notes</label>

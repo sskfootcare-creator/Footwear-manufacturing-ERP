@@ -28,6 +28,7 @@ export default function PatternManager() {
 
   // Scan modal state
   const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanUploading, setScanUploading] = useState(false);
   const [scanForm, setScanForm] = useState({
     style_code: "",
     pattern_name: "",
@@ -38,6 +39,29 @@ export default function PatternManager() {
     background_cleaned: true,
     url: "",
   });
+
+  const handleScanFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setScanUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await http.post(`/upload/file?folder=/ssk-erp/patterns/${scanForm.style_code || "general"}`, fd);
+      const data = res.data;
+      setScanForm((prev) => ({
+        ...prev,
+        url: data.url,
+        pattern_name: prev.pattern_name || file.name.replace(/\.[^/.]+$/, ""),
+      }));
+    } catch (err) {
+      alert("Pattern file upload failed: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setScanUploading(false);
+      e.target.value = "";
+    }
+  };
+
 
   useEffect(() => {
     fetchData();
@@ -297,15 +321,35 @@ export default function PatternManager() {
               </div>
 
               <div>
-                <label className="block text-slate-300 font-bold mb-1">Digitized File / ImageKit Link</label>
+                <label className="block text-slate-300 font-bold mb-1">Upload Pattern Scan / CAD File</label>
+                <div className="flex items-center gap-3 mb-2">
+                  <label className={`flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow cursor-pointer transition ${scanUploading ? "opacity-50 pointer-events-none" : ""}`}>
+                    <Upload className="w-4 h-4" />
+                    {scanUploading ? "Uploading to ImageKit..." : "Select Scan / CAD File"}
+                    <input
+                      type="file"
+                      className="hidden"
+                      onChange={handleScanFileUpload}
+                      disabled={scanUploading}
+                    />
+                  </label>
+                  {scanForm.url && (
+                    <span className="text-xs text-indigo-300 font-mono truncate max-w-[260px]">
+                      ✓ {scanForm.url.split("/").pop()}
+                    </span>
+                  )}
+                </div>
+
+                <label className="block text-slate-400 text-[11px] mb-1">Or Digitized File / ImageKit Link</label>
                 <input
                   type="text"
                   value={scanForm.url}
                   onChange={(e) => setScanForm({ ...scanForm, url: e.target.value })}
                   placeholder="https://ik.imagekit.io/ssk/... or uploaded scan URL"
-                  className="w-full bg-slate-950 border border-slate-700 text-white p-2.5 rounded-xl outline-none focus:border-indigo-500"
+                  className="w-full bg-slate-950 border border-slate-700 text-white p-2.5 rounded-xl outline-none focus:border-indigo-500 text-xs"
                 />
               </div>
+
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
                 <button

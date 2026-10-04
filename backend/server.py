@@ -8,6 +8,7 @@ load_dotenv(Path(__file__).parent / ".env")
 import os
 import re
 import logging
+logger = logging.getLogger("server")
 import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
@@ -87,6 +88,14 @@ import uuid
 import boto3
 from models import *
 from rate_limiter import upload_rate_limiter, pdf_rate_limiter, bulk_import_rate_limiter
+from services.imagekit_service import (
+    is_imagekit_configured,
+    upload_to_imagekit_async,
+    delete_from_imagekit_async,
+    generate_v2_auth_token,
+    build_image_variants,
+)
+
 
 # ---------- DB & app ----------
 from routes.plm import plm_router, DEFAULT_PLM_FOLDERS
@@ -415,8 +424,10 @@ if S3_BUCKET:
 else:
     # SEC-014: Fail production startup if durable object storage is not configured
     if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
-        raise RuntimeError("SEC-014: Production environment detected, but durable S3_BUCKET is not configured. Server startup aborted.")
+        if not is_imagekit_configured():
+            raise RuntimeError("SEC-014: Production environment detected, but durable S3_BUCKET or IMAGEKIT is not configured. Server startup aborted.")
     s3_client = None
+
 
 @api.post("/upload/image", dependencies=[Depends(upload_rate_limiter)])
 async def upload_image(file: UploadFile = File(...), request: Request = None):
@@ -500,6 +511,51 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
         encoded[name] = buf.getvalue()
 
     key = uuid.uuid4().hex
+
+    if is_imagekit_configured():
+        try:
+            ik_res = await upload_to_imagekit_async(
+                file_data=encoded["original.jpg"],
+                file_name=f"{key}.jpg",
+                folder="/ssk-erp/images",
+                tags=["ssk-erp", "images"],
+                use_unique_file_name=True,
+            )
+
+            # Record metadata for lifecycle and orphan management
+            if db is not None and hasattr(db, "image_uploads"):
+                try:
+                    await db.image_uploads.insert_one({
+                        "_id": key,
+                        "key": key,
+                        "storage": "imagekit",
+                        "imagekit_file_id": ik_res.get("fileId"),
+                        "uploader": u.get("email"),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "width": ik_res.get("width") or orig_w,
+                        "height": ik_res.get("height") or orig_h,
+                        "url": ik_res.get("url"),
+                        "status": "active"
+                    })
+                except Exception:
+                    pass
+
+            return {
+                "key":           key,
+                "file_id":       ik_res.get("fileId"),
+                "url":           ik_res.get("url"),
+                "original_url":  ik_res.get("original_url") or ik_res.get("url"),
+                "display_url":   ik_res.get("display_url") or ik_res.get("url"),
+                "thumbnail_url": ik_res.get("thumbnail_url") or ik_res.get("thumbnailUrl") or ik_res.get("url"),
+                "width":         ik_res.get("width") or orig_w,
+                "height":        ik_res.get("height") or orig_h,
+                "storage":       "imagekit",
+            }
+        except Exception as e:
+            logger.error(f"ImageKit image upload failed: {e}")
+            if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
+                raise HTTPException(500, f"Failed to persist image to ImageKit: {e}")
+            # In non-production, fall through to S3 or local storage
 
     if s3_client:
         uploaded_keys = []
@@ -610,14 +666,146 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     }
 
 
+@api.post("/upload/file", dependencies=[Depends(upload_rate_limiter)])
+async def upload_file(
+    file: UploadFile = File(...),
+    folder: str = Query("/ssk-erp/documents"),
+    request: Request = None,
+):
+    """
+    General file/document uploader for PLM specs, CAD/DXF patterns, PDFs, and assets.
+    Persists to ImageKit (Upload File V2 API) or local filesystem fallback.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "staff")(u)
+
+    MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB
+    content = await file.read(MAX_FILE_BYTES + 1)
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(413, "File too large. Maximum allowed size is 25 MB.")
+
+    file_name = file.filename or "file.bin"
+    key = uuid.uuid4().hex
+
+    if is_imagekit_configured():
+        try:
+            ik_res = await upload_to_imagekit_async(
+                file_data=content,
+                file_name=file_name,
+                folder=folder or "/ssk-erp/documents",
+                tags=["ssk-erp", "document"],
+                use_unique_file_name=True,
+            )
+            if db is not None and hasattr(db, "image_uploads"):
+                try:
+                    await db.image_uploads.insert_one({
+                        "_id": key,
+                        "key": key,
+                        "file_name": file_name,
+                        "storage": "imagekit",
+                        "imagekit_file_id": ik_res.get("fileId"),
+                        "uploader": u.get("email"),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "url": ik_res.get("url"),
+                        "size": ik_res.get("size") or len(content),
+                        "status": "active",
+                    })
+                except Exception:
+                    pass
+
+            return {
+                "ok": True,
+                "key": key,
+                "file_id": ik_res.get("fileId"),
+                "file_name": ik_res.get("name") or file_name,
+                "url": ik_res.get("url"),
+                "thumbnail_url": ik_res.get("thumbnail_url") or ik_res.get("thumbnailUrl") or ik_res.get("url"),
+                "file_type": ik_res.get("fileType", "document"),
+                "size": ik_res.get("size") or len(content),
+                "storage": "imagekit",
+            }
+        except Exception as e:
+            logger.error(f"ImageKit file upload failed: {e}")
+            if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
+                raise HTTPException(500, f"Failed to persist file to ImageKit: {e}")
+
+    # Local storage fallback
+    doc_folder = os.path.join("uploads", "documents", key)
+    os.makedirs(doc_folder, exist_ok=True)
+    fpath = os.path.join(doc_folder, file_name)
+    with open(fpath, "wb") as f:
+        f.write(content)
+
+    url = f"/api/uploads/documents/{key}/{file_name}"
+    if db is not None and hasattr(db, "image_uploads"):
+        try:
+            await db.image_uploads.insert_one({
+                "_id": key,
+                "key": key,
+                "file_name": file_name,
+                "storage": "local",
+                "uploader": u.get("email"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "url": url,
+                "size": len(content),
+                "status": "active",
+            })
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "key": key,
+        "file_id": key,
+        "file_name": file_name,
+        "url": url,
+        "thumbnail_url": url,
+        "file_type": "document",
+        "size": len(content),
+        "storage": "local",
+    }
+
+
+@api.post("/upload/imagekit-auth")
+async def get_imagekit_auth_endpoint(payload: Dict[str, Any], request: Request = None):
+    """
+    Generate JSON Web Token (JWT) for secure client-side file upload adhering
+    strictly to the ImageKit Upload File V2 API specification.
+    """
+    u = await get_current_user(request)
+    require_roles("admin", "manager", "staff")(u)
+
+    if not is_imagekit_configured():
+        raise HTTPException(503, "ImageKit is not configured on this server.")
+
+    try:
+        return generate_v2_auth_token(
+            upload_payload=payload.get("uploadPayload", {}),
+            expire_seconds=payload.get("expire", 3600),
+            public_key=payload.get("publicKey"),
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Failed to generate ImageKit token: {e}")
+
+
 @api.delete("/upload/image/{key}")
 async def delete_uploaded_image(key: str, request: Request = None):
-    """Delete an uploaded image and its variants from S3 or local storage (F-030)."""
+    """Delete an uploaded image and its variants from ImageKit, S3, or local storage (F-030)."""
     u = await get_current_user(request)
     require_roles("admin", "manager")(u)
 
     deleted_variants = 0
-    if s3_client:
+    doc = None
+    if db is not None and hasattr(db, "image_uploads"):
+        try:
+            doc = await db.image_uploads.find_one({"key": key})
+        except Exception:
+            pass
+
+    if doc and doc.get("storage") == "imagekit" and doc.get("imagekit_file_id"):
+        await delete_from_imagekit_async(doc["imagekit_file_id"])
+        deleted_variants = 1
+    elif s3_client:
         for name in ("original.jpg", "display.jpg", "thumb.jpg"):
             try:
                 s3_client.delete_object(Bucket=S3_BUCKET, Key=f"images/{key}/{name}")
@@ -648,6 +836,7 @@ async def delete_uploaded_image(key: str, request: Request = None):
             pass
 
     return {"ok": True, "key": key, "deleted_variants": deleted_variants}
+
 
 
 def resolve_local_upload_path(url: str) -> Optional[str]:
