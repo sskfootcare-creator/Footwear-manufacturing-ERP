@@ -262,6 +262,8 @@ async def create_expense(payload: ExpenseIn, request: Request):
         "amount": amount,
         "date": payload.date,
         "payee": payload.payee,
+        "worker_id": payload.worker_id or None,
+        "worker_name": payload.worker_name or None,
         "notes": payload.notes or "",
         "receipt": payload.receipt,
         "paid_via": payload.paid_via,

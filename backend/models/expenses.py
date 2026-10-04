@@ -9,7 +9,6 @@ EXPENSE_CATEGORIES = [
     "Rent & Utilities",
     "Raw Materials",
     "Machinery & Maintenance",
-    "Labor & Wages",
     "Transport & Logistics",
     "Packaging & Printing",
     "Office & Administrative",
@@ -24,6 +23,8 @@ class ExpenseIn(BaseModel):
     amount: float = Field(..., gt=0, description="Expense amount in INR")
     date: str = Field(..., description="Expense date (YYYY-MM-DD)")
     payee: str = Field(..., description="Payee / Recipient name")
+    worker_id: Optional[str] = None
+    worker_name: Optional[str] = None
     notes: Optional[str] = ""
     receipt: Optional[Any] = None
     bank_account_id: Optional[str] = None
@@ -41,6 +42,8 @@ class ExpenseUpdate(BaseModel):
     amount: Optional[float] = Field(None, gt=0)
     date: Optional[str] = None
     payee: Optional[str] = None
+    worker_id: Optional[str] = None
+    worker_name: Optional[str] = None
     notes: Optional[str] = None
     receipt: Optional[Any] = None
     bank_account_id: Optional[str] = None
@@ -51,6 +54,7 @@ class ExpenseUpdate(BaseModel):
     recurring_expense_id: Optional[str] = None
     status: Optional[str] = None
     linked_wage_payment_id: Optional[str] = None
+
 
 
 class RecurringExpenseIn(BaseModel):

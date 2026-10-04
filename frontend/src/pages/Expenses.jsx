@@ -44,13 +44,10 @@ import {
 
 const EXPENSE_CATEGORIES = [
   "wages",
-  "Contract Labour",
-  "Labor & Wages",
-  "Rent",
-  "Electricity",
   "Salary",
-  "EMI",
   "Rent & Utilities",
+  "Electricity",
+  "EMI",
   "Raw Materials",
   "Machinery & Maintenance",
   "Transport & Logistics",
@@ -60,6 +57,27 @@ const EXPENSE_CATEGORIES = [
   "Tax & Professional Fees",
   "Other Expenses",
 ];
+
+const getCategoryLabel = (c) => {
+  if (c === "wages" || c === "Labor & Wages" || c === "Contract Labour") {
+    return "Wages & Labour (Karigar)";
+  }
+  return c;
+};
+
+const isWageCategoryName = (c) => {
+  if (!c) return false;
+  const s = String(c).toLowerCase().trim();
+  return (
+    s === "wages" ||
+    s === "labor & wages" ||
+    s === "contract labour" ||
+    s.includes("wage") ||
+    s.includes("labour") ||
+    s.includes("labor")
+  );
+};
+
 
 const TODAY = new Date().toISOString().split("T")[0];
 
@@ -182,6 +200,8 @@ export default function Expenses() {
     notes: "",
   });
 
+  const [workers, setWorkers] = useState([]);
+
   // One-time / Manual Expense form state
   const [form, setForm] = useState({
     category: EXPENSE_CATEGORIES[0],
@@ -189,6 +209,7 @@ export default function Expenses() {
     amount: "",
     date: TODAY,
     payee: "",
+    worker_id: "",
     notes: "",
     receipt: null,
     paid_via: "bank",
@@ -207,7 +228,7 @@ export default function Expenses() {
       if (toDate) params.to_date = toDate;
       if (search) params.search = search;
 
-      const [expRes, pnlRes, dueRes, recRes, bankRes, cashRes, cashAccRes] = await Promise.all([
+      const [expRes, pnlRes, dueRes, recRes, bankRes, cashRes, cashAccRes, workersRes] = await Promise.all([
         http.get("/expenses", { params }),
         http.get("/reports/pnl", { params: { from_date: fromDate, to_date: toDate } }),
         http.get("/expenses/due-queue"),
@@ -215,6 +236,7 @@ export default function Expenses() {
         http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
         http.get("/banking/cash-ledger").catch(() => ({ data: [] })),
         http.get("/banking/cash-accounts").catch(() => ({ data: [] })),
+        http.get("/workers").catch(() => ({ data: [] })),
       ]);
 
       setExpenses(expRes.data || []);
@@ -226,6 +248,7 @@ export default function Expenses() {
       setCashLedgerEntries(clItems);
       const caItems = cashAccRes?.data?.items || (Array.isArray(cashAccRes?.data) ? cashAccRes.data : []);
       setCashAccounts(caItems);
+      setWorkers(Array.isArray(workersRes?.data) ? workersRes.data : []);
     } catch (err) {
       console.error("Failed to load expenses data:", err);
     } finally {
@@ -416,6 +439,7 @@ export default function Expenses() {
       amount: "",
       date: TODAY,
       payee: "",
+      worker_id: "",
       notes: "",
       receipt: null,
       paid_via: "bank",
@@ -429,13 +453,15 @@ export default function Expenses() {
 
   const openEditModal = (item) => {
     setEditingItem(item);
-    const isCustom = !EXPENSE_CATEGORIES.includes(item.category);
+    const isWage = isWageCategoryName(item.category);
+    const isCustom = !isWage && !EXPENSE_CATEGORIES.includes(item.category);
     setForm({
-      category: isCustom ? "Other" : item.category,
+      category: isWage ? "wages" : (isCustom ? "Other" : item.category),
       customCategory: isCustom ? item.category : "",
       amount: item.amount || "",
       date: item.date || TODAY,
       payee: item.payee || "",
+      worker_id: item.worker_id || "",
       notes: item.notes || "",
       receipt: item.receipt || null,
       paid_via: item.paid_via || (item.cash_account_id || item.cash_ledger_id ? "cash" : "bank"),
@@ -477,6 +503,10 @@ export default function Expenses() {
       amount: parseFloat(form.amount),
       date: form.date || TODAY,
       payee: form.payee.trim(),
+      worker_id: form.worker_id || null,
+      worker_name: form.worker_id
+        ? (workers.find((w) => String(w.id || w._id) === String(form.worker_id))?.name || form.payee.trim())
+        : null,
       notes: form.notes ? form.notes.trim() : "",
       receipt: form.receipt,
       paid_via: form.paid_via || "bank",
@@ -486,6 +516,7 @@ export default function Expenses() {
       is_recurring: form.is_recurring,
       status: "confirmed",
     };
+
 
     setSubmitting(true);
     try {
@@ -881,7 +912,7 @@ export default function Expenses() {
                     <option value="all">All Categories</option>
                     {EXPENSE_CATEGORIES.map((c) => (
                       <option key={c} value={c}>
-                        {c}
+                        {getCategoryLabel(c)}
                       </option>
                     ))}
                   </select>
@@ -1291,109 +1322,116 @@ export default function Expenses() {
 
       {/* ── CONFIRM DUE EXPENSE MODAL ────────────────────────────────────────── */}
       {confirmModalItem && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog">
-          <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
-            <div className="bg-[#0F172A] text-white px-5 py-3.5 flex items-center justify-between">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog">
+          <div className="bg-white border-0 sm:border-2 border-slate-900 shadow-2xl w-full max-w-md rounded-t-2xl sm:rounded-none overflow-hidden flex flex-col max-h-[92vh] sm:max-h-[90vh]">
+            <div className="bg-[#0F172A] text-white px-4 sm:px-5 py-3.5 flex items-center justify-between flex-shrink-0">
               <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Confirm Recurring Expense
               </div>
-              <button onClick={() => setConfirmModalItem(null)} className="text-slate-400 hover:text-white transition-colors">
+              <button
+                type="button"
+                onClick={() => setConfirmModalItem(null)}
+                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                aria-label="Close"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleConfirmSubmit} className="p-5 space-y-4">
-              <div className="bg-slate-50 p-3 border border-slate-200 rounded space-y-1 text-xs">
-                <div className="font-bold text-slate-900">{confirmModalItem.category} for {confirmModalItem.payee}</div>
-                <div className="text-slate-500">Auto-generated due date: <span className="font-mono">{confirmModalItem.date}</span></div>
+            <form onSubmit={handleConfirmSubmit} className="flex flex-col flex-1 overflow-hidden">
+              <div className="p-4 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto flex-1">
+                <div className="bg-slate-50 p-3 border border-slate-200 rounded space-y-1 text-xs">
+                  <div className="font-bold text-slate-900">{confirmModalItem.category} for {confirmModalItem.payee}</div>
+                  <div className="text-slate-500">Auto-generated due date: <span className="font-mono">{confirmModalItem.date}</span></div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Actual Amount Paid (₹) *
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={confirmForm.amount}
+                    onChange={(e) => setConfirmForm({ ...confirmForm, amount: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-sm font-black text-slate-900 outline-none focus:border-slate-800 min-h-[42px]"
+                    required
+                    data-testid="confirm-form-amount"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">Pre-filled with base amount. Adjust for variable bill (e.g. electricity).</p>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee Name</label>
+                  <input
+                    type="text"
+                    value={confirmForm.payee}
+                    onChange={(e) => setConfirmForm({ ...confirmForm, payee: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    required
+                    data-testid="confirm-form-payee"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payment Date</label>
+                  <input
+                    type="date"
+                    value={confirmForm.date}
+                    onChange={(e) => setConfirmForm({ ...confirmForm, date: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    required
+                    data-testid="confirm-form-date"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Bank Account (Optional)
+                  </label>
+                  <select
+                    value={confirmForm.bank_account_id || ""}
+                    onChange={(e) => setConfirmForm({ ...confirmForm, bank_account_id: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    data-testid="confirm-form-bank-account"
+                  >
+                    <option value="">-- No Bank Account / Unassigned --</option>
+                    {bankAccounts.map((acc) => (
+                      <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                        {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Invoice Ref</label>
+                  <textarea
+                    rows={2}
+                    value={confirmForm.notes}
+                    onChange={(e) => setConfirmForm({ ...confirmForm, notes: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
+                    data-testid="confirm-form-notes"
+                  />
+                </div>
+
+                <div className="border-t border-slate-200 pt-3">
+                  <ImageUploader
+                    label="Receipt / Bill Copy"
+                    value={confirmForm.receipt}
+                    onChange={(imgObj) => setConfirmForm({ ...confirmForm, receipt: imgObj })}
+                    maxSizeMB={8}
+                    testIdPrefix="confirm-receipt"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Actual Amount Paid (₹) *
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  value={confirmForm.amount}
-                  onChange={(e) => setConfirmForm({ ...confirmForm, amount: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-black text-slate-900 outline-none focus:border-slate-800"
-                  required
-                  data-testid="confirm-form-amount"
-                />
-                <p className="text-[10px] text-slate-400 mt-1">Pre-filled with base amount. Adjust for variable bill (e.g. electricity).</p>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee Name</label>
-                <input
-                  type="text"
-                  value={confirmForm.payee}
-                  onChange={(e) => setConfirmForm({ ...confirmForm, payee: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  required
-                  data-testid="confirm-form-payee"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payment Date</label>
-                <input
-                  type="date"
-                  value={confirmForm.date}
-                  onChange={(e) => setConfirmForm({ ...confirmForm, date: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  required
-                  data-testid="confirm-form-date"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Bank Account (Optional)
-                </label>
-                <select
-                  value={confirmForm.bank_account_id || ""}
-                  onChange={(e) => setConfirmForm({ ...confirmForm, bank_account_id: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  data-testid="confirm-form-bank-account"
-                >
-                  <option value="">-- No Bank Account / Unassigned --</option>
-                  {bankAccounts.map((acc) => (
-                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Invoice Ref</label>
-                <textarea
-                  rows={2}
-                  value={confirmForm.notes}
-                  onChange={(e) => setConfirmForm({ ...confirmForm, notes: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
-                  data-testid="confirm-form-notes"
-                />
-              </div>
-
-              <div className="border-t border-slate-200 pt-3">
-                <ImageUploader
-                  label="Receipt / Bill Copy"
-                  value={confirmForm.receipt}
-                  onChange={(imgObj) => setConfirmForm({ ...confirmForm, receipt: imgObj })}
-                  maxSizeMB={8}
-                  testIdPrefix="confirm-receipt"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
-                <BtnSecondary type="button" onClick={() => setConfirmModalItem(null)}>
+              <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
+                <BtnSecondary type="button" onClick={() => setConfirmModalItem(null)} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
                   Cancel
                 </BtnSecondary>
-                <BtnPrimary type="submit" disabled={submitting} className="bg-emerald-600 hover:bg-emerald-700 border-none" data-testid="submit-confirm-btn">
+                <BtnPrimary type="submit" disabled={submitting} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px] bg-emerald-600 hover:bg-emerald-700 border-none" data-testid="submit-confirm-btn">
                   {submitting ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Check className="w-4 h-4 inline mr-1" />}
                   Confirm Expense
                 </BtnPrimary>
@@ -1405,152 +1443,159 @@ export default function Expenses() {
 
       {/* ── ADD / EDIT RECURRING TEMPLATE MODAL ─────────────────────────────── */}
       {recurringModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog">
-          <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
-            <div className="bg-[#0F172A] text-white px-5 py-3.5 flex items-center justify-between">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog">
+          <div className="bg-white border-0 sm:border-2 border-slate-900 shadow-2xl w-full max-w-lg rounded-t-2xl sm:rounded-none overflow-hidden flex flex-col max-h-[92vh] sm:max-h-[90vh]">
+            <div className="bg-[#0F172A] text-white px-4 sm:px-5 py-3.5 flex items-center justify-between flex-shrink-0">
               <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 text-purple-400" /> New Recurring Expense Template
               </div>
-              <button onClick={() => setRecurringModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
+              <button
+                type="button"
+                onClick={() => setRecurringModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                aria-label="Close"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleRecurringSubmit} className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleRecurringSubmit} className="flex flex-col flex-1 overflow-hidden">
+              <div className="p-4 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto flex-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
+                    <select
+                      value={recurringForm.category}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, category: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      data-testid="rec-form-category"
+                    >
+                      <option value="Rent">Rent</option>
+                      <option value="Electricity">Electricity</option>
+                      <option value="Salary">Salary</option>
+                      <option value="EMI">EMI</option>
+                      <option value="Other Expenses">Other Expenses</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Frequency *</label>
+                    <select
+                      value={recurringForm.frequency}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, frequency: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      data-testid="rec-form-frequency"
+                    >
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                      <option value="yearly">Yearly</option>
+                    </select>
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee / Recipient *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Landlord, State Power Corp, Bank Name"
+                    value={recurringForm.payee}
+                    onChange={(e) => setRecurringForm({ ...recurringForm, payee: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    required
+                    data-testid="rec-form-payee"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Base Amount (₹) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      placeholder="50000.00"
+                      value={recurringForm.amount}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, amount: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-sm font-bold outline-none focus:border-slate-800 min-h-[42px]"
+                      required
+                      data-testid="rec-form-amount"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Due Day of Month (1-31) *</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      value={recurringForm.due_day}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, due_day: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-bold outline-none focus:border-slate-800 min-h-[42px]"
+                      required
+                      data-testid="rec-form-due-day"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Start Date *</label>
+                    <input
+                      type="date"
+                      value={recurringForm.start_date}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, start_date: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      required
+                      data-testid="rec-form-start-date"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">End Date (Optional)</label>
+                    <input
+                      type="date"
+                      value={recurringForm.end_date}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, end_date: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      data-testid="rec-form-end-date"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Bank Account (Optional)
+                  </label>
                   <select
-                    value={recurringForm.category}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, category: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    data-testid="rec-form-category"
+                    value={recurringForm.bank_account_id || ""}
+                    onChange={(e) => setRecurringForm({ ...recurringForm, bank_account_id: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    data-testid="rec-form-bank-account"
                   >
-                    <option value="Rent">Rent</option>
-                    <option value="Electricity">Electricity</option>
-                    <option value="Salary">Salary</option>
-                    <option value="EMI">EMI</option>
-                    <option value="Other Expenses">Other Expenses</option>
+                    <option value="">-- No Bank Account / Unassigned --</option>
+                    {bankAccounts.map((acc) => (
+                      <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                        {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                      </option>
+                    ))}
                   </select>
                 </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Frequency *</label>
-                  <select
-                    value={recurringForm.frequency}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, frequency: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    data-testid="rec-form-frequency"
-                  >
-                    <option value="monthly">Monthly</option>
-                    <option value="quarterly">Quarterly</option>
-                    <option value="yearly">Yearly</option>
-                  </select>
-                </div>
-              </div>
 
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee / Recipient *</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Landlord, State Power Corp, Bank Name"
-                  value={recurringForm.payee}
-                  onChange={(e) => setRecurringForm({ ...recurringForm, payee: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  required
-                  data-testid="rec-form-payee"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Base Amount (₹) *</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    placeholder="50000.00"
-                    value={recurringForm.amount}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, amount: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-bold outline-none focus:border-slate-800"
-                    required
-                    data-testid="rec-form-amount"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Due Day of Month (1-31) *</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="31"
-                    value={recurringForm.due_day}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, due_day: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-bold outline-none focus:border-slate-800"
-                    required
-                    data-testid="rec-form-due-day"
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes</label>
+                  <textarea
+                    rows={2}
+                    placeholder="Template remarks..."
+                    value={recurringForm.notes}
+                    onChange={(e) => setRecurringForm({ ...recurringForm, notes: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
+                    data-testid="rec-form-notes"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Start Date *</label>
-                  <input
-                    type="date"
-                    value={recurringForm.start_date}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, start_date: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    required
-                    data-testid="rec-form-start-date"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">End Date (Optional)</label>
-                  <input
-                    type="date"
-                    value={recurringForm.end_date}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, end_date: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    data-testid="rec-form-end-date"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Bank Account (Optional)
-                </label>
-                <select
-                  value={recurringForm.bank_account_id || ""}
-                  onChange={(e) => setRecurringForm({ ...recurringForm, bank_account_id: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  data-testid="rec-form-bank-account"
-                >
-                  <option value="">-- No Bank Account / Unassigned --</option>
-                  {bankAccounts.map((acc) => (
-                    <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                      {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes</label>
-                <textarea
-                  rows={2}
-                  placeholder="Template remarks..."
-                  value={recurringForm.notes}
-                  onChange={(e) => setRecurringForm({ ...recurringForm, notes: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
-                  data-testid="rec-form-notes"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
-                <BtnSecondary type="button" onClick={() => setRecurringModalOpen(false)}>
+              <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
+                <BtnSecondary type="button" onClick={() => setRecurringModalOpen(false)} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
                   Cancel
                 </BtnSecondary>
-                <BtnPrimary type="submit" disabled={submitting} data-testid="save-rec-template-btn">
+                <BtnPrimary type="submit" disabled={submitting} data-testid="save-rec-template-btn" className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
                   {submitting ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Check className="w-4 h-4 inline mr-1" />}
                   Save Template
                 </BtnPrimary>
@@ -1562,245 +1607,321 @@ export default function Expenses() {
 
       {/* ── ADD / EDIT ONE-TIME EXPENSE MODAL ────────────────────────────────── */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog">
-          <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="bg-[#0F172A] text-white px-5 py-3.5 flex items-center justify-between flex-shrink-0">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog">
+          <div className="bg-white border-0 sm:border-2 border-slate-900 shadow-2xl w-full max-w-lg rounded-t-2xl sm:rounded-none overflow-hidden flex flex-col max-h-[92vh] sm:max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="bg-[#0F172A] text-white px-4 sm:px-5 py-3.5 flex items-center justify-between flex-shrink-0">
               <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
                 <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" /> {editingItem ? "Edit Expense Record" : "Add New Expense Record"}
               </div>
-              <button onClick={() => setModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
+              <button
+                type="button"
+                onClick={() => setModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                aria-label="Close"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
-                <select
-                  value={form.category}
-                  onChange={(e) => setForm({ ...form, category: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  data-testid="expense-form-category"
-                >
-                  {EXPENSE_CATEGORIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                  <option value="Other">Other Category (Custom)</option>
-                </select>
-                {form.category === "Other" && (
-                  <input
-                    type="text"
-                    placeholder="Enter custom category name"
-                    value={form.customCategory}
-                    onChange={(e) => setForm({ ...form, customCategory: e.target.value })}
-                    className="w-full mt-2 border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    data-testid="expense-form-custom-category"
-                  />
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
+              <div className="p-4 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto flex-1">
+                {/* Category Selection */}
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Amount (₹) *</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    placeholder="0.00"
-                    value={form.amount}
-                    onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-bold outline-none focus:border-slate-800"
-                    required
-                    data-testid="expense-form-amount"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Date *</label>
-                  <input
-                    type="date"
-                    value={form.date}
-                    onChange={(e) => setForm({ ...form, date: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                    required
-                    data-testid="expense-form-date"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee / Recipient *</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Electric Board, Landlord, Vendor Name"
-                  value={form.payee}
-                  onChange={(e) => setForm({ ...form, payee: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                  required
-                  data-testid="expense-form-payee"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                  Payment Method *
-                </label>
-                <div className="grid grid-cols-2 gap-2 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, paid_via: "bank", cash_account_id: "", cash_ledger_id: "" })}
-                    className={`px-3 py-2 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
-                      form.paid_via === "bank"
-                        ? "bg-[#0F172A] text-white border-[#0F172A] shadow-sm"
-                        : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
-                    }`}
-                    data-testid="expense-pay-via-bank"
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
+                  <select
+                    value={form.category}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setForm({
+                        ...form,
+                        category: val,
+                        worker_id: isWageCategoryName(val) ? form.worker_id : "",
+                      });
+                    }}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    data-testid="expense-form-category"
                   >
-                    <span>🏦 Bank Account</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, paid_via: "cash", bank_account_id: "" })}
-                    className={`px-3 py-2 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all ${
-                      form.paid_via === "cash"
-                        ? "bg-amber-700 text-white border-amber-700 shadow-sm"
-                        : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
-                    }`}
-                    data-testid="expense-pay-via-cash"
-                  >
-                    <span>💵 Paid via Cash</span>
-                  </button>
+                    {EXPENSE_CATEGORIES.map((c) => (
+                      <option key={c} value={c}>
+                        {getCategoryLabel(c)}
+                      </option>
+                    ))}
+                    <option value="Other">Other Category (Custom)</option>
+                  </select>
+                  {form.category === "Other" && (
+                    <input
+                      type="text"
+                      placeholder="Enter custom category name"
+                      value={form.customCategory}
+                      onChange={(e) => setForm({ ...form, customCategory: e.target.value })}
+                      className="w-full mt-2 border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      data-testid="expense-form-custom-category"
+                    />
+                  )}
                 </div>
 
-                {form.paid_via === "bank" ? (
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
-                      Bank Account (Optional)
-                    </label>
-                    <select
-                      value={form.bank_account_id || ""}
-                      onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800"
-                      data-testid="expense-form-bank-account"
-                    >
-                      <option value="">-- No Bank Account / Unassigned --</option>
-                      {bankAccounts.map((acc) => (
-                        <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                          {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div>
+                {/* Karigar (Worker) Selector - Shown when Wages & Labour is chosen */}
+                {isWageCategoryName(form.category) && (
+                  <div className="bg-amber-50/80 border-2 border-amber-300 p-3 rounded-sm space-y-2" data-testid="expense-karigar-picker-container">
                     <div className="flex items-center justify-between">
-                      <label className="text-[10px] uppercase font-bold text-slate-700 tracking-wider">
-                        Cash Account *
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-amber-900">
+                        Select Karigar (Worker) *
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => setShowCashWithdrawalModal(true)}
-                        className="text-[10px] font-bold text-amber-800 hover:text-amber-950 underline flex items-center gap-1"
-                        data-testid="expense-add-cash-pool-btn"
-                      >
-                        <Plus className="w-3 h-3" /> New Cash Withdrawal
-                      </button>
+                      <span className="text-[10px] text-amber-700 font-semibold">
+                        {workers.length} Karigars
+                      </span>
                     </div>
                     <select
-                      value={form.cash_account_id || ""}
+                      value={form.worker_id || (form.payee && !form.worker_id ? "custom" : "")}
                       onChange={(e) => {
-                        setForm({ ...form, cash_account_id: e.target.value, cash_ledger_id: "" });
+                        const val = e.target.value;
+                        if (val === "custom") {
+                          setForm({ ...form, worker_id: "" });
+                        } else if (val) {
+                          const wk = workers.find((w) => String(w.id || w._id) === val);
+                          if (wk) {
+                            setForm({
+                              ...form,
+                              worker_id: String(wk.id || wk._id),
+                              payee: wk.name,
+                              notes: form.notes ? form.notes : `Wage payment for ${wk.name} (${wk.department || wk.role || "Karigar"})`,
+                            });
+                          }
+                        } else {
+                          setForm({ ...form, worker_id: "", payee: "" });
+                        }
                       }}
-                      className="w-full border-2 border-amber-400 bg-amber-50/40 px-3 py-2 text-xs font-bold text-amber-950 outline-none focus:border-amber-700"
-                      required
-                      data-testid="expense-form-cash-ledger"
+                      className="w-full border-2 border-amber-400 bg-white px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:border-amber-700 min-h-[42px]"
+                      data-testid="expense-form-worker-select"
                     >
-                      <option value="">-- Select Cash Account --</option>
-                      {cashAccounts.map((ca) => {
-                        const cid = String(ca.id || ca._id);
-                        const bal = Number(ca.current_balance ?? ca.balance ?? 0);
+                      <option value="">-- Choose Karigar from List --</option>
+                      {workers.map((w) => {
+                        const wid = String(w.id || w._id);
+                        const roleOrDept = w.department || w.role || "";
                         return (
-                          <option key={`ca-${cid}`} value={cid}>
-                            {`💵 ${ca.name} • Available: ${inr(bal)}`}
+                          <option key={wid} value={wid}>
+                            {w.name} {roleOrDept ? `(${roleOrDept})` : ""} {w.phone ? `• ${w.phone}` : ""}
                           </option>
                         );
                       })}
+                      <option value="custom">-- Other / Outside Contractor (Enter name below) --</option>
                     </select>
-
-                    {/* Balance Status Pill */}
-                    {(() => {
-                      const selectedCa = cashAccounts.find(
-                        (ca) => String(ca.id || ca._id) === String(form.cash_account_id)
-                      );
-                      const available = selectedCa
-                        ? Number(selectedCa.current_balance ?? selectedCa.balance ?? 0)
-                        : null;
-
-                      if (available === null) {
-                        return (
-                          <p className="text-[10px] text-amber-800 mt-1 font-medium">
-                            Payment will draw down this cash account's liquidity pool.
-                          </p>
-                        );
-                      }
-
-                      const amt = parseFloat(form.amount) || 0;
-                      const isInsufficient = amt > available;
-
-                      return (
-                        <div
-                          className={`mt-1.5 p-2 rounded text-xs flex items-center justify-between font-semibold ${
-                            isInsufficient
-                              ? "bg-red-50 text-red-700 border border-red-200"
-                              : "bg-amber-100/80 text-amber-900 border border-amber-300"
-                          }`}
-                          data-testid="expense-cash-balance-pill"
-                        >
-                          <span>
-                            Available: <b>{inr(available)}</b>
-                          </span>
-                          {isInsufficient ? (
-                            <span className="text-red-600 text-[11px] font-bold">
-                              ⚠️ Exceeds balance by {inr(amt - available)}
-                            </span>
-                          ) : (
-                            <span className="text-emerald-700 text-[11px] font-bold">✓ Sufficient cash balance</span>
-                          )}
-                        </div>
-                      );
-                    })()}
+                    <p className="text-[10px] text-amber-800 font-medium">
+                      Linking Karigar tags this wage payment directly to their payroll records.
+                    </p>
                   </div>
                 )}
+
+                {/* Amount & Date - responsive 1-col on mobile, 2-col on desktop */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Amount (₹) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      placeholder="0.00"
+                      value={form.amount}
+                      onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-sm font-bold outline-none focus:border-slate-800 min-h-[42px]"
+                      required
+                      data-testid="expense-form-amount"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Date *</label>
+                    <input
+                      type="date"
+                      value={form.date}
+                      onChange={(e) => setForm({ ...form, date: e.target.value })}
+                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      required
+                      data-testid="expense-form-date"
+                    />
+                  </div>
+                </div>
+
+                {/* Payee / Recipient */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    Payee / Recipient * {form.worker_id && <span className="text-amber-700 font-semibold lowercase">(linked karigar)</span>}
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Karigar Name, Vendor, Electric Board"
+                    value={form.payee}
+                    onChange={(e) => setForm({ ...form, payee: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    required
+                    data-testid="expense-form-payee"
+                  />
+                </div>
+
+                {/* Payment Method */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                    Payment Method *
+                  </label>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, paid_via: "bank", cash_account_id: "", cash_ledger_id: "" })}
+                      className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all min-h-[42px] ${
+                        form.paid_via === "bank"
+                          ? "bg-[#0F172A] text-white border-[#0F172A] shadow-sm"
+                          : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                      }`}
+                      data-testid="expense-pay-via-bank"
+                    >
+                      <span>🏦 Bank Account</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, paid_via: "cash", bank_account_id: "" })}
+                      className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all min-h-[42px] ${
+                        form.paid_via === "cash"
+                          ? "bg-amber-700 text-white border-amber-700 shadow-sm"
+                          : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                      }`}
+                      data-testid="expense-pay-via-cash"
+                    >
+                      <span>💵 Paid via Cash</span>
+                    </button>
+                  </div>
+
+                  {form.paid_via === "bank" ? (
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                        Bank Account (Optional)
+                      </label>
+                      <select
+                        value={form.bank_account_id || ""}
+                        onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
+                        className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                        data-testid="expense-form-bank-account"
+                      >
+                        <option value="">-- No Bank Account / Unassigned --</option>
+                        {bankAccounts.map((acc) => (
+                          <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                            {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] uppercase font-bold text-slate-700 tracking-wider">
+                          Cash Account *
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setShowCashWithdrawalModal(true)}
+                          className="text-[10px] font-bold text-amber-800 hover:text-amber-950 underline flex items-center gap-1"
+                          data-testid="expense-add-cash-pool-btn"
+                        >
+                          <Plus className="w-3 h-3" /> New Cash Withdrawal
+                        </button>
+                      </div>
+                      <select
+                        value={form.cash_account_id || ""}
+                        onChange={(e) => {
+                          setForm({ ...form, cash_account_id: e.target.value, cash_ledger_id: "" });
+                        }}
+                        className="w-full border-2 border-amber-400 bg-amber-50/40 px-3 py-2 text-xs font-bold text-amber-950 outline-none focus:border-amber-700 min-h-[42px]"
+                        required
+                        data-testid="expense-form-cash-ledger"
+                      >
+                        <option value="">-- Select Cash Account --</option>
+                        {cashAccounts.map((ca) => {
+                          const cid = String(ca.id || ca._id);
+                          const bal = Number(ca.current_balance ?? ca.balance ?? 0);
+                          return (
+                            <option key={`ca-${cid}`} value={cid}>
+                              {`💵 ${ca.name} • Available: ${inr(bal)}`}
+                            </option>
+                          );
+                        })}
+                      </select>
+
+                      {/* Balance Status Pill */}
+                      {(() => {
+                        const selectedCa = cashAccounts.find(
+                          (ca) => String(ca.id || ca._id) === String(form.cash_account_id)
+                        );
+                        const available = selectedCa
+                          ? Number(selectedCa.current_balance ?? selectedCa.balance ?? 0)
+                          : null;
+
+                        if (available === null) {
+                          return (
+                            <p className="text-[10px] text-amber-800 mt-1 font-medium">
+                              Payment will draw down this cash account's liquidity pool.
+                            </p>
+                          );
+                        }
+
+                        const amt = parseFloat(form.amount) || 0;
+                        const isInsufficient = amt > available;
+
+                        return (
+                          <div
+                            className={`mt-1.5 p-2 rounded text-xs flex items-center justify-between font-semibold ${
+                              isInsufficient
+                                ? "bg-red-50 text-red-700 border border-red-200"
+                                : "bg-amber-100/80 text-amber-900 border border-amber-300"
+                            }`}
+                            data-testid="expense-cash-balance-pill"
+                          >
+                            <span>
+                              Available: <b>{inr(available)}</b>
+                            </span>
+                            {isInsufficient ? (
+                              <span className="text-red-600 text-[11px] font-bold">
+                                ⚠️ Exceeds balance by {inr(amt - available)}
+                              </span>
+                            ) : (
+                              <span className="text-emerald-700 text-[11px] font-bold">✓ Sufficient cash balance</span>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+
+                {/* Notes / Remarks */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Remarks</label>
+                  <textarea
+                    rows={2}
+                    placeholder="Bill details, invoice ref, payment notes..."
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
+                    data-testid="expense-form-notes"
+                  />
+                </div>
+
+                {/* Receipt Document / Image with responsive uploader */}
+                <div className="border-t border-slate-200 pt-3">
+                  <ImageUploader
+                    label="Receipt Document / Image"
+                    value={form.receipt}
+                    onChange={(imgObj) => setForm({ ...form, receipt: imgObj })}
+                    maxSizeMB={8}
+                    testIdPrefix="expense-receipt"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Remarks</label>
-                <textarea
-                  rows={2}
-                  placeholder="Bill details, invoice ref, payment notes..."
-                  value={form.notes}
-                  onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                  className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
-                  data-testid="expense-form-notes"
-                />
-              </div>
-
-              <div className="border-t border-slate-200 pt-3">
-                <ImageUploader
-                  label="Receipt Document / Image"
-                  value={form.receipt}
-                  onChange={(imgObj) => setForm({ ...form, receipt: imgObj })}
-                  maxSizeMB={8}
-                  testIdPrefix="expense-receipt"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-4 border-t border-slate-200">
-                <BtnSecondary type="button" onClick={() => setModalOpen(false)}>
+              {/* Sticky Action Footer */}
+              <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
+                <BtnSecondary type="button" onClick={() => setModalOpen(false)} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
                   Cancel
                 </BtnSecondary>
-                <BtnPrimary type="submit" disabled={submitting} data-testid="save-expense-btn">
+                <BtnPrimary type="submit" disabled={submitting} data-testid="save-expense-btn" className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
                   {submitting ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Check className="w-4 h-4 inline mr-1" />}
                   {editingItem ? "Update Expense" : "Save Expense"}
                 </BtnPrimary>
@@ -2047,7 +2168,7 @@ export default function Expenses() {
                       <option value="all">All Categories</option>
                       {EXPENSE_CATEGORIES.map((c) => (
                         <option key={c} value={c}>
-                          {c}
+                          {getCategoryLabel(c)}
                         </option>
                       ))}
                     </select>

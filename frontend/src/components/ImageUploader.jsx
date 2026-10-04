@@ -200,8 +200,8 @@ export default function ImageUploader({
           (max {maxSizeMB}MB)
         </span>
       </div>
-      <div className="flex gap-3 items-start">
-        <div className="w-28 min-h-[100px] border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0">
+      <div className="flex flex-col sm:flex-row gap-3 items-start">
+        <div className="w-24 h-24 sm:w-28 sm:min-h-[100px] border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0 rounded">
           {hasImage && !fallbackToPlaceholder ? (
             <img
               src={previewSrc}
@@ -215,17 +215,17 @@ export default function ImageUploader({
             />
           ) : (
             <div className="text-center">
-              <div className="text-3xl mb-1">👟</div>
+              <div className="text-2xl sm:text-3xl mb-1">👟</div>
               <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">
                 No Image
               </div>
             </div>
           )}
         </div>
-        <div className="flex flex-col justify-center flex-1 min-w-[200px]">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="flex flex-col justify-center flex-1 w-full min-w-0">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2 w-full">
             <label
-              className={`inline-flex items-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
+              className={`inline-flex items-center justify-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
                 }`}
               data-testid={`${testIdPrefix}-upload-label`}
             >
@@ -249,11 +249,11 @@ export default function ImageUploader({
                 data-testid={`${testIdPrefix}-upload-input`}
               />
             </label>
-            <span className="text-[10px] text-slate-400 font-bold">OR</span>
+            <span className="text-[10px] text-slate-400 font-bold text-center sm:text-left">OR</span>
             <input
               type="text"
               placeholder="Paste image URL"
-              className="flex-1 bg-white border-2 border-slate-300 px-2 py-2.5 text-xs outline-none focus:border-slate-500 min-h-[44px]"
+              className="w-full flex-1 bg-white border-2 border-slate-300 px-2 py-2.5 text-xs outline-none focus:border-slate-500 min-h-[44px]"
               value={asObj.original_url || asObj.url || ""}
               onChange={pasteUrl}
               data-testid={`${testIdPrefix}-url-input`}
