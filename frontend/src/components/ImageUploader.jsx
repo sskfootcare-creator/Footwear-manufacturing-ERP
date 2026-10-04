@@ -223,20 +223,21 @@ export default function ImageUploader({
 
 
   return (
-    <div data-testid={`${testIdPrefix}-uploader`}>
-      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-        {label}{" "}
-        <span className="text-slate-400 font-normal normal-case">
-          (max {maxSizeMB}MB)
+    <div data-testid={`${testIdPrefix}-uploader`} className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+        <span>{label}</span>
+        <span className="text-[10px] text-slate-400 font-normal">
+          Max {maxSizeMB}MB • JPG, PNG, WEBP
         </span>
       </div>
-      <div className="flex flex-col sm:flex-row gap-3 items-start">
-        <div className="w-24 h-24 sm:w-28 sm:min-h-[100px] border-2 border-dashed border-slate-300 bg-slate-50 grid place-items-center overflow-hidden flex-shrink-0 rounded">
+      <div className="flex flex-col sm:flex-row gap-3 items-center sm:items-start p-3 bg-slate-50/70 border border-slate-200/90 rounded-2xl hover:border-slate-300 transition-colors">
+        {/* Preview Container */}
+        <div className="w-20 h-20 sm:w-24 sm:h-24 border border-dashed border-slate-300 bg-white grid place-items-center overflow-hidden flex-shrink-0 rounded-xl shadow-2xs relative group">
           {hasImage && !fallbackToPlaceholder ? (
             <img
               src={previewSrc}
               alt="preview"
-              className="w-full h-full object-cover"
+              className="w-full h-full object-cover transition-transform group-hover:scale-105"
               data-testid={`${testIdPrefix}-preview`}
               onError={() => {
                 if (!fallbackToThumb) setFallbackToThumb(true);
@@ -244,30 +245,34 @@ export default function ImageUploader({
               }}
             />
           ) : (
-            <div className="text-center">
-              <div className="text-2xl sm:text-3xl mb-1">👟</div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">
-                No Image
+            <div className="text-center p-1">
+              <div className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center mx-auto mb-1 text-slate-400">
+                <Upload className="w-3.5 h-3.5 text-slate-400" />
+              </div>
+              <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">
+                No File
               </div>
             </div>
           )}
         </div>
+
+        {/* Upload Controls */}
         <div className="flex flex-col justify-center flex-1 w-full min-w-0">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2 w-full">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-1.5 w-full">
             <label
-              className={`inline-flex items-center justify-center min-h-[44px] bg-white text-slate-900 font-bold uppercase tracking-wider text-xs px-4 py-2.5 border-2 border-slate-300 hover:border-[#0F172A] transition-colors ${uploading ? "opacity-50 pointer-events-none" : "cursor-pointer"
-                }`}
+              className={`inline-flex items-center justify-center min-h-[40px] bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs px-3.5 py-2 rounded-xl shadow-xs transition-all active:scale-[0.98] ${
+                uploading ? "opacity-60 pointer-events-none" : "cursor-pointer"
+              }`}
               data-testid={`${testIdPrefix}-upload-label`}
             >
               {uploading ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 inline -mt-0.5 mr-1 animate-spin" />{" "}
-                  Uploading
+                  <Loader2 className="w-3.5 h-3.5 inline mr-1.5 animate-spin" />{" "}
+                  Uploading...
                 </>
               ) : (
                 <>
-                  <Upload className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Upload
-                  File
+                  <Upload className="w-3.5 h-3.5 inline mr-1.5" /> Upload File
                 </>
               )}
               <input
@@ -279,29 +284,39 @@ export default function ImageUploader({
                 data-testid={`${testIdPrefix}-upload-input`}
               />
             </label>
-            <span className="text-[10px] text-slate-400 font-bold text-center sm:text-left">OR</span>
+            <span className="text-[10px] text-slate-400 font-bold text-center sm:text-left uppercase tracking-wider">
+              OR
+            </span>
             <input
               type="text"
-              placeholder="Paste image URL"
-              className="w-full flex-1 bg-white border-2 border-slate-300 px-2 py-2.5 text-xs outline-none focus:border-slate-500 min-h-[44px]"
+              placeholder="Paste public image URL (or cloud link)"
+              className="w-full flex-1 bg-white border border-slate-200 focus:border-amber-600 focus:ring-4 focus:ring-amber-500/10 px-3 py-2 text-xs rounded-xl outline-none min-h-[40px] placeholder:text-slate-400 transition-all"
               value={asObj.original_url || asObj.url || ""}
               onChange={pasteUrl}
               data-testid={`${testIdPrefix}-url-input`}
             />
           </div>
-          {hasImage && (
-            <button
-              type="button"
-              onClick={clear}
-              className="text-xs uppercase tracking-wider text-slate-500 hover:text-red-600 font-bold self-start inline-flex items-center gap-1 p-2 -ml-2 min-h-[44px] touch-manipulation"
-              data-testid={`${testIdPrefix}-clear`}
-            >
-              <X className="w-3 h-3" /> Clear Image
-            </button>
-          )}
+
+          <div className="flex items-center justify-between">
+            {hasImage ? (
+              <button
+                type="button"
+                onClick={clear}
+                className="text-xs font-semibold text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-2 py-1 rounded-lg transition-colors inline-flex items-center gap-1 -ml-1"
+                data-testid={`${testIdPrefix}-clear`}
+              >
+                <X className="w-3.5 h-3.5" /> Remove Attachment
+              </button>
+            ) : (
+              <span className="text-[10px] text-slate-400">
+                Supports camera snapshots, scanned receipts, vouchers
+              </span>
+            )}
+          </div>
+
           {err && (
             <div
-              className="mt-1 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1"
+              className="mt-1.5 text-xs font-medium text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-2.5 py-1.5"
               data-testid={`${testIdPrefix}-error`}
             >
               {err}

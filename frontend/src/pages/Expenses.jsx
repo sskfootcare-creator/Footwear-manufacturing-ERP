@@ -29,6 +29,14 @@ import {
   FileSpreadsheet,
   Layers,
   ShoppingBag,
+  Building2,
+  Landmark,
+  Wallet,
+  UserCheck,
+  ChevronDown,
+  Tag,
+  FileText,
+  Sparkles,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -1443,71 +1451,98 @@ export default function Expenses() {
 
       {/* ── ADD / EDIT RECURRING TEMPLATE MODAL ─────────────────────────────── */}
       {recurringModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog">
-          <div className="bg-white border-0 sm:border-2 border-slate-900 shadow-2xl w-full max-w-lg rounded-t-2xl sm:rounded-none overflow-hidden flex flex-col max-h-[92vh] sm:max-h-[90vh]">
-            <div className="bg-[#0F172A] text-white px-4 sm:px-5 py-3.5 flex items-center justify-between flex-shrink-0">
-              <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
-                <RefreshCw className="w-4 h-4 text-purple-400" /> New Recurring Expense Template
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 transition-all duration-200" role="dialog">
+          <div className="bg-white border border-slate-200/90 shadow-2xl w-full max-w-lg rounded-t-3xl sm:rounded-2xl overflow-hidden flex flex-col max-h-[94vh] sm:max-h-[90vh] animate-in fade-in zoom-in-95 duration-150">
+            <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white px-5 sm:px-6 py-4 flex items-center justify-between flex-shrink-0 border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-400 shadow-sm shadow-purple-500/10">
+                  <RefreshCw className="w-5 h-5 text-purple-400" />
+                </div>
+                <div>
+                  <div className="font-bold text-sm sm:text-base text-white tracking-tight flex items-center gap-2">
+                    <span>New Recurring Expense Template</span>
+                    <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      Auto-Schedule
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-normal">
+                    Schedule automated monthly, quarterly or annual expense obligations
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setRecurringModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors border border-slate-700/60"
                 aria-label="Close"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             <form onSubmit={handleRecurringSubmit} className="flex flex-col flex-1 overflow-hidden">
-              <div className="p-4 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto flex-1">
+              <div className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
-                    <select
-                      value={recurringForm.category}
-                      onChange={(e) => setRecurringForm({ ...recurringForm, category: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                      data-testid="rec-form-category"
-                    >
-                      <option value="Rent">Rent</option>
-                      <option value="Electricity">Electricity</option>
-                      <option value="Salary">Salary</option>
-                      <option value="EMI">EMI</option>
-                      <option value="Other Expenses">Other Expenses</option>
-                    </select>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 text-slate-500" /> Category *
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={recurringForm.category}
+                        onChange={(e) => setRecurringForm({ ...recurringForm, category: e.target.value })}
+                        className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3 py-2 text-xs font-semibold outline-none transition-all appearance-none cursor-pointer min-h-[42px]"
+                        data-testid="rec-form-category"
+                      >
+                        <option value="Rent">Rent</option>
+                        <option value="Electricity">Electricity</option>
+                        <option value="Salary">Salary</option>
+                        <option value="EMI">EMI</option>
+                        <option value="Other Expenses">Other Expenses</option>
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Frequency *</label>
-                    <select
-                      value={recurringForm.frequency}
-                      onChange={(e) => setRecurringForm({ ...recurringForm, frequency: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                      data-testid="rec-form-frequency"
-                    >
-                      <option value="monthly">Monthly</option>
-                      <option value="quarterly">Quarterly</option>
-                      <option value="yearly">Yearly</option>
-                    </select>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-slate-500" /> Frequency *
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={recurringForm.frequency}
+                        onChange={(e) => setRecurringForm({ ...recurringForm, frequency: e.target.value })}
+                        className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3 py-2 text-xs font-semibold outline-none transition-all appearance-none cursor-pointer min-h-[42px]"
+                        data-testid="rec-form-frequency"
+                      >
+                        <option value="monthly">Monthly</option>
+                        <option value="quarterly">Quarterly</option>
+                        <option value="yearly">Yearly</option>
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Payee / Recipient *</label>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-slate-500" /> Payee / Recipient *
+                  </label>
                   <input
                     type="text"
                     placeholder="e.g. Landlord, State Power Corp, Bank Name"
                     value={recurringForm.payee}
                     onChange={(e) => setRecurringForm({ ...recurringForm, payee: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3 py-2 text-xs font-semibold outline-none transition-all min-h-[42px]"
                     required
                     data-testid="rec-form-payee"
                   />
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Base Amount (₹) *</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <IndianRupee className="w-3.5 h-3.5 text-slate-500" /> Base Amount (₹) *
+                    </label>
                     <input
                       type="number"
                       step="0.01"
@@ -1515,20 +1550,22 @@ export default function Expenses() {
                       placeholder="50000.00"
                       value={recurringForm.amount}
                       onChange={(e) => setRecurringForm({ ...recurringForm, amount: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-sm font-bold outline-none focus:border-slate-800 min-h-[42px]"
+                      className="w-full bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3 py-2 text-sm font-bold font-mono outline-none transition-all min-h-[42px]"
                       required
                       data-testid="rec-form-amount"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Due Day of Month (1-31) *</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-slate-500" /> Due Day of Month (1-31) *
+                    </label>
                     <input
                       type="number"
                       min="1"
                       max="31"
                       value={recurringForm.due_day}
                       onChange={(e) => setRecurringForm({ ...recurringForm, due_day: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-bold outline-none focus:border-slate-800 min-h-[42px]"
+                      className="w-full bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3 py-2 text-xs font-bold outline-none transition-all min-h-[42px]"
                       required
                       data-testid="rec-form-due-day"
                     />
@@ -1536,69 +1573,83 @@ export default function Expenses() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Start Date *</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700">Start Date *</label>
                     <input
                       type="date"
                       value={recurringForm.start_date}
                       onChange={(e) => setRecurringForm({ ...recurringForm, start_date: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      className="w-full bg-white border border-slate-200 focus:border-purple-600 rounded-xl px-3 py-2 text-xs font-semibold outline-none min-h-[42px]"
                       required
                       data-testid="rec-form-start-date"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">End Date (Optional)</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-700">End Date (Optional)</label>
                     <input
                       type="date"
                       value={recurringForm.end_date}
                       onChange={(e) => setRecurringForm({ ...recurringForm, end_date: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      className="w-full bg-white border border-slate-200 focus:border-purple-600 rounded-xl px-3 py-2 text-xs font-semibold outline-none min-h-[42px]"
                       data-testid="rec-form-end-date"
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                    Bank Account (Optional)
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Landmark className="w-3.5 h-3.5 text-slate-500" /> Bank Account (Optional)
                   </label>
-                  <select
-                    value={recurringForm.bank_account_id || ""}
-                    onChange={(e) => setRecurringForm({ ...recurringForm, bank_account_id: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                    data-testid="rec-form-bank-account"
-                  >
-                    <option value="">-- No Bank Account / Unassigned --</option>
-                    {bankAccounts.map((acc) => (
-                      <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                        {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={recurringForm.bank_account_id || ""}
+                      onChange={(e) => setRecurringForm({ ...recurringForm, bank_account_id: e.target.value })}
+                      className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-purple-600 rounded-xl px-3 py-2 text-xs font-semibold outline-none transition-all appearance-none cursor-pointer min-h-[42px]"
+                      data-testid="rec-form-bank-account"
+                    >
+                      <option value="">-- No Bank Account / Unassigned --</option>
+                      {bankAccounts.map((acc) => (
+                        <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                          {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes</label>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-slate-500" /> Notes
+                  </label>
                   <textarea
                     rows={2}
-                    placeholder="Template remarks..."
+                    placeholder="Template remarks, reminder details..."
                     value={recurringForm.notes}
                     onChange={(e) => setRecurringForm({ ...recurringForm, notes: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
+                    className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-purple-600 focus:ring-4 focus:ring-purple-500/10 rounded-xl px-3.5 py-2 text-xs font-medium outline-none transition-all resize-y"
                     data-testid="rec-form-notes"
                   />
                 </div>
               </div>
 
-              <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
-                <BtnSecondary type="button" onClick={() => setRecurringModalOpen(false)} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
+              <div className="bg-slate-50/95 backdrop-blur border-t border-slate-200 px-5 sm:px-6 py-3.5 flex items-center justify-end gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setRecurringModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors min-h-[40px]"
+                >
                   Cancel
-                </BtnSecondary>
-                <BtnPrimary type="submit" disabled={submitting} data-testid="save-rec-template-btn" className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
-                  {submitting ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Check className="w-4 h-4 inline mr-1" />}
-                  Save Template
-                </BtnPrimary>
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  data-testid="save-rec-template-btn"
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 via-purple-700 to-indigo-700 hover:from-purple-500 hover:to-indigo-600 text-white font-bold text-xs uppercase tracking-wider shadow-md shadow-purple-900/20 hover:shadow-lg transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
+                >
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                  <span>Save Template</span>
+                </button>
               </div>
             </form>
           </div>
@@ -1607,243 +1658,345 @@ export default function Expenses() {
 
       {/* ── ADD / EDIT ONE-TIME EXPENSE MODAL ────────────────────────────────── */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" role="dialog">
-          <div className="bg-white border-0 sm:border-2 border-slate-900 shadow-2xl w-full max-w-lg rounded-t-2xl sm:rounded-none overflow-hidden flex flex-col max-h-[92vh] sm:max-h-[90vh]">
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 transition-all duration-200" role="dialog">
+          <div className="bg-white border border-slate-200/90 shadow-2xl w-full max-w-xl rounded-t-3xl sm:rounded-2xl overflow-hidden flex flex-col max-h-[94vh] sm:max-h-[90vh] animate-in fade-in zoom-in-95 duration-150">
             {/* Modal Header */}
-            <div className="bg-[#0F172A] text-white px-4 sm:px-5 py-3.5 flex items-center justify-between flex-shrink-0">
-              <div className="font-bold text-sm uppercase tracking-wider flex items-center gap-2">
-                <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" /> {editingItem ? "Edit Expense Record" : "Add New Expense Record"}
+            <div className="bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 text-white px-5 sm:px-6 py-4 flex items-center justify-between flex-shrink-0 border-b border-slate-800">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500/20 to-amber-600/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-sm shadow-amber-500/10">
+                  <ReceiptIndianRupee className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <div className="font-bold text-sm sm:text-base text-white tracking-tight flex items-center gap-2">
+                    <span>{editingItem ? "Edit Expense Record" : "Add New Expense Record"}</span>
+                    <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      {editingItem ? "Update" : "Outflow"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-normal">
+                    Record operational payouts, factory bills, receipts & karigar wages
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors border border-slate-700/60"
                 aria-label="Close"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
-              <div className="p-4 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto flex-1">
-                {/* Category Selection */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Category *</label>
-                  <select
-                    value={form.category}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setForm({
-                        ...form,
-                        category: val,
-                        worker_id: isWageCategoryName(val) ? form.worker_id : "",
-                      });
-                    }}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                    data-testid="expense-form-category"
-                  >
-                    {EXPENSE_CATEGORIES.map((c) => (
-                      <option key={c} value={c}>
-                        {getCategoryLabel(c)}
-                      </option>
+              <div className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1">
+                {/* ── AMOUNT & DATE HERO CARD ── */}
+                <div className="bg-gradient-to-br from-amber-50/60 via-slate-50/50 to-white border border-amber-200/80 rounded-2xl p-4 space-y-3 shadow-xs">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <IndianRupee className="w-3.5 h-3.5 text-amber-600" /> Expense Amount *
+                    </label>
+                    <span className="text-[11px] font-medium text-slate-500">
+                      Currency: <span className="font-semibold text-slate-700">INR (₹)</span>
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                    {/* Currency Input */}
+                    <div className="sm:col-span-7 relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400 text-lg font-bold">
+                        ₹
+                      </div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        placeholder="0.00"
+                        value={form.amount}
+                        onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                        className="w-full bg-white border border-slate-300 rounded-xl pl-8 pr-3 py-2 text-xl sm:text-2xl font-black font-mono tracking-tight text-slate-900 outline-none focus:border-amber-600 focus:ring-4 focus:ring-amber-500/10 transition-all shadow-inner"
+                        required
+                        data-testid="expense-form-amount"
+                      />
+                    </div>
+
+                    {/* Date Input */}
+                    <div className="sm:col-span-5 relative">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                        <Calendar className="w-4 h-4 text-slate-500" />
+                      </div>
+                      <input
+                        type="date"
+                        value={form.date}
+                        onChange={(e) => setForm({ ...form, date: e.target.value })}
+                        className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-3 py-2.5 text-xs font-semibold text-slate-800 outline-none focus:border-slate-800 focus:ring-2 focus:ring-slate-400/20 transition-all min-h-[42px]"
+                        required
+                        data-testid="expense-form-date"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Quick Amount Suggestion Chips */}
+                  <div className="flex items-center gap-1.5 pt-1 overflow-x-auto no-scrollbar">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex-shrink-0">
+                      Quick:
+                    </span>
+                    {[500, 1000, 2000, 5000, 10000].map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => {
+                          const current = parseFloat(form.amount) || 0;
+                          setForm({ ...form, amount: String(current + amt) });
+                        }}
+                        className="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-white border border-slate-200/90 text-slate-700 hover:border-amber-400 hover:bg-amber-50/50 hover:text-amber-900 transition-all active:scale-95 shadow-2xs"
+                      >
+                        +₹{amt.toLocaleString("en-IN")}
+                      </button>
                     ))}
-                    <option value="Other">Other Category (Custom)</option>
-                  </select>
+                    {parseFloat(form.amount) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, amount: "" })}
+                        className="text-[10px] font-semibold px-2 py-1 rounded-lg text-slate-400 hover:text-red-600 transition-colors ml-auto"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── CATEGORY SELECTION ── */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 text-slate-500" /> Category *
+                    </label>
+                    <span className="text-[11px] text-slate-400">
+                      Operational expenditure category
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <select
+                      value={form.category}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setForm({
+                          ...form,
+                          category: val,
+                          worker_id: isWageCategoryName(val) ? form.worker_id : "",
+                        });
+                      }}
+                      className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-amber-600 focus:ring-4 focus:ring-amber-500/10 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800 outline-none transition-all appearance-none cursor-pointer min-h-[44px]"
+                      data-testid="expense-form-category"
+                    >
+                      {EXPENSE_CATEGORIES.map((c) => (
+                        <option key={c} value={c}>
+                          {getCategoryLabel(c)}
+                        </option>
+                      ))}
+                      <option value="Other">Other Category (Custom)</option>
+                    </select>
+                    <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  </div>
                   {form.category === "Other" && (
                     <input
                       type="text"
                       placeholder="Enter custom category name"
                       value={form.customCategory}
                       onChange={(e) => setForm({ ...form, customCategory: e.target.value })}
-                      className="w-full mt-2 border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                      className="w-full mt-2 bg-white border border-slate-300 focus:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-semibold outline-none focus:ring-2 focus:ring-slate-400/20 min-h-[42px]"
                       data-testid="expense-form-custom-category"
                     />
                   )}
                 </div>
 
-                {/* Karigar (Worker) Selector - Shown when Wages & Labour is chosen */}
+                {/* ── KARIGAR (WORKER) SELECTOR (Wages & Labour) ── */}
                 {isWageCategoryName(form.category) && (
-                  <div className="bg-amber-50/80 border-2 border-amber-300 p-3 rounded-sm space-y-2" data-testid="expense-karigar-picker-container">
+                  <div
+                    className="bg-gradient-to-br from-amber-50/90 via-orange-50/30 to-amber-50/50 border border-amber-300 rounded-2xl p-4 space-y-3 shadow-xs animate-in fade-in duration-150"
+                    data-testid="expense-karigar-picker-container"
+                  >
                     <div className="flex items-center justify-between">
-                      <label className="block text-[11px] font-bold uppercase tracking-wider text-amber-900">
-                        Select Karigar (Worker) *
-                      </label>
-                      <span className="text-[10px] text-amber-700 font-semibold">
-                        {workers.length} Karigars
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-800 flex items-center justify-center font-bold">
+                          <UserCheck className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                            Link to Karigar (Worker) *
+                          </label>
+                          <p className="text-[10px] text-amber-800/80">
+                            Synchronizes with Karigar payroll & wage ledger
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-200/60 text-amber-900 border border-amber-300">
+                        {workers.length} Karigars Registered
                       </span>
                     </div>
-                    <select
-                      value={form.worker_id || (form.payee && !form.worker_id ? "custom" : "")}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === "custom") {
-                          setForm({ ...form, worker_id: "" });
-                        } else if (val) {
-                          const wk = workers.find((w) => String(w.id || w._id) === val);
-                          if (wk) {
-                            setForm({
-                              ...form,
-                              worker_id: String(wk.id || wk._id),
-                              payee: wk.name,
-                              notes: form.notes ? form.notes : `Wage payment for ${wk.name} (${wk.department || wk.role || "Karigar"})`,
-                            });
+
+                    <div className="relative">
+                      <select
+                        value={form.worker_id || (form.payee && !form.worker_id ? "custom" : "")}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val === "custom") {
+                            setForm({ ...form, worker_id: "" });
+                          } else if (val) {
+                            const wk = workers.find((w) => String(w.id || w._id) === val);
+                            if (wk) {
+                              setForm({
+                                ...form,
+                                worker_id: String(wk.id || wk._id),
+                                payee: wk.name,
+                                notes: form.notes ? form.notes : `Wage payment for ${wk.name} (${wk.department || wk.role || "Karigar"})`,
+                              });
+                            }
+                          } else {
+                            setForm({ ...form, worker_id: "", payee: "" });
                           }
-                        } else {
-                          setForm({ ...form, worker_id: "", payee: "" });
-                        }
-                      }}
-                      className="w-full border-2 border-amber-400 bg-white px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:border-amber-700 min-h-[42px]"
-                      data-testid="expense-form-worker-select"
-                    >
-                      <option value="">-- Choose Karigar from List --</option>
-                      {workers.map((w) => {
-                        const wid = String(w.id || w._id);
-                        const roleOrDept = w.department || w.role || "";
-                        return (
-                          <option key={wid} value={wid}>
-                            {w.name} {roleOrDept ? `(${roleOrDept})` : ""} {w.phone ? `• ${w.phone}` : ""}
-                          </option>
-                        );
-                      })}
-                      <option value="custom">-- Other / Outside Contractor (Enter name below) --</option>
-                    </select>
-                    <p className="text-[10px] text-amber-800 font-medium">
-                      Linking Karigar tags this wage payment directly to their payroll records.
-                    </p>
+                        }}
+                        className="w-full bg-white border border-amber-300 focus:border-amber-700 focus:ring-4 focus:ring-amber-500/15 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 outline-none transition-all appearance-none cursor-pointer min-h-[44px]"
+                        data-testid="expense-form-worker-select"
+                      >
+                        <option value="">-- Choose Karigar from Master List --</option>
+                        {workers.map((w) => {
+                          const wid = String(w.id || w._id);
+                          const roleOrDept = w.department || w.role || "";
+                          return (
+                            <option key={wid} value={wid}>
+                              {w.name} {roleOrDept ? `(${roleOrDept})` : ""} {w.phone ? `• ${w.phone}` : ""}
+                            </option>
+                          );
+                        })}
+                        <option value="custom">-- Other / Outside Contractor (Enter name below) --</option>
+                      </select>
+                      <ChevronDown className="w-4 h-4 text-amber-700 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
                   </div>
                 )}
 
-                {/* Amount & Date - responsive 1-col on mobile, 2-col on desktop */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Amount (₹) *</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      placeholder="0.00"
-                      value={form.amount}
-                      onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-sm font-bold outline-none focus:border-slate-800 min-h-[42px]"
-                      required
-                      data-testid="expense-form-amount"
-                    />
+                {/* ── PAYEE / RECIPIENT ── */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-slate-500" /> Payee / Recipient *
+                    </label>
+                    {form.worker_id && (
+                      <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> Linked to Karigar
+                      </span>
+                    )}
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Date *</label>
-                    <input
-                      type="date"
-                      value={form.date}
-                      onChange={(e) => setForm({ ...form, date: e.target.value })}
-                      className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                      required
-                      data-testid="expense-form-date"
-                    />
-                  </div>
-                </div>
-
-                {/* Payee / Recipient */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">
-                    Payee / Recipient * {form.worker_id && <span className="text-amber-700 font-semibold lowercase">(linked karigar)</span>}
-                  </label>
                   <input
                     type="text"
-                    placeholder="e.g. Karigar Name, Vendor, Electric Board"
+                    placeholder="e.g. Karigar Name, Vendor, Electric Board, Landlord"
                     value={form.payee}
                     onChange={(e) => setForm({ ...form, payee: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
+                    className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-amber-600 focus:ring-4 focus:ring-amber-500/10 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800 outline-none transition-all min-h-[44px]"
                     required
                     data-testid="expense-form-payee"
                   />
                 </div>
 
-                {/* Payment Method */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                    Payment Method *
+                {/* ── PAYMENT METHOD (SEGMENTED TABS) ── */}
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Wallet className="w-3.5 h-3.5 text-slate-500" /> Payment Mode *
                   </label>
-                  <div className="grid grid-cols-2 gap-2 mb-2">
+
+                  <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100/90 rounded-2xl border border-slate-200">
                     <button
                       type="button"
                       onClick={() => setForm({ ...form, paid_via: "bank", cash_account_id: "", cash_ledger_id: "" })}
-                      className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all min-h-[42px] ${
+                      className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 min-h-[42px] ${
                         form.paid_via === "bank"
-                          ? "bg-[#0F172A] text-white border-[#0F172A] shadow-sm"
-                          : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                          ? "bg-white text-slate-900 shadow-sm border border-slate-200/90"
+                          : "text-slate-600 hover:text-slate-900"
                       }`}
                       data-testid="expense-pay-via-bank"
                     >
-                      <span>🏦 Bank Account</span>
+                      <Landmark className={`w-4 h-4 ${form.paid_via === "bank" ? "text-indigo-600" : "text-slate-400"}`} />
+                      <span>Bank Account</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setForm({ ...form, paid_via: "cash", bank_account_id: "" })}
-                      className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider border-2 flex items-center justify-center gap-1.5 transition-all min-h-[42px] ${
+                      className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 min-h-[42px] ${
                         form.paid_via === "cash"
-                          ? "bg-amber-700 text-white border-amber-700 shadow-sm"
-                          : "bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100"
+                          ? "bg-white text-emerald-950 shadow-sm border border-emerald-300/80"
+                          : "text-slate-600 hover:text-slate-900"
                       }`}
                       data-testid="expense-pay-via-cash"
                     >
-                      <span>💵 Paid via Cash</span>
+                      <Coins className={`w-4 h-4 ${form.paid_via === "cash" ? "text-emerald-600" : "text-slate-400"}`} />
+                      <span>Paid via Cash</span>
                     </button>
                   </div>
 
                   {form.paid_via === "bank" ? (
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
-                        Bank Account (Optional)
+                    <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-3 space-y-1.5 animate-in fade-in duration-150">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center justify-between">
+                        <span>Select Bank Account (Optional)</span>
+                        <span className="text-[10px] text-slate-400 font-normal">Direct payout attribution</span>
                       </label>
-                      <select
-                        value={form.bank_account_id || ""}
-                        onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
-                        className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-semibold outline-none focus:border-slate-800 min-h-[42px]"
-                        data-testid="expense-form-bank-account"
-                      >
-                        <option value="">-- No Bank Account / Unassigned --</option>
-                        {bankAccounts.map((acc) => (
-                          <option key={acc.id || acc._id} value={acc.id || acc._id}>
-                            {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={form.bank_account_id || ""}
+                          onChange={(e) => setForm({ ...form, bank_account_id: e.target.value })}
+                          className="w-full bg-white border border-slate-200 focus:border-slate-800 rounded-lg px-3 py-2 text-xs font-semibold outline-none focus:ring-2 focus:ring-slate-300 transition-all appearance-none cursor-pointer min-h-[40px]"
+                          data-testid="expense-form-bank-account"
+                        >
+                          <option value="">-- No Bank Account / Unassigned --</option>
+                          {bankAccounts.map((acc) => (
+                            <option key={acc.id || acc._id} value={acc.id || acc._id}>
+                              {`${acc.name} (${acc.bank_name || "Bank"}${acc.account_number_last4 ? ` - ••${acc.account_number_last4}` : ""})`}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      </div>
                     </div>
                   ) : (
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[10px] uppercase font-bold text-slate-700 tracking-wider">
-                          Cash Account *
+                    <div className="bg-emerald-50/40 border border-emerald-200/90 rounded-xl p-3 space-y-2 animate-in fade-in duration-150">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-bold text-emerald-950 flex items-center gap-1">
+                          <Wallet className="w-3 h-3 text-emerald-700" /> Cash Account *
                         </label>
                         <button
                           type="button"
                           onClick={() => setShowCashWithdrawalModal(true)}
-                          className="text-[10px] font-bold text-amber-800 hover:text-amber-950 underline flex items-center gap-1"
+                          className="text-[10px] font-bold text-amber-800 hover:text-amber-950 bg-amber-100/70 hover:bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors"
                           data-testid="expense-add-cash-pool-btn"
                         >
                           <Plus className="w-3 h-3" /> New Cash Withdrawal
                         </button>
                       </div>
-                      <select
-                        value={form.cash_account_id || ""}
-                        onChange={(e) => {
-                          setForm({ ...form, cash_account_id: e.target.value, cash_ledger_id: "" });
-                        }}
-                        className="w-full border-2 border-amber-400 bg-amber-50/40 px-3 py-2 text-xs font-bold text-amber-950 outline-none focus:border-amber-700 min-h-[42px]"
-                        required
-                        data-testid="expense-form-cash-ledger"
-                      >
-                        <option value="">-- Select Cash Account --</option>
-                        {cashAccounts.map((ca) => {
-                          const cid = String(ca.id || ca._id);
-                          const bal = Number(ca.current_balance ?? ca.balance ?? 0);
-                          return (
-                            <option key={`ca-${cid}`} value={cid}>
-                              {`💵 ${ca.name} • Available: ${inr(bal)}`}
-                            </option>
-                          );
-                        })}
-                      </select>
+
+                      <div className="relative">
+                        <select
+                          value={form.cash_account_id || ""}
+                          onChange={(e) => {
+                            setForm({ ...form, cash_account_id: e.target.value, cash_ledger_id: "" });
+                          }}
+                          className="w-full bg-white border border-emerald-300 focus:border-emerald-700 rounded-lg px-3 py-2 text-xs font-bold text-emerald-950 outline-none focus:ring-2 focus:ring-emerald-400/20 transition-all appearance-none cursor-pointer min-h-[40px]"
+                          required
+                          data-testid="expense-form-cash-ledger"
+                        >
+                          <option value="">-- Select Cash Account --</option>
+                          {cashAccounts.map((ca) => {
+                            const cid = String(ca.id || ca._id);
+                            const bal = Number(ca.current_balance ?? ca.balance ?? 0);
+                            return (
+                              <option key={`ca-${cid}`} value={cid}>
+                                {`💵 ${ca.name} • Available: ${inr(bal)}`}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <ChevronDown className="w-3.5 h-3.5 text-emerald-700 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      </div>
 
                       {/* Balance Status Pill */}
                       {(() => {
@@ -1856,8 +2009,8 @@ export default function Expenses() {
 
                         if (available === null) {
                           return (
-                            <p className="text-[10px] text-amber-800 mt-1 font-medium">
-                              Payment will draw down this cash account's liquidity pool.
+                            <p className="text-[10px] text-slate-500 font-medium">
+                              Payment will draw down this cash account's liquidity balance.
                             </p>
                           );
                         }
@@ -1867,22 +2020,25 @@ export default function Expenses() {
 
                         return (
                           <div
-                            className={`mt-1.5 p-2 rounded text-xs flex items-center justify-between font-semibold ${
+                            className={`p-2.5 rounded-lg text-xs flex items-center justify-between font-semibold ${
                               isInsufficient
                                 ? "bg-red-50 text-red-700 border border-red-200"
-                                : "bg-amber-100/80 text-amber-900 border border-amber-300"
+                                : "bg-emerald-100/70 text-emerald-900 border border-emerald-300"
                             }`}
                             data-testid="expense-cash-balance-pill"
                           >
-                            <span>
-                              Available: <b>{inr(available)}</b>
+                            <span className="flex items-center gap-1.5">
+                              <span>Available:</span>
+                              <b className="font-mono">{inr(available)}</b>
                             </span>
                             {isInsufficient ? (
-                              <span className="text-red-600 text-[11px] font-bold">
-                                ⚠️ Exceeds balance by {inr(amt - available)}
+                              <span className="text-red-700 text-[11px] font-bold flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-red-600 inline" /> Exceeds balance by {inr(amt - available)}
                               </span>
                             ) : (
-                              <span className="text-emerald-700 text-[11px] font-bold">✓ Sufficient cash balance</span>
+                              <span className="text-emerald-700 text-[11px] font-bold flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600 inline" /> Sufficient cash balance
+                              </span>
                             )}
                           </div>
                         );
@@ -1891,21 +2047,23 @@ export default function Expenses() {
                   )}
                 </div>
 
-                {/* Notes / Remarks */}
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-700 mb-1">Notes / Remarks</label>
+                {/* ── NOTES / REMARKS ── */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-slate-500" /> Notes / Remarks
+                  </label>
                   <textarea
                     rows={2}
-                    placeholder="Bill details, invoice ref, payment notes..."
+                    placeholder="Bill details, invoice reference number, payment notes or voucher remarks..."
                     value={form.notes}
                     onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                    className="w-full border-2 border-slate-300 px-3 py-2 text-xs font-medium outline-none focus:border-slate-800"
+                    className="w-full bg-slate-50/70 hover:bg-white focus:bg-white border border-slate-200 focus:border-amber-600 focus:ring-4 focus:ring-amber-500/10 rounded-xl px-3.5 py-2.5 text-xs font-medium outline-none transition-all resize-y"
                     data-testid="expense-form-notes"
                   />
                 </div>
 
-                {/* Receipt Document / Image with responsive uploader */}
-                <div className="border-t border-slate-200 pt-3">
+                {/* ── RECEIPT DOCUMENT / IMAGE ── */}
+                <div className="border-t border-slate-200/90 pt-3">
                   <ImageUploader
                     label="Receipt Document / Image"
                     value={form.receipt}
@@ -1916,15 +2074,45 @@ export default function Expenses() {
                 </div>
               </div>
 
-              {/* Sticky Action Footer */}
-              <div className="bg-slate-50 border-t border-slate-200 px-4 sm:px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
-                <BtnSecondary type="button" onClick={() => setModalOpen(false)} className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
-                  Cancel
-                </BtnSecondary>
-                <BtnPrimary type="submit" disabled={submitting} data-testid="save-expense-btn" className="w-1/2 sm:w-auto text-center justify-center min-h-[42px]">
-                  {submitting ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Check className="w-4 h-4 inline mr-1" />}
-                  {editingItem ? "Update Expense" : "Save Expense"}
-                </BtnPrimary>
+              {/* ── STICKY ACTION FOOTER ── */}
+              <div className="bg-slate-50/95 backdrop-blur border-t border-slate-200 px-5 sm:px-6 py-3.5 flex items-center justify-between flex-shrink-0 gap-3">
+                <div>
+                  {parseFloat(form.amount) > 0 ? (
+                    <div className="flex flex-col">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                        Total Outflow
+                      </span>
+                      <span className="text-base font-black font-mono text-slate-900">
+                        {inr(parseFloat(form.amount) || 0)}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-slate-400 hidden sm:inline">Fill in details to record</span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setModalOpen(false)}
+                    className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold text-xs transition-colors min-h-[40px]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    data-testid="save-expense-btn"
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 via-amber-700 to-amber-800 hover:from-amber-500 hover:to-amber-700 text-white font-bold text-xs uppercase tracking-wider shadow-md shadow-amber-900/20 hover:shadow-lg transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
+                  >
+                    {submitting ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Check className="w-4 h-4" />
+                    )}
+                    <span>{editingItem ? "Update Expense" : "Save Expense"}</span>
+                  </button>
+                </div>
               </div>
             </form>
           </div>
