@@ -191,6 +191,65 @@ async def worker_login(payload: WorkerLoginIn, request: Request, response: Respo
 
 # ---------- WORKER SELF-SERVICE ENDPOINTS (/my/...) ----------
 
+def is_role_completed(
+    asgn: dict,
+    role: str,
+    curr_stage: str,
+    total_completed: int,
+    total_ordered: int,
+    components: Optional[dict] = None,
+    tracks: Optional[dict] = None
+) -> bool:
+    if not isinstance(asgn, dict):
+        return False
+    # 1. Explicit assignment status
+    if asgn.get("status") in ("completed", "done", "ready"):
+        return True
+    # 2. Completed at timestamp
+    if asgn.get("completed_at"):
+        return True
+    # 3. Explicit completed_qty meets total ordered
+    c_qty = asgn.get("completed_qty")
+    if c_qty is not None and total_ordered > 0 and int(c_qty) >= total_ordered:
+        return True
+    # 4. Total completed qty on the job meets total ordered
+    if total_ordered > 0 and total_completed >= total_ordered:
+        return True
+    # 5. Whole job stage is dispatched or completed
+    if curr_stage in ("dispatched", "completed"):
+        return True
+    # 6. Pipeline stage order: if curr_stage is strictly after role in PRODUCTION_STAGES
+    base_role = role.split(".")[-1].split("__")[-1]
+    if base_role in PRODUCTION_STAGES and curr_stage in PRODUCTION_STAGES:
+        try:
+            if PRODUCTION_STAGES.index(curr_stage) > PRODUCTION_STAGES.index(base_role):
+                return True
+        except ValueError:
+            pass
+    # 7. Component track status
+    components = components or {}
+    tracks = tracks or {}
+    comp_prefix = role.split(".")[0].split("__")[0] if ("." in role or "__" in role) else role
+    if comp_prefix in tracks:
+        t = tracks[comp_prefix]
+        if isinstance(t, dict):
+            if t.get("status") == "ready":
+                return True
+            if base_role in (t.get("stages_completed") or []):
+                return True
+    # 8. Legacy component flags
+    if components.get(f"{comp_prefix}_done") or components.get(f"{role}_done"):
+        return True
+    if comp_prefix in ("upper", "cutting", "folding", "attachment", "stitching") and components.get("upper_done"):
+        return True
+    if comp_prefix in ("bottom", "insole") and components.get("bottom_done"):
+        return True
+    if comp_prefix in ("sole", "outsole") and components.get("sole_done"):
+        return True
+
+    return False
+
+
 @workers_router.get("/my/tasks")
 async def my_tasks(request: Request, scope: Optional[str] = "active"):
     """Worker-only: list jobs assigned to the calling worker."""
@@ -212,11 +271,15 @@ async def my_tasks(request: Request, scope: Optional[str] = "active"):
         curr_stage = job.get("stage", "")
 
         for role, asgn in assigns.items():
-            if asgn.get("worker_id") == caller_wid:
+            if not isinstance(asgn, dict):
+                continue
+            assigned_to_me = (asgn.get("worker_id") == caller_wid)
+            completed_by_me = (isinstance(asgn.get("completed_by"), dict) and asgn.get("completed_by", {}).get("worker_id") == caller_wid)
+            if assigned_to_me or completed_by_me:
                 if po_num and po_num != "—":
-                    gkey = f"{po_num}_{style_code}_{color}_{curr_stage}_{role}"
+                    gkey = f"{po_num}_{style_code}_{color}_{role}"
                 else:
-                    gkey = f"single_{str(job['_id'])}_{curr_stage}_{role}"
+                    gkey = f"single_{str(job['_id'])}_{role}"
 
                 if gkey not in grouped:
                     grouped[gkey] = {
@@ -281,7 +344,21 @@ async def my_tasks(request: Request, scope: Optional[str] = "active"):
                 "is_rfp": rfp_by_me,
             })
 
-        all_completed = any_rfp or (curr_stage == "dispatched")
+        # Check whether this worker's role is completed across the jobs in this group
+        role_completed = any_rfp or all(
+            is_role_completed(
+                (j.get("assignments") or {}).get(role) or {},
+                role,
+                j.get("stage", curr_stage),
+                total_completed,
+                total_ordered,
+                j.get("components"),
+                j.get("component_tracks")
+            )
+            for j in sorted_jobs
+        ) if sorted_jobs else False
+
+        all_completed = role_completed or (curr_stage == "dispatched")
         is_active = not all_completed
 
         if scope == "active" and not is_active:
@@ -457,8 +534,17 @@ async def my_task_details(job_id: str, request: Request):
         raise HTTPException(404, "Job not found")
 
     assigns = job.get("assignments") or {}
-    assigned_workers = {a.get("worker_id") for a in assigns.values()}
-    if caller_wid not in assigned_workers:
+    assigned_workers = {
+        a.get("worker_id")
+        for a in assigns.values()
+        if isinstance(a, dict) and a.get("worker_id")
+    }
+    completed_by_workers = {
+        a.get("completed_by", {}).get("worker_id")
+        for a in assigns.values()
+        if isinstance(a, dict) and isinstance(a.get("completed_by"), dict) and a.get("completed_by", {}).get("worker_id")
+    }
+    if caller_wid not in assigned_workers and caller_wid not in completed_by_workers:
         raise HTTPException(403, "You are not assigned to this job")
 
     po_num = job.get("po_number")
@@ -498,7 +584,41 @@ async def my_task_details(job_id: str, request: Request):
     style = await db.styles.find_one({"code": style_code})
     style_d = stringify(style) if style else {}
 
-    my_asgn_role = next((r for r, a in assigns.items() if a.get("worker_id") == caller_wid), None)
+    curr_stage = j0.get("stage", "—")
+    tracks = j0.get("component_tracks") or {}
+    comps = j0.get("components") or {}
+
+    sanitized_assignments = {}
+    for stg, asgn_val in assigns.items():
+        if not isinstance(asgn_val, dict):
+            continue
+        is_me = (asgn_val.get("worker_id") == caller_wid or (isinstance(asgn_val.get("completed_by"), dict) and asgn_val.get("completed_by", {}).get("worker_id") == caller_wid))
+        done = is_role_completed(
+            asgn_val, stg, curr_stage,
+            total_completed_qty, total_qty,
+            comps, tracks
+        )
+        if is_me:
+            sanitized_assignments[stg] = {
+                "worker_id": str(caller_wid),
+                "worker_name": asgn_val.get("worker_name"),
+                "rate_per_pair": asgn_val.get("rate_per_pair"),
+                "status": "completed" if done else (asgn_val.get("status") or "pending"),
+                "is_done": done,
+                "is_me": True,
+            }
+        else:
+            # Privacy redaction: DO NOT return other workers' worker_id, worker_name, or rate_per_pair!
+            sanitized_assignments[stg] = {
+                "status": "completed" if done else (asgn_val.get("status") or "pending"),
+                "is_done": done,
+                "is_me": False,
+            }
+
+    my_asgn_role = next(
+        (r for r, a in assigns.items() if isinstance(a, dict) and (a.get("worker_id") == caller_wid or a.get("completed_by", {}).get("worker_id") == caller_wid)),
+        None
+    )
     my_asgn = assigns.get(my_asgn_role, {}) if my_asgn_role else {}
 
     return {
@@ -509,14 +629,16 @@ async def my_task_details(job_id: str, request: Request):
         "article_name": style_d.get("name", ""),
         "color": color,
         "delivery_date": j0.get("delivery_date", "—"),
-        "stage": j0.get("stage", "—"),
+        "stage": curr_stage,
         "sizes": sizes,
         "total_qty": total_qty,
         "total_completed_qty": total_completed_qty,
         "image_url": style_d.get("image_url") or style_d.get("image_display_url"),
         "image_thumbnail_url": style_d.get("image_thumbnail_url") or style_d.get("image_url"),
-        "components": j0.get("components") or {},
-        "assignments": j0.get("assignments") or {},
+        "components": comps,
+        "component_tracks": tracks,
+        "component_specs": j0.get("component_specs") or {},
+        "assignments": sanitized_assignments,
         "bom_items": style_d.get("bom_items") or style_d.get("components") or [],
         "my_assignment": {
             "role": my_asgn_role,

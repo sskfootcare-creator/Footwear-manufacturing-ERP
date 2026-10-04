@@ -2956,6 +2956,11 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
         durations = await _get_stage_durations(db=db)
         entered = now_iso()
         hours = float(durations.get(payload.stage, 24))
+        prev_stage = job.get("stage")
+        if prev_stage and prev_stage != payload.stage:
+            update[f"assignments.{prev_stage}.status"] = "completed"
+            if not (job.get("assignments") or {}).get(prev_stage, {}).get("completed_at"):
+                update[f"assignments.{prev_stage}.completed_at"] = entered
         update["stage"] = payload.stage
         update["stage_entered_at"] = entered
         update["stage_deadline"] = _compute_deadline(entered, hours) if payload.stage != "dispatched" else None
@@ -2981,6 +2986,12 @@ async def update_job(jid: str, payload: ProductionStageUpdate, request: Request)
             update[f"assignments.{curr_stage}.completed_by"] = completed_by
             update[f"assignments.{curr_stage}.completed_qty"] = payload.completed_qty
             update[f"assignments.{curr_stage}.completed_at"] = now_iso()
+            if payload.completed_qty >= int(job.get("quantity") or 0) or payload.qc_pass:
+                update[f"assignments.{curr_stage}.status"] = "completed"
+        elif payload.completed_qty >= int(job.get("quantity") or 0) or payload.qc_pass:
+            if curr_stage:
+                update[f"assignments.{curr_stage}.status"] = "completed"
+                update[f"assignments.{curr_stage}.completed_at"] = now_iso()
     if payload.rejected_qty is not None:
         update["rejected_qty"] = payload.rejected_qty
     if payload.qc_pass is not None:
