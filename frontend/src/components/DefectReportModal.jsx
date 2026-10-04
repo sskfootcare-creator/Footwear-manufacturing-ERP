@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Camera, Upload, X, AlertOctagon, CheckCircle2, Loader2, Image as ImageIcon } from "lucide-react";
+import { http } from "../lib/api";
 
 /**
  * DefectReportModal (U-005)
@@ -35,16 +36,11 @@ export default function DefectReportModal({
       const formData = new FormData();
       formData.append("file", files[0]);
 
-      const res = await fetch("/api/upload/image", {
-        method: "POST",
-        body: formData,
+      const res = await http.post("/upload/image", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
       });
-
-      if (!res.ok) {
-        throw new Error("Image upload failed");
-      }
-      const data = await res.json();
-      const url = data.url || data.key;
+      const data = res.data;
+      const url = data.url || data.display_url || data.key;
       if (url) {
         setPhotoUrls([...photoUrls, url]);
       }

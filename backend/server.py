@@ -432,14 +432,17 @@ else:
 @api.post("/upload/image", dependencies=[Depends(upload_rate_limiter)])
 async def upload_image(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request)
-    require_roles("admin", "manager")(u)
+    if not u:
+        raise HTTPException(401, "Authentication required to upload images")
 
     ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
         raise HTTPException(400, "Invalid image format")
 
-    if file.content_type and file.content_type.lower() not in ALLOWED_IMAGE_MIME_TYPES:
-        raise HTTPException(400, f"Unsupported Content-Type '{file.content_type}'. Must be a valid image MIME type.")
+    if file.content_type:
+        clean_ct = file.content_type.split(";")[0].strip().lower()
+        if clean_ct not in ALLOWED_IMAGE_MIME_TYPES and clean_ct not in ("application/octet-stream", "image/pjpeg", "image/x-png"):
+            raise HTTPException(400, f"Unsupported Content-Type '{file.content_type}'. Must be a valid image MIME type.")
 
     # ── Read up to cap + 1 byte to enforce bounded memory allocation (CODE-004)
     content = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
@@ -552,10 +555,7 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
                 "storage":       "imagekit",
             }
         except Exception as e:
-            logger.error(f"ImageKit image upload failed: {e}")
-            if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
-                raise HTTPException(500, f"Failed to persist image to ImageKit: {e}")
-            # In non-production, fall through to S3 or local storage
+            logger.warning(f"ImageKit image upload failed ({e}); falling through to cloud/local storage")
 
     if s3_client:
         uploaded_keys = []
@@ -725,9 +725,7 @@ async def upload_file(
                 "storage": "imagekit",
             }
         except Exception as e:
-            logger.error(f"ImageKit file upload failed: {e}")
-            if os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod"):
-                raise HTTPException(500, f"Failed to persist file to ImageKit: {e}")
+            logger.warning(f"ImageKit file upload failed ({e}); falling through to local storage")
 
     # Local storage fallback
     doc_folder = os.path.join("uploads", "documents", key)

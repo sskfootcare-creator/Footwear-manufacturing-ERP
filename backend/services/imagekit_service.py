@@ -22,6 +22,7 @@ IMAGEKIT_PUBLIC_KEY = os.environ.get("IMAGEKIT_PUBLIC_KEY", "").strip()
 IMAGEKIT_PRIVATE_KEY = os.environ.get("IMAGEKIT_PRIVATE_KEY", "").strip()
 IMAGEKIT_URL_ENDPOINT = os.environ.get("IMAGEKIT_URL_ENDPOINT", "").strip().rstrip("/")
 
+IMAGEKIT_UPLOAD_V1_URL = "https://upload.imagekit.io/api/v1/files/upload"
 IMAGEKIT_UPLOAD_V2_URL = "https://upload.imagekit.io/api/v2/files/upload"
 IMAGEKIT_API_BASE_URL = "https://api.imagekit.io/v1"
 
@@ -177,27 +178,59 @@ async def upload_to_imagekit_async(
         import json
         form_data["customMetadata"] = json.dumps(custom_metadata)
 
+    def _get_mime(fname: str) -> str:
+        fn = fname.lower()
+        if fn.endswith((".jpg", ".jpeg")):
+            return "image/jpeg"
+        if fn.endswith(".png"):
+            return "image/png"
+        if fn.endswith(".webp"):
+            return "image/webp"
+        if fn.endswith(".gif"):
+            return "image/gif"
+        if fn.endswith(".pdf"):
+            return "application/pdf"
+        return "application/octet-stream"
+
     files = None
     if isinstance(file_data, (bytes, bytearray)):
-        files = {"file": (file_name, file_data)}
+        files = {"file": (file_name, file_data, _get_mime(file_name))}
     elif hasattr(file_data, "read"):
-        files = {"file": (file_name, file_data)}
+        files = {"file": (file_name, file_data, _get_mime(file_name))}
     elif isinstance(file_data, str):
         # Could be URL or base64 data
         form_data["file"] = file_data
     else:
         raise ValueError("Unsupported file_data type for ImageKit upload.")
 
+    target_url = IMAGEKIT_UPLOAD_V2_URL
+
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
-            IMAGEKIT_UPLOAD_V2_URL,
+            target_url,
             headers=headers,
             data=form_data,
             files=files,
         )
+        if response.status_code not in (200, 201):
+            # Fallback attempt on V1
+            try:
+                if files and hasattr(file_data, "seek"):
+                    file_data.seek(0)
+                    files = {"file": (file_name, file_data, _get_mime(file_name))}
+                alt_res = await client.post(
+                    IMAGEKIT_UPLOAD_V1_URL,
+                    headers=headers,
+                    data=form_data,
+                    files=files,
+                )
+                if alt_res.status_code in (200, 201):
+                    response = alt_res
+            except Exception:
+                pass
 
     if response.status_code not in (200, 201):
-        err_msg = f"ImageKit V2 Upload failed [{response.status_code}]: {response.text}"
+        err_msg = f"ImageKit Upload failed [{response.status_code}]: {response.text}"
         logger.error(err_msg)
         raise RuntimeError(err_msg)
 
@@ -251,26 +284,58 @@ def upload_to_imagekit_sync(
         import json
         form_data["customMetadata"] = json.dumps(custom_metadata)
 
+    def _get_mime(fname: str) -> str:
+        fn = fname.lower()
+        if fn.endswith((".jpg", ".jpeg")):
+            return "image/jpeg"
+        if fn.endswith(".png"):
+            return "image/png"
+        if fn.endswith(".webp"):
+            return "image/webp"
+        if fn.endswith(".gif"):
+            return "image/gif"
+        if fn.endswith(".pdf"):
+            return "application/pdf"
+        return "application/octet-stream"
+
     files = None
     if isinstance(file_data, (bytes, bytearray)):
-        files = {"file": (file_name, file_data)}
+        files = {"file": (file_name, file_data, _get_mime(file_name))}
     elif hasattr(file_data, "read"):
-        files = {"file": (file_name, file_data)}
+        files = {"file": (file_name, file_data, _get_mime(file_name))}
     elif isinstance(file_data, str):
         form_data["file"] = file_data
     else:
         raise ValueError("Unsupported file_data type for ImageKit upload.")
 
+    target_url = IMAGEKIT_UPLOAD_V2_URL
+
     response = requests.post(
-        IMAGEKIT_UPLOAD_V2_URL,
+        target_url,
         headers=headers,
         data=form_data,
         files=files,
         timeout=timeout,
     )
+    if response.status_code not in (200, 201):
+        try:
+            if files and hasattr(file_data, "seek"):
+                file_data.seek(0)
+                files = {"file": (file_name, file_data, _get_mime(file_name))}
+            alt_res = requests.post(
+                IMAGEKIT_UPLOAD_V1_URL,
+                headers=headers,
+                data=form_data,
+                files=files,
+                timeout=timeout,
+            )
+            if alt_res.status_code in (200, 201):
+                response = alt_res
+        except Exception:
+            pass
 
     if response.status_code not in (200, 201):
-        err_msg = f"ImageKit V2 Upload failed [{response.status_code}]: {response.text}"
+        err_msg = f"ImageKit Upload failed [{response.status_code}]: {response.text}"
         logger.error(err_msg)
         raise RuntimeError(err_msg)
 

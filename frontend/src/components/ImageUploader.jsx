@@ -1,6 +1,25 @@
 import { useEffect, useState } from "react";
 import { Upload, X, Loader2 } from "lucide-react";
-import { http } from "../lib/api";
+import { http, getBackendUrl } from "../lib/api";
+
+/**
+ * Normalise any relative backend URL (/api/uploads/... or /uploads/...)
+ * into a fully-qualified URL pointing to the active backend server.
+ * Leaves absolute URLs (http://, https://, data:) untouched.
+ */
+export function resolveImageUrl(url) {
+  if (!url || typeof url !== "string") return url || "";
+  const trimmed = url.trim();
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    try {
+      const backendOrigin = getBackendUrl().replace(/\/api\/?$/, "").replace(/\/+$/, "");
+      return `${backendOrigin}${trimmed}`;
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+}
 
 /**
  * Reusable image uploader that hits `/api/upload/image` (Phase 1 backend).
@@ -34,9 +53,10 @@ export default function ImageUploader({
       : value || {};
   const hasImage = !!(asObj.url || asObj.display_url || asObj.thumbnail_url);
 
-  const previewSrc = fallbackToThumb
+  const rawPreviewSrc = fallbackToThumb
     ? asObj.thumbnail_url || asObj.url || ""
     : asObj.display_url || asObj.url || asObj.thumbnail_url || "";
+  const previewSrc = resolveImageUrl(rawPreviewSrc);
 
   const onFile = async (e) => {
     const file = e.target.files?.[0];
@@ -49,7 +69,15 @@ export default function ImageUploader({
       e.target.value = "";
       return;
     }
-    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+
+    const ext = file.name ? file.name.split(".").pop().toLowerCase() : "";
+    const isAllowedExt = ["jpg", "jpeg", "png", "webp", "gif"].includes(ext);
+    const isAllowedMime =
+      !file.type ||
+      /^image\/(png|jpe?g|webp|gif|pjpeg|x-png)$/i.test(file.type) ||
+      file.type === "application/octet-stream";
+
+    if (!isAllowedExt && !isAllowedMime) {
       setErr("Only PNG, JPG, WEBP, or GIF allowed.");
       e.target.value = "";
       return;
@@ -59,7 +87,9 @@ export default function ImageUploader({
     fd.append("file", file);
     setUploading(true);
     try {
-      const res = await http.post("/upload/image", fd);
+      const res = await http.post("/upload/image", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       const { url, original_url, display_url, thumbnail_url, width, height } =
         res.data || {};
       onChange({
@@ -305,9 +335,10 @@ export function ImageThumb({
     typeof image === "string"
       ? { url: image, thumbnail_url: image, display_url: image }
       : image || {};
-  const src = asObj.thumbnail_url || asObj.display_url || asObj.url || "";
-  const lightboxSrc =
-    asObj.display_url || asObj.url || asObj.thumbnail_url || "";
+  const src = resolveImageUrl(asObj.thumbnail_url || asObj.display_url || asObj.url || "");
+  const lightboxSrc = resolveImageUrl(
+    asObj.display_url || asObj.url || asObj.thumbnail_url || ""
+  );
 
   // ESC to close
   useEffect(() => {
@@ -439,7 +470,7 @@ export function SafeImage({
       ].filter(Boolean)
     )
   );
-  const currentSrc = chain[errStep];
+  const currentSrc = resolveImageUrl(chain[errStep]);
   const showPlaceholder = !currentSrc;
 
   const wrapperStyle = { aspectRatio };
