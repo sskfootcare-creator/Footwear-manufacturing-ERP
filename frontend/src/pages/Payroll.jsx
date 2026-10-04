@@ -223,49 +223,51 @@ export default function Payroll() {
             <BtnPrimary
               onClick={openAdvancesDrawer}
               data-testid="open-advances-btn"
-              className="bg-[#2563EB] border-[#2563EB] hover:bg-[#1E40AF] px-3 sm:px-5"
+              className="bg-[#2563EB] border-[#2563EB] hover:bg-[#1E40AF] px-3 sm:px-5 py-2 text-xs sm:text-sm font-bold flex items-center touch-manipulation"
             >
               <IndianRupee className="w-3.5 h-3.5 inline -mt-0.5" />
-              <span className="hidden sm:inline ml-1">Transactions</span>
+              <span className="inline ml-1">Transactions</span>
             </BtnPrimary>
             <BtnPrimary
               onClick={dlPayrollPdf}
               data-testid="payroll-pdf-btn"
-              className="bg-[#C27842] border-[#C27842] hover:bg-[#A65D24] px-3 sm:px-5"
+              className="bg-[#C27842] border-[#C27842] hover:bg-[#A65D24] px-3 sm:px-5 py-2 text-xs sm:text-sm font-bold flex items-center touch-manipulation"
             >
               <FileDown className="w-3.5 h-3.5 inline -mt-0.5" />
-              <span className="hidden sm:inline ml-1">PDF</span>
+              <span className="inline ml-1">PDF</span>
             </BtnPrimary>
           </div>
         }
       />
 
       <div className="p-2 sm:p-4 lg:p-8 space-y-4">
-        <div className="flex flex-wrap gap-2 items-end bg-white p-4 border-2 border-slate-200">
-          <div className="w-full sm:w-auto">
-            <Input
-              testId="payroll-from"
-              label="From"
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="w-full"
-            />
-          </div>
-          <div className="w-full sm:w-auto">
-            <Input
-              testId="payroll-to"
-              label="To"
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="w-full"
-            />
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2.5 bg-white p-3 sm:p-4 border-2 border-slate-200 shadow-sm rounded-lg sm:rounded-none">
+          <div className="grid grid-cols-2 gap-2 flex-1">
+            <div className="w-full">
+              <Input
+                testId="payroll-from"
+                label="From"
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="w-full text-xs sm:text-sm"
+              />
+            </div>
+            <div className="w-full">
+              <Input
+                testId="payroll-to"
+                label="To"
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="w-full text-xs sm:text-sm"
+              />
+            </div>
           </div>
           <BtnPrimary
             onClick={load}
             data-testid="payroll-run-btn"
-            className="w-full sm:w-auto py-2"
+            className="w-full sm:w-auto py-2.5 sm:py-2 px-5 text-xs sm:text-sm font-bold flex items-center justify-center touch-manipulation"
           >
             <Calendar className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Run
           </BtnPrimary>
@@ -275,7 +277,7 @@ export default function Payroll() {
           <Card className="p-12 text-center text-slate-400">Loading...</Card>
         ) : (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
               <KpiTile
                 label="Karigars"
                 value={data.worker_count}
@@ -311,22 +313,22 @@ export default function Payroll() {
             </div>
 
             <Card className="overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm" data-testid="payroll-table">
+              <div className="overflow-x-auto touch-pan-x -mx-1 sm:mx-0">
+                <table className="w-full text-xs sm:text-sm min-w-[700px] sm:min-w-full" data-testid="payroll-table">
                   <thead className="bg-slate-50 border-b-2 border-slate-200">
                     <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                      <th className="px-4 py-3 font-bold">Karigar</th>
-                      <th className="px-4 py-3 font-bold">Skill</th>
-                      <th className="px-4 py-3 font-bold text-right">Opening Bal</th>
-                      <th className="px-4 py-3 font-bold text-right">Pairs</th>
-                      <th className="px-4 py-3 font-bold text-right">
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold">Karigar</th>
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold">Skill</th>
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">Opening Bal</th>
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">Pairs</th>
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">
                         Earnings
                       </th>
-                      <th className="px-4 py-3 font-bold text-right">Bonus</th>
-                      <th className="px-4 py-3 font-bold text-right">
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">Bonus</th>
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">
                         Paid / Advance
                       </th>
-                      <th className="px-4 py-3 font-bold text-right">
+                      <th className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-right">
                         Net Balance
                       </th>
                       <th className="px-4 py-3" />
@@ -431,12 +433,14 @@ export default function Payroll() {
               <BtnPrimary
                 onClick={() => openNewTransactionModal({ txn_type: "advance" })}
                 data-testid="new-advance-btn"
+                className="py-1.5 px-3 text-xs font-bold"
               >
                 <Plus className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> New
               </BtnPrimary>
             </div>
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50 border-b-2 border-slate-200">
+            <div className="overflow-x-auto touch-pan-x -mx-1 sm:mx-0">
+              <table className="w-full text-xs min-w-[580px] sm:min-w-full">
+                <thead className="bg-slate-50 border-b-2 border-slate-200">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                   <th className="px-3 py-2 font-bold">Date</th>
                   <th className="px-3 py-2 font-bold">Karigar</th>
@@ -539,6 +543,7 @@ export default function Payroll() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </Drawer>
       )}
@@ -614,8 +619,9 @@ export default function Payroll() {
               </BtnPrimary>
             </div>
 
-            <table className="w-full text-xs" data-testid="ledger-table">
-              <thead className="bg-slate-50 border-b-2 border-slate-200 sticky top-0">
+            <div className="overflow-x-auto touch-pan-x -mx-1 sm:mx-0">
+              <table className="w-full text-xs min-w-[540px] sm:min-w-full" data-testid="ledger-table">
+                <thead className="bg-slate-50 border-b-2 border-slate-200 sticky top-0">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
                   <th className="px-3 py-2 font-bold">Date</th>
                   <th className="px-3 py-2 font-bold">Type</th>
@@ -675,14 +681,15 @@ export default function Payroll() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </Drawer>
       )}
 
       {advForm && (
-        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-white border-2 border-slate-300 shadow-2xl w-full max-w-lg my-8">
-            <div className="px-6 py-4 bg-slate-50 border-b-2 border-slate-200 flex items-center justify-between">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white border-2 border-slate-300 shadow-2xl w-full max-w-lg my-auto max-h-[92vh] flex flex-col rounded-lg overflow-hidden">
+            <div className="px-4 sm:px-6 py-3.5 sm:py-4 bg-slate-50 border-b-2 border-slate-200 flex items-center justify-between flex-shrink-0">
               <div>
                 <div className="font-bold text-slate-800 text-base">
                   {advForm.txn_type === "payment"
@@ -702,7 +709,7 @@ export default function Payroll() {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+            <div className="p-4 sm:p-6 space-y-4 max-h-[80vh] overflow-y-auto flex-1">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">
@@ -1080,65 +1087,67 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
         onClick={onToggle}
         data-testid={`payroll-row-${r.worker_id}`}
       >
-        <td className="px-4 py-3 font-bold">{r.name}</td>
-        <td className="px-4 py-3">
+        <td className="px-3 sm:px-4 py-2.5 sm:py-3 font-bold text-slate-900 whitespace-nowrap">{r.name}</td>
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 whitespace-nowrap">
           <Badge color="orange">{r.skill}</Badge>
         </td>
-        <td className="px-4 py-3 text-right font-mono font-medium text-slate-600">
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono font-medium text-slate-600 whitespace-nowrap">
           {inr(r.opening_balance || 0)}
         </td>
-        <td className="px-4 py-3 text-right font-mono">{r.total_pairs}</td>
-        <td className="px-4 py-3 text-right font-mono font-bold text-[#C27842]">
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono whitespace-nowrap">{r.total_pairs}</td>
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono font-bold text-[#C27842] whitespace-nowrap">
           {inr(r.total_earning)}
         </td>
-        <td className="px-4 py-3 text-right font-mono text-purple-700">
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono text-purple-700 whitespace-nowrap">
           {inr(r.total_bonus || 0)}
         </td>
-        <td className="px-4 py-3 text-right font-mono text-red-700">
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono text-red-700 whitespace-nowrap">
           {inr(debit)}
         </td>
         <td
-          className={`px-4 py-3 text-right font-mono font-bold ${r.net_payable >= 0 ? "text-green-700" : "text-red-700"}`}
+          className={`px-2.5 sm:px-4 py-2.5 sm:py-3 text-right font-mono font-bold whitespace-nowrap ${r.net_payable >= 0 ? "text-green-700" : "text-red-700"}`}
         >
           {inr(r.net_payable)}
         </td>
-        <td className="px-4 py-3 text-right whitespace-nowrap">
-          <button
-            onClick={onPay}
-            className="text-slate-600 hover:text-[#16A34A] p-1.5"
-            title="Record payment"
-            data-testid={`pay-${r.worker_id}`}
-          >
-            <ArrowDownLeft className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onLedger}
-            className="text-slate-600 hover:text-[#2563EB] p-1.5 ml-0.5"
-            title="View ledger"
-            data-testid={`ledger-${r.worker_id}`}
-          >
-            <BookOpen className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onSlip}
-            className="text-slate-600 hover:text-[#C27842] p-1.5 ml-0.5"
-            title="Wage slip PDF"
-            data-testid={`wage-slip-${r.worker_id}`}
-          >
-            <FileDown className="w-4 h-4" />
-          </button>
-          <span className="text-xs text-slate-500 ml-1">
-            {expanded ? "▼" : "▶"}
-          </span>
+        <td className="px-2.5 sm:px-4 py-2.5 sm:py-3 text-right whitespace-nowrap">
+          <div className="flex items-center justify-end gap-1">
+            <button
+              onClick={onPay}
+              className="text-slate-600 hover:text-white hover:bg-emerald-600 p-2 sm:p-1.5 rounded transition-colors touch-manipulation min-w-[32px] min-h-[32px] flex items-center justify-center"
+              title="Record payment"
+              data-testid={`pay-${r.worker_id}`}
+            >
+              <ArrowDownLeft className="w-4 h-4" />
+            </button>
+            <button
+              onClick={onLedger}
+              className="text-slate-600 hover:text-white hover:bg-blue-600 p-2 sm:p-1.5 rounded transition-colors touch-manipulation min-w-[32px] min-h-[32px] flex items-center justify-center"
+              title="View ledger"
+              data-testid={`ledger-${r.worker_id}`}
+            >
+              <BookOpen className="w-4 h-4" />
+            </button>
+            <button
+              onClick={onSlip}
+              className="text-slate-600 hover:text-white hover:bg-amber-600 p-2 sm:p-1.5 rounded transition-colors touch-manipulation min-w-[32px] min-h-[32px] flex items-center justify-center"
+              title="Wage slip PDF"
+              data-testid={`wage-slip-${r.worker_id}`}
+            >
+              <FileDown className="w-4 h-4" />
+            </button>
+            <span className="text-xs text-slate-400 p-1">
+              {expanded ? "▼" : "▶"}
+            </span>
+          </div>
         </td>
       </tr>
       {expanded && (
         <tr>
-          <td colSpan="9" className="bg-slate-50 px-8 py-5">
+          <td colSpan="9" className="bg-slate-50 px-2 sm:px-8 py-3 sm:py-5">
             <div className="space-y-3">
               {r.bonus_pct > 0 && r.target_cycle_days > 0 && (
-                <div className="bg-purple-50 border border-purple-200 px-3 py-2 text-xs flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-700" />
+                <div className="bg-purple-50 border border-purple-200 px-3 py-2 text-xs flex items-center gap-2 rounded">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-700 shrink-0" />
                   <span>
                     <b>Productivity bonus:</b> {r.bonus_pct}% extra if job
                     completes within {r.target_cycle_days} days of assignment.
@@ -1148,48 +1157,50 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
               <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">
                 Per-job earnings
               </div>
-              <table className="w-full text-xs border border-slate-200">
-                <thead className="bg-white">
-                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                    <th className="px-2 py-1.5 border-b">PO</th>
-                    <th className="px-2 py-1.5 border-b">Style</th>
-                    <th className="px-2 py-1.5 border-b">Color</th>
-                    <th className="px-2 py-1.5 border-b">Size</th>
-                    <th className="px-2 py-1.5 border-b">Role</th>
-                    <th className="px-2 py-1.5 border-b text-right">Pairs</th>
-                    <th className="px-2 py-1.5 border-b text-right">Rate</th>
-                    <th className="px-2 py-1.5 border-b text-right">Earning</th>
-                    <th className="px-2 py-1.5 border-b text-right">Bonus</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {r.jobs.map((j, i) => (
-                    <tr key={i} className="border-b border-slate-200">
-                      <td className="px-2 py-1.5 font-mono">{j.po_number}</td>
-                      <td className="px-2 py-1.5 font-mono">{j.style_code}</td>
-                      <td className="px-2 py-1.5">{j.color}</td>
-                      <td className="px-2 py-1.5 font-mono">{j.size}</td>
-                      <td className="px-2 py-1.5">
-                        <Badge color={j.role?.startsWith("Contract:") ? "orange" : "slate"}>
-                          {(ROLE_LABEL[j.role] || j.role).toUpperCase()}
-                        </Badge>
-                      </td>
-                      <td className="px-2 py-1.5 text-right font-mono">
-                        {j.pairs}
-                      </td>
-                      <td className="px-2 py-1.5 text-right font-mono">
-                        {inr(j.rate)}/pr
-                      </td>
-                      <td className="px-2 py-1.5 text-right font-mono font-bold">
-                        {inr(j.earning)}
-                      </td>
-                      <td className="px-2 py-1.5 text-right font-mono text-purple-700">
-                        {j.bonus ? inr(j.bonus) : "—"}
-                      </td>
+              <div className="overflow-x-auto touch-pan-x -mx-1 sm:mx-0">
+                <table className="w-full text-xs border border-slate-200 bg-white min-w-[560px] sm:min-w-full">
+                  <thead className="bg-white">
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
+                      <th className="px-2 py-1.5 border-b">PO</th>
+                      <th className="px-2 py-1.5 border-b">Style</th>
+                      <th className="px-2 py-1.5 border-b">Color</th>
+                      <th className="px-2 py-1.5 border-b">Size</th>
+                      <th className="px-2 py-1.5 border-b">Role</th>
+                      <th className="px-2 py-1.5 border-b text-right">Pairs</th>
+                      <th className="px-2 py-1.5 border-b text-right">Rate</th>
+                      <th className="px-2 py-1.5 border-b text-right">Earning</th>
+                      <th className="px-2 py-1.5 border-b text-right">Bonus</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {r.jobs.map((j, i) => (
+                      <tr key={i} className="border-b border-slate-200">
+                        <td className="px-2 py-1.5 font-mono">{j.po_number}</td>
+                        <td className="px-2 py-1.5 font-mono">{j.style_code}</td>
+                        <td className="px-2 py-1.5">{j.color}</td>
+                        <td className="px-2 py-1.5 font-mono">{j.size}</td>
+                        <td className="px-2 py-1.5">
+                          <Badge color={j.role?.startsWith("Contract:") ? "orange" : "slate"}>
+                            {(ROLE_LABEL[j.role] || j.role).toUpperCase()}
+                          </Badge>
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">
+                          {j.pairs}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">
+                          {inr(j.rate)}/pr
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono font-bold">
+                          {inr(j.earning)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono text-purple-700">
+                          {j.bonus ? inr(j.bonus) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </td>
         </tr>
@@ -1200,14 +1211,14 @@ function ExpandableRow({ r, expanded, onToggle, onSlip, onLedger, onPay }) {
 
 function KpiTile({ label, value, accent = "#0F172A", icon }) {
   return (
-    <Card className="p-5 relative overflow-hidden">
-      <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 flex items-center gap-1.5">
+    <Card className="p-3 sm:p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between">
+      <div className="text-[9px] sm:text-[10px] uppercase tracking-[0.15em] font-bold text-slate-500 flex items-center gap-1.5 truncate">
         {icon}
-        {label}
+        <span className="truncate">{label}</span>
       </div>
-      <div className="font-mono text-2xl font-bold mt-2">{value}</div>
+      <div className="font-mono text-base sm:text-xl lg:text-2xl font-bold mt-1 sm:mt-2 truncate">{value}</div>
       <div
-        className="absolute left-0 top-0 bottom-0 w-1.5"
+        className="absolute left-0 top-0 bottom-0 w-1 sm:w-1.5"
         style={{ background: accent }}
       />
     </Card>

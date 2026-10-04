@@ -642,99 +642,107 @@ export default function Expenses() {
         testId="expenses-header"
       />
 
-      <div className="p-2 sm:p-4 lg:p-8 space-y-6">
+      <div className="p-2 sm:p-4 lg:p-8 space-y-4 sm:space-y-6">
         {/* ── SIMPLE P&L SUMMARY DASHBOARD ────────────────────────────────────── */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="pnl-summary-cards">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4" data-testid="pnl-summary-cards">
           {/* Card 1: Total Revenue */}
-          <Card className="p-5 border-l-4 border-l-emerald-600 bg-gradient-to-br from-white to-emerald-50/30">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Total Revenue</span>
-              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 grid place-items-center">
-                <ArrowUpRight className="w-4 h-4" />
+          <Card className="p-3 sm:p-5 border-l-4 border-l-emerald-600 bg-gradient-to-br from-white to-emerald-50/30 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-1.5 sm:mb-2">
+                <span className="text-[10px] sm:text-xs uppercase tracking-wider font-bold text-slate-500 truncate">Total Revenue</span>
+                <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-full bg-emerald-100 text-emerald-700 grid place-items-center flex-shrink-0">
+                  <ArrowUpRight className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                </div>
+              </div>
+              <div className="text-lg sm:text-2xl font-black text-slate-900 truncate" data-testid="pnl-revenue-value">
+                {inr(pnl.revenue)}
               </div>
             </div>
-            <div className="text-2xl font-black text-slate-900" data-testid="pnl-revenue-value">
-              {inr(pnl.revenue)}
-            </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
-              <span>Invoices: {inr(pnl.invoices_revenue)}</span>
-              <span>Settlements: {inr(pnl.settlements_revenue)}</span>
+            <div className="mt-2 text-[10px] sm:text-[11px] text-slate-500 font-medium flex flex-col sm:flex-row sm:justify-between gap-y-0.5 border-t pt-1.5 sm:pt-2">
+              <span className="truncate">Inv: {inr(pnl.invoices_revenue)}</span>
+              <span className="truncate">Setl: {inr(pnl.settlements_revenue)}</span>
             </div>
           </Card>
 
           {/* Card 2: Material & Labor Costs */}
-          <Card className="p-5 border-l-4 border-l-amber-500 bg-gradient-to-br from-white to-amber-50/30">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Material & Labor Cost</span>
-              <div className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 grid place-items-center">
-                <IndianRupee className="w-4 h-4" />
+          <Card className="p-3 sm:p-5 border-l-4 border-l-amber-500 bg-gradient-to-br from-white to-amber-50/30 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-1.5 sm:mb-2">
+                <span className="text-[10px] sm:text-xs uppercase tracking-wider font-bold text-slate-500 truncate">Material & Labor</span>
+                <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-full bg-amber-100 text-amber-700 grid place-items-center flex-shrink-0">
+                  <IndianRupee className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                </div>
+              </div>
+              <div className="text-lg sm:text-2xl font-black text-slate-900 truncate" data-testid="pnl-cogs-value">
+                {inr(pnl.material_cost + pnl.labor_cost)}
               </div>
             </div>
-            <div className="text-2xl font-black text-slate-900" data-testid="pnl-cogs-value">
-              {inr(pnl.material_cost + pnl.labor_cost)}
-            </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
-              <span>Material: {inr(pnl.material_cost)}</span>
-              <span>Labor: {inr(pnl.labor_cost)}</span>
+            <div className="mt-2 text-[10px] sm:text-[11px] text-slate-500 font-medium flex flex-col sm:flex-row sm:justify-between gap-y-0.5 border-t pt-1.5 sm:pt-2">
+              <span className="truncate">Mat: {inr(pnl.material_cost)}</span>
+              <span className="truncate">Lab: {inr(pnl.labor_cost)}</span>
             </div>
           </Card>
 
           {/* Card 3: Operating Expenses (Split Recurring vs Variable) */}
-          <Card className="p-5 border-l-4 border-l-blue-600 bg-gradient-to-br from-white to-blue-50/30">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs uppercase tracking-wider font-bold text-slate-500">Operating Expenses</span>
-              <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 grid place-items-center">
-                <ReceiptIndianRupee className="w-4 h-4" />
+          <Card className="p-3 sm:p-5 border-l-4 border-l-blue-600 bg-gradient-to-br from-white to-blue-50/30 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-1.5 sm:mb-2">
+                <span className="text-[10px] sm:text-xs uppercase tracking-wider font-bold text-slate-500 truncate">Expenses</span>
+                <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-full bg-blue-100 text-blue-700 grid place-items-center flex-shrink-0">
+                  <ReceiptIndianRupee className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                </div>
+              </div>
+              <div className="text-lg sm:text-2xl font-black text-slate-900 truncate" data-testid="pnl-expenses-value">
+                {inr(pnl.expenses)}
               </div>
             </div>
-            <div className="text-2xl font-black text-slate-900" data-testid="pnl-expenses-value">
-              {inr(pnl.expenses)}
-            </div>
-            <div className="mt-2 text-[11px] text-slate-500 font-medium flex flex-wrap justify-between gap-x-2 gap-y-1 border-t pt-2">
-              <span title="Recurring fixed expenses">Recurring: {inr(pnl.recurring_expenses || 0)}</span>
-              <span title="Variable one-time expenses">Variable: {inr(pnl.variable_expenses || 0)}</span>
+            <div className="mt-2 text-[10px] sm:text-[11px] text-slate-500 font-medium flex flex-col sm:flex-row sm:justify-between gap-y-0.5 border-t pt-1.5 sm:pt-2">
+              <span className="truncate" title="Recurring fixed expenses">Rec: {inr(pnl.recurring_expenses || 0)}</span>
+              <span className="truncate" title="Variable one-time expenses">Var: {inr(pnl.variable_expenses || 0)}</span>
             </div>
           </Card>
 
           {/* Card 4: Net P&L */}
           <Card
-            className={`p-5 border-l-4 ${
+            className={`p-3 sm:p-5 border-l-4 flex flex-col justify-between ${
               pnl.net_profit >= 0
                 ? "border-l-emerald-500 bg-gradient-to-br from-emerald-900 to-slate-900 text-white"
                 : "border-l-red-500 bg-gradient-to-br from-red-950 to-slate-900 text-white"
             }`}
           >
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs uppercase tracking-wider font-bold text-slate-300">Simple P&L Net</span>
-              <Badge variant={pnl.net_profit >= 0 ? "green" : "red"}>
-                {pnl.net_profit >= 0 ? "PROFIT" : "LOSS"}
-              </Badge>
+            <div>
+              <div className="flex items-center justify-between mb-1.5 sm:mb-2">
+                <span className="text-[10px] sm:text-xs uppercase tracking-wider font-bold text-slate-300 truncate">Simple P&L Net</span>
+                <Badge variant={pnl.net_profit >= 0 ? "green" : "red"} className="text-[9px] sm:text-xs px-1.5 py-0.5">
+                  {pnl.net_profit >= 0 ? "PROFIT" : "LOSS"}
+                </Badge>
+              </div>
+              <div className="text-lg sm:text-2xl font-black truncate" data-testid="pnl-net-profit-value">
+                {inr(pnl.net_profit)}
+              </div>
             </div>
-            <div className="text-2xl font-black" data-testid="pnl-net-profit-value">
-              {inr(pnl.net_profit)}
-            </div>
-            <div className="mt-2 text-[11px] text-slate-300 font-medium border-t border-slate-700/60 pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <div className="mt-2 text-[10px] sm:text-[11px] text-slate-300 font-medium border-t border-slate-700/60 pt-1.5 sm:pt-2 flex items-center gap-1 truncate">
               {pnl.net_profit >= 0 ? (
-                <span className="flex items-center gap-1">
+                <>
                   <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span>Revenue − Costs − Expenses</span>
-                </span>
+                  <span className="truncate">Net Profit Margin</span>
+                </>
               ) : (
-                <span className="flex items-center gap-1">
+                <>
                   <TrendingDown className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                  <span>Expenses & Costs exceed Revenue</span>
-                </span>
+                  <span className="truncate">Loss in Period</span>
+                </>
               )}
             </div>
           </Card>
         </div>
 
         {/* ── NAVIGATION TABS BAR ────────────────────────────────────────────── */}
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 py-3">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 sm:px-4 py-2.5 sm:py-3 shadow-sm rounded-lg sm:rounded-none">
+          <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto pb-1 sm:pb-0 scrollbar-none -mx-1 px-1">
             <button
               onClick={() => setActiveTab("expenses")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
+              className={`px-3 sm:px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 whitespace-nowrap touch-manipulation flex-shrink-0 ${
                 activeTab === "expenses"
                   ? "border-[#C27842] text-[#C27842]"
                   : "border-transparent text-slate-500 hover:text-slate-900"
@@ -742,11 +750,11 @@ export default function Expenses() {
               data-testid="tab-all-expenses"
             >
               <ReceiptIndianRupee className="w-4 h-4 inline mr-1.5" />
-              Main Expenses List
+              Expenses List
             </button>
             <button
               onClick={() => setActiveTab("due_queue")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 flex items-center gap-1.5 ${
+              className={`px-3 sm:px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 flex items-center gap-1.5 whitespace-nowrap touch-manipulation flex-shrink-0 ${
                 activeTab === "due_queue"
                   ? "border-[#C27842] text-[#C27842]"
                   : "border-transparent text-slate-500 hover:text-slate-900"
@@ -763,7 +771,7 @@ export default function Expenses() {
             </button>
             <button
               onClick={() => setActiveTab("recurring")}
-              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
+              className={`px-3 sm:px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 whitespace-nowrap touch-manipulation flex-shrink-0 ${
                 activeTab === "recurring"
                   ? "border-[#C27842] text-[#C27842]"
                   : "border-transparent text-slate-500 hover:text-slate-900"
@@ -771,31 +779,31 @@ export default function Expenses() {
               data-testid="tab-recurring"
             >
               <RefreshCw className="w-4 h-4 inline mr-1.5" />
-              Recurring Templates ({recurringTemplates.length})
+              Recurring ({recurringTemplates.length})
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full sm:w-auto">
             <button
               onClick={openExportModal}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-900 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-slate-800 shadow-sm transition-colors"
+              className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-900 text-white font-bold uppercase tracking-wider text-[11px] sm:text-xs px-3 py-2 border-2 border-slate-800 shadow-sm transition-colors touch-manipulation rounded"
               data-testid="export-outflows-btn"
             >
-              <Download className="w-3.5 h-3.5 text-[#C27842]" /> Export Outflows
+              <Download className="w-3.5 h-3.5 text-[#C27842]" /> Export
             </button>
             <button
               onClick={() => setShowCashWithdrawalModal(true)}
-              className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-xs px-3.5 py-2 border-2 border-amber-600 shadow-sm transition-colors"
+              className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold uppercase tracking-wider text-[11px] sm:text-xs px-3 py-2 border-2 border-amber-600 shadow-sm transition-colors touch-manipulation rounded"
               data-testid="record-cash-withdrawal-btn"
             >
-              <Coins className="w-3.5 h-3.5" /> Record Cash Withdrawal
+              <Coins className="w-3.5 h-3.5" /> Cash Withdrawal
             </button>
             {activeTab === "recurring" ? (
-              <BtnPrimary onClick={openNewRecurringModal} data-testid="add-recurring-btn" className="flex items-center gap-2">
-                <Plus className="w-4 h-4" /> New Recurring Template
+              <BtnPrimary onClick={openNewRecurringModal} data-testid="add-recurring-btn" className="w-full sm:w-auto flex items-center justify-center gap-2 py-2 text-xs sm:text-sm font-bold">
+                <Plus className="w-4 h-4" /> New Template
               </BtnPrimary>
             ) : (
-              <BtnPrimary onClick={openNewModal} data-testid="add-expense-btn" className="flex items-center gap-2">
+              <BtnPrimary onClick={openNewModal} data-testid="add-expense-btn" className="w-full sm:w-auto flex items-center justify-center gap-2 py-2 text-xs sm:text-sm font-bold">
                 <Plus className="w-4 h-4" /> Add Expense
               </BtnPrimary>
             )}
@@ -848,26 +856,26 @@ export default function Expenses() {
             )}
 
             {/* Action Bar Filters */}
-            <div className="bg-white p-4 border border-slate-200 shadow-sm flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-              <div className="flex flex-wrap gap-2 items-center flex-1">
-                <div className="relative min-w-[200px] flex-1 sm:flex-initial">
+            <div className="bg-white p-3 sm:p-4 border border-slate-200 shadow-sm flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+              <div className="flex flex-col sm:flex-row flex-wrap gap-2.5 items-stretch sm:items-center flex-1">
+                <div className="relative min-w-[180px] flex-1">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
                     type="text"
                     placeholder="Search payee, notes..."
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-800"
+                    className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 focus:outline-none focus:border-slate-800 rounded sm:rounded-none"
                     data-testid="expense-search-input"
                   />
                 </div>
 
-                <div className="flex items-center gap-1.5 min-w-[180px]">
+                <div className="flex items-center gap-1.5 min-w-[160px]">
                   <Filter className="w-3.5 h-3.5 text-slate-400 hidden sm:block" />
                   <select
                     value={categoryFilter}
                     onChange={(e) => setCategoryFilter(e.target.value)}
-                    className="w-full px-2.5 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-800"
+                    className="w-full px-2.5 py-2 text-xs border border-slate-300 bg-white font-medium focus:outline-none focus:border-slate-800 rounded sm:rounded-none"
                     data-testid="expense-category-filter"
                   >
                     <option value="all">All Categories</option>
@@ -880,21 +888,22 @@ export default function Expenses() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    value={fromDate}
-                    onChange={(e) => setFromDate(e.target.value)}
-                    className="px-2 py-1.5 text-xs border border-slate-300 bg-white focus:outline-none"
-                    data-testid="expense-from-date"
-                  />
-                  <span className="text-xs text-slate-400">to</span>
-                  <input
-                    type="date"
-                    value={toDate}
-                    onChange={(e) => setToDate(e.target.value)}
-                    className="px-2 py-1.5 text-xs border border-slate-300 bg-white focus:outline-none"
-                    data-testid="expense-to-date"
-                  />
+                  <div className="grid grid-cols-2 gap-2 flex-1 sm:flex sm:items-center">
+                    <input
+                      type="date"
+                      value={fromDate}
+                      onChange={(e) => setFromDate(e.target.value)}
+                      className="w-full px-2 py-1.5 text-xs border border-slate-300 bg-white focus:outline-none rounded sm:rounded-none"
+                      data-testid="expense-from-date"
+                    />
+                    <input
+                      type="date"
+                      value={toDate}
+                      onChange={(e) => setToDate(e.target.value)}
+                      className="w-full px-2 py-1.5 text-xs border border-slate-300 bg-white focus:outline-none rounded sm:rounded-none"
+                      data-testid="expense-to-date"
+                    />
+                  </div>
                   {(fromDate || toDate || categoryFilter !== "all" || search) && (
                     <button
                       onClick={() => {
@@ -903,7 +912,7 @@ export default function Expenses() {
                         setCategoryFilter("all");
                         setSearch("");
                       }}
-                      className="text-xs text-red-600 font-bold uppercase tracking-wider hover:underline ml-1"
+                      className="text-xs text-red-600 font-bold uppercase tracking-wider hover:underline ml-1 whitespace-nowrap p-1"
                     >
                       Clear
                     </button>
@@ -914,7 +923,7 @@ export default function Expenses() {
                   type="button"
                   onClick={openExportModal}
                   data-testid="filter-bar-export-btn"
-                  className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-700 hover:text-slate-900 border border-slate-300 hover:border-slate-400 bg-white hover:bg-slate-50 px-3 py-1.5 transition-colors self-start md:self-auto"
+                  className="flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-700 hover:text-slate-900 border border-slate-300 hover:border-slate-400 bg-white hover:bg-slate-50 px-3 py-1.5 transition-colors sm:self-auto rounded sm:rounded-none touch-manipulation"
                 >
                   <Download className="w-3.5 h-3.5 text-[#C27842]" /> Export Outflow
                 </button>
@@ -925,7 +934,7 @@ export default function Expenses() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-4">
                 <Card className="overflow-hidden">
-                  <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                  <div className="px-4 sm:px-5 py-3 sm:py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
                     <div className="font-bold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
                       <ReceiptIndianRupee className="w-4 h-4 text-[#C27842]" /> Expense Records ({expenses.length})
                     </div>
@@ -945,27 +954,27 @@ export default function Expenses() {
                     </div>
                   ) : (
                     <>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left text-xs border-collapse" data-testid="expenses-table">
+                      <div className="overflow-x-auto touch-pan-x -mx-1 sm:mx-0">
+                        <table className="w-full text-left text-xs border-collapse min-w-[640px] sm:min-w-full" data-testid="expenses-table">
                           <thead>
                             <tr className="bg-slate-100 border-b border-slate-200 text-slate-600 uppercase tracking-wider text-[10px] font-bold">
-                              <th className="p-3">Receipt</th>
-                              <th className="p-3">Type</th>
-                              <th className="p-3">Date</th>
-                              <th className="p-3">Payee</th>
-                              <th className="p-3">Category</th>
-                              <th className="p-3">Notes</th>
-                              <th className="p-3 text-right">Amount</th>
-                              <th className="p-3 text-center">Actions</th>
+                              <th className="p-2.5 sm:p-3">Receipt</th>
+                              <th className="p-2.5 sm:p-3">Type</th>
+                              <th className="p-2.5 sm:p-3">Date</th>
+                              <th className="p-2.5 sm:p-3">Payee</th>
+                              <th className="p-2.5 sm:p-3">Category</th>
+                              <th className="p-2.5 sm:p-3">Notes</th>
+                              <th className="p-2.5 sm:p-3 text-right">Amount</th>
+                              <th className="p-2.5 sm:p-3 text-center">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-200">
                             {paginatedExpenses.map((item) => (
                               <tr key={item.id} className="hover:bg-slate-50 transition-colors" data-testid={`expense-row-${item.id}`}>
-                                <td className="p-3">
+                                <td className="p-2.5 sm:p-3">
                                   <ImageThumb image={item.receipt} size={36} alt="Receipt" clickable testId={`receipt-thumb-${item.id}`} />
                                 </td>
-                                <td className="p-3 whitespace-nowrap">
+                                <td className="p-2.5 sm:p-3 whitespace-nowrap">
                                   {item.linked_wage_payment_id ? (
                                     <a
                                       href="/payroll"
@@ -985,8 +994,8 @@ export default function Expenses() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="p-3 font-semibold text-slate-800 whitespace-nowrap">{item.date}</td>
-                                <td className="p-3 font-bold text-slate-900">
+                                <td className="p-2.5 sm:p-3 font-semibold text-slate-800 whitespace-nowrap">{item.date}</td>
+                                <td className="p-2.5 sm:p-3 font-bold text-slate-900">
                                   {item.payee}
                                   {item.linked_wage_payment_id && (
                                     <span className="block text-[10px] font-normal text-blue-600">
@@ -994,7 +1003,7 @@ export default function Expenses() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="p-3 whitespace-nowrap">
+                                <td className="p-2.5 sm:p-3 whitespace-nowrap">
                                   <span className="inline-block px-2 py-0.5 bg-slate-100 border border-slate-300 font-semibold text-[11px] text-slate-700 rounded-sm">
                                     {item.category}
                                   </span>
@@ -1020,27 +1029,27 @@ export default function Expenses() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="p-3 text-slate-500 max-w-[180px] truncate" title={item.notes}>
+                                <td className="p-2.5 sm:p-3 text-slate-500 max-w-[180px] truncate" title={item.notes}>
                                   {item.notes || "—"}
                                 </td>
-                                <td className="p-3 text-right font-black text-slate-900 whitespace-nowrap">{inr(item.amount)}</td>
-                                <td className="p-3 text-center whitespace-nowrap">
+                                <td className="p-2.5 sm:p-3 text-right font-black text-slate-900 whitespace-nowrap">{inr(item.amount)}</td>
+                                <td className="p-2.5 sm:p-3 text-center whitespace-nowrap">
                                   <div className="flex items-center justify-center gap-1">
                                     <button
                                       onClick={() => openEditModal(item)}
-                                      className="p-1.5 text-slate-500 hover:text-slate-900 transition-colors"
+                                      className="p-2 sm:p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded transition-colors touch-manipulation min-w-[34px] min-h-[34px] flex items-center justify-center"
                                       title="Edit Expense"
                                       data-testid={`edit-expense-${item.id}`}
                                     >
-                                      <Edit3 className="w-3.5 h-3.5" />
+                                      <Edit3 className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
                                     </button>
                                     <button
                                       onClick={() => setDeleteConfirm(item)}
-                                      className="p-1.5 text-slate-400 hover:text-red-600 transition-colors"
+                                      className="p-2 sm:p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors touch-manipulation min-w-[34px] min-h-[34px] flex items-center justify-center"
                                       title="Delete Expense"
                                       data-testid={`delete-expense-${item.id}`}
                                     >
-                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <Trash2 className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
                                     </button>
                                   </div>
                                 </td>

@@ -862,14 +862,25 @@ function PayrollPanel({ worker, onViewCard }) {
           { label: "Pairs Done", value: p.total_pairs, color: "#60a5fa" },
           { label: "Period Earnings", value: inr(p.total_earning), color: "#6ee7b7" },
           { label: "Bonus", value: inr(p.total_bonus || 0), color: "#fbbf24" },
-          { label: "Net Payable Due", value: inr(p.net_payable), color: (p.net_payable || 0) >= 0 ? "#a78bfa" : "#f87171" },
+          { label: "Net Payable Due", value: inr(p.net_payable), color: (p.net_payable || 0) >= 0 ? "#4ade80" : "#f87171", isNet: true },
         ].map((s) => (
           <div key={s.label} style={{
-            background: "rgba(30,41,59,0.8)", border: "1px solid rgba(255,255,255,0.07)",
-            borderRadius: 14, padding: "1rem",
+            background: s.isNet ? "linear-gradient(135deg, rgba(30,41,59,0.95), rgba(15,23,42,0.95))" : "rgba(30,41,59,0.8)",
+            border: s.isNet ? "1px solid rgba(74,222,128,0.3)" : "1px solid rgba(255,255,255,0.07)",
+            borderRadius: 14,
+            padding: s.isNet ? "1.1rem" : "0.9rem",
+            gridColumn: s.isNet ? "1 / -1" : "auto",
+            boxShadow: s.isNet ? "0 4px 20px -2px rgba(0,0,0,0.4)" : "none",
           }}>
-            <div style={{ fontSize: "0.68rem", color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em" }}>{s.label}</div>
-            <div style={{ fontSize: "1.25rem", fontWeight: 800, color: s.color, marginTop: 4 }}>{s.value}</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: "0.68rem", color: s.isNet ? "#94a3b8" : "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em" }}>{s.label}</div>
+              {s.isNet && (
+                <span style={{ fontSize: "0.65rem", padding: "2px 8px", borderRadius: 999, fontWeight: 700, background: (p.net_payable || 0) >= 0 ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)", color: s.color }}>
+                  {(p.net_payable || 0) >= 0 ? "BALANCE DUE" : "ADVANCE DUE"}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: s.isNet ? "1.6rem" : "1.25rem", fontWeight: 800, color: s.color, marginTop: 4 }}>{s.value}</div>
           </div>
         ))}
       </div>
