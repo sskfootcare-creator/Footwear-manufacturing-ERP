@@ -135,13 +135,32 @@ class TestPackingListDefault:
 # ----------------- Packing List for specific job -----------------
 class TestPackingListJob:
     def test_packing_for_jobs(self, session):
-        # find a production job
+        # find a production job with a valid po_id
         r = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
         assert r.status_code == 200
         jobs = r.json()
-        if not jobs:
-            pytest.skip("no production jobs")
-        job = jobs[0]
+        job = next((j for j in jobs if j.get("po_id") and j.get("id")), None)
+        if not job:
+            ts = int(time.time() * 1000)
+            po_payload = {
+                "po_number": f"PO-IT11-PACK-{ts}",
+                "client_name": "Test Client",
+                "items": [{
+                    "style_code": "SSK-TEST-PACK",
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 10,
+                    "unit_price": 500.0,
+                    "amount": 5000.0
+                }]
+            }
+            r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload)
+            if r_po.status_code == 200:
+                po_id = r_po.json().get("id")
+                r_j = session.get(f"{BASE_URL}/api/production/jobs?include_archived=true")
+                job = next((j for j in r_j.json() if j.get("po_id") == po_id), None)
+        if not job:
+            pytest.skip("no production jobs with po_id")
         po_id = job.get("po_id")
         jid = job.get("id")
         assert po_id and jid
@@ -196,10 +215,28 @@ class TestAutoArchive:
     def test_auto_archive_flow(self, session):
         r = session.get(f"{BASE_URL}/api/production/jobs")
         jobs = r.json()
-        if not jobs:
-            pytest.skip("no production jobs")
-        # pick one not yet archived
-        target = jobs[0]
+        target = next((j for j in jobs if j.get("po_id") and j.get("id") and not j.get("archived")), None)
+        if not target:
+            ts = int(time.time() * 1000)
+            po_payload = {
+                "po_number": f"PO-IT11-ARCH-{ts}",
+                "client_name": "Test Client",
+                "items": [{
+                    "style_code": "SSK-TEST-ARCH",
+                    "color": "Black",
+                    "size": "8",
+                    "quantity": 10,
+                    "unit_price": 500.0,
+                    "amount": 5000.0
+                }]
+            }
+            r_po = session.post(f"{BASE_URL}/api/pos", json=po_payload)
+            if r_po.status_code == 200:
+                po_id = r_po.json().get("id")
+                r_j = session.get(f"{BASE_URL}/api/production/jobs")
+                target = next((j for j in r_j.json() if j.get("po_id") == po_id), None)
+        if not target:
+            pytest.skip("no production jobs with po_id")
         jid = target["id"]
         po_id = target["po_id"]
 
