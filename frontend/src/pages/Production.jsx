@@ -439,12 +439,13 @@ export default function Production() {
       if (filters.karigar_name) params.set("karigar_name", filters.karigar_name);
       if (filters.color) params.set("color", filters.color);
       const res = await http.get(`/production/archive?${params}`);
-      setArchiveSummaries(res.data.items || []);
+      const items = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+      setArchiveSummaries(items);
       setArchiveMeta({
-        total: res.data.total,
-        page: res.data.page,
-        pages: res.data.pages,
-        page_size: res.data.page_size,
+        total: Array.isArray(res.data) ? res.data.length : (res.data?.total || 0),
+        page: res.data?.page || 1,
+        pages: res.data?.pages || 1,
+        page_size: res.data?.page_size || 50,
       });
       setArchiveLoaded(true);
     } catch (e) {
@@ -3638,14 +3639,30 @@ function ArchivePanel({
     onFiltersChange?.(empty);
   };
 
-  // Wrap a single job doc (from GET /production/archive/{id}) into the group-like shape DetailModal expects
+  // Wrap a single job doc (from GET /production/archive/{id} or summary) into the group-like shape modals expect
   const toGroupLike = (doc) => {
     if (!doc) return null;
     const q = doc.quantity || doc.total_pairs || 0;
+    const id = doc.id || doc._id;
     return {
       ...doc,
-      rows: [{ ...doc, id: doc.id || doc._id, size: doc.size || "—", quantity: q, completed_qty: doc.completed_qty || 0, rejected_qty: doc.rejected_qty || 0, stage: doc.stage, history: doc.history || [] }],
+      id,
+      po_number: doc.po_number,
+      style_code: doc.style_code,
+      color: doc.color,
+      client_name: doc.client_name,
+      rows: (doc.rows && doc.rows.length) ? doc.rows : [{
+        ...doc,
+        id,
+        size: doc.size || "—",
+        quantity: q,
+        completed_qty: doc.completed_qty ?? q,
+        rejected_qty: doc.rejected_qty || 0,
+        stage: doc.stage || "dispatched",
+        history: doc.history || [],
+      }],
       totalQty: q,
+      sizes: (doc.rows && doc.rows.length) ? doc.rows.map(r => r.size) : [doc.size || "—"],
       style_display: doc.style_code || "—",
       card_created_date: doc.created_at ? new Date(doc.created_at).toLocaleDateString("en-IN") : "—",
       delivery_date: doc.delivery_date || "—",
@@ -3731,6 +3748,8 @@ function ArchivePanel({
             const styleImg = styleByCode[s.style_code]?.image_thumbnail_url || styleByCode[s.style_code]?.image_url;
             const dispatchedDate = s.dispatched_at ? new Date(s.dispatched_at).toLocaleDateString("en-IN") : "—";
 
+            const groupKey = `${s.po_number || s.id}::${s.style_code || "—"}::${s.color || "—"}`;
+
             return (
               <Card key={s.id} className="border-l-4 border-slate-300 hover:border-[#C27842] transition-colors" data-testid={`archive-card-${s.id}`}>
                 <div className="p-4">
@@ -3770,6 +3789,14 @@ function ArchivePanel({
 
                   {/* Action bar */}
                   <div className="flex gap-1.5 flex-wrap pt-3 mt-3 border-t border-slate-200 items-center">
+                    <button
+                      onClick={() => onViewDispatchDetails?.(toGroupLike(s))}
+                      className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors"
+                      data-testid={`archive-dispatch-details-${groupKey}`}
+                    >
+                      <Truck className="w-3 h-3" /> View Dispatch Details
+                    </button>
+
                     {/* Stage 5: Expand / lazy detail */}
                     <button
                       onClick={() => {
@@ -3785,6 +3812,14 @@ function ArchivePanel({
                     >
                       {isLoadingDetail ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
                       {detail && detail !== "loading" ? "View Detail" : isExpanded ? "Loading…" : "Expand Detail"}
+                    </button>
+
+                    <button
+                      onClick={() => onViewDetails?.(toGroupLike(s))}
+                      className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1"
+                      data-testid={`archive-details-${groupKey}`}
+                    >
+                      <Eye className="w-3 h-3" /> Production History
                     </button>
 
                     {s.invoice_id && (
