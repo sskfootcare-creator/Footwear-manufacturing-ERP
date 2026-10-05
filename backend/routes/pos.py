@@ -2915,44 +2915,157 @@ async def list_archive(
     q: dict = {"archived": True}
 
     # Date range filter on archived_at
-    if from_date or to_date:
-        date_filter: dict = {}
-        if from_date:
+    if (from_date and isinstance(from_date, str)) or (to_date and isinstance(to_date, str)):
+        date_filter = {}
+        if from_date and isinstance(from_date, str):
             date_filter["$gte"] = from_date
-        if to_date:
+        if to_date and isinstance(to_date, str):
             date_filter["$lte"] = to_date + "T23:59:59"
-        q["archived_at"] = date_filter
+        q["$or"] = [
+            {"archived_at": date_filter},
+            {"dispatched_at": date_filter},
+            {"invoice_generated_at": date_filter},
+            {"updated_at": date_filter},
+        ]
 
-    # archive_summary field filters (dot-notation)
-    if style_code:
-        q["archive_summary.style_code"] = {"$regex": re.escape(style_code.strip()), "$options": "i"}
-    if po_number:
-        q["archive_summary.po_number"] = {"$regex": re.escape(po_number.strip()), "$options": "i"}
-    if color:
-        q["archive_summary.color"] = {"$regex": re.escape(color.strip()), "$options": "i"}
-    if karigar_name:
-        q["archive_summary.karigars_involved"] = {"$regex": re.escape(karigar_name.strip()), "$options": "i"}
+    # Filters matching both archive_summary and top-level job fields
+    and_clauses = []
+    if style_code and isinstance(style_code, str):
+        rx = {"$regex": re.escape(style_code.strip()), "$options": "i"}
+        and_clauses.append({"$or": [{"archive_summary.style_code": rx}, {"style_code": rx}]})
+    if po_number and isinstance(po_number, str):
+        rx = {"$regex": re.escape(po_number.strip()), "$options": "i"}
+        and_clauses.append({"$or": [{"archive_summary.po_number": rx}, {"po_number": rx}]})
+    if color and isinstance(color, str):
+        rx = {"$regex": re.escape(color.strip()), "$options": "i"}
+        and_clauses.append({"$or": [{"archive_summary.color": rx}, {"color": rx}]})
+    if karigar_name and isinstance(karigar_name, str):
+        rx = {"$regex": re.escape(karigar_name.strip()), "$options": "i"}
+        and_clauses.append({"$or": [
+            {"archive_summary.karigars_involved": rx},
+            {"history.worker_name": rx},
+            {"assignments.cutting.worker_name": rx},
+            {"assignments.stitching.worker_name": rx},
+            {"assignments.lasting.worker_name": rx},
+            {"assignments.sole_pasting.worker_name": rx},
+            {"assignments.finishing.worker_name": rx},
+            {"assignments.qc_pack.worker_name": rx},
+        ]})
 
-    skip = (page - 1) * page_size
-    projection = {"_id": 1, "archive_summary": 1, "archived_at": 1}
+    if and_clauses:
+        if "$and" in q:
+            q["$and"].extend(and_clauses)
+        elif "$or" in q:
+            or_date = q.pop("$or")
+            q["$and"] = [{"$or": or_date}] + and_clauses
+        else:
+            q["$and"] = and_clauses
 
-    cursor = db.production_jobs.find(q, projection).sort("archived_at", -1).skip(skip).limit(page_size)
-    docs = await cursor.to_list(page_size)
+    p_num = page if isinstance(page, int) else 1
+    p_size = page_size if isinstance(page_size, int) else 50
+    skip = (p_num - 1) * p_size
+    projection = {
+        "_id": 1,
+        "archive_summary": 1,
+        "archived_at": 1,
+        "po_number": 1,
+        "po_id": 1,
+        "style_code": 1,
+        "style_id": 1,
+        "color": 1,
+        "size": 1,
+        "quantity": 1,
+        "completed_qty": 1,
+        "rejected_qty": 1,
+        "client_name": 1,
+        "description": 1,
+        "invoice_id": 1,
+        "invoice_no": 1,
+        "dispatched_at": 1,
+        "invoice_generated_at": 1,
+        "packing_generated_at": 1,
+        "stage": 1,
+        "delivery_date": 1,
+        "created_at": 1,
+        "history": 1,
+        "assignments": 1,
+        "total_pairs": 1,
+        "component_specs": 1,
+        "component_tracks": 1,
+        "components": 1,
+    }
+
+    cursor = db.production_jobs.find(q, projection).sort("archived_at", -1)
+    if hasattr(cursor, "skip"):
+        cursor = cursor.skip(skip)
+    if hasattr(cursor, "limit"):
+        cursor = cursor.limit(p_size)
+    docs = await cursor.to_list(p_size)
     total = await db.production_jobs.count_documents(q)
 
     results = []
     for d in docs:
-        item = {"id": str(d["_id"]), "archived_at": d.get("archived_at")}
-        summary = d.get("archive_summary") or {}
+        summary = d.get("archive_summary")
+        if not summary or not summary.get("style_code"):
+            summary = compute_archive_summary(d)
+
+        item = {
+            "id": str(d["_id"]),
+            "archived_at": d.get("archived_at") or d.get("dispatched_at") or d.get("invoice_generated_at"),
+            "po_number": d.get("po_number") or summary.get("po_number") or "",
+            "po_id": str(d["po_id"]) if d.get("po_id") else None,
+            "style_code": d.get("style_code") or summary.get("style_code") or "",
+            "style_id": str(d["style_id"]) if d.get("style_id") else None,
+            "color": d.get("color") or summary.get("color") or "",
+            "size": str(d.get("size") or ""),
+            "quantity": d.get("quantity") or summary.get("total_pairs") or 0,
+            "completed_qty": d.get("completed_qty") or d.get("quantity") or summary.get("total_pairs") or 0,
+            "rejected_qty": d.get("rejected_qty") or 0,
+            "client_name": d.get("client_name") or summary.get("client_name") or "",
+            "description": d.get("description") or "",
+            "invoice_id": str(d["invoice_id"]) if d.get("invoice_id") else (summary.get("invoice_id") or None),
+            "invoice_no": d.get("invoice_no") or "",
+            "dispatched_at": d.get("dispatched_at") or summary.get("dispatched_at") or d.get("archived_at") or "",
+            "stage": d.get("stage") or "dispatched",
+            "delivery_date": d.get("delivery_date") or "",
+            "created_at": d.get("created_at") or "",
+            "archived": True,
+        }
         item.update(summary)
+        item["id"] = str(d["_id"])
+        item["_id"] = str(d["_id"])
+        item["archived"] = True
+        if not item.get("total_pairs"):
+            item["total_pairs"] = item.get("quantity") or 0
+        if not item.get("quantity"):
+            item["quantity"] = item.get("total_pairs") or 0
+        if not item.get("size"):
+            item["size"] = str(d.get("size") or "")
+        if not item.get("po_number"):
+            item["po_number"] = d.get("po_number") or ""
+        if not item.get("style_code"):
+            item["style_code"] = d.get("style_code") or ""
+        if not item.get("color"):
+            item["color"] = d.get("color") or ""
+        if not item.get("client_name"):
+            item["client_name"] = d.get("client_name") or ""
+        if d.get("po_id"):
+            item["po_id"] = str(d["po_id"])
+        if d.get("style_id"):
+            item["style_id"] = str(d["style_id"])
+        if d.get("invoice_id"):
+            item["invoice_id"] = str(d["invoice_id"])
+        if d.get("invoice_no"):
+            item["invoice_no"] = d.get("invoice_no")
+
         results.append(item)
 
     return {
         "items": results,
         "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": max(1, (total + page_size - 1) // page_size),
+        "page": p_num,
+        "page_size": p_size,
+        "pages": max(1, (total + p_size - 1) // p_size),
     }
 
 

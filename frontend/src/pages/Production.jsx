@@ -285,6 +285,25 @@ export function clusterArchivedGroups(groups, dispatchRecordByJobId = {}, invoic
       }
     }
 
+    if (!resolvedInvoiceId) {
+      for (const row of g.rows || []) {
+        if (row.invoice_id) {
+          resolvedInvoiceId = String(row.invoice_id);
+          resolvedInvoiceNo = row.invoice_no || resolvedInvoiceNo;
+          break;
+        }
+        if (row.invoice_no) {
+          resolvedInvoiceId = String(row.invoice_no);
+          resolvedInvoiceNo = row.invoice_no;
+          break;
+        }
+      }
+    }
+    if (!resolvedInvoiceId && g.invoice_id) {
+      resolvedInvoiceId = String(g.invoice_id);
+      resolvedInvoiceNo = g.invoice_no || resolvedInvoiceNo;
+    }
+
     const clusterKey = resolvedInvoiceId ? `inv:${resolvedInvoiceId}` : `group:${g.key}`;
 
     if (!clustersMap.has(clusterKey)) {
@@ -1392,7 +1411,7 @@ export default function Production() {
           styleByCode={styleByCode}
           onClose={() => setDispatchDetailFor(null)}
           onDownloadDispatchFile={downloadDispatchFile}
-          onArchive={archiveDispatchedJobs}
+          onArchive={viewArchive ? null : archiveDispatchedJobs}
           onPreviewImage={(img) => setPreviewImageModal(img)}
         />
       )}
@@ -3600,20 +3619,23 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 }
 
 
-/* -------------------- ARCHIVE PANEL (Stage 4 + 5) -------------------- */
+/* -------------------- ARCHIVE PANEL (Stage 4 + 5 Clustered) -------------------- */
 function ArchivePanel({
   summaries = [], meta = {}, filters = {}, loading = false,
   onFiltersChange, onPageChange,
-  styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails,
-  savedPackingLists, onReDownloadPacking, dispatchRecordByJobId,
+  styleByCode = {}, onPrint, onPacking, onViewDetails, onViewDispatchDetails,
+  savedPackingLists = [], onReDownloadPacking, dispatchRecordByJobId = {},
   onDownloadDispatchFile, onDownloadInvoice, invoices = [], onPreviewImage,
 }) {
-  // Stage 5: per-row lazy detail state
-  const [detailCache, setDetailCache] = useState({}); // id -> full job doc or "loading"
-  const [expandedRows, setExpandedRows] = useState({}); // id -> bool
+  const [expandedClusters, setExpandedClusters] = useState({});
+  const toggleCluster = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
+
+  // Stage 5: per-job lazy detail state
+  const [detailCache, setDetailCache] = useState({});
+  const [expandedDetails, setExpandedDetails] = useState({});
 
   const loadDetail = async (id) => {
-    if (detailCache[id] && detailCache[id] !== "loading") return; // already cached
+    if (!id || (detailCache[id] && detailCache[id] !== "loading")) return;
     setDetailCache(prev => ({ ...prev, [id]: "loading" }));
     try {
       const res = await http.get(`/production/archive/${id}`);
@@ -3624,11 +3646,15 @@ function ArchivePanel({
     }
   };
 
-  const toggleExpand = async (id) => {
-    const next = !expandedRows[id];
-    setExpandedRows(prev => ({ ...prev, [id]: next }));
-    if (next) await loadDetail(id); // fire network call only on first expand
+  const toggleDetail = async (id) => {
+    const next = !expandedDetails[id];
+    setExpandedDetails(prev => ({ ...prev, [id]: next }));
+    if (next) await loadDetail(id);
   };
+
+  // Group by color/style and cluster by invoice
+  const groups = useMemo(() => groupJobsByColor(summaries), [summaries]);
+  const clusters = useMemo(() => clusterArchivedGroups(groups, dispatchRecordByJobId, invoices), [groups, dispatchRecordByJobId, invoices]);
 
   // Local filter input state (controlled, applied on submit/enter)
   const [localFilters, setLocalFilters] = useState(filters);
@@ -3639,10 +3665,9 @@ function ArchivePanel({
     onFiltersChange?.(empty);
   };
 
-  // Wrap a single job doc (from GET /production/archive/{id} or summary) into the group-like shape modals expect
   const toGroupLike = (doc) => {
     if (!doc) return null;
-    const q = doc.quantity || doc.total_pairs || 0;
+    const q = doc.quantity || doc.total_pairs || doc.totalQty || 0;
     const id = doc.id || doc._id;
     return {
       ...doc,
@@ -3678,8 +3703,34 @@ function ArchivePanel({
     }
   };
 
-  const { total = 0, page = 1, pages = 1 } = meta;
+  const downloadInvoiceCartonLabels = async (invoiceId, invoiceNo, fallbackJobIds = []) => {
+    try {
+      if (invoiceId) {
+        try {
+          const res = await http.get(`/invoices/${invoiceId}/carton-labels`, { responseType: "blob" });
+          triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
+          return;
+        } catch (err) {}
+      }
+      if (fallbackJobIds && fallbackJobIds.length) {
+        const res = await http.get(`/production/jobs/carton-labels?job_ids=${fallbackJobIds.join(",")}`, { responseType: "blob" });
+        triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
+      }
+    } catch (e) {
+      alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
 
+  const downloadCombinedCartonList = async (jobIds = [], invoiceNo = "") => {
+    try {
+      const res = await http.get(`/production/jobs/carton-list?job_ids=${jobIds.join(",")}`, { responseType: "blob" });
+      triggerDownload(res.data, `CartonList-${invoiceNo || "merged"}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    } catch (e) {
+      alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const { total = 0, page = 1, pages = 1 } = meta;
   const inputCls = "border border-slate-300 px-2 py-1.5 text-xs focus:outline-none focus:border-[#C27842] w-full";
 
   return (
@@ -3689,7 +3740,7 @@ function ArchivePanel({
         <div className="flex items-baseline justify-between mb-3">
           <div>
             <h2 className="text-lg font-bold flex items-center gap-2"><Archive className="w-4 h-4 text-slate-700" /> Archived Production Cards</h2>
-            <p className="text-xs text-slate-600 mt-1">Cards that have both invoice + packing list generated land here. Use filters to search. Click <b>Expand</b> to see full production history.</p>
+            <p className="text-xs text-slate-600 mt-1">Cards that have both invoice + packing list generated land here. Grouped according to invoices. Click <b>Expand</b> to see full production history.</p>
           </div>
           <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{total} total jobs</div>
         </div>
@@ -3697,27 +3748,27 @@ function ArchivePanel({
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-2">
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">From date</div>
-            <input type="date" value={localFilters.from_date} onChange={e => setLocalFilters(f => ({ ...f, from_date: e.target.value }))} className={inputCls} data-testid="archive-filter-from" />
+            <input type="date" value={localFilters.from_date || ""} onChange={e => setLocalFilters(f => ({ ...f, from_date: e.target.value }))} className={inputCls} data-testid="archive-filter-from" />
           </div>
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">To date</div>
-            <input type="date" value={localFilters.to_date} onChange={e => setLocalFilters(f => ({ ...f, to_date: e.target.value }))} className={inputCls} data-testid="archive-filter-to" />
+            <input type="date" value={localFilters.to_date || ""} onChange={e => setLocalFilters(f => ({ ...f, to_date: e.target.value }))} className={inputCls} data-testid="archive-filter-to" />
           </div>
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Style</div>
-            <input placeholder="e.g. SSK-001" value={localFilters.style_code} onChange={e => setLocalFilters(f => ({ ...f, style_code: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-style" />
+            <input placeholder="e.g. SSK-001" value={localFilters.style_code || ""} onChange={e => setLocalFilters(f => ({ ...f, style_code: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-style" />
           </div>
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">PO Number</div>
-            <input placeholder="e.g. PO-12345" value={localFilters.po_number} onChange={e => setLocalFilters(f => ({ ...f, po_number: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-po" />
+            <input placeholder="e.g. PO-12345" value={localFilters.po_number || ""} onChange={e => setLocalFilters(f => ({ ...f, po_number: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-po" />
           </div>
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Color</div>
-            <input placeholder="e.g. Black" value={localFilters.color} onChange={e => setLocalFilters(f => ({ ...f, color: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-color" />
+            <input placeholder="e.g. Black" value={localFilters.color || ""} onChange={e => setLocalFilters(f => ({ ...f, color: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-color" />
           </div>
           <div>
             <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Karigar</div>
-            <input placeholder="Worker name" value={localFilters.karigar_name} onChange={e => setLocalFilters(f => ({ ...f, karigar_name: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-karigar" />
+            <input placeholder="Worker name" value={localFilters.karigar_name || ""} onChange={e => setLocalFilters(f => ({ ...f, karigar_name: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-karigar" />
           </div>
         </div>
         <div className="flex gap-2">
@@ -3735,129 +3786,412 @@ function ArchivePanel({
           <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-slate-400" />
           Loading archive…
         </Card>
-      ) : summaries.length === 0 ? (
+      ) : clusters.length === 0 ? (
         <Card className="p-12 text-center text-slate-400 text-sm" data-testid="archive-empty">
           Nothing archived yet — once both <b>Invoice</b> and <b>Packing List</b> are generated for a card it moves here automatically.
         </Card>
       ) : (
-        <div className="space-y-3" data-testid="archive-grid">
-          {summaries.map(s => {
-            const isExpanded = !!expandedRows[s.id];
-            const detail = detailCache[s.id];
-            const isLoadingDetail = detail === "loading";
-            const styleImg = styleByCode[s.style_code]?.image_thumbnail_url || styleByCode[s.style_code]?.image_url;
-            const dispatchedDate = s.dispatched_at ? new Date(s.dispatched_at).toLocaleDateString("en-IN") : "—";
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4" data-testid="archive-grid">
+          {clusters.map(cluster => {
+            if (cluster.is_merged && cluster.groups.length > 1) {
+              const isExpanded = !!expandedClusters[cluster.id];
+              const allJobIds = cluster.groups.flatMap(g => g.rows.map(r => r.id || r._id)).filter(Boolean);
+              const totalClusterQty = cluster.groups.reduce((sum, g) => sum + (g.totalQty || 0), 0);
+              const poNumbers = Array.from(new Set(cluster.groups.map(g => g.po_number).filter(Boolean)));
+              const clientName = cluster.groups[0]?.client_name;
 
-            const groupKey = `${s.po_number || s.id}::${s.style_code || "—"}::${s.color || "—"}`;
+              return (
+                <Card key={cluster.id} className="border-l-4 border-[#0F172A] hover:border-blue-600 transition-colors shadow-sm" data-testid={`archive-merged-card-${cluster.id}`}>
+                  <div className="p-4 space-y-3">
+                    {/* Header */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                          <span className="font-mono text-xs text-slate-500 font-bold">PO {poNumbers.join(" + ") || "—"}</span>
+                          <span className="bg-[#0F172A] text-white text-[9px] font-bold px-2 py-0.5 uppercase tracking-wider rounded flex items-center gap-1">
+                            <Layers className="w-2.5 h-2.5" /> Merged Dispatch ({cluster.groups.length} Styles)
+                          </span>
+                        </div>
+                        <div className="font-mono text-sm font-bold text-slate-800">
+                          Invoice: <span className="text-[#C27842]">{cluster.invoice_no || "—"}</span>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Total Qty</div>
+                        <div className="font-mono font-bold text-xl text-[#C27842]">{totalClusterQty} prs</div>
+                      </div>
+                    </div>
+
+                    {clientName && (
+                      <div className="text-xs text-slate-600">
+                        <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {clientName}
+                      </div>
+                    )}
+
+                    {/* Constituent Styles & Colors List */}
+                    <div className="bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1.5">
+                      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
+                        Constituent Styles &amp; Quantities:
+                      </div>
+                      <div className="divide-y divide-slate-200">
+                        {cluster.groups.map(g => {
+                          const styleImg = styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url || styleByCode[g.style_code]?.image_display_url;
+                          const sizeDisplay = Array.isArray(g.sizes) ? g.sizes.join(" · ") : Array.from(g.sizes || []).join(" · ");
+                          return (
+                            <div key={g.key} className="py-1.5 flex items-center justify-between text-xs gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                {styleImg && (
+                                  <img
+                                    src={styleImg}
+                                    alt=""
+                                    className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842]"
+                                    onClick={() => {
+                                      const st = styleByCode[g.style_code];
+                                      const url = st?.image_url || st?.image_display_url || styleImg;
+                                      if (url) onPreviewImage?.({ src: url, title: `${g.style_code}${g.color ? ` · ${g.color}` : ""}`, subtitle: `PO #${g.po_number || "—"} · ${g.totalQty || 0} pairs` });
+                                    }}
+                                  />
+                                )}
+                                <div className="truncate">
+                                  <span className="font-bold text-slate-900">{g.style_code}</span>
+                                  <span className="text-slate-600 ml-1 font-semibold">({g.color})</span>
+                                  <div className="text-[10px] text-slate-500 truncate">
+                                    Sizes: <span className="font-mono">{sizeDisplay}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="font-mono font-bold text-slate-700 text-sm whitespace-nowrap">{g.totalQty} prs</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Collapsed/Primary Action Bar */}
+                    <div className="flex gap-1.5 flex-wrap pt-2 border-t border-slate-200 items-center">
+                      <button
+                        onClick={() => onViewDispatchDetails?.(cluster)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors"
+                        data-testid={`archive-merged-dispatch-details-${cluster.id}`}
+                      >
+                        <Truck className="w-3 h-3" /> View Dispatch Details
+                      </button>
+
+                      <button
+                        onClick={() => toggleCluster(cluster.id)}
+                        className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
+                        data-testid={`archive-merged-details-btn-${cluster.id}`}
+                      >
+                        <Eye className="w-3 h-3" /> {isExpanded ? "Hide Cards" : "View Cards"}
+                        {isExpanded ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
+                      </button>
+
+                      {cluster.invoice_id && (
+                        <button
+                          onClick={() => downloadInvoiceFile(cluster.invoice_id, cluster.invoice_no)}
+                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                          data-testid={`archive-merged-invoice-btn-${cluster.id}`}
+                        >
+                          <FileDown className="w-3 h-3" /> Invoice
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => downloadInvoiceCartonLabels(cluster.invoice_id, cluster.invoice_no, allJobIds)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        data-testid={`archive-merged-labels-btn-${cluster.id}`}
+                      >
+                        <FileDown className="w-3 h-3" /> Labels
+                      </button>
+
+                      <button
+                        onClick={() => downloadCombinedCartonList(allJobIds, cluster.invoice_no)}
+                        className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        data-testid={`archive-merged-cartonlist-btn-${cluster.id}`}
+                      >
+                        <FileDown className="w-3 h-3" /> Carton List
+                      </button>
+                    </div>
+
+                    {/* Expanded Drill-down for individual constituent cards and pre-merge documents */}
+                    {isExpanded && (
+                      <div className="mt-3 pt-3 border-t-2 border-dashed border-slate-300 space-y-2.5 bg-slate-100/80 p-3 rounded" data-testid={`archive-merged-drilldown-${cluster.id}`}>
+                        <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                          Individual Pre-Merge Cards &amp; Original Documents:
+                        </div>
+                        {cluster.groups.map(g => {
+                          let drec = null;
+                          if (dispatchRecordByJobId) {
+                            for (const row of g.rows || []) {
+                              if (dispatchRecordByJobId[row.id]) {
+                                drec = dispatchRecordByJobId[row.id];
+                                break;
+                              }
+                            }
+                          }
+                          const sizeDisplay = Array.isArray(g.sizes) ? g.sizes.join(" · ") : Array.from(g.sizes || []).join(" · ");
+                          return (
+                            <div key={`drill-${g.key}`} className="bg-white p-2.5 rounded border border-slate-200 shadow-2xs space-y-2">
+                              <div className="flex items-baseline justify-between">
+                                <div>
+                                  <span className="font-bold text-xs text-slate-900">{g.style_code}</span>
+                                  <span className="text-[11px] text-slate-600 ml-1.5 font-bold">({g.color})</span>
+                                  <div className="text-[10px] text-slate-500 font-mono">Sizes: {sizeDisplay}</div>
+                                </div>
+                                <div className="font-mono font-bold text-xs text-[#C27842]">{g.totalQty} prs</div>
+                              </div>
+                              <div className="flex gap-1 flex-wrap pt-1.5 border-t border-slate-100">
+                                <button onClick={() => onViewDispatchDetails?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-1.5 py-0.5 flex items-center gap-1" data-testid={`archive-merged-drilldown-dispatch-details-${g.key}`}>
+                                  <Truck className="w-2.5 h-2.5" /> Dispatch Details
+                                </button>
+                                <button onClick={() => onViewDetails?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-1.5 py-0.5 flex items-center gap-1">
+                                  <Eye className="w-2.5 h-2.5" /> Details Modal
+                                </button>
+                                <button onClick={() => onPrint?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1">
+                                  <Printer className="w-2.5 h-2.5" /> Card PDF
+                                </button>
+                                <button onClick={() => onPacking?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1">
+                                  <Package className="w-2.5 h-2.5" /> Packing List (New)
+                                </button>
+                                {drec ? (
+                                  <>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Invoice
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Packing List
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Labels
+                                    </button>
+                                    <button
+                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    {g.rows[0]?.invoice_id && (
+                                      <button
+                                        onClick={() => downloadInvoiceFile(g.rows[0]?.invoice_id, cluster.invoice_no || g.po_number)}
+                                        className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                      >
+                                        <FileDown className="w-2.5 h-2.5" /> Invoice
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => downloadInvoiceCartonLabels(g.rows[0]?.invoice_id, cluster.invoice_no, g.rows.map(r => r.id))}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Labels
+                                    </button>
+                                    <button
+                                      onClick={() => downloadCombinedCartonList(g.rows.map(r => r.id), cluster.invoice_no || g.po_number)}
+                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
+                                    >
+                                      <FileDown className="w-2.5 h-2.5" /> Carton List
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            }
+
+            // Single group card
+            const g = cluster.groups[0];
+            const firstJobId = g.rows[0]?.id || g.id;
+            const isDetailExpanded = !!expandedDetails[firstJobId];
+            const detailDoc = detailCache[firstJobId];
+            const isLoadingDetail = detailDoc === "loading";
+            const styleImg = styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url || styleByCode[g.style_code]?.image_display_url;
+            const dispatchedRaw = g.dispatched_at || g.rows[0]?.dispatched_at || g.rows[0]?.archived_at || g.archived_at;
+            const dispatchedDate = dispatchedRaw ? new Date(dispatchedRaw).toLocaleDateString("en-IN") : "—";
+            const laborCost = g.rows.reduce((sum, r) => sum + (Number(r.total_labor_cost) || 0), 0);
+            const karigars = Array.from(new Set(g.rows.flatMap(r => r.karigars_involved || []))).filter(Boolean);
+            const sizeDisplay = Array.isArray(g.sizes) ? g.sizes.join(" · ") : Array.from(g.sizes || []).join(" · ");
+
+            let drec = null;
+            if (dispatchRecordByJobId) {
+              for (const row of g.rows || []) {
+                if (dispatchRecordByJobId[row.id]) {
+                  drec = dispatchRecordByJobId[row.id];
+                  break;
+                }
+              }
+            }
 
             return (
-              <Card key={s.id} className="border-l-4 border-slate-300 hover:border-[#C27842] transition-colors" data-testid={`archive-card-${s.id}`}>
-                <div className="p-4">
-                  {/* Summary row */}
+              <Card key={g.key} className="border-l-4 border-slate-300 hover:border-[#C27842] transition-colors" data-testid={`archive-card-${g.key}`}>
+                <div className="p-4 space-y-3">
                   <div className="flex items-start gap-3">
                     {styleImg && (
-                      <img src={styleImg} alt="" className="w-12 h-12 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842] transition-all"
+                      <img
+                        src={styleImg}
+                        alt=""
+                        className="w-14 h-14 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842] transition-all"
                         onClick={() => {
-                          const st = styleByCode[s.style_code];
+                          const st = styleByCode[g.style_code];
                           const url = st?.image_url || st?.image_display_url || styleImg;
-                          if (url) onPreviewImage?.({ src: url, title: `${s.style_code}${s.color ? ` · ${s.color}` : ""}`, subtitle: `PO #${s.po_number || "—"} · ${s.total_pairs || 0} pairs` });
+                          if (url) onPreviewImage?.({ src: url, title: `${g.style_code}${g.color ? ` · ${g.color}` : ""}`, subtitle: `PO #${g.po_number || "—"} · ${g.totalQty || 0} pairs` });
                         }}
-                        data-testid={`archive-img-${s.id}`}
+                        data-testid={`archive-img-${g.key}`}
                       />
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                      <div className="flex items-baseline justify-between mb-1">
                         <div>
-                          <span className="font-mono text-xs text-slate-500">PO {s.po_number || "—"}</span>
-                          <div className="font-bold text-base text-slate-900">{s.style_code || "—"}</div>
+                          <div className="font-mono text-xs text-slate-500 font-bold">PO {g.po_number || "—"}</div>
+                          <div className="font-bold text-base text-slate-900">{g.style_display || g.style_code || "—"}</div>
                         </div>
-                        <div className="text-right flex-shrink-0">
-                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{s.color || "—"}</div>
-                          <div className="font-mono font-bold text-lg text-[#C27842]">{s.total_pairs ?? 0} prs</div>
+                        <div className="text-right">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{g.color || "—"}</div>
+                          <div className="font-mono font-bold text-lg text-[#C27842]">{g.totalQty ?? 0} prs</div>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-0.5 mt-1 text-xs text-slate-600">
-                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Client:</span> {s.client_name || "—"}</span>
-                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Dispatched:</span> {dispatchedDate}</span>
-                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Labor:</span> ₹{(s.total_labor_cost ?? 0).toLocaleString("en-IN")}</span>
-                        {s.karigars_involved?.length > 0 && (
-                          <span className="col-span-2 sm:col-span-3 truncate"><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Karigars:</span> {s.karigars_involved.join(", ")}</span>
-                        )}
+
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs text-slate-600 mt-1">
+                        <div><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Client:</span> {g.client_name || "—"}</div>
+                        <div><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Dispatched:</span> {dispatchedDate}</div>
+                        <div><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Sizes:</span> <span className="font-mono">{sizeDisplay}</span></div>
+                        <div><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Invoice:</span> <span className="font-mono text-slate-800">{cluster.invoice_no || g.rows[0]?.invoice_no || "—"}</span></div>
+                        {laborCost > 0 && <div><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Labor:</span> ₹{laborCost.toLocaleString("en-IN")}</div>}
+                        {karigars.length > 0 && <div className="col-span-2 truncate"><span className="font-bold uppercase tracking-wider text-[10px] text-slate-400">Karigars:</span> {karigars.join(", ")}</div>}
                       </div>
                     </div>
                   </div>
 
-                  {/* Action bar */}
-                  <div className="flex gap-1.5 flex-wrap pt-3 mt-3 border-t border-slate-200 items-center">
+                  {/* Action Bar */}
+                  <div className="flex gap-1.5 flex-wrap pt-2 border-t border-slate-200 items-center">
                     <button
-                      onClick={() => onViewDispatchDetails?.(toGroupLike(s))}
+                      onClick={() => onViewDispatchDetails?.(g)}
                       className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors"
-                      data-testid={`archive-dispatch-details-${groupKey}`}
+                      data-testid={`archive-dispatch-details-${g.key}`}
                     >
                       <Truck className="w-3 h-3" /> View Dispatch Details
                     </button>
 
-                    {/* Stage 5: Expand / lazy detail */}
                     <button
                       onClick={() => {
-                        if (detail && detail !== "loading") {
-                          // Already loaded — pass full doc to detail modal
-                          onViewDetails?.(toGroupLike(detail));
+                        if (detailDoc && detailDoc !== "loading") {
+                          onViewDetails?.(toGroupLike(detailDoc));
                         } else {
-                          toggleExpand(s.id);
+                          toggleDetail(firstJobId);
                         }
                       }}
-                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded || (detail && detail !== "loading") ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
-                      data-testid={`archive-expand-${s.id}`}
+                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isDetailExpanded || (detailDoc && detailDoc !== "loading") ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
+                      data-testid={`archive-expand-${firstJobId}`}
                     >
                       {isLoadingDetail ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
-                      {detail && detail !== "loading" ? "View Detail" : isExpanded ? "Loading…" : "Expand Detail"}
+                      {detailDoc && detailDoc !== "loading" ? "View Detail" : isDetailExpanded ? "Loading…" : "Expand Detail"}
                     </button>
 
                     <button
-                      onClick={() => onViewDetails?.(toGroupLike(s))}
+                      onClick={() => onViewDetails?.(g)}
                       className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1"
-                      data-testid={`archive-details-${groupKey}`}
+                      data-testid={`archive-details-${g.key}`}
                     >
                       <Eye className="w-3 h-3" /> Production History
                     </button>
 
-                    {s.invoice_id && (
-                      <button onClick={() => downloadInvoiceFile(s.invoice_id, s.po_number)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1" data-testid={`archive-invoice-${s.id}`}>
-                        <FileDown className="w-3 h-3" /> Invoice
-                      </button>
+                    <button
+                      onClick={() => onPrint?.(g)}
+                      className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                    >
+                      <Printer className="w-3 h-3" /> Card PDF
+                    </button>
+
+                    <button
+                      onClick={() => onPacking?.(g)}
+                      className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
+                    >
+                      <Package className="w-3 h-3" /> Packing List (New)
+                    </button>
+
+                    {drec ? (
+                      <>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Invoice
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Packing List
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Labels
+                        </button>
+                        <button
+                          onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Carton List
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        {(cluster.invoice_id || g.rows[0]?.invoice_id) ? (
+                          <button
+                            onClick={() => downloadInvoiceFile(cluster.invoice_id || g.rows[0]?.invoice_id, cluster.invoice_no || g.po_number)}
+                            className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                          >
+                            <FileDown className="w-3 h-3" /> Invoice
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => onDownloadInvoice?.(g)}
+                            className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
+                          >
+                            <FileDown className="w-3 h-3" /> Invoice
+                          </button>
+                        )}
+                        <button
+                          onClick={() => downloadInvoiceCartonLabels(cluster.invoice_id || g.rows[0]?.invoice_id, cluster.invoice_no, g.rows.map(r => r.id))}
+                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Labels
+                        </button>
+                        <button
+                          onClick={() => downloadCombinedCartonList(g.rows.map(r => r.id), cluster.invoice_no || g.po_number)}
+                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <FileDown className="w-3 h-3" /> Carton List
+                        </button>
+                      </>
                     )}
-
-                    <button onClick={async () => {
-                      try {
-                        const url = s.invoice_id
-                          ? `/invoices/${s.invoice_id}/carton-labels`
-                          : `/production/jobs/carton-labels?job_ids=${s.id}`;
-                        const res = await http.get(url, { responseType: "blob" });
-                        triggerDownload(res.data, `CartonLabels-${s.po_number || s.id}.pdf`, "application/pdf");
-                      } catch (e) { alert("Labels download failed: " + (e.response?.data?.detail || e.message)); }
-                    }} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1" data-testid={`archive-labels-${s.id}`}>
-                      <FileDown className="w-3 h-3" /> Labels
-                    </button>
-
-                    <button onClick={async () => {
-                      try {
-                        const res = await http.get(`/production/jobs/carton-list?job_ids=${s.id}`, { responseType: "blob" });
-                        triggerDownload(res.data, `CartonList-${s.po_number || s.id}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-                      } catch (e) { alert("Carton List download failed: " + (e.response?.data?.detail || e.message)); }
-                    }} className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1" data-testid={`archive-cartonlist-${s.id}`}>
-                      <FileDown className="w-3 h-3" /> Carton List
-                    </button>
                   </div>
 
                   {/* Stage 5: Expanded detail pane (once loaded) */}
-                  {isExpanded && detail && detail !== "loading" && (
-                    <div className="mt-4 pt-4 border-t-2 border-dashed border-slate-300 space-y-3" data-testid={`archive-detail-pane-${s.id}`}>
+                  {isDetailExpanded && detailDoc && detailDoc !== "loading" && (
+                    <div className="mt-4 pt-4 border-t-2 border-dashed border-slate-300 space-y-3" data-testid={`archive-detail-pane-${firstJobId}`}>
                       <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Full Production Record</div>
-                      {/* Component summary from archive_summary */}
-                      {s.component_summary && Object.keys(s.component_summary).length > 0 && (
+                      {detailDoc.component_summary && Object.keys(detailDoc.component_summary).length > 0 && (
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                          {Object.entries(s.component_summary).map(([comp, status]) => (
+                          {Object.entries(detailDoc.component_summary).map(([comp, status]) => (
                             <div key={comp} className={`text-[10px] px-2 py-1 rounded font-bold uppercase tracking-wider flex items-center gap-1 ${status === "done" ? "bg-green-50 text-green-700 border border-green-200" : "bg-amber-50 text-amber-700 border border-amber-200"}`}>
                               {status === "done" ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
                               {comp}: {status}
@@ -3865,11 +4199,10 @@ function ArchivePanel({
                           ))}
                         </div>
                       )}
-                      {/* History from full detail */}
-                      {Array.isArray(detail.history) && detail.history.length > 0 && (
+                      {Array.isArray(detailDoc.history) && detailDoc.history.length > 0 && (
                         <div className="max-h-56 overflow-y-auto space-y-1">
                           <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Production History</div>
-                          {[...detail.history].reverse().map((h, i) => (
+                          {[...detailDoc.history].reverse().map((h, i) => (
                             <div key={i} className="flex items-start gap-2 text-xs bg-slate-50 px-2 py-1 rounded border border-slate-100">
                               <span className="font-mono text-slate-500 whitespace-nowrap flex-shrink-0">{h.at ? new Date(h.at).toLocaleString("en-IN", { hour12: false }) : "—"}</span>
                               <span className="font-bold text-slate-700 uppercase tracking-wider flex-shrink-0">{h.stage}</span>
@@ -3880,10 +4213,10 @@ function ArchivePanel({
                         </div>
                       )}
                       <div className="flex gap-1.5 flex-wrap">
-                        <button onClick={() => onViewDetails?.(toGroupLike(detail))} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-700 px-2 py-1 flex items-center gap-1">
+                        <button onClick={() => onViewDetails?.(toGroupLike(detailDoc))} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-700 px-2 py-1 flex items-center gap-1">
                           <Eye className="w-3 h-3" /> Full Detail Modal
                         </button>
-                        <button onClick={() => setExpandedRows(prev => ({ ...prev, [s.id]: false }))} className="text-[10px] uppercase tracking-wider font-bold text-slate-600 border border-slate-200 hover:bg-slate-100 px-2 py-1 flex items-center gap-1">
+                        <button onClick={() => setExpandedDetails(prev => ({ ...prev, [firstJobId]: false }))} className="text-[10px] uppercase tracking-wider font-bold text-slate-600 border border-slate-200 hover:bg-slate-100 px-2 py-1 flex items-center gap-1">
                           <ChevronUp className="w-3 h-3" /> Collapse
                         </button>
                       </div>
@@ -4165,12 +4498,31 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
 
   const groups = useMemo(() => {
     if (!item) return [];
-    if (item.groups && Array.isArray(item.groups)) return item.groups;
-    return [item];
+    const rawGroups = item.groups && Array.isArray(item.groups) ? item.groups : [item];
+    return rawGroups.map(g => {
+      if (g.rows && g.rows.length) return g;
+      return {
+        ...g,
+        rows: [{
+          ...g,
+          id: g.id || g._id,
+          size: g.size || "—",
+          quantity: g.quantity || g.total_pairs || g.totalQty || 0,
+          completed_qty: g.completed_qty ?? g.quantity ?? g.total_pairs ?? g.totalQty ?? 0,
+          stage: g.stage || "dispatched",
+        }],
+      };
+    });
   }, [item]);
 
   const allRows = useMemo(() => groups.flatMap(g => g.rows || []), [groups]);
-  const jobIds = useMemo(() => allRows.map(r => r.id).filter(Boolean), [allRows]);
+  const jobIds = useMemo(() => allRows.map(r => r.id || r._id).filter(Boolean), [allRows]);
+
+  const isAlreadyArchived = useMemo(() => {
+    if (item?.archived) return true;
+    if (groups.some(g => g.archived || (g.rows && g.rows.some(r => r.archived)))) return true;
+    return false;
+  }, [item, groups]);
 
   const primaryGroup = groups[0] || {};
   const poNumbers = useMemo(() => {
@@ -4344,7 +4696,13 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
               <Truck className="w-3.5 h-3.5" /> Dispatch Record Details
             </div>
             <div className="text-xl font-black mt-0.5">
-              {groups.map(g => `${g.style_code} (${g.color})`).join(" + ")}
+              {groups
+                .map(g => {
+                  const style = g.style_code || g.po_style_code || (g.rows && g.rows[0]?.style_code) || "Style";
+                  const color = g.color || (g.rows && g.rows[0]?.color) || "—";
+                  return `${style} (${color})`;
+                })
+                .join(" + ") || "Dispatch Details"}
             </div>
           </div>
           <button onClick={onClose} className="hover:bg-white/10 p-1 text-slate-300 hover:text-white" data-testid="dispatch-details-close">
@@ -4563,7 +4921,7 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
         {/* Footer */}
         <div className="bg-slate-50 border-t border-slate-200 px-6 py-3.5 flex items-center justify-between shrink-0 gap-3">
           <BtnSecondary onClick={onClose}>Close</BtnSecondary>
-          {onArchive && (
+          {onArchive && !isAlreadyArchived && (
             <button
               type="button"
               onClick={async () => {

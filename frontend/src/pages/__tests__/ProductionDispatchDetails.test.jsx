@@ -317,4 +317,80 @@ describe("Production View Dispatch Details Modal", () => {
     expect(clusters[1].invoice_no).toBe("INV-002");
     expect(clusters[1].groups[0].rows[0].id).toBe("job_orig_1");
   });
+
+  test("Archive panel renders merged card for multi-style invoice and modal suppresses archive button", async () => {
+    const jobA = {
+      id: "job_m1",
+      po_id: "po_merged",
+      po_number: "PO-MRG-99",
+      client_name: "Siyaram Silk Mills Ltd.",
+      style_code: "STYLE-A",
+      color: "Black",
+      size: "7",
+      quantity: 50,
+      completed_qty: 50,
+      stage: "dispatched",
+      archived: true,
+      invoice_id: "inv_merged_1",
+      invoice_no: "SSK26-27-048",
+    };
+    const jobB = {
+      id: "job_m2",
+      po_id: "po_merged",
+      po_number: "PO-MRG-99",
+      client_name: "Siyaram Silk Mills Ltd.",
+      style_code: "STYLE-B",
+      color: "Brown",
+      size: "8",
+      quantity: 70,
+      completed_qty: 70,
+      stage: "dispatched",
+      archived: true,
+      invoice_id: "inv_merged_1",
+      invoice_no: "SSK26-27-048",
+    };
+
+    http.get.mockImplementation((url) => {
+      if (url.startsWith("/production/jobs")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/workers")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/styles")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/production/archive")) return Promise.resolve({ data: { items: [jobA, jobB], total: 2, page: 1, pages: 1 } });
+      if (url.startsWith("/packing-lists")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/dispatch-records")) return Promise.resolve({ data: [] });
+      if (url.startsWith("/invoices")) return Promise.resolve({ data: [{ id: "inv_merged_1", invoice_no: "SSK26-27-048", merged: true, job_ids: ["job_m1", "job_m2"] }] });
+      if (url.startsWith("/packing/cartons")) return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: [] });
+    });
+
+    render(
+      <MemoryRouter>
+        <Production />
+      </MemoryRouter>
+    );
+
+    // Switch to Archive View
+    await waitFor(() => {
+      expect(screen.getByTestId("toggle-archive")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("toggle-archive"));
+
+    // Verify Merged Dispatch Card is rendered (grouped by invoice SSK26-27-048)
+    const mergedCard = await screen.findByTestId("archive-merged-card-inv:inv_merged_1");
+    expect(mergedCard).toBeInTheDocument();
+    expect(within(mergedCard).getAllByText((_, el) => el?.textContent?.includes("Merged Dispatch (2 Styles)"))[0]).toBeInTheDocument();
+    expect(within(mergedCard).getByText("SSK26-27-048")).toBeInTheDocument();
+    expect(within(mergedCard).getAllByText((_, el) => el?.textContent?.includes("120 prs"))[0]).toBeInTheDocument();
+    expect(within(mergedCard).getByText("STYLE-A")).toBeInTheDocument();
+    expect(within(mergedCard).getByText("STYLE-B")).toBeInTheDocument();
+
+    // Click "View Dispatch Details" on merged card
+    const viewDispatchBtn = screen.getByTestId("archive-merged-dispatch-details-inv:inv_merged_1");
+    fireEvent.click(viewDispatchBtn);
+
+    // Verify modal opens with correct header and WITHOUT "Verify & Move to Archive" button
+    const modal = await screen.findByTestId("dispatch-details-modal");
+    expect(modal).toBeInTheDocument();
+    expect(within(modal).getByText("STYLE-A (Black) + STYLE-B (Brown)")).toBeInTheDocument();
+    expect(screen.queryByTestId("dispatch-details-archive-btn")).not.toBeInTheDocument();
+  });
 });
