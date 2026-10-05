@@ -267,7 +267,9 @@ class TestAutoArchive:
         # archive endpoint includes it
         r = session.get(f"{BASE_URL}/api/production/archive")
         assert r.status_code == 200
-        assert jid in [j["id"] for j in r.json()]
+        arch_data = r.json()
+        arch_list = arch_data["items"] if isinstance(arch_data, dict) and "items" in arch_data else arch_data
+        assert jid in [j["id"] for j in arch_list]
 
 
 # ----------------- Production Card PDF A4 -----------------

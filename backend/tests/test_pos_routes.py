@@ -29,6 +29,10 @@ class MockCursor:
     def sort(self, key_or_list, direction=1):
         return self
 
+    def skip(self, count):
+        self.docs = self.docs[count:]
+        return self
+
     def limit(self, count):
         self.docs = self.docs[:count]
         return self
@@ -1198,7 +1202,9 @@ def test_archive_production_jobs_endpoint(client, mock_pos_env):
     # Check archive endpoint includes archived jobs
     r_arch = client.get("/api/production/archive")
     assert r_arch.status_code == 200
-    arch_ids = [j["id"] for j in r_arch.json()]
+    arch_data = r_arch.json()
+    arch_list = arch_data["items"] if isinstance(arch_data, dict) and "items" in arch_data else arch_data
+    arch_ids = [j["id"] for j in arch_list]
     assert job_1 in arch_ids
     assert job_2 in arch_ids
     assert job_3 not in arch_ids
