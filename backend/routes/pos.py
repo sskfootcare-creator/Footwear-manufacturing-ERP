@@ -659,10 +659,102 @@ async def _sync_po_sku_mappings(client_name: str, line_items: list, user_email: 
                 pass
 
 
+def compute_archive_summary(job: dict) -> dict:
+    """Compute lightweight archive summary for a production job at the moment of archiving."""
+    style_code = job.get("style_code") or ""
+    color = job.get("color") or ""
+    total_pairs = job.get("total_pairs")
+    if total_pairs is None:
+        total_pairs = job.get("quantity", 0) or 0
+    po_number = job.get("po_number") or ""
+    client_name = job.get("client_name") or ""
+    dispatched_at = (
+        job.get("dispatched_at")
+        or job.get("invoice_generated_at")
+        or job.get("archived_at")
+        or ""
+    )
+    invoice_id = job.get("invoice_id")
+
+    karigars = set()
+    for a in (job.get("assignments") or {}).values():
+        if isinstance(a, dict):
+            if a.get("worker_name"):
+                karigars.add(a["worker_name"].strip())
+            if isinstance(a.get("completed_by"), dict) and a["completed_by"].get("worker_name"):
+                karigars.add(a["completed_by"]["worker_name"].strip())
+            elif isinstance(a.get("completed_by"), str) and "@" not in a["completed_by"] and a["completed_by"].lower() not in ("admin", "system"):
+                karigars.add(a["completed_by"].strip())
+    for h in job.get("history", []):
+        if isinstance(h, dict):
+            if h.get("worker_name"):
+                karigars.add(h["worker_name"].strip())
+            if isinstance(h.get("completed_by"), dict) and h["completed_by"].get("worker_name"):
+                karigars.add(h["completed_by"]["worker_name"].strip())
+            elif isinstance(h.get("completed_by"), str) and "@" not in h["completed_by"] and h["completed_by"].lower() not in ("admin", "system"):
+                karigars.add(h["completed_by"].strip())
+
+    karigars_involved = sorted([k for k in karigars if k])
+
+    total_labor_cost = 0.0
+    for a in (job.get("assignments") or {}).values():
+        if isinstance(a, dict):
+            rate = float(
+                a.get("rate_per_pair")
+                or (a.get("completed_by", {}).get("rate_per_pair") if isinstance(a.get("completed_by"), dict) else 0)
+                or 0
+            )
+            c_qty = a.get("completed_qty")
+            if c_qty is None and isinstance(a.get("completed_by"), dict):
+                c_qty = a["completed_by"].get("completed_qty")
+            c_qty_val = float(c_qty or 0)
+            total_labor_cost += c_qty_val * rate
+    total_labor_cost = round(total_labor_cost, 2)
+
+    comp_summary = {}
+    raw_specs = job.get("component_specs") or {}
+    comps = raw_specs.get("components") if isinstance(raw_specs, dict) and "components" in raw_specs else (raw_specs if isinstance(raw_specs, dict) else {})
+    tracks = job.get("component_tracks") or {}
+    done_flags = job.get("components") or {}
+
+    for comp_name, spec in comps.items():
+        if not isinstance(comp_name, str):
+            continue
+        c_done = done_flags.get(f"{comp_name}_done")
+        tr = tracks.get(comp_name) or {}
+        tr_status = tr.get("status") if isinstance(tr, dict) else None
+        ready_empty = isinstance(spec, dict) and spec.get("ready_if_empty") and not spec.get("stages")
+
+        if c_done is True or tr_status in ("ready", "done", "completed") or ready_empty:
+            comp_summary[comp_name] = "done"
+        else:
+            comp_summary[comp_name] = "partial"
+
+    if not comp_summary and done_flags:
+        for k, v in done_flags.items():
+            if k.endswith("_done"):
+                c_name = k[:-5]
+                comp_summary[c_name] = "done" if v else "partial"
+
+    return {
+        "style_code": style_code,
+        "color": color,
+        "total_pairs": total_pairs,
+        "po_number": po_number,
+        "client_name": client_name,
+        "dispatched_at": dispatched_at,
+        "invoice_id": invoice_id,
+        "karigars_involved": karigars_involved,
+        "total_labor_cost": total_labor_cost,
+        "component_summary": comp_summary,
+    }
+
+
 def _archive_if_complete(job_update: dict) -> None:
     if job_update.get("invoice_generated_at") and job_update.get("packing_generated_at"):
         job_update["archived"] = True
         job_update["archived_at"] = now_iso()
+        job_update["archive_summary"] = compute_archive_summary(job_update)
 
 
 async def _flag_jobs(job_ids: list, field: str, db=None) -> None:
@@ -699,11 +791,16 @@ async def _flag_jobs(job_ids: list, field: str, db=None) -> None:
             )
 
     docs = await db.production_jobs.find({"_id": {"$in": obj_ids}}).to_list(2000)
-    archive_ids = [d["_id"] for d in docs if d.get("invoice_generated_at") and d.get("packing_generated_at")]
-    if archive_ids:
-        await db.production_jobs.update_many(
-            {"_id": {"$in": archive_ids}},
-            {"$set": {"archived": True, "archived_at": now}},
+    archive_docs = [d for d in docs if d.get("invoice_generated_at") and d.get("packing_generated_at")]
+    for d in archive_docs:
+        d_copy = dict(d)
+        d_copy["archived"] = True
+        d_copy["archived_at"] = now
+        d_copy.update(update_fields)
+        summary = compute_archive_summary(d_copy)
+        await db.production_jobs.update_one(
+            {"_id": d["_id"]},
+            {"$set": {"archived": True, "archived_at": now, "archive_summary": summary}},
         )
 
 
@@ -2800,13 +2897,77 @@ async def list_jobs(request: Request, include_archived: bool = False, source_typ
 
 
 @pos_router.get("/production/archive")
-async def list_archive(request: Request):
+async def list_archive(
+    request: Request,
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    style_code: Optional[str] = Query(None),
+    po_number: Optional[str] = Query(None),
+    karigar_name: Optional[str] = Query(None),
+    color: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = get_db()
-    docs = await db.production_jobs.find({"archived": True}).sort("archived_at", -1).to_list(2000)
-    await _enrich_jobs(docs, db)
-    return [stringify(d) for d in docs]
+
+    q: dict = {"archived": True}
+
+    # Date range filter on archived_at
+    if from_date or to_date:
+        date_filter: dict = {}
+        if from_date:
+            date_filter["$gte"] = from_date
+        if to_date:
+            date_filter["$lte"] = to_date + "T23:59:59"
+        q["archived_at"] = date_filter
+
+    # archive_summary field filters (dot-notation)
+    if style_code:
+        q["archive_summary.style_code"] = {"$regex": re.escape(style_code.strip()), "$options": "i"}
+    if po_number:
+        q["archive_summary.po_number"] = {"$regex": re.escape(po_number.strip()), "$options": "i"}
+    if color:
+        q["archive_summary.color"] = {"$regex": re.escape(color.strip()), "$options": "i"}
+    if karigar_name:
+        q["archive_summary.karigars_involved"] = {"$regex": re.escape(karigar_name.strip()), "$options": "i"}
+
+    skip = (page - 1) * page_size
+    projection = {"_id": 1, "archive_summary": 1, "archived_at": 1}
+
+    cursor = db.production_jobs.find(q, projection).sort("archived_at", -1).skip(skip).limit(page_size)
+    docs = await cursor.to_list(page_size)
+    total = await db.production_jobs.count_documents(q)
+
+    results = []
+    for d in docs:
+        item = {"id": str(d["_id"]), "archived_at": d.get("archived_at")}
+        summary = d.get("archive_summary") or {}
+        item.update(summary)
+        results.append(item)
+
+    return {
+        "items": results,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    }
+
+
+@pos_router.get("/production/archive/{jid}")
+async def get_archive_detail(jid: str, request: Request):
+    """Return the full job document for a single archived job (lazy-loaded by expand)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    doc = await db.production_jobs.find_one({"_id": oid(jid), "archived": True})
+    if not doc:
+        raise HTTPException(404, "Archived job not found")
+    await _enrich_jobs([doc], db)
+    return stringify(doc)
+
 
 
 @pos_router.post("/production/jobs/archive")
@@ -2857,10 +3018,17 @@ async def archive_jobs(payload: ArchiveJobsRequest, request: Request):
         }}
     )
 
-    for o_id in all_oids_list:
+    # Fetch updated docs to compute per-job archive_summary from real field data
+    all_docs_after = await db.production_jobs.find({"_id": {"$in": all_oids_list}}).to_list(1000)
+    for doc in all_docs_after:
+        doc_copy = dict(doc)
+        doc_copy.setdefault("archived_at", now)
+        doc_copy.setdefault("invoice_generated_at", now)
+        doc_copy.setdefault("packing_generated_at", now)
+        summary = compute_archive_summary(doc_copy)
         await db.production_jobs.update_one(
-            {"_id": o_id},
-            {"$push": {"history": {
+            {"_id": doc["_id"]},
+            {"$set": {"archive_summary": summary}, "$push": {"history": {
                 "stage": "archived",
                 "at": now,
                 "by": u.get("email", "system"),

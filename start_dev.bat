@@ -44,6 +44,6 @@ echo ==========================================================
 echo All servers (Local Supabase, MongoDB, FastAPI Backend, React Frontend) launched!
 echo Backend is running at http://localhost:8000
 echo Frontend is launching at http://localhost:3000
-echo Local Supabase Studio at http://localhost:54323
+echo Local Supabase Studio at http://localhost:51323
 echo ==========================================================
 

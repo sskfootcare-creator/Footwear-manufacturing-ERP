@@ -388,7 +388,13 @@ export default function Production() {
   const [waFor, setWaFor] = useState(null);
   const [viewArchive, setViewArchive] = useState(false);
   const [boardMode, setBoardMode] = useState("assembly"); // "assembly" | "component"
-  const [archivedJobs, setArchivedJobs] = useState([]);
+  // Stage 4: archive state — summaries only, lazy-loaded, paginated
+  const [archiveSummaries, setArchiveSummaries] = useState([]);
+  const [archiveMeta, setArchiveMeta] = useState({ total: 0, page: 1, pages: 1, page_size: 50 });
+  const [archiveFilters, setArchiveFilters] = useState({ from_date: "", to_date: "", style_code: "", po_number: "", karigar_name: "", color: "" });
+  const [archivePage, setArchivePage] = useState(1);
+  const [archiveLoaded, setArchiveLoaded] = useState(false);
+  const [archiveLoading, setArchiveLoading] = useState(false);
   const [detailFor, setDetailFor] = useState(null);
   const [packingFor, setPackingFor] = useState(null); // {kind:'single'|'merged', group?, jobs?}
   const [cartonPackFor, setCartonPackFor] = useState(null); // job group
@@ -404,23 +410,56 @@ export default function Production() {
   const canEdit = ["admin", "manager", "production"].includes(user?.role);
 
   const load = async () => {
-    const [j, w, s, ar, pl, dr, invs, vends] = await Promise.all([
+    const [j, w, s, pl, dr, invs, vends] = await Promise.all([
       http.get("/production/jobs"),
       http.get("/workers"),
       http.get("/styles"),
-      http.get("/production/archive"),
       http.get("/packing-lists"),
       http.get("/dispatch-records?limit=1000"),
       http.get("/invoices").catch(() => ({ data: [] })),
       http.get("/vendors").catch(() => ({ data: [] })),
     ]);
     setJobs(j.data); setWorkers(w.data); setStyles(s.data);
-    setArchivedJobs(ar.data); setSavedPackingLists(pl.data || []);
+    setSavedPackingLists(pl.data || []);
     setDispatchRecords(dr.data || []);
     setInvoices(invs.data || []);
     setVendors(vends.data || []);
   };
   useEffect(() => { load(); }, []);
+
+  // Stage 4: load archive summaries (lazy, only when tab is first opened or filters/page change)
+  const loadArchive = useCallback(async (filters = archiveFilters, page = archivePage) => {
+    setArchiveLoading(true);
+    try {
+      const params = new URLSearchParams({ page, page_size: 50 });
+      if (filters.from_date) params.set("from_date", filters.from_date);
+      if (filters.to_date) params.set("to_date", filters.to_date);
+      if (filters.style_code) params.set("style_code", filters.style_code);
+      if (filters.po_number) params.set("po_number", filters.po_number);
+      if (filters.karigar_name) params.set("karigar_name", filters.karigar_name);
+      if (filters.color) params.set("color", filters.color);
+      const res = await http.get(`/production/archive?${params}`);
+      setArchiveSummaries(res.data.items || []);
+      setArchiveMeta({
+        total: res.data.total,
+        page: res.data.page,
+        pages: res.data.pages,
+        page_size: res.data.page_size,
+      });
+      setArchiveLoaded(true);
+    } catch (e) {
+      console.error("Archive load error", e);
+    } finally {
+      setArchiveLoading(false);
+    }
+  }, [archiveFilters, archivePage]);
+
+  // Trigger load when archive tab opens for the first time
+  useEffect(() => {
+    if (viewArchive && !archiveLoaded) {
+      loadArchive(archiveFilters, 1);
+    }
+  }, [viewArchive, archiveLoaded, loadArchive, archiveFilters]);
 
   const dispatchRecordByJobId = useMemo(() => {
     const m = {};
@@ -460,9 +499,8 @@ export default function Production() {
     return map;
   }, [jobs]);
 
-  const archivedGroupsCount = useMemo(() => {
-    return groupJobsByColor(archivedJobs).length;
-  }, [archivedJobs]);
+  // Stage 4: archive count comes from server total
+  const archivedGroupsCount = archiveMeta.total;
 
   const allGroups = useMemo(() => {
     return groupJobsByColor(jobs);
@@ -1133,7 +1171,19 @@ export default function Production() {
       <div className="p-4 sm:p-8">
         {viewArchive ? (
           <ArchivePanel
-            jobs={archivedJobs}
+            summaries={archiveSummaries}
+            meta={archiveMeta}
+            filters={archiveFilters}
+            loading={archiveLoading}
+            onFiltersChange={(newFilters) => {
+              setArchiveFilters(newFilters);
+              setArchivePage(1);
+              loadArchive(newFilters, 1);
+            }}
+            onPageChange={(p) => {
+              setArchivePage(p);
+              loadArchive(archiveFilters, p);
+            }}
             styleByCode={styleByCode}
             onPrint={printCard}
             onPacking={openPackingForGroup}
@@ -3549,14 +3599,58 @@ function WhatsAppDialog({ group, workers, onClose, onSend }) {
 }
 
 
-/* -------------------- ARCHIVE PANEL -------------------- */
-function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails, savedPackingLists, onReDownloadPacking, dispatchRecordByJobId, onDownloadDispatchFile, onDownloadInvoice, invoices = [], onPreviewImage }) {
-  const [expandedClusters, setExpandedClusters] = useState({});
-  const toggleExpand = (id) => setExpandedClusters(prev => ({ ...prev, [id]: !prev[id] }));
+/* -------------------- ARCHIVE PANEL (Stage 4 + 5) -------------------- */
+function ArchivePanel({
+  summaries = [], meta = {}, filters = {}, loading = false,
+  onFiltersChange, onPageChange,
+  styleByCode, onPrint, onPacking, onViewDetails, onViewDispatchDetails,
+  savedPackingLists, onReDownloadPacking, dispatchRecordByJobId,
+  onDownloadDispatchFile, onDownloadInvoice, invoices = [], onPreviewImage,
+}) {
+  // Stage 5: per-row lazy detail state
+  const [detailCache, setDetailCache] = useState({}); // id -> full job doc or "loading"
+  const [expandedRows, setExpandedRows] = useState({}); // id -> bool
 
-  const groups = useMemo(() => groupJobsByColor(jobs), [jobs]);
-  const clusters = useMemo(() => clusterArchivedGroups(groups, dispatchRecordByJobId, invoices), [groups, dispatchRecordByJobId, invoices]);
+  const loadDetail = async (id) => {
+    if (detailCache[id] && detailCache[id] !== "loading") return; // already cached
+    setDetailCache(prev => ({ ...prev, [id]: "loading" }));
+    try {
+      const res = await http.get(`/production/archive/${id}`);
+      setDetailCache(prev => ({ ...prev, [id]: res.data }));
+    } catch (e) {
+      setDetailCache(prev => ({ ...prev, [id]: null }));
+      alert("Failed to load job detail: " + (e.response?.data?.detail || e.message));
+    }
+  };
 
+  const toggleExpand = async (id) => {
+    const next = !expandedRows[id];
+    setExpandedRows(prev => ({ ...prev, [id]: next }));
+    if (next) await loadDetail(id); // fire network call only on first expand
+  };
+
+  // Local filter input state (controlled, applied on submit/enter)
+  const [localFilters, setLocalFilters] = useState(filters);
+  const applyFilters = () => onFiltersChange?.(localFilters);
+  const clearFilters = () => {
+    const empty = { from_date: "", to_date: "", style_code: "", po_number: "", karigar_name: "", color: "" };
+    setLocalFilters(empty);
+    onFiltersChange?.(empty);
+  };
+
+  // Wrap a single job doc (from GET /production/archive/{id}) into the group-like shape DetailModal expects
+  const toGroupLike = (doc) => {
+    if (!doc) return null;
+    const q = doc.quantity || doc.total_pairs || 0;
+    return {
+      ...doc,
+      rows: [{ ...doc, id: doc.id || doc._id, size: doc.size || "—", quantity: q, completed_qty: doc.completed_qty || 0, rejected_qty: doc.rejected_qty || 0, stage: doc.stage, history: doc.history || [] }],
+      totalQty: q,
+      style_display: doc.style_code || "—",
+      card_created_date: doc.created_at ? new Date(doc.created_at).toLocaleDateString("en-IN") : "—",
+      delivery_date: doc.delivery_date || "—",
+    };
+  };
 
   const downloadInvoiceFile = async (invoiceId, invoiceNo) => {
     try {
@@ -3567,460 +3661,212 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
     }
   };
 
-  const downloadInvoiceCartonLabels = async (invoiceId, invoiceNo, fallbackJobIds = []) => {
-    try {
-      if (invoiceId) {
-        try {
-          const res = await http.get(`/invoices/${invoiceId}/carton-labels`, { responseType: "blob" });
-          triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
-          return;
-        } catch (err) {
-          // fallback to job_ids endpoint
-        }
-      }
-      if (fallbackJobIds.length) {
-        const res = await http.get(`/production/jobs/carton-labels?job_ids=${fallbackJobIds.join(",")}`, { responseType: "blob" });
-        triggerDownload(res.data, `CartonLabels-${invoiceNo || "merged"}.pdf`, "application/pdf");
-      }
-    } catch (e) {
-      alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
-    }
-  };
+  const { total = 0, page = 1, pages = 1 } = meta;
 
-  const downloadCombinedCartonList = async (jobIds, invoiceNo) => {
-    try {
-      const res = await http.get(`/production/jobs/carton-list?job_ids=${jobIds.join(",")}`, { responseType: "blob" });
-      triggerDownload(res.data, `CartonList-${invoiceNo || "merged"}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    } catch (e) {
-      alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
-    }
-  };
+  const inputCls = "border border-slate-300 px-2 py-1.5 text-xs focus:outline-none focus:border-[#C27842] w-full";
 
   return (
     <div className="space-y-5" data-testid="archive-list">
+      {/* Header + filters */}
       <Card className="bg-slate-50 border-2 border-slate-200 p-4">
-        <div className="flex items-baseline justify-between">
+        <div className="flex items-baseline justify-between mb-3">
           <div>
             <h2 className="text-lg font-bold flex items-center gap-2"><Archive className="w-4 h-4 text-slate-700" /> Archived Production Cards</h2>
-            <p className="text-xs text-slate-600 mt-1">Cards that have both invoice + packing list generated land here. Click <b>View details</b> to inspect full production history.</p>
+            <p className="text-xs text-slate-600 mt-1">Cards that have both invoice + packing list generated land here. Use filters to search. Click <b>Expand</b> to see full production history.</p>
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
-            {clusters.length} card{clusters.length !== 1 ? "s" : ""} ({groups.length} group{groups.length !== 1 ? "s" : ""}) · {jobs.length} job{jobs.length !== 1 ? "s" : ""}
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{total} total jobs</div>
+        </div>
+        {/* Filter bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-2">
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">From date</div>
+            <input type="date" value={localFilters.from_date} onChange={e => setLocalFilters(f => ({ ...f, from_date: e.target.value }))} className={inputCls} data-testid="archive-filter-from" />
           </div>
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">To date</div>
+            <input type="date" value={localFilters.to_date} onChange={e => setLocalFilters(f => ({ ...f, to_date: e.target.value }))} className={inputCls} data-testid="archive-filter-to" />
+          </div>
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Style</div>
+            <input placeholder="e.g. SSK-001" value={localFilters.style_code} onChange={e => setLocalFilters(f => ({ ...f, style_code: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-style" />
+          </div>
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">PO Number</div>
+            <input placeholder="e.g. PO-12345" value={localFilters.po_number} onChange={e => setLocalFilters(f => ({ ...f, po_number: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-po" />
+          </div>
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Color</div>
+            <input placeholder="e.g. Black" value={localFilters.color} onChange={e => setLocalFilters(f => ({ ...f, color: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-color" />
+          </div>
+          <div>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 mb-1">Karigar</div>
+            <input placeholder="Worker name" value={localFilters.karigar_name} onChange={e => setLocalFilters(f => ({ ...f, karigar_name: e.target.value }))} onKeyDown={e => e.key === "Enter" && applyFilters()} className={inputCls} data-testid="archive-filter-karigar" />
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={applyFilters} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-700 px-3 py-1.5 flex items-center gap-1" data-testid="archive-filter-apply">
+            <Eye className="w-3 h-3" /> Search
+          </button>
+          <button onClick={clearFilters} className="text-[10px] uppercase tracking-wider font-bold text-slate-600 border border-slate-300 hover:bg-slate-100 px-3 py-1.5 flex items-center gap-1" data-testid="archive-filter-clear">
+            <X className="w-3 h-3" /> Clear
+          </button>
         </div>
       </Card>
 
-      {clusters.length === 0 ? (
+      {loading ? (
+        <Card className="p-12 text-center text-slate-400 text-sm" data-testid="archive-loading">
+          <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-slate-400" />
+          Loading archive…
+        </Card>
+      ) : summaries.length === 0 ? (
         <Card className="p-12 text-center text-slate-400 text-sm" data-testid="archive-empty">
           Nothing archived yet — once both <b>Invoice</b> and <b>Packing List</b> are generated for a card it moves here automatically.
         </Card>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4" data-testid="archive-grid">
-          {clusters.map(cluster => {
-            if (cluster.is_merged && cluster.groups.length > 1) {
-              const isExpanded = !!expandedClusters[cluster.id];
-              const allJobIds = cluster.groups.flatMap(g => g.rows.map(r => r.id));
-              const totalClusterQty = cluster.groups.reduce((sum, g) => sum + (g.totalQty || 0), 0);
-              const poNumbers = Array.from(new Set(cluster.groups.map(g => g.po_number).filter(Boolean)));
-              const clientName = cluster.groups[0]?.client_name;
+        <div className="space-y-3" data-testid="archive-grid">
+          {summaries.map(s => {
+            const isExpanded = !!expandedRows[s.id];
+            const detail = detailCache[s.id];
+            const isLoadingDetail = detail === "loading";
+            const styleImg = styleByCode[s.style_code]?.image_thumbnail_url || styleByCode[s.style_code]?.image_url;
+            const dispatchedDate = s.dispatched_at ? new Date(s.dispatched_at).toLocaleDateString("en-IN") : "—";
 
-              return (
-                <Card key={cluster.id} className="border-l-4 border-[#0F172A] hover:border-blue-600 transition-colors shadow-sm" data-testid={`archive-merged-card-${cluster.id}`}>
-                  <div className="p-4 space-y-3">
-                    {/* Header */}
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
-                          <span className="font-mono text-xs text-slate-500 font-bold">PO {poNumbers.join(" + ") || "—"}</span>
-                          <span className="bg-[#0F172A] text-white text-[9px] font-bold px-2 py-0.5 uppercase tracking-wider rounded flex items-center gap-1">
-                            <Layers className="w-2.5 h-2.5" /> Merged Dispatch ({cluster.groups.length} Styles)
-                          </span>
-                        </div>
-                        <div className="font-mono text-sm font-bold text-slate-800">
-                          Invoice: <span className="text-[#C27842]">{cluster.invoice_no || "—"}</span>
-                        </div>
-                      </div>
-                      <div className="text-right flex-shrink-0">
-                        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Total Qty</div>
-                        <div className="font-mono font-bold text-xl text-[#C27842]">{totalClusterQty}</div>
-                      </div>
-                    </div>
-
-                    {clientName && (
-                      <div className="text-xs text-slate-600">
-                        <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {clientName}
-                      </div>
-                    )}
-
-                    {/* Constituent Styles & Colors List */}
-                    <div className="bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1.5">
-                      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
-                        Constituent Styles &amp; Quantities:
-                      </div>
-                      <div className="divide-y divide-slate-200">
-                        {cluster.groups.map(g => (
-                          <div key={g.key} className="py-1.5 flex items-center justify-between text-xs gap-2">
-                            <div className="flex items-center gap-2 min-w-0">
-                              {(styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url) && (
-                                <img
-                                  src={styleByCode[g.style_code]?.image_thumbnail_url || styleByCode[g.style_code]?.image_url}
-                                  alt=""
-                                  className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842] hover:scale-110 transition-all"
-                                  title="Click to view full image in modal"
-                                  onClick={() => {
-                                    const st = styleByCode[g.style_code];
-                                    const url = st?.image_url || st?.image_display_url || st?.image_thumbnail_url;
-                                    if (url) {
-                                      onPreviewImage?.({
-                                        src: url,
-                                        title: `${st?.name ? `${st.name} (${g.style_code})` : g.style_code}${g.color ? ` · ${g.color}` : ""}`,
-                                        subtitle: `Invoice: ${cluster.invoice_no || "—"} · ${g.totalQty || 0} pairs`,
-                                      });
-                                    }
-                                  }}
-                                  data-testid={`archive-merged-thumb-${g.key}`}
-                                />
-                              )}
-                              <div className="truncate">
-                                <span className="font-bold text-slate-900">{g.style_code}</span>
-                                <span className="text-slate-600 ml-1 font-semibold">({g.color})</span>
-                                <div className="text-[10px] text-slate-500 truncate">
-                                  Sizes: <span className="font-mono">{g.sizes.join(" · ")}</span>
-                                </div>
-                              </div>
-                            </div>
-                            <div className="font-mono font-bold text-slate-700 text-sm whitespace-nowrap">{g.totalQty} prs</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Collapsed/Primary Action Bar */}
-                    <div className="flex gap-1.5 flex-wrap pt-2 border-t border-slate-200 items-center">
-                      <button
-                        onClick={() => onViewDispatchDetails?.(cluster)}
-                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors"
-                        data-testid={`archive-merged-dispatch-details-${cluster.id}`}
-                      >
-                        <Truck className="w-3 h-3" /> View Dispatch Details
-                      </button>
-
-                      <button
-                        onClick={() => toggleExpand(cluster.id)}
-                        className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
-                        data-testid={`archive-merged-details-btn-${cluster.id}`}
-                      >
-                        <Eye className="w-3 h-3" /> {isExpanded ? "Hide Cards" : "View Cards"}
-                        {isExpanded ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
-                      </button>
-
-                      {cluster.invoice_id && (
-                        <button
-                          onClick={() => downloadInvoiceFile(cluster.invoice_id, cluster.invoice_no)}
-                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
-                          data-testid={`archive-merged-invoice-btn-${cluster.id}`}
-                        >
-                          <FileDown className="w-3 h-3" /> Invoice
-                        </button>
-                      )}
-
-                      <button
-                        onClick={() => downloadInvoiceCartonLabels(cluster.invoice_id, cluster.invoice_no, allJobIds)}
-                        className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
-                        data-testid={`archive-merged-labels-btn-${cluster.id}`}
-                      >
-                        <FileDown className="w-3 h-3" /> Labels
-                      </button>
-
-                      <button
-                        onClick={() => downloadCombinedCartonList(allJobIds, cluster.invoice_no)}
-                        className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
-                        data-testid={`archive-merged-cartonlist-btn-${cluster.id}`}
-                      >
-                        <FileDown className="w-3 h-3" /> Carton List
-                      </button>
-                    </div>
-
-                    {/* Expanded Drill-down for individual constituent cards and pre-merge documents */}
-                    {isExpanded && (
-                      <div className="mt-3 pt-3 border-t-2 border-dashed border-slate-300 space-y-2.5 bg-slate-100/80 p-3 rounded" data-testid={`archive-merged-drilldown-${cluster.id}`}>
-                        <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
-                          Individual Pre-Merge Cards &amp; Original Documents:
-                        </div>
-                        {cluster.groups.map(g => {
-                          let drec = null;
-                          if (dispatchRecordByJobId) {
-                            for (const row of g.rows || []) {
-                              if (dispatchRecordByJobId[row.id]) {
-                                drec = dispatchRecordByJobId[row.id];
-                                break;
-                              }
-                            }
-                          }
-                          return (
-                            <div key={`drill-${g.key}`} className="bg-white p-2.5 rounded border border-slate-200 shadow-2xs space-y-2">
-                              <div className="flex items-baseline justify-between">
-                                <div>
-                                  <span className="font-bold text-xs text-slate-900">{g.style_code}</span>
-                                  <span className="text-[11px] text-slate-600 ml-1.5 font-bold">({g.color})</span>
-                                  <div className="text-[10px] text-slate-500 font-mono">Sizes: {g.sizes.join(" · ")}</div>
-                                </div>
-                                <div className="font-mono font-bold text-xs text-[#C27842]">{g.totalQty} prs</div>
-                              </div>
-                              <div className="flex gap-1 flex-wrap pt-1.5 border-t border-slate-100">
-                                <button onClick={() => onViewDispatchDetails?.(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-1.5 py-0.5 flex items-center gap-1" data-testid={`archive-merged-drilldown-dispatch-details-${g.key}`}>
-                                  <Truck className="w-2.5 h-2.5" /> Dispatch Details
-                                </button>
-                                <button onClick={() => onViewDetails(g)} className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-1.5 py-0.5 flex items-center gap-1">
-                                  <Eye className="w-2.5 h-2.5" /> Details Modal
-                                </button>
-                                <button onClick={() => onPrint(g)} className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1">
-                                  <Printer className="w-2.5 h-2.5" /> Card PDF
-                                </button>
-                                <button onClick={() => onPacking(g)} className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1">
-                                  <Package className="w-2.5 h-2.5" /> Packing List (New)
-                                </button>
-                                {drec ? (
-                                  <>
-                                    <button
-                                      onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Invoice
-                                    </button>
-                                    <button
-                                      onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Packing List
-                                    </button>
-                                    <button
-                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Labels
-                                    </button>
-                                    <button
-                                      onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
-                                    </button>
-                                    <button
-                                      onClick={() => onDownloadDispatchFile(drec.id, "ewaybill", `EWayBill-${drec.invoice_no}.json`, "application/json")}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-sky-700 border border-sky-300 hover:bg-sky-700 hover:text-white px-1.5 py-0.5 flex items-center gap-1"
-                                      title="Download E-Way Bill JSON"
-                                      data-testid={`archive-download-ewaybill-${drec.id}`}
-                                    >
-                                      <FileText className="w-2.5 h-2.5" /> Orig. E-Way Bill
-                                    </button>
-                                  </>
-                                ) : (
-                                  <>
-                                    <button
-                                      onClick={async () => {
-                                        try {
-                                          const res = await http.get(`/production/jobs/carton-labels?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
-                                          triggerDownload(res.data, `CartonLabels-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.pdf`, "application/pdf");
-                                        } catch (e) {
-                                          alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
-                                        }
-                                      }}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Labels
-                                    </button>
-                                    <button
-                                      onClick={async () => {
-                                        try {
-                                          const res = await http.get(`/production/jobs/carton-list?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
-                                          triggerDownload(res.data, `CartonList-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-                                        } catch (e) {
-                                          alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
-                                        }
-                                      }}
-                                      className="text-[9px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-1.5 py-0.5 flex items-center gap-1"
-                                    >
-                                      <FileDown className="w-2.5 h-2.5" /> Orig. Carton List
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </Card>
-              );
-            }
-
-            // Non-merged single-item cluster — render EXACTLY as before
-            const g = cluster.groups[0];
-            let drec = null;
-            if (dispatchRecordByJobId) {
-              for (const row of g.rows || []) {
-                if (dispatchRecordByJobId[row.id]) {
-                  drec = dispatchRecordByJobId[row.id];
-                  break;
-                }
-              }
-            }
             return (
-              <Card key={g.key} className="border-l-4 border-slate-400 hover:border-[#0F172A] transition-colors" data-testid={`archive-card-${g.key}`}>
-                {(styleByCode[g.style_code]?.image_url ||
-                  styleByCode[g.style_code]?.image_display_url ||
-                  styleByCode[g.style_code]?.image_thumbnail_url) && (
-                  <div
-                    className="relative cursor-pointer group overflow-hidden"
-                    title="Click to view full image in modal"
-                    onClick={() => {
-                      const st = styleByCode[g.style_code];
-                      const url = st?.image_url || st?.image_display_url || st?.image_thumbnail_url;
-                      if (url) {
-                        onPreviewImage?.({
-                          src: url,
-                          title: `${st?.name ? `${st.name} (${g.style_code})` : g.style_code}${g.color ? ` · ${g.color}` : ""}`,
-                          subtitle: `PO #${g.po_number || "—"} · ${g.totalQty || 0} pairs`,
-                        });
-                      }
-                    }}
-                    data-testid={`archive-img-container-${g.key}`}
-                  >
-                    <SafeImage
-                      image={{
-                        url: styleByCode[g.style_code]?.image_url,
-                        display_url:
-                          styleByCode[g.style_code]?.image_display_url,
-                        thumbnail_url:
-                          styleByCode[g.style_code]?.image_thumbnail_url,
-                      }}
-                      alt=""
-                      aspectRatio="16/8"
-                      className="group-hover:scale-102 transition-transform duration-200"
-                      testId={`archive-img-${g.key}`}
-                    />
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white pointer-events-none">
-                      <span className="text-[10px] font-bold uppercase tracking-wider bg-black/60 px-2 py-1 rounded flex items-center gap-1 shadow">
-                        <Maximize2 className="w-3.5 h-3.5" /> View Image
-                      </span>
-                    </div>
-                  </div>
-                )}
+              <Card key={s.id} className="border-l-4 border-slate-300 hover:border-[#C27842] transition-colors" data-testid={`archive-card-${s.id}`}>
                 <div className="p-4">
-                  <div className="flex items-baseline justify-between mb-2">
-                    <div>
-                      <div className="font-mono text-xs text-slate-500">PO {g.po_number}</div>
-                      <div className="font-bold text-base">{g.style_code}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{g.color}</div>
-                      <div className="font-mono font-bold text-lg text-[#C27842]">{g.totalQty}</div>
-                    </div>
-                  </div>
-                  <div className="text-xs text-slate-600 mb-1">
-                    <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Client:</span> {g.client_name}
-                  </div>
-                  <div className="text-xs text-slate-600 mb-3">
-                    <span className="font-bold uppercase tracking-wider text-[10px] text-slate-500">Sizes:</span>{" "}
-                    <span className="font-mono">{g.sizes.join(" · ")}</span>
-                  </div>
-                  <div className="flex gap-1 flex-wrap pt-2 border-t border-slate-200">
-                    <button onClick={() => onViewDispatchDetails?.(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-800 px-2 py-1 flex items-center gap-1 transition-colors" data-testid={`archive-dispatch-details-${g.key}`}>
-                      <Truck className="w-3 h-3" /> View Dispatch Details
-                    </button>
-                    <button onClick={() => onViewDetails(g)} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#2563EB] hover:bg-[#1E40AF] px-2 py-1 flex items-center gap-1" data-testid={`archive-details-${g.key}`}>
-                      <Eye className="w-3 h-3" /> Production History
-                    </button>
-                    <button onClick={() => onPrint(g)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1">
-                      <Printer className="w-3 h-3" /> Card PDF
-                    </button>
-                    <button onClick={() => onPacking(g)} className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1">
-                      <Package className="w-3 h-3" /> Packing List (New)
-                    </button>
-                    {drec ? (
-                      <>
-                        <button
-                          onClick={() => onDownloadDispatchFile(drec.id, "invoice", `Invoice-${drec.invoice_no}.pdf`, "application/pdf")}
-                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Invoice
-                        </button>
-                        <button
-                          onClick={() => onDownloadDispatchFile(drec.id, "packing-list", `PackingList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-                          className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Packing List
-                        </button>
-                        <button
-                          onClick={() => onDownloadDispatchFile(drec.id, "carton-labels", `CartonLabels-${drec.invoice_no}.pdf`, "application/pdf")}
-                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Labels
-                        </button>
-                        <button
-                          onClick={() => onDownloadDispatchFile(drec.id, "carton-list", `CartonList-${drec.invoice_no}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Carton List
-                        </button>
-                        <button
-                          onClick={() => onDownloadDispatchFile(drec.id, "ewaybill", `EWayBill-${drec.invoice_no}.json`, "application/json")}
-                          className="text-[10px] uppercase tracking-wider font-bold text-sky-700 border border-sky-300 hover:bg-sky-700 hover:text-white px-2 py-1 flex items-center gap-1"
-                          title="Download E-Way Bill JSON"
-                          data-testid={`archive-card-download-ewaybill-${drec.id}`}
-                        >
-                          <FileText className="w-3 h-3" /> E-Way Bill
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => onDownloadInvoice(g)}
-                          className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Invoice
-                        </button>
-                        <button
-                          onClick={() => { onPacking(g); }}
-                          className="text-[10px] uppercase tracking-wider font-bold text-[#16A34A] border border-[#16A34A] hover:bg-[#16A34A] hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Packing List
-                        </button>
-                        <button
-                          onClick={async () => {
-                            try {
-                              const res = await http.get(`/production/jobs/carton-labels?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
-                              triggerDownload(res.data, `CartonLabels-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.pdf`, "application/pdf");
-                            } catch (e) {
-                              alert("Carton Labels download failed: " + (e.response?.data?.detail || e.message));
-                            }
-                          }}
-                          className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Labels
-                        </button>
-                        <button
-                          onClick={async () => {
-                            try {
-                              const res = await http.get(`/production/jobs/carton-list?job_ids=${g.rows.map(r => r.id).join(",")}`, { responseType: "blob" });
-                              triggerDownload(res.data, `CartonList-${(g.po_number || "dispatch").replace(/[\/\\]/g, "-")}-${g.style_code}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-                            } catch (e) {
-                              alert("Carton List download failed: " + (e.response?.data?.detail || e.message));
-                            }
-                          }}
-                          className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1"
-                        >
-                          <FileDown className="w-3 h-3" /> Carton List
-                        </button>
-                      </>
+                  {/* Summary row */}
+                  <div className="flex items-start gap-3">
+                    {styleImg && (
+                      <img src={styleImg} alt="" className="w-12 h-12 object-cover rounded border border-slate-200 flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-[#C27842] transition-all"
+                        onClick={() => {
+                          const st = styleByCode[s.style_code];
+                          const url = st?.image_url || st?.image_display_url || styleImg;
+                          if (url) onPreviewImage?.({ src: url, title: `${s.style_code}${s.color ? ` · ${s.color}` : ""}`, subtitle: `PO #${s.po_number || "—"} · ${s.total_pairs || 0} pairs` });
+                        }}
+                        data-testid={`archive-img-${s.id}`}
+                      />
                     )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                        <div>
+                          <span className="font-mono text-xs text-slate-500">PO {s.po_number || "—"}</span>
+                          <div className="font-bold text-base text-slate-900">{s.style_code || "—"}</div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">{s.color || "—"}</div>
+                          <div className="font-mono font-bold text-lg text-[#C27842]">{s.total_pairs ?? 0} prs</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-0.5 mt-1 text-xs text-slate-600">
+                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Client:</span> {s.client_name || "—"}</span>
+                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Dispatched:</span> {dispatchedDate}</span>
+                        <span><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Labor:</span> ₹{(s.total_labor_cost ?? 0).toLocaleString("en-IN")}</span>
+                        {s.karigars_involved?.length > 0 && (
+                          <span className="col-span-2 sm:col-span-3 truncate"><span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Karigars:</span> {s.karigars_involved.join(", ")}</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
+
+                  {/* Action bar */}
+                  <div className="flex gap-1.5 flex-wrap pt-3 mt-3 border-t border-slate-200 items-center">
+                    {/* Stage 5: Expand / lazy detail */}
+                    <button
+                      onClick={() => {
+                        if (detail && detail !== "loading") {
+                          // Already loaded — pass full doc to detail modal
+                          onViewDetails?.(toGroupLike(detail));
+                        } else {
+                          toggleExpand(s.id);
+                        }
+                      }}
+                      className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 flex items-center gap-1 transition-colors ${isExpanded || (detail && detail !== "loading") ? "bg-slate-800 text-white" : "bg-[#2563EB] hover:bg-[#1E40AF] text-white"}`}
+                      data-testid={`archive-expand-${s.id}`}
+                    >
+                      {isLoadingDetail ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
+                      {detail && detail !== "loading" ? "View Detail" : isExpanded ? "Loading…" : "Expand Detail"}
+                    </button>
+
+                    {s.invoice_id && (
+                      <button onClick={() => downloadInvoiceFile(s.invoice_id, s.po_number)} className="text-[10px] uppercase tracking-wider font-bold text-slate-700 border border-slate-300 hover:bg-slate-900 hover:text-white px-2 py-1 flex items-center gap-1" data-testid={`archive-invoice-${s.id}`}>
+                        <FileDown className="w-3 h-3" /> Invoice
+                      </button>
+                    )}
+
+                    <button onClick={async () => {
+                      try {
+                        const url = s.invoice_id
+                          ? `/invoices/${s.invoice_id}/carton-labels`
+                          : `/production/jobs/carton-labels?job_ids=${s.id}`;
+                        const res = await http.get(url, { responseType: "blob" });
+                        triggerDownload(res.data, `CartonLabels-${s.po_number || s.id}.pdf`, "application/pdf");
+                      } catch (e) { alert("Labels download failed: " + (e.response?.data?.detail || e.message)); }
+                    }} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0D9488] hover:bg-[#0B7A70] px-2 py-1 flex items-center gap-1" data-testid={`archive-labels-${s.id}`}>
+                      <FileDown className="w-3 h-3" /> Labels
+                    </button>
+
+                    <button onClick={async () => {
+                      try {
+                        const res = await http.get(`/production/jobs/carton-list?job_ids=${s.id}`, { responseType: "blob" });
+                        triggerDownload(res.data, `CartonList-${s.po_number || s.id}.xlsx`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                      } catch (e) { alert("Carton List download failed: " + (e.response?.data?.detail || e.message)); }
+                    }} className="text-[10px] uppercase tracking-wider font-bold text-[#EAB308] border border-[#EAB308] hover:bg-[#EAB308] hover:text-white px-2 py-1 flex items-center gap-1" data-testid={`archive-cartonlist-${s.id}`}>
+                      <FileDown className="w-3 h-3" /> Carton List
+                    </button>
+                  </div>
+
+                  {/* Stage 5: Expanded detail pane (once loaded) */}
+                  {isExpanded && detail && detail !== "loading" && (
+                    <div className="mt-4 pt-4 border-t-2 border-dashed border-slate-300 space-y-3" data-testid={`archive-detail-pane-${s.id}`}>
+                      <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Full Production Record</div>
+                      {/* Component summary from archive_summary */}
+                      {s.component_summary && Object.keys(s.component_summary).length > 0 && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {Object.entries(s.component_summary).map(([comp, status]) => (
+                            <div key={comp} className={`text-[10px] px-2 py-1 rounded font-bold uppercase tracking-wider flex items-center gap-1 ${status === "done" ? "bg-green-50 text-green-700 border border-green-200" : "bg-amber-50 text-amber-700 border border-amber-200"}`}>
+                              {status === "done" ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
+                              {comp}: {status}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* History from full detail */}
+                      {Array.isArray(detail.history) && detail.history.length > 0 && (
+                        <div className="max-h-56 overflow-y-auto space-y-1">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Production History</div>
+                          {[...detail.history].reverse().map((h, i) => (
+                            <div key={i} className="flex items-start gap-2 text-xs bg-slate-50 px-2 py-1 rounded border border-slate-100">
+                              <span className="font-mono text-slate-500 whitespace-nowrap flex-shrink-0">{h.at ? new Date(h.at).toLocaleString("en-IN", { hour12: false }) : "—"}</span>
+                              <span className="font-bold text-slate-700 uppercase tracking-wider flex-shrink-0">{h.stage}</span>
+                              {h.notes && <span className="text-slate-500 truncate">{h.notes}</span>}
+                              {h.worker_name && <span className="text-[#C27842] font-bold ml-auto flex-shrink-0">{h.worker_name}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex gap-1.5 flex-wrap">
+                        <button onClick={() => onViewDetails?.(toGroupLike(detail))} className="text-[10px] uppercase tracking-wider font-bold text-white bg-[#0F172A] hover:bg-slate-700 px-2 py-1 flex items-center gap-1">
+                          <Eye className="w-3 h-3" /> Full Detail Modal
+                        </button>
+                        <button onClick={() => setExpandedRows(prev => ({ ...prev, [s.id]: false }))} className="text-[10px] uppercase tracking-wider font-bold text-slate-600 border border-slate-200 hover:bg-slate-100 px-2 py-1 flex items-center gap-1">
+                          <ChevronUp className="w-3 h-3" /> Collapse
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </Card>
             );
           })}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {pages > 1 && (
+        <div className="flex items-center justify-center gap-2 pt-2" data-testid="archive-pagination">
+          <button disabled={page <= 1} onClick={() => onPageChange?.(page - 1)} className="text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 border border-slate-300 disabled:opacity-40 hover:bg-slate-100">← Prev</button>
+          <span className="text-xs text-slate-600 font-mono">Page {page} / {pages}  ({total} total)</span>
+          <button disabled={page >= pages} onClick={() => onPageChange?.(page + 1)} className="text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 border border-slate-300 disabled:opacity-40 hover:bg-slate-100">Next →</button>
         </div>
       )}
 
@@ -4101,6 +3947,7 @@ function ArchivePanel({ jobs, styleByCode, onPrint, onPacking, onViewDetails, on
     </div>
   );
 }
+
 
 /* -------------------- DETAIL MODAL -------------------- */
 function DetailModal({ group, onClose }) {
