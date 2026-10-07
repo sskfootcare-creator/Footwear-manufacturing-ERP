@@ -127,4 +127,12 @@ __all__ = [
     # PO EAN Barcodes
     "PoEanCodeIn", "PoEanCodeDoc", "PoEanImportFormatConfigIn", "PoEanImportFormatConfigUpdate",
     "PoEanImportItem", "PoEanImportRequest", "PoEanImportResult",
+    # Investors
+    "InvestorIn", "InvestorUpdate", "InvestorAdvanceCreateIn", "InvestorBatchAdvanceCreateIn",
+    "InvestorRepayActionIn", "InvestorBulkRepayActionIn", "SetInvestorPinIn", "InvestorLoginIn",
 ]
+
+from models.investors import (
+    InvestorIn, InvestorUpdate, InvestorAdvanceCreateIn, InvestorBatchAdvanceCreateIn,
+    InvestorRepayActionIn, InvestorBulkRepayActionIn, SetInvestorPinIn, InvestorLoginIn
+)

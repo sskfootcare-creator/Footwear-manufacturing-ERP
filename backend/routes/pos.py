@@ -2279,7 +2279,54 @@ async def create_payment(payload: PaymentIn, request: Request):
         except Exception:
             pass
 
-    return stringify(doc)
+    # Check for active investor advances tied to invoices' POs (Stage 4)
+    investor_actions_prompt = []
+    po_ids_set = set()
+    for inv in invoices:
+        pid = inv.get("po_id")
+        if pid:
+            po_ids_set.add(str(pid))
+        pnum = inv.get("po_number")
+        if pnum:
+            po_ids_set.add(str(pnum))
+
+    if po_ids_set and hasattr(db, "investor_advances") and db.investor_advances is not None:
+        try:
+            adv_cursor = db.investor_advances.find({
+                "status": "active",
+                "$or": [
+                    {"po_id": {"$in": list(po_ids_set)}},
+                    {"po_number": {"$in": list(po_ids_set)}}
+                ]
+            })
+            adv_list = await adv_cursor.to_list(20)
+            for adv in adv_list:
+                pairs = int(adv.get("pairs") or 0)
+                margin_rate = float(adv.get("margin_per_pair") or 10.0)
+                principal = float(adv.get("amount") or 0.0)
+                margin_amount = round(pairs * margin_rate, 2)
+                total_payout = round(principal + margin_amount, 2)
+                investor_actions_prompt.append({
+                    "advance_id": str(adv["_id"]),
+                    "investor_name": adv.get("investor_name", "Investor"),
+                    "po_number": adv.get("po_number", ""),
+                    "pairs": pairs,
+                    "principal_amount": principal,
+                    "margin_amount": margin_amount,
+                    "total_payout": total_payout,
+                    "prompt_actions": [
+                        {"action": "repay_in_full", "label": f"Repay in Full (₹{total_payout})"},
+                        {"action": "reinvest", "label": f"Pay Margin (₹{margin_amount}) & Reinvest Principal (₹{principal})"}
+                    ]
+                })
+        except Exception as adv_e:
+            log.warning("Could not check active investor advances for payment: %s", adv_e)
+
+    ret_doc = dict(doc)
+    if investor_actions_prompt:
+        ret_doc["investor_actions_prompt"] = investor_actions_prompt
+
+    return stringify(ret_doc)
 
 
 @pos_router.get("/payments")

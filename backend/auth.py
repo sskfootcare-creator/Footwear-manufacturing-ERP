@@ -435,7 +435,21 @@ async def get_current_user_factory(db):
                     path = getattr(request, "url", None) and getattr(request.url, "path", None)
                     if path:
                         check_route_module_access(w_user, path)
-                    return w_user
+                # ── Investor tokens resolve from db.investors, not db.users ───────
+                if payload.get("role") == "investor":
+                    investor = await active_db.investors.find_one({"_id": ObjectId(payload["sub"])})
+                    if not investor or not investor.get("active", True):
+                        raise HTTPException(status_code=401, detail="Investor not found or inactive")
+                    inv_user = {
+                        "id": str(investor["_id"]),
+                        "investor_id": str(investor["_id"]),
+                        "name": investor.get("name", ""),
+                        "phone": investor.get("phone", ""),
+                        "email": investor.get("email") or payload.get("email", ""),
+                        "role": "investor",
+                        "modules": ["investor_portal"],
+                    }
+                    return inv_user
 
                 # ── Regular user token ────────────────────────────────────────────
                 user = await active_db.users.find_one({"_id": ObjectId(payload["sub"])})

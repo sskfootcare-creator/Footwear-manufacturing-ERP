@@ -67,6 +67,7 @@ class RecurringExpenseIn(BaseModel):
     end_date: Optional[str] = None
     bank_account_id: Optional[str] = None
     active: bool = True
+    is_investor_opex: bool = Field(False, description="Whether this template is flagged as investor opex")
     notes: Optional[str] = ""
 
 
@@ -80,4 +81,5 @@ class RecurringExpenseUpdate(BaseModel):
     end_date: Optional[str] = None
     bank_account_id: Optional[str] = None
     active: Optional[bool] = None
+    is_investor_opex: Optional[bool] = None
     notes: Optional[str] = None

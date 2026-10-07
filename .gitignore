@@ -585,3 +585,4 @@ backend/scripts/test_live_db_import.py
 aug.csv
 record.csv
 docs/component-aware-kanban-plan.md
+supabase/migrations/20261006000000_investor_gl_accounts.sql

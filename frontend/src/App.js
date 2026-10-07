@@ -39,6 +39,9 @@ import SelectWorkspace from "@/pages/SelectWorkspace";
 import ResetPassword from "@/pages/ResetPassword";
 import KarigarLogin from "@/pages/KarigarLogin";
 import KarigarDashboard from "@/pages/KarigarDashboard";
+import InvestorLogin from "@/pages/InvestorLogin";
+import InvestorPortal from "@/pages/InvestorPortal";
+import Investors from "@/pages/Investors";
 import StylePLM from "@/pages/StylePLM";
 import PatternManager from "@/pages/PatternManager";
 import ToolingLibrary from "@/pages/ToolingLibrary";
@@ -88,6 +91,7 @@ const ROUTE_PERMISSIONS = {
   "order-import-formats": { roles: ["admin"], modules: ["settings_admin"] },
   "settings": { roles: ["admin", "manager"], modules: ["settings_admin"] },
   "users": { roles: ["admin"], modules: ["settings_admin"] },
+  "investors": { roles: ["admin", "manager"], modules: ["orders_sales", "settings_admin"] },
 };
 
 function RouteGuard({ path, children }) {
@@ -150,11 +154,14 @@ function App() {
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/karigar-login" element={<KarigarLogin />} />
           <Route path="/karigar" element={<KarigarDashboard />} />
+          <Route path="/investor-login" element={<InvestorLogin />} />
+          <Route path="/investor" element={<InvestorPortal />} />
           <Route path="/select-workspace" element={<Protected><SelectWorkspace /></Protected>} />
           <Route path="/mobile/picklist" element={<Protected><MobilePicklist /></Protected>} />
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
             <Route index element={<Dashboard />} />
+            <Route path="investors" element={<RouteGuard path="investors"><Investors /></RouteGuard>} />
             <Route path="styles" element={<RouteGuard path="styles"><Styles /></RouteGuard>} />
             <Route path="plm" element={<RouteGuard path="plm"><StylePLM /></RouteGuard>} />
             <Route path="patterns" element={<RouteGuard path="patterns"><PatternManager /></RouteGuard>} />

@@ -4085,6 +4085,30 @@ async def update_monthly_style_cost(
         "top_loss_styles":   sorted(styles, key=lambda s: s.get("contribution", 0), reverse=False)[:10],
     }
 
+    # Recalculate unit economics
+    pnl_sum = doc.get("pnl_summary") or {}
+    tot_sold_units = int(doc.get("total_net_sold") or (pnl_sum.get("net_units") or 0))
+    fee_total = float((doc.get("platform_fee_breakdown") or {}).get("total_fees") or (pnl_sum.get("total_expenses") or 0.0))
+    net_asp = round(tot_sold_rev / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_unit_cogs = round(tot_prod_cost / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_platform_fee = round(fee_total / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    avg_overhead_per_pair = round(allocated_op / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+    unit_contribution = round(net_asp - avg_unit_cogs - avg_platform_fee, 2)
+    net_profit_per_pair = round(actual_net_profit / tot_sold_units, 2) if tot_sold_units > 0 else 0.0
+
+    ret_analytics = doc.get("return_analytics") or {}
+    unit_economics = {
+        "net_asp":                   net_asp,
+        "avg_unit_cogs":             avg_unit_cogs,
+        "avg_platform_fee_per_unit": avg_platform_fee,
+        "avg_overhead_per_pair":     avg_overhead_per_pair,
+        "unit_contribution":         unit_contribution,
+        "net_profit_per_pair":       net_profit_per_pair,
+        "return_rate_pct":           ret_analytics.get("overall_return_rate_pct", 0.0),
+        "return_financial_damage":   ret_analytics.get("total_return_financial_damage", 0.0) or ret_analytics.get("financial_damage_amount", 0.0),
+    }
+    update_data["unit_economics"] = unit_economics
+
     await _safe_update_one(
         getattr(db, "online_monthly_reconciliation_overviews", None),
         {"_id": doc["_id"]},

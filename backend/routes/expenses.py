@@ -337,6 +337,7 @@ async def create_recurring_expense(payload: RecurringExpenseIn, request: Request
         "end_date": payload.end_date,
         "bank_account_id": payload.bank_account_id,
         "active": payload.active,
+        "is_investor_opex": bool(payload.is_investor_opex),
         "notes": payload.notes or "",
         "created_at": now_iso(),
         "created_by": u.get("email") or u.get("name", ""),

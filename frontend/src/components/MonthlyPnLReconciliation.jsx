@@ -1253,12 +1253,12 @@ export default function MonthlyPnLReconciliation() {
   const totalFees = Number(overview?.platform_fee_breakdown?.total_fees ?? overview?.pnl_summary?.total_expenses ?? 0);
 
   const unitEcon = overview?.unit_economics || {};
-  const netAsp = unitEcon.net_asp ?? (netSoldUnits > 0 ? (netSoldRevenue / netSoldUnits).toFixed(2) : 0);
-  const avgUnitCogs = unitEcon.avg_unit_cogs ?? (netSoldUnits > 0 ? (totalCogs / netSoldUnits).toFixed(2) : 0);
-  const avgPlatformFee = unitEcon.avg_platform_fee_per_unit ?? (netSoldUnits > 0 ? (totalFees / netSoldUnits).toFixed(2) : 0);
-  const avgOverheadPerPair = unitEcon.avg_overhead_per_pair ?? (netSoldUnits > 0 ? (allocatedOverhead / netSoldUnits).toFixed(2) : 0);
-  const unitContribution = unitEcon.unit_contribution ?? (Number(netAsp) - Number(avgUnitCogs) - Number(avgPlatformFee)).toFixed(2);
-  const netProfitPerPair = unitEcon.net_profit_per_pair ?? (netSoldUnits > 0 ? (actualNetProfit / netSoldUnits).toFixed(2) : 0);
+  const netAsp = netSoldUnits > 0 ? (netSoldRevenue / netSoldUnits).toFixed(2) : (unitEcon.net_asp ?? 0);
+  const avgUnitCogs = netSoldUnits > 0 ? (totalCogs / netSoldUnits).toFixed(2) : (unitEcon.avg_unit_cogs ?? 0);
+  const avgPlatformFee = netSoldUnits > 0 ? (totalFees / netSoldUnits).toFixed(2) : (unitEcon.avg_platform_fee_per_unit ?? 0);
+  const avgOverheadPerPair = netSoldUnits > 0 ? (allocatedOverhead / netSoldUnits).toFixed(2) : (unitEcon.avg_overhead_per_pair ?? 0);
+  const unitContribution = (Number(netAsp) - Number(avgUnitCogs) - Number(avgPlatformFee)).toFixed(2);
+  const netProfitPerPair = netSoldUnits > 0 ? (actualNetProfit / netSoldUnits).toFixed(2) : (unitEcon.net_profit_per_pair ?? 0);
 
   return (
     <div className="space-y-6">
@@ -2070,46 +2070,46 @@ export default function MonthlyPnLReconciliation() {
               </Card>
             </div>
           )}
+        </div>
+      )}
 
-          {/* ── Modals & Drawers ─────────────────────────────────────── */}
-          <OperationalCostModal
-            overview={overview}
-            isOpen={showOpModal}
-            onClose={() => setShowOpModal(false)}
-            onSave={handleUpdateOperationalCost}
-          />
+      {/* ── Modals & Drawers ─────────────────────────────────────── */}
+      <OperationalCostModal
+        overview={overview}
+        isOpen={showOpModal}
+        onClose={() => setShowOpModal(false)}
+        onSave={handleUpdateOperationalCost}
+      />
 
-          {showImportDrawer && (
-            <MonthlyReportDrawer
-              onClose={() => setShowImportDrawer(false)}
-              onDone={() => {
-                setShowImportDrawer(false);
-                loadData();
-              }}
-            />
-          )}
+      {showImportDrawer && (
+        <MonthlyReportDrawer
+          onClose={() => setShowImportDrawer(false)}
+          onDone={() => {
+            setShowImportDrawer(false);
+            loadData();
+          }}
+        />
+      )}
 
-          {/* ── Image Enlarged Preview Modal ─────────────────────────── */}
-          {previewImage && (
-            <div
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-              onClick={() => setPreviewImage(null)}
-            >
-              <div className="relative max-w-lg max-h-[85vh] bg-white rounded p-3 shadow-2xl space-y-2" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between border-b pb-2">
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Style Photo Preview</span>
-                  <button
-                    type="button"
-                    onClick={() => setPreviewImage(null)}
-                    className="w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold flex items-center justify-center"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <img src={previewImage} alt="Style Preview" className="max-w-full max-h-[75vh] rounded object-contain mx-auto" />
-              </div>
+      {/* ── Image Enlarged Preview Modal ─────────────────────────── */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div className="relative max-w-lg max-h-[85vh] bg-white rounded p-3 shadow-2xl space-y-2" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b pb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-700">Style Photo Preview</span>
+              <button
+                type="button"
+                onClick={() => setPreviewImage(null)}
+                className="w-6 h-6 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold flex items-center justify-center"
+              >
+                ✕
+              </button>
             </div>
-          )}
+            <img src={previewImage} alt="Style Preview" className="max-w-full max-h-[75vh] rounded object-contain mx-auto" />
+          </div>
         </div>
       )}
     </div>

@@ -138,7 +138,7 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
                 amt = float(p.get("amount") or 0.0)
                 if p.get("account_type") == "cash":
                     continue
-                if p.get("type") == "vendor_payment" or bool(p.get("vendor_id")):
+                if p.get("type") in ("vendor_payment", "investor_repayment") or bool(p.get("vendor_id")):
                     vp_outflow += amt
                 else:
                     client_inflow += amt
@@ -3632,74 +3632,114 @@ async def get_unmatched_erp_candidates(
                     "reference": s.get("payment_id") or s.get("neft_ref") or "",
                 })
 
-        if account_type == "b2b_client" or not bank_account_id or bank_account_id == "all":
-            p_q = {
-                "type": {"$ne": "vendor_payment"},
-                "vendor_id": {"$in": [None, ""]},
-                "account_type": {"$ne": "cash"},
-            }
-            if account_filter:
-                p_q["bank_account_id"] = account_filter
-            if search:
-                p_rx = {"$regex": re.escape(str(search)), "$options": "i"}
-                p_q["$or"] = [
-                    {"client_name": p_rx},
-                    {"reference": p_rx},
-                    {"payment_no": p_rx},
-                    {"description": p_rx},
-                    {"category": p_rx},
-                    {"notes": p_rx},
-                ]
-            payments = await db.payments.find(p_q).sort("payment_date", -1).limit(limit).to_list(limit)
-            for p in payments:
-                if p.get("account_type") == "cash":
+        # Payments (Client Inflows, Bank Deposits, Investor Funding)
+        p_q = {
+            "type": {"$nin": ["vendor_payment", "investor_repayment"]},
+            "vendor_id": {"$in": [None, ""]},
+            "account_type": {"$ne": "cash"},
+            "statement_line_id": {"$in": [None, ""]},
+            "reconciled": {"$ne": True},
+        }
+        if account_filter:
+            p_q["bank_account_id"] = account_filter
+        if search:
+            p_rx = {"$regex": re.escape(str(search)), "$options": "i"}
+            p_q["$or"] = [
+                {"client_name": p_rx},
+                {"investor_name": p_rx},
+                {"party": p_rx},
+                {"reference": p_rx},
+                {"payment_no": p_rx},
+                {"po_number": p_rx},
+                {"description": p_rx},
+                {"category": p_rx},
+                {"notes": p_rx},
+            ]
+        payments = await db.payments.find(p_q).sort("payment_date", -1).limit(limit).to_list(limit)
+        for p in payments:
+            if p.get("account_type") == "cash":
+                continue
+            if p.get("cash_account_id") and not p.get("bank_account_id"):
+                continue
+            if account_id_str:
+                p_acc = str(p.get("bank_account_id") or "")
+                if p_acc and p_acc != account_id_str:
                     continue
-                if p.get("cash_account_id") and not p.get("bank_account_id"):
-                    continue
-                if account_id_str:
-                    p_acc = str(p.get("bank_account_id") or "")
-                    if p_acc and p_acc != account_id_str:
-                        continue
-                is_dep = p.get("type") == "deposit"
-                cand_type = "deposit" if is_dep else "payment"
-                party_label = p.get("party") or p.get("client_name") or (f"Deposit ({p.get('category', 'Other').title()})" if is_dep else "Client")
-                desc_label = p.get("description") or (f"Deposit ({p.get('category', 'Other').title()}) - {p.get('notes', '')}".strip(" -") if is_dep else f"Client Payment {p.get('payment_no', '')} - {party_label}")
-                candidates.append({
-                    "type": cand_type,
-                    "id": str(p["_id"]),
-                    "date": p.get("payment_date", "")[:10],
-                    "amount": float(p.get("amount") or 0.0),
-                    "description": desc_label,
-                    "side": "credit",
-                    "party": party_label,
-                    "reference": p.get("reference") or p.get("payment_no") or "",
-                })
+            p_type = p.get("type")
+            is_dep = p_type == "deposit"
+            is_inv = p_type == "investor_funding"
+            cand_type = "investor_funding" if is_inv else ("deposit" if is_dep else "payment")
 
-    # 2. Debits (Vendor Payments / Expenses)
+            if is_inv:
+                party_label = p.get("investor_name") or p.get("party") or "Investor Partner"
+                po_num = p.get("po_number") or ""
+                po_info = f" - PO #{po_num}" if po_num else ""
+                desc_label = p.get("description") or p.get("notes") or f"Investor Capital Advance{po_info} ({party_label})"
+            elif is_dep:
+                party_label = p.get("party") or f"Deposit ({p.get('category', 'Other').title()})"
+                desc_label = p.get("description") or (f"Deposit ({p.get('category', 'Other').title()}) - {p.get('notes', '')}".strip(" -"))
+            else:
+                party_label = p.get("party") or p.get("client_name") or "Client"
+                desc_label = p.get("description") or f"Client Payment {p.get('payment_no', '')} - {party_label}"
+
+            candidates.append({
+                "type": cand_type,
+                "id": str(p["_id"]),
+                "date": p.get("payment_date", "")[:10],
+                "amount": float(p.get("amount") or 0.0),
+                "description": desc_label,
+                "side": "credit",
+                "party": party_label,
+                "reference": p.get("reference") or p.get("po_number") or p.get("payment_no") or "",
+            })
+
+    # 2. Debits (Vendor Payments / Investor Repayments / Expenses)
     if side in ["debit", "all"]:
         vp_q = {
-            "$or": [{"type": "vendor_payment"}, {"vendor_id": {"$nin": [None, ""]}}],
+            "$or": [
+                {"type": "vendor_payment"},
+                {"type": "investor_repayment"},
+                {"vendor_id": {"$nin": [None, ""]}},
+            ],
+            "statement_line_id": {"$in": [None, ""]},
+            "reconciled": {"$ne": True},
         }
         if account_filter:
             vp_q["bank_account_id"] = account_filter
         if search:
             vp_rx = {"$regex": re.escape(str(search)), "$options": "i"}
-            vp_q["$or"] = [{"vendor_name": vp_rx}, {"reference": vp_rx}, {"payment_no": vp_rx}]
+            vp_q["$or"] = [
+                {"vendor_name": vp_rx},
+                {"investor_name": vp_rx},
+                {"reference": vp_rx},
+                {"payment_no": vp_rx},
+                {"po_number": vp_rx},
+                {"notes": vp_rx},
+            ]
         vendor_payments = await db.payments.find(vp_q).sort("payment_date", -1).limit(limit).to_list(limit)
         for vp in vendor_payments:
             if account_id_str:
                 vp_acc = str(vp.get("bank_account_id") or "")
                 if vp_acc and vp_acc != account_id_str:
                     continue
+            is_inv_rep = vp.get("type") == "investor_repayment"
+            party_label = vp.get("investor_name") if is_inv_rep else vp.get("vendor_name", "Vendor")
+            po_num = vp.get("po_number") or ""
+            po_info = f" - PO #{po_num}" if po_num else ""
+            desc_label = (
+                vp.get("description") or vp.get("notes") or f"Investor Repayment{po_info} ({party_label})"
+                if is_inv_rep
+                else f"Vendor Payment {vp.get('payment_no', '')} - {party_label}"
+            )
             candidates.append({
-                "type": "vendor_payment",
+                "type": "investor_repayment" if is_inv_rep else "vendor_payment",
                 "id": str(vp["_id"]),
                 "date": vp.get("payment_date", "")[:10],
                 "amount": float(vp.get("amount") or 0.0),
-                "description": f"Vendor Payment {vp.get('payment_no', '')} - {vp.get('vendor_name', 'Vendor')}",
+                "description": desc_label,
                 "side": "debit",
-                "party": vp.get("vendor_name", "Vendor"),
-                "reference": vp.get("reference") or vp.get("payment_no") or "",
+                "party": party_label,
+                "reference": vp.get("reference") or vp.get("po_number") or vp.get("payment_no") or "",
             })
 
         e_q = {
