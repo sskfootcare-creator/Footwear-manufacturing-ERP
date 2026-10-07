@@ -427,29 +427,31 @@ function MonthlyStyleOverviewTable({ overview, onUpdateCost, readOnly = false })
                 const isEditing = editingStyle === s.style_code;
                 const isProfit = (s.gross_profit ?? 0) >= 0;
                 return (
-                  <tr key={s.style_code} className="group border-b border-slate-100 hover:bg-slate-50/80">
+                  <tr key={s.myntra_style_id || s.style_code} className="group border-b border-slate-100 hover:bg-slate-50/80">
                     <td className="p-2.5 sticky left-0 z-10 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 min-w-[280px] shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
                       <div className="flex items-center gap-3">
                         {/* Style Photo Thumbnail with click-to-preview */}
                         <div
-                          className="relative w-12 h-12 rounded border border-slate-300 bg-slate-50 overflow-hidden shadow-sm shrink-0 cursor-pointer group"
+                          className={`relative w-12 h-12 rounded border border-slate-300 bg-slate-50 overflow-hidden shadow-sm shrink-0 ${s.image_url ? "cursor-pointer group" : "cursor-default"}`}
                           onClick={() => s.image_url && setPreviewImage(s.image_url)}
-                          title="Click to view full style photo"
+                          title={s.image_url ? "Click to view full style photo" : "No photo mapped in Style Master"}
                         >
                           {s.image_url ? (
-                            <img
-                              src={s.image_url}
-                              alt={s.style_code}
-                              className="w-full h-full object-cover transition-transform group-hover:scale-110"
-                            />
+                            <>
+                              <img
+                                src={s.image_url}
+                                alt={s.style_code}
+                                className="w-full h-full object-cover transition-transform group-hover:scale-110"
+                              />
+                              <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                <Eye className="w-3.5 h-3.5" />
+                              </div>
+                            </>
                           ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100 text-slate-400">
+                            <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100 text-slate-400" title="No photo mapped in Style Master">
                               <ImageIcon className="w-4 h-4" />
                             </div>
                           )}
-                          <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                            <Eye className="w-3.5 h-3.5" />
-                          </div>
                         </div>
 
                         {/* Style Details & Identifiers */}
@@ -1100,7 +1102,7 @@ function MonthlyReportDrawer({ onClose, onDone }) {
             <div className="bg-emerald-50 border border-emerald-300 p-3 rounded text-xs flex justify-between items-center text-emerald-900">
               <div>
                 Report preview ready for <strong>{preview.platform?.toUpperCase()}</strong> ({preview.month || "Current Month"}).
-                Found <strong>{preview.style_overview?.styles_count || 0} styles</strong> across <strong>{preview.total_rows || 0} SKU lines</strong>.
+                Found <strong>{preview.style_overview?.styles_count || 0} styles</strong> across <strong>{preview.total_rows || preview.stats?.total_rows || preview.sku_bifurcation?.length || preview.rows?.length || 0} SKU lines</strong>.
               </div>
               <button onClick={reset} className="text-xs font-bold underline text-emerald-800">
                 Choose another file

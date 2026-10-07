@@ -2608,6 +2608,8 @@ async def _build_pnl_reconciliation_overview(
         for st_item in existing_ov.get("styles", []):
             if st_item.get("style_code") and st_item.get("unit_production_cost") is not None:
                 saved_costs[st_item["style_code"]] = float(st_item["unit_production_cost"])
+            if st_item.get("myntra_style_id") and st_item.get("unit_production_cost") is not None:
+                saved_costs[st_item["myntra_style_id"]] = float(st_item["unit_production_cost"])
 
     baseline_snap = await _safe_find_one(getattr(db, "style_cost_snapshots", None), {"total_cost": {"$gt": 0}})
     default_unit_cost = float(baseline_snap["total_cost"]) if (baseline_snap and isinstance(baseline_snap, dict) and "total_cost" in baseline_snap) else 210.0
@@ -2616,7 +2618,7 @@ async def _build_pnl_reconciliation_overview(
     all_styles = []
     if all_styles_cur is not None and hasattr(all_styles_cur, "find"):
         try:
-            res = all_styles_cur.find().to_list(1000)
+            res = all_styles_cur.find().to_list(2000)
             if inspect.isawaitable(res):
                 res = await res
             all_styles = res or []
@@ -2629,17 +2631,207 @@ async def _build_pnl_reconciliation_overview(
     sku_map_cur = getattr(db, "sku_map", None)
     if sku_map_cur is not None and hasattr(sku_map_cur, "find"):
         try:
-            res_m = sku_map_cur.find().to_list(1000)
+            res_m = sku_map_cur.find().to_list(2000)
             if inspect.isawaitable(res_m):
                 res_m = await res_m
             all_sku_maps = res_m or []
         except Exception:
             all_sku_maps = []
 
-    map_by_ext = {}
+    # Custom style photos index
+    custom_photos = {}
+    photos_cur = getattr(db, "online_style_photos", None)
+    if photos_cur is not None and hasattr(photos_cur, "find"):
+        try:
+            res_p = photos_cur.find().to_list(1000)
+            if inspect.isawaitable(res_p):
+                res_p = await res_p
+            for cp in (res_p or []):
+                if cp.get("style_code") and cp.get("image_url"):
+                    custom_photos[str(cp["style_code"]).strip().lower()] = cp["image_url"]
+        except Exception:
+            pass
+
+    # Marketplace style-color mapping index
+    mscm_cur = getattr(db, "marketplace_style_color_mapping", None)
+    mscm_index = {}
+    if mscm_cur is not None and hasattr(mscm_cur, "find"):
+        try:
+            res_mscm = mscm_cur.find().to_list(2000)
+            if inspect.isawaitable(res_mscm):
+                res_mscm = await res_mscm
+            for m in (res_mscm or []):
+                mp = str(m.get("marketplace") or "").strip().lower()
+                st = str(m.get("marketplace_style_code") or "").strip().lower()
+                col_k = str(m.get("marketplace_color_code") or "").strip().lower()
+                if st:
+                    mscm_index[(mp, st, col_k)] = m.get("erp_style_code")
+                    mscm_index[(mp, st, "")] = m.get("erp_style_code")
+        except Exception:
+            pass
+
+    # Learned mappings from existing monthly reconciliation overviews
+    learned_erp_by_sid = {}
+    learned_erp_by_st = {}
+    ov_cur = getattr(db, "online_monthly_reconciliation_overviews", None)
+    if ov_cur is not None and hasattr(ov_cur, "find"):
+        try:
+            res_ovs = ov_cur.find().to_list(100)
+            if inspect.isawaitable(res_ovs):
+                res_ovs = await res_ovs
+            for ov in (res_ovs or []):
+                for st_item in (ov.get("styles") or []):
+                    sid = str(st_item.get("myntra_style_id") or "").strip()
+                    st_c = str(st_item.get("style_code") or "").strip()
+                    erp_c = str(st_item.get("erp_style_code") or "").strip()
+                    if erp_c:
+                        if sid:
+                            learned_erp_by_sid[sid] = erp_c
+                        if st_c:
+                            learned_erp_by_st[st_c.lower()] = erp_c
+        except Exception:
+            pass
+
+    # Build comprehensive multi-key sku_map index
+    from routes.sku_map import split_leaf_sku
+    sku_map_index = {}
     for sm in all_sku_maps:
-        if sm.get("external_sku"):
-            map_by_ext[str(sm["external_sku"]).strip().lower()] = sm
+        keys_to_index = []
+        ext = sm.get("external_sku")
+        if ext:
+            keys_to_index.append(str(ext).strip().lower())
+            gid, _, _ = split_leaf_sku(str(ext))
+            if gid:
+                keys_to_index.append(str(gid).strip().lower())
+        ext_k = sm.get("external_sku_key")
+        if ext_k:
+            keys_to_index.append(str(ext_k).strip().lower())
+        for sk in (sm.get("sample_skus") or []):
+            if sk:
+                keys_to_index.append(str(sk).strip().lower())
+                gid, _, _ = split_leaf_sku(str(sk))
+                if gid:
+                    keys_to_index.append(str(gid).strip().lower())
+        for sz_k, sz_v in (sm.get("size_map") or {}).items():
+            if isinstance(sz_v, str) and len(sz_v) > 3:
+                keys_to_index.append(str(sz_v).strip().lower())
+        for k in keys_to_index:
+            sku_map_index[k] = sm
+
+    def resolve_style_info(sku_str: str, sid_str: str, st_root_str: str, col_str: str, raw_style_str: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str], Optional[float], bool]:
+        raw_sc = f"{raw_style_str}_{col_str}" if col_str else raw_style_str
+        st_sc = f"{st_root_str}_{col_str}" if col_str else st_root_str
+        cands = [
+            sku_str,
+            raw_sc,
+            st_sc,
+            raw_sc.replace("_", "-"),
+            st_sc.replace("_", "-"),
+            raw_style_str,
+            st_root_str,
+            raw_style_str.replace("_", "-"),
+            st_root_str.replace("_", "-"),
+            sid_str,
+        ]
+
+        # 1. Match in sku_map
+        sm = None
+        for c in cands:
+            if c and c.strip().lower() in sku_map_index:
+                sm = sku_map_index[c.strip().lower()]
+                break
+
+        erp_code = ""
+        st_doc = None
+        if sm:
+            erp_code = sm.get("internal_style_code") or sm.get("style_code") or sm.get("erp_style_code") or ""
+            if erp_code and erp_code.lower() in style_by_code:
+                st_doc = style_by_code[erp_code.lower()]
+
+        # 2. Check marketplace_style_color_mapping
+        if not erp_code and platform:
+            mp_key = platform.strip().lower()
+            erp_code = (
+                mscm_index.get((mp_key, raw_style_str.lower(), col_str.lower()))
+                or mscm_index.get((mp_key, st_root_str.lower(), col_str.lower()))
+                or mscm_index.get((mp_key, raw_style_str.lower(), ""))
+                or mscm_index.get((mp_key, st_root_str.lower(), ""))
+                or ""
+            )
+            if erp_code and erp_code.lower() in style_by_code:
+                st_doc = style_by_code[erp_code.lower()]
+
+        # 3. Check learned mappings from existing reconciliation overviews
+        if not erp_code and sid_str and sid_str in learned_erp_by_sid:
+            erp_code = learned_erp_by_sid[sid_str]
+            if erp_code.lower() in style_by_code:
+                st_doc = style_by_code[erp_code.lower()]
+
+        if not erp_code:
+            for c in cands:
+                if c and c.strip().lower() in learned_erp_by_st:
+                    erp_code = learned_erp_by_st[c.strip().lower()]
+                    if erp_code.lower() in style_by_code:
+                        st_doc = style_by_code[erp_code.lower()]
+                    break
+
+        # 4. Check direct style match in db.styles
+        if not st_doc:
+            for c in cands:
+                if c and c.strip().lower() in style_by_code:
+                    st_doc = style_by_code[c.strip().lower()]
+                    erp_code = st_doc.get("code", "")
+                    break
+
+        # 5. Image resolution: prioritize real images (ImageKit, custom upload, ERP style image)
+        img = None
+        for c in cands:
+            if c and c.strip().lower() in custom_photos:
+                img = custom_photos[c.strip().lower()]
+                break
+        if not img and sm and sm.get("image_url") and not str(sm["image_url"]).startswith("/company/"):
+            img = sm["image_url"]
+        if not img and st_doc:
+            for f in ["image_url", "image_display_url", "image_thumbnail_url"]:
+                val = st_doc.get(f)
+                if val and not str(val).startswith("/company/"):
+                    img = val
+                    break
+            if not img and isinstance(st_doc.get("images"), list) and st_doc["images"]:
+                first_img = st_doc["images"][0]
+                if isinstance(first_img, str) and first_img and not first_img.startswith("/company/"):
+                    img = first_img
+                elif isinstance(first_img, dict) and first_img.get("url"):
+                    img = first_img["url"]
+        if not img and sm and sm.get("image_url"):
+            img = sm["image_url"]
+        if not img and st_doc and st_doc.get("image_url"):
+            img = st_doc.get("image_url")
+
+        # 6. Cost resolution: prioritize Style Master preset COGS & BOM calculations
+        cost = None
+        if st_doc:
+            c_dict = st_doc.get("costing") or {}
+            c_cost = float(c_dict.get("total_cost") or c_dict.get("production_cost") or 0)
+            if c_cost > 0:
+                cost = c_cost
+            else:
+                try:
+                    from routes.styles import compute_style_costing
+                    c_calc = compute_style_costing(st_doc, color=col_str)
+                    if c_calc and float(c_calc.get("total_cost", 0)) > 0:
+                        cost = float(c_calc["total_cost"])
+                except Exception:
+                    pass
+            if not cost:
+                for f in ["total_cost", "production_cost", "unit_cost", "standard_cost", "cost", "bom_cost"]:
+                    v = float(st_doc.get(f) or 0)
+                    if v > 0:
+                        cost = v
+                        break
+
+        is_mapped = bool(erp_code or st_doc)
+        return erp_code, st_doc, img, cost, is_mapped
 
     sku_bifurcation: List[Dict[str, Any]] = []
     style_groups: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
@@ -2672,7 +2864,13 @@ async def _build_pnl_reconciliation_overview(
     for r in sku_rows:
         sku = str(r.get("sku_code") or "").strip()
         brand = str(r.get("brand_name") or "").strip()
+        sid = str(r.get("style_id") or r.get("Style ID") or "").strip()
+        m_raw = re.match(r"^(.*?)[-_]([A-Za-z]{1,4})[-_]([0-9]{1,2}(?:\.[0-9])?)$", sku)
+        raw_st = m_raw.group(1).strip() if m_raw else sku
         st_root, col, sz = _parse_sku_style_and_size(sku)
+
+        raw_sc = f"{raw_st}_{col}" if col else raw_st
+        group_key = sid if sid else raw_sc
 
         gross_units = int(float(r.get("GrossSalesUnit") or 0))
         ret_units = int(float(r.get("ReturnsandCancellationsUnit") or 0))
@@ -2696,23 +2894,16 @@ async def _build_pnl_reconciliation_overview(
         pending_amt = float(r.get("AmountPending") or 0.0)
 
         # Style resolution & cost lookup
-        resolved_style = map_by_ext.get(st_root.lower()) or map_by_ext.get(sku.lower())
+        erp_c, st_doc, img_c, preset_cogs, is_mapped = resolve_style_info(sku, sid, st_root, col, raw_st)
         u_cost = default_unit_cost
-        if st_root in saved_costs:
+        if preset_cogs is not None and preset_cogs > 0:
+            u_cost = float(preset_cogs)
+        elif sid in saved_costs:
+            u_cost = saved_costs[sid]
+        elif raw_sc in saved_costs:
+            u_cost = saved_costs[raw_sc]
+        elif st_root in saved_costs:
             u_cost = saved_costs[st_root]
-        elif resolved_style and resolved_style.get("style_code"):
-            st_doc = style_by_code.get(resolved_style["style_code"].lower())
-            if st_doc:
-                from routes.styles import compute_style_costing
-                b_cost = compute_style_costing(st_doc).get("total_cost", 0)
-                if b_cost and float(b_cost) > 0:
-                    u_cost = float(b_cost)
-        elif st_root.lower() in style_by_code:
-            st_doc = style_by_code[st_root.lower()]
-            from routes.styles import compute_style_costing
-            b_cost = compute_style_costing(st_doc).get("total_cost", 0)
-            if b_cost and float(b_cost) > 0:
-                u_cost = float(b_cost)
 
         cogs = round(net_units * u_cost, 2)
         gross_prof = round(net_sales - cogs, 2)
@@ -2722,13 +2913,9 @@ async def _build_pnl_reconciliation_overview(
         sku_bifurcation.append({
             "sku_code": sku,
             "style_root": st_root,
-            "myntra_style_id": str(r.get("style_id") or r.get("Style ID") or "").strip(),
-            "erp_style_code": (resolved_style.get("internal_style_code") or resolved_style.get("style_code")) if resolved_style else (style_by_code[st_root.lower()].get("code") if st_root.lower() in style_by_code else ""),
-            "image_url": (
-                (style_by_code[st_root.lower()].get("image_url") if st_root.lower() in style_by_code else None)
-                or (resolved_style.get("image_url") if resolved_style else None)
-                or get_footwear_placeholder_image(st_root)
-            ),
+            "myntra_style_id": sid,
+            "erp_style_code": erp_c,
+            "image_url": img_c or "",
             "color": col,
             "size": sz,
             "brand": brand,
@@ -2755,32 +2942,19 @@ async def _build_pnl_reconciliation_overview(
             "gross_profit": gross_prof,
             "contribution_after_platform": contrib,
             "margin_pct": margin,
-            "is_mapped": bool(resolved_style or st_root.lower() in style_by_code),
+            "is_mapped": is_mapped,
         })
 
-        g = style_groups[st_root]
-        g["style_code"] = st_root
+        g = style_groups[group_key]
+        g["style_code"] = raw_st
+        g["style_root"] = st_root
         g["brand"] = brand or g["brand"]
-        g["style_name"] = st_root
-        
-        sid = str(r.get("style_id") or r.get("Style ID") or "").strip()
+        g["style_name"] = raw_st
         if sid:
             g["myntra_style_id"] = sid
-            
-        erp_c = (
-            (resolved_style.get("internal_style_code") or resolved_style.get("style_code")) if resolved_style else None
-        ) or (
-            style_by_code[st_root.lower()].get("code") if st_root.lower() in style_by_code else None
-        ) or g.get("erp_style_code") or ""
         if erp_c:
             g["erp_style_code"] = erp_c
-
-        if "image_url" not in g or not g["image_url"]:
-            img_c = (
-                (style_by_code[st_root.lower()].get("image_url") if st_root.lower() in style_by_code else None)
-                or (resolved_style.get("image_url") if resolved_style else None)
-                or get_footwear_placeholder_image(st_root)
-            )
+        if img_c:
             g["image_url"] = img_c
 
         if col:
@@ -2814,7 +2988,8 @@ async def _build_pnl_reconciliation_overview(
     tot_sold_rev = 0.0
     tot_prod_cost = 0.0
 
-    for st_code, g in sorted(style_groups.items(), key=lambda kv: kv[1]["net_sold_qty"], reverse=True):
+    for st_key, g in sorted(style_groups.items(), key=lambda kv: kv[1]["net_sold_qty"], reverse=True):
+        st_code = g["style_code"] or st_key
         u_cost = g["unit_production_cost"]
         total_cogs = round(g["total_production_cost"], 2)
         gross_profit = round(g["gross_profit"], 2)
@@ -2834,9 +3009,10 @@ async def _build_pnl_reconciliation_overview(
 
         styles_list.append({
             "style_code":            st_code,
+            "style_root":            g.get("style_root") or st_code,
             "myntra_style_id":       g.get("myntra_style_id") or "",
             "erp_style_code":        g.get("erp_style_code") or "",
-            "image_url":             g.get("image_url") or get_footwear_placeholder_image(st_code),
+            "image_url":             g.get("image_url") or "",
             "brand":                 g["brand"] or "Generic",
             "style_name":            g["style_name"] or st_code,
             "article_type":          g["article_type"] or "Footwear",
@@ -3272,6 +3448,7 @@ async def import_monthly_report(
             "is_pnl_report": True,
             "month": style_overview["month"],
             "seller_id": seller_id,
+            "total_rows": len(style_overview["sku_bifurcation"]),
             "pnl_summary": pnl_summary,
             "operational_expenses": style_overview.get("operational_expenses"),
             "header_row_1_based": 1,
@@ -4031,7 +4208,11 @@ async def update_monthly_style_cost(
     tot_prod_cost = 0.0
 
     for s in styles:
-        if s.get("style_code") == style_code:
+        s_code = str(s.get("style_code") or "").strip().lower()
+        s_root = str(s.get("style_name") or s.get("style_root") or "").strip().lower()
+        s_sid = str(s.get("myntra_style_id") or "").strip().lower()
+        target = style_code.lower()
+        if s_code == target or s_root == target or s_sid == target or s_code.startswith(f"{target}_") or s_code.startswith(f"{target}-"):
             s["unit_production_cost"] = round(new_unit_cost, 2)
             cogs = round(s.get("net_sold_qty", 0) * new_unit_cost, 2)
             s["total_production_cost"] = cogs
@@ -4060,7 +4241,11 @@ async def update_monthly_style_cost(
     sku_bifurcation = doc.get("sku_bifurcation", [])
     if sku_bifurcation:
         for sk in sku_bifurcation:
-            if str(sk.get("style_root") or "").strip().lower() == style_code.lower():
+            sk_root = str(sk.get("style_root") or "").strip().lower()
+            sk_code = str(sk.get("sku_code") or "").strip().lower()
+            sk_sid = str(sk.get("myntra_style_id") or "").strip().lower()
+            target = style_code.lower()
+            if sk_root == target or sk_sid == target or target in sk_code or sk_code.startswith(target):
                 sk["unit_production_cost"] = round(new_unit_cost, 2)
                 sk_cogs = round(float(sk.get("net_units") or 0) * new_unit_cost, 2)
                 sk["total_production_cost"] = sk_cogs
