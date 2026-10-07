@@ -97,7 +97,9 @@ def production_job(admin_session, worker_token, second_worker):
     actual_wid = worker_token["worker_id"]
 
     # Create a style with BOM and stock
+    m_code = f"MAT-WRK-{int(time.time()*1000)}"
     m_res = admin_session.post(f"{API_URL}/materials", json={
+        "code": m_code,
         "name": "Worker Style Material",
         "category": "upper",
         "unit": "sqft",
@@ -106,7 +108,8 @@ def production_job(admin_session, worker_token, second_worker):
     if m_res.status_code == 200:
         mat_doc = m_res.json()
     else:
-        mat_doc = admin_session.get(f"{API_URL}/materials").json()[0]
+        mats = admin_session.get(f"{API_URL}/materials").json()
+        mat_doc = mats[0] if mats else {}
     mat_id = mat_doc.get("id") or str(mat_doc.get("_id"))
     admin_session.post(f"{API_URL}/inventory/movements", json={
         "material_id": mat_id,
@@ -384,7 +387,13 @@ class TestReadyForPickup:
             # Stage must NOT have changed
             assert job_doc["stage"] == "cutting"
 
-    def test_notification_created(self, admin_session):
+    def test_notification_created(self, admin_session, worker_session, rfp_job):
+        # Ensure at least one ready-for-pickup event exists for notifications check
+        job_id = rfp_job["job_id"]
+        worker_session.patch(
+            f"{API_URL}/my/tasks/{job_id}/ready-for-pickup",
+            json={"completed_qty": 8, "notes": "Batch 1 done"},
+        )
         r = admin_session.get(f"{API_URL}/notifications")
         assert r.status_code == 200
         notifs = r.json()

@@ -6,11 +6,43 @@ from routes.pos import compute_po_profitability
 
 @pytest.mark.anyio
 async def test_stage_1_funding_calculation():
-    client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
-    db = client["ssk_footwear_erp"]
+    import os
+    mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+    db_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
+    client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+
+    created_test_po = False
     po = await db.pos.find_one({"line_items": {"$exists": True, "$ne": []}})
     if not po:
         po = await db.pos.find_one()
+    if not po:
+        created_test_po = True
+        await db.styles.update_one(
+            {"code": "TEST-STAGE1-STYLE"},
+            {"$set": {
+                "name": "Stage 1 Style",
+                "bom": [{"material_name": "Leather", "rate": 100.0, "quantity": 1.0}],
+                "labor": [{"stage": "Cutting", "rate": 20.0}],
+            }},
+            upsert=True,
+        )
+        po_doc = {
+            "po_number": "PO-STAGE1-TEST",
+            "client_name": "Test Client",
+            "total_quantity": 100,
+            "status": "in_production",
+            "line_items": [{
+                "style_code": "TEST-STAGE1-STYLE",
+                "quantity": 100,
+                "unit_price": 500.0,
+                "amount": 50000.0,
+            }],
+        }
+        res_po = await db.pos.insert_one(po_doc)
+        po_doc["_id"] = res_po.inserted_id
+        po = po_doc
+
     assert po is not None, "No PO found in MongoDB"
     po_id = str(po["_id"])
 
@@ -49,3 +81,6 @@ async def test_stage_1_funding_calculation():
         assert expected_item_bom >= 0
     finally:
         await db.recurring_expenses.delete_many({"category": "TEST_INVESTOR_OPEX"})
+        if created_test_po and po and "_id" in po:
+            await db.pos.delete_one({"_id": po["_id"]})
+            await db.styles.delete_one({"code": "TEST-STAGE1-STYLE"})

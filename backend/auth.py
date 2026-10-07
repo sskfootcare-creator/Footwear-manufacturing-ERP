@@ -435,6 +435,8 @@ async def get_current_user_factory(db):
                     path = getattr(request, "url", None) and getattr(request.url, "path", None)
                     if path:
                         check_route_module_access(w_user, path)
+                    return w_user
+
                 # ── Investor tokens resolve from db.investors, not db.users ───────
                 if payload.get("role") == "investor":
                     investor = await active_db.investors.find_one({"_id": ObjectId(payload["sub"])})

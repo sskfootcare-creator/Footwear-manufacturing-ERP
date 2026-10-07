@@ -9,16 +9,49 @@ from auth import create_access_token
 
 @pytest.fixture
 async def e2e_env():
-    client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
-    db = client["ssk_footwear_erp"]
+    import os
+    from bson import ObjectId
+    mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+    db_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
+    client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
 
-    # 1. Find a real PO from db.pos
+    created_pos = []
+    # 1. Find or create a real PO from db.pos
     real_po = await db.pos.find_one({"line_items": {"$exists": True, "$ne": []}})
     if not real_po:
         real_po = await db.pos.find_one()
-    assert real_po is not None, "Real PO required for testing"
+    if not real_po:
+        await db.styles.update_one(
+            {"code": "TEST-INV-E2E-STYLE"},
+            {"$set": {
+                "name": "Investor E2E Style",
+                "bom": [{"material_name": "Sole Material", "rate": 100.0, "quantity": 1.0}],
+                "labor": [{"stage": "Cutting", "rate": 20.0}],
+            }},
+            upsert=True,
+        )
+        real_po_doc = {
+            "po_number": f"PO-INV-E2E-1-{ObjectId()}",
+            "client_name": "Metro Retailers",
+            "total_quantity": 500,
+            "quantity": 500,
+            "status": "in_production",
+            "line_items": [
+                {
+                    "style_code": "TEST-INV-E2E-STYLE",
+                    "quantity": 500,
+                    "unit_price": 500.0,
+                    "amount": 250000.0,
+                }
+            ],
+        }
+        res1 = await db.pos.insert_one(real_po_doc)
+        real_po_doc["_id"] = res1.inserted_id
+        real_po = real_po_doc
+        created_pos.append(real_po["_id"])
 
-    # Find a second real PO for reinvestment target
+    # Find or create a second real PO for reinvestment target
     pos = await db.pos.find().limit(5).to_list(5)
     target_po = None
     for p in pos:
@@ -26,12 +59,42 @@ async def e2e_env():
             target_po = p
             break
     if not target_po:
-        target_po = real_po
+        target_po_doc = {
+            "po_number": f"PO-INV-E2E-2-{ObjectId()}",
+            "client_name": "Target Retailers",
+            "total_quantity": 500,
+            "quantity": 500,
+            "status": "in_production",
+            "line_items": [
+                {
+                    "style_code": "TEST-INV-E2E-STYLE",
+                    "quantity": 500,
+                    "unit_price": 500.0,
+                    "amount": 250000.0,
+                }
+            ],
+        }
+        res2 = await db.pos.insert_one(target_po_doc)
+        target_po_doc["_id"] = res2.inserted_id
+        target_po = target_po_doc
+        created_pos.append(target_po["_id"])
 
-    # Find real admin user
+    # Find or create admin user
     admin_user = await db.users.find_one({"role": "admin"})
     if not admin_user:
         admin_user = await db.users.find_one()
+    if not admin_user:
+        from auth import hash_password
+        admin_doc = {
+            "email": os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com"),
+            "password_hash": hash_password(os.environ.get("ADMIN_PASSWORD", "Admin@123")),
+            "role": "admin",
+            "name": "Admin User",
+            "active": True,
+        }
+        res = await db.users.insert_one(admin_doc)
+        admin_doc["_id"] = res.inserted_id
+        admin_user = admin_doc
     admin_id = str(admin_user["_id"])
     admin_email = admin_user.get("email", "admin@example.com")
 
@@ -54,6 +117,8 @@ async def e2e_env():
     # Cleanup after test
     await db.investors.delete_many({"$or": [{"email": test_email}, {"phone": test_phone}]})
     await db.investor_advances.delete_many({"investor_name": "Test Titan Capital"})
+    if created_pos:
+        await db.pos.delete_many({"_id": {"$in": created_pos}})
 
 
 @pytest.mark.anyio

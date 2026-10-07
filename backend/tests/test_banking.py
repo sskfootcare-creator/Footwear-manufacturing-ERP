@@ -1361,7 +1361,15 @@ async def test_unmatched_erp_candidates_listing(monkeypatch):
 
     mock_db.online_settlements.find = MagicMock(return_value=MagicMock(sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=settlements)))))))
     mock_db.expenses.find = MagicMock(return_value=MagicMock(sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=expenses)))))))
-    mock_db.payments.find = MagicMock(return_value=MagicMock(sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=vendor_payments)))))))
+
+    def mock_payments_find(q=None, *args, **kwargs):
+        if isinstance(q, dict) and "$nin" in q.get("type", {}) and "vendor_payment" in q["type"]["$nin"]:
+            ret = []
+        else:
+            ret = vendor_payments
+        return MagicMock(sort=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(to_list=AsyncMock(return_value=ret))))))
+
+    mock_db.payments.find = MagicMock(side_effect=mock_payments_find)
 
     req = MagicMock()
     res = await routes.banking.get_unmatched_erp_candidates(

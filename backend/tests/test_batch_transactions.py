@@ -32,12 +32,27 @@ async def test_batch_funding_and_bulk_repayment_transactions():
     8. Execute reinvestment for another batch into a 3rd PO.
     9. Verify margin cash payout and principal rollover.
     """
-    motor_client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
-    db = motor_client["ssk_footwear_erp"]
+    import os
+    mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+    db_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
+    motor_client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+    db = motor_client[db_name]
 
     admin_user = await db.users.find_one({"role": "admin"})
     if not admin_user:
         admin_user = await db.users.find_one()
+    if not admin_user:
+        from auth import hash_password
+        admin_doc = {
+            "email": os.environ.get("ADMIN_EMAIL", "admin@sskfootcare.com"),
+            "password_hash": hash_password(os.environ.get("ADMIN_PASSWORD", "Admin@123")),
+            "role": "admin",
+            "name": "Admin User",
+            "active": True,
+        }
+        res = await db.users.insert_one(admin_doc)
+        admin_doc["_id"] = res.inserted_id
+        admin_user = admin_doc
     admin_id = str(admin_user["_id"])
     admin_email = admin_user.get("email", "admin@sskfootwear.com")
 
