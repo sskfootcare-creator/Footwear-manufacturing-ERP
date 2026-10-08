@@ -1167,6 +1167,25 @@ export default function MonthlyPnLReconciliation() {
   const [showOpModal, setShowOpModal] = useState(false);
   const [showImportDrawer, setShowImportDrawer] = useState(false);
   const [previewImage, setPreviewImage] = useState(null);
+  const [syncingBom, setSyncingBom] = useState(false);
+
+  const handleSyncBom = async () => {
+    setSyncingBom(true);
+    try {
+      const res = await http.post("/online-orders/monthly-reconciliation-overview/sync-bom", {
+        platform: platform || (data?.overview?.platform ?? "myntra"),
+        month: month || data?.overview?.month || undefined,
+      });
+      if (res?.data?.overview) {
+        setData((prev) => (prev ? { ...prev, overview: res.data.overview } : { overview: res.data.overview }));
+      }
+      await loadData(true);
+    } catch (e) {
+      alert(e.response?.data?.detail || "Failed to sync Style Master BOM costs");
+    } finally {
+      setSyncingBom(false);
+    }
+  };
 
   const loadData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -1301,11 +1320,24 @@ export default function MonthlyPnLReconciliation() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <BtnSecondary onClick={loadData} disabled={loading} className="text-xs">
+            <BtnSecondary onClick={loadData} disabled={loading || syncingBom} className="text-xs">
               <span className="flex items-center gap-1.5">
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
               </span>
             </BtnSecondary>
+            {overview && (
+              <BtnSecondary
+                onClick={handleSyncBom}
+                disabled={loading || syncingBom}
+                className="text-xs border-indigo-200 bg-indigo-50/60 text-indigo-700 hover:bg-indigo-100/80"
+                title="Sync Unit Costs with Style Master BOMs"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Layers className={`w-3.5 h-3.5 ${syncingBom ? "animate-spin" : ""}`} />
+                  {syncingBom ? "Syncing BOMs…" : "Sync BOM Costs"}
+                </span>
+              </BtnSecondary>
+            )}
             <BtnPrimary onClick={() => setShowImportDrawer(true)} className="text-xs">
               <span className="flex items-center gap-1.5">
                 <Upload className="w-3.5 h-3.5" /> Import Monthly PnL

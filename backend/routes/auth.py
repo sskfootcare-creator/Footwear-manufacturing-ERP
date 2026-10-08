@@ -372,29 +372,30 @@ async def login(payload: LoginInput, request: Request, response: Response):
                 user = user_doc
 
         # F-003: Persist refresh session
-        try:
-            from auth import JWT_ISSUER, JWT_AUDIENCE
-            r_payload = jwt.decode(
-                refresh,
-                get_jwt_secret(),
-                algorithms=[JWT_ALGORITHM],
-                issuer=JWT_ISSUER,
-                audience=JWT_AUDIENCE,
-            )
-            r_jti = r_payload.get("jti")
-            r_exp = r_payload.get("exp")
-            if r_jti:
-                exp_dt = datetime.fromtimestamp(r_exp, tz=timezone.utc) if r_exp else (datetime.now(timezone.utc) + timedelta(days=7))
-                await _maybe_await(db.refresh_tokens.insert_one({
-                    "user_id": uid,
-                    "jti": r_jti,
-                    "revoked": False,
-                    "expires_at": exp_dt,
-                    "created_at": _now_iso(),
-                    "ip": client_ip,
-                }))
-        except Exception as _r_err:
-            log.warning("Failed to persist initial refresh token: %s", _r_err)
+        if is_authenticated and refresh:
+            try:
+                from auth import JWT_ISSUER, JWT_AUDIENCE
+                r_payload = jwt.decode(
+                    refresh,
+                    get_jwt_secret(),
+                    algorithms=[JWT_ALGORITHM],
+                    issuer=JWT_ISSUER,
+                    audience=JWT_AUDIENCE,
+                )
+                r_jti = r_payload.get("jti")
+                r_exp = r_payload.get("exp")
+                if r_jti:
+                    exp_dt = datetime.fromtimestamp(r_exp, tz=timezone.utc) if r_exp else (datetime.now(timezone.utc) + timedelta(days=7))
+                    await _maybe_await(db.refresh_tokens.insert_one({
+                        "user_id": uid,
+                        "jti": r_jti,
+                        "revoked": False,
+                        "expires_at": exp_dt,
+                        "created_at": _now_iso(),
+                        "ip": client_ip,
+                    }))
+            except Exception as _r_err:
+                log.warning("Failed to persist initial refresh token: %s", _r_err)
 
     if not is_authenticated or (user and not user.get("active", True)):
         attempt_count = await record_login_failure(client_ip)

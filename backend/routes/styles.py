@@ -2296,6 +2296,19 @@ async def update_style(sid: str, payload: StyleIn, request: Request):
     await db.styles.update_one({"_id": oid(sid)}, {"$set": update})
     d = stringify(await db.styles.find_one({"_id": oid(sid)}))
     d["costing"] = await compute_style_costing_async(d, db)
+    if d.get("costing"):
+        await db.styles.update_one({"_id": oid(sid)}, {"$set": {"costing": d["costing"]}})
+
+    # Propagate updated BOM costing to all monthly reconciliation overviews
+    style_code = d.get("code") or existing.get("code")
+    new_bom_cost = float(d.get("costing", {}).get("total_cost") or 0.0)
+    if style_code and new_bom_cost > 0:
+        try:
+            from routes.online_orders import propagate_style_bom_to_monthly_overviews
+            await propagate_style_bom_to_monthly_overviews(style_code, new_bom_cost, db=db)
+        except Exception as _p_err:
+            log.warning(f"Failed to propagate style BOM cost to monthly overviews: {_p_err}")
+
     return d
 
 

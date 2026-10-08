@@ -4079,6 +4079,224 @@ class UpdateOperationalCostPayload(BaseModel):
     other_basic_sundry: Optional[float] = None
 
 
+class SyncBomPayload(BaseModel):
+    platform: Optional[str] = "myntra"
+    month: Optional[str] = None
+
+
+async def sync_monthly_reconciliation_with_style_master(overview_doc: dict, db=None) -> bool:
+    """Synchronizes styles in an overview document with the latest Style Master BOM costs and ERP mappings.
+    Returns True if any costs, mappings, or images were updated.
+    """
+    if not overview_doc or not isinstance(overview_doc, dict):
+        return False
+    styles = overview_doc.get("styles", [])
+    if not styles:
+        return False
+
+    if db is None:
+        db = get_db()
+
+    # 1. Fetch styles from Style Master
+    all_styles_cur = getattr(db, "styles", None)
+    all_styles = []
+    if all_styles_cur is not None and hasattr(all_styles_cur, "find"):
+        try:
+            res = all_styles_cur.find({}).to_list(3000)
+            if inspect.isawaitable(res):
+                res = await res
+            all_styles = res or []
+        except Exception:
+            all_styles = []
+
+    style_by_code = {str(s.get("code") or "").strip().lower(): s for s in all_styles if s.get("code")}
+    style_by_name = {str(s.get("name") or "").strip().lower(): s for s in all_styles if s.get("name")}
+    style_by_id = {str(s.get("_id")): s for s in all_styles if s.get("_id")}
+
+    # 2. Fetch sku_map index
+    all_sku_maps = []
+    sku_map_cur = getattr(db, "sku_map", None)
+    if sku_map_cur is not None and hasattr(sku_map_cur, "find"):
+        try:
+            res_m = sku_map_cur.find({}).to_list(3000)
+            if inspect.isawaitable(res_m):
+                res_m = await res_m
+            all_sku_maps = res_m or []
+        except Exception:
+            all_sku_maps = []
+
+    from routes.sku_map import split_leaf_sku
+    sku_map_index = {}
+    for sm in all_sku_maps:
+        for k in [sm.get("external_sku"), sm.get("external_sku_key"), sm.get("external_style_name"), sm.get("external_style_id")]:
+            if k:
+                sku_map_index[str(k).strip().lower()] = sm
+                gid, _, _ = split_leaf_sku(str(k))
+                if gid:
+                    sku_map_index[str(gid).strip().lower()] = sm
+        for sk in (sm.get("sample_skus") or []):
+            if sk:
+                sku_map_index[str(sk).strip().lower()] = sm
+
+    updated = False
+    from routes.styles import compute_style_costing
+
+    for s in styles:
+        erp_c = str(s.get("erp_style_code") or "").strip()
+        st_c = str(s.get("style_code") or "").strip()
+        sid = str(s.get("myntra_style_id") or "").strip()
+        st_root = str(s.get("style_root") or s.get("style_name") or "").strip()
+
+        st_doc = None
+        # Try direct lookup by erp_style_code
+        if erp_c:
+            st_doc = style_by_code.get(erp_c.lower()) or style_by_name.get(erp_c.lower()) or style_by_id.get(erp_c)
+
+        # Try finding mapped style via sku_map_index
+        if not st_doc:
+            for k in [sid, st_c, st_root]:
+                if k and k.lower() in sku_map_index:
+                    sm = sku_map_index[k.lower()]
+                    mapped_erp = sm.get("internal_style_code") or sm.get("style_code") or sm.get("erp_style_code") or sm.get("style_id")
+                    if mapped_erp:
+                        st_doc = style_by_code.get(str(mapped_erp).lower()) or style_by_name.get(str(mapped_erp).lower()) or style_by_id.get(str(mapped_erp))
+                        if st_doc:
+                            real_code = st_doc.get("code", "")
+                            if real_code and real_code != s.get("erp_style_code"):
+                                s["erp_style_code"] = real_code
+                                updated = True
+                            break
+
+        # Try direct style match by style_code or style_root
+        if not st_doc:
+            for k in [st_c, st_root]:
+                if k and k.lower() in style_by_code:
+                    st_doc = style_by_code[k.lower()]
+                    real_code = st_doc.get("code", "")
+                    if real_code and real_code != s.get("erp_style_code"):
+                        s["erp_style_code"] = real_code
+                        updated = True
+                    break
+
+        if st_doc:
+            # Extract latest BOM cost
+            cost = None
+            c_dict = st_doc.get("costing") or {}
+            c_cost = float(c_dict.get("total_cost") or c_dict.get("production_cost") or 0)
+            if c_cost > 0:
+                cost = c_cost
+            else:
+                try:
+                    first_col = s.get("colors", [None])[0] if s.get("colors") else None
+                    calc = compute_style_costing(st_doc, color=first_col)
+                    b_cost = float(calc.get("total_cost") or 0)
+                    if b_cost > 0:
+                        cost = b_cost
+                except Exception:
+                    pass
+            if not cost:
+                for cf in ["production_cost", "total_cost", "unit_cost", "standard_cost"]:
+                    v = float(st_doc.get(cf) or 0)
+                    if v > 0:
+                        cost = v
+                        break
+
+            if cost and cost > 0:
+                current_cost = float(s.get("unit_production_cost") or 0)
+                if abs(current_cost - cost) >= 0.01:
+                    s["unit_production_cost"] = round(cost, 2)
+                    net_u = int(s.get("net_sold_qty") or 0)
+                    cogs = round(net_u * cost, 2)
+                    s["total_production_cost"] = cogs
+                    sold_sp = float(s.get("net_sold_seller_price") or 0)
+                    s["gross_profit"] = round(sold_sp - cogs, 2)
+                    s["margin_pct"] = round((s["gross_profit"] / sold_sp * 100), 1) if sold_sp > 0 else 0.0
+                    earnings = float(s.get("platform_earnings") or 0)
+                    s["contribution"] = round(earnings - cogs, 2)
+                    updated = True
+
+            # Sync real image from Style Master
+            if not s.get("image_url") or str(s.get("image_url")).startswith("/company/"):
+                for img_k in ["image_url", "image_display_url", "image_thumbnail_url"]:
+                    img_v = st_doc.get(img_k)
+                    if img_v and not str(img_v).startswith("/company/"):
+                        s["image_url"] = img_v
+                        updated = True
+                        break
+
+    if updated:
+        # Re-sync sku_bifurcation items
+        style_cost_map = {
+            str(s.get("myntra_style_id") or s.get("style_code")): s
+            for s in styles
+        }
+        for sk in overview_doc.get("sku_bifurcation", []):
+            sid_k = str(sk.get("myntra_style_id") or "")
+            st_k = str(sk.get("style_root") or "")
+            matched_s = style_cost_map.get(sid_k) or style_cost_map.get(st_k)
+            if matched_s:
+                u_cost = matched_s["unit_production_cost"]
+                sk["unit_production_cost"] = u_cost
+                if matched_s.get("erp_style_code"):
+                    sk["erp_style_code"] = matched_s["erp_style_code"]
+                if matched_s.get("image_url"):
+                    sk["image_url"] = matched_s["image_url"]
+                net_u = float(sk.get("net_units") or 0)
+                sk_cogs = round(net_u * u_cost, 2)
+                sk["total_production_cost"] = sk_cogs
+                sk["gross_profit"] = round(float(sk.get("net_sales") or 0) - sk_cogs, 2)
+
+        tot_cogs = round(sum(float(x.get("total_production_cost") or 0) for x in styles), 2)
+        overview_doc["total_cost_of_production"] = tot_cogs
+        sold_rev = float(overview_doc.get("net_sold_revenue", 0) or 0)
+        overview_doc["estimated_gross_profit"] = round(sold_rev - tot_cogs, 2)
+        overview_doc["overall_margin_pct"] = round((overview_doc["estimated_gross_profit"] / sold_rev * 100), 1) if sold_rev > 0 else 0.0
+
+        pnl_earn = float(overview_doc.get("platform_earnings") or overview_doc.get("pnl_summary", {}).get("earnings_on_platform") or 0)
+        allocated_op = float(overview_doc.get("allocated_operational_cost") or overview_doc.get("operational_expenses", {}).get("allocated_operational_cost") or 0)
+        overview_doc["actual_net_profit"] = round(pnl_earn - tot_cogs - allocated_op, 2)
+        overview_doc["actual_net_margin_pct"] = round((overview_doc["actual_net_profit"] / sold_rev * 100), 2) if sold_rev > 0 else 0.0
+
+        tot_sold_units = int(overview_doc.get("total_net_sold") or 0)
+        if tot_sold_units > 0:
+            fee_total = float(overview_doc.get("platform_fee_breakdown", {}).get("total_fees") or overview_doc.get("pnl_summary", {}).get("total_expenses") or 0)
+            overview_doc["unit_economics"] = {
+                "net_asp": round(sold_rev / tot_sold_units, 2),
+                "avg_unit_cogs": round(tot_cogs / tot_sold_units, 2),
+                "avg_platform_fee_per_unit": round(fee_total / tot_sold_units, 2),
+                "avg_overhead_per_pair": round(allocated_op / tot_sold_units, 2),
+                "unit_contribution": round((sold_rev / tot_sold_units) - (tot_cogs / tot_sold_units) - (fee_total / tot_sold_units), 2),
+                "net_profit_per_pair": round(overview_doc["actual_net_profit"] / tot_sold_units, 2),
+                "return_rate_pct": overview_doc.get("unit_economics", {}).get("return_rate_pct", 0),
+                "return_financial_damage": overview_doc.get("unit_economics", {}).get("return_financial_damage", 0),
+            }
+        overview_doc["updated_at"] = now_iso()
+
+        col = getattr(db, "online_monthly_reconciliation_overviews", None)
+        if col is not None and "_id" in overview_doc:
+            await _safe_update_one(col, {"_id": overview_doc["_id"]}, {"$set": overview_doc})
+
+    return updated
+
+
+async def propagate_style_bom_to_monthly_overviews(style_code: str, new_bom_cost: float, db=None) -> int:
+    """When a style's BOM is updated in Style Master, immediately update all monthly reconciliation
+    overviews containing this style or mapped to this style."""
+    if db is None:
+        db = get_db()
+    col = getattr(db, "online_monthly_reconciliation_overviews", None)
+    if col is None or not hasattr(col, "find"):
+        return 0
+
+    overviews = await _safe_to_list(col.find({}), limit=100)
+    updated_count = 0
+    for ov in overviews:
+        did_update = await sync_monthly_reconciliation_with_style_master(ov, db)
+        if did_update:
+            updated_count += 1
+    return updated_count
+
+
 @online_orders_router.get("/online-orders/reconciliation-summary")
 async def reconciliation_summary(
     request: Request,
@@ -4132,6 +4350,9 @@ async def reconciliation_summary(
     }
 
     if overview_doc and isinstance(overview_doc, dict):
+        # Automatically synchronize with Style Master BOM costs and ERP mapped style codes
+        await sync_monthly_reconciliation_with_style_master(overview_doc, db)
+
         tot_rows = overview_doc.get("total_orders", 0)
         packed = overview_doc.get("total_packed", 0)
         ret_cust = overview_doc.get("total_returned", 0)
@@ -4142,9 +4363,8 @@ async def reconciliation_summary(
 
         if "styles" in overview_doc and isinstance(overview_doc["styles"], list):
             for s in overview_doc["styles"]:
-                st = s.get("style_code", "")
-                if not s.get("image_url"):
-                    s["image_url"] = get_footwear_placeholder_image(st)
+                if not s.get("image_url") or str(s.get("image_url")).startswith("/company/"):
+                    s["image_url"] = ""
                 if "myntra_style_id" not in s:
                     s["myntra_style_id"] = ""
                 if "erp_style_code" not in s:
@@ -4179,6 +4399,35 @@ async def reconciliation_summary(
         })
 
     return res
+
+
+@online_orders_router.post("/online-orders/monthly-reconciliation-overview/sync-bom")
+async def sync_monthly_reconciliation_bom(
+    payload: SyncBomPayload,
+    request: Request,
+):
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = get_db()
+    platform_lc = (payload.platform or "myntra").lower().strip()
+    ov_query: Dict[str, Any] = {"platform": platform_lc}
+    if payload.month:
+        ov_query["month"] = payload.month.strip()
+
+    overview_doc = await _safe_find_one(
+        getattr(db, "online_monthly_reconciliation_overviews", None),
+        ov_query,
+        sort=[("month", -1), ("updated_at", -1)],
+    )
+    if not overview_doc:
+        raise HTTPException(404, f"Reconciliation overview for {platform_lc} / {payload.month or 'latest'} not found")
+
+    updated = await sync_monthly_reconciliation_with_style_master(overview_doc, db)
+    return {
+        "ok": True,
+        "updated": updated,
+        "overview": stringify(overview_doc),
+    }
 
 
 @online_orders_router.put("/online-orders/monthly-reconciliation-overview/cost")
