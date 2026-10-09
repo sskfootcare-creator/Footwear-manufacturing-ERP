@@ -34,6 +34,7 @@ export default function Picklists() {
   const [channelFilter, setChannel] = useState("");
   const [search, setSearch]     = useState("");
   const [openId, setOpenId]     = useState(null);
+  const [mappingErrors, setMappingErrors] = useState([]);
 
   async function load() {
     setLoading(true); setErr("");
@@ -67,7 +68,21 @@ export default function Picklists() {
       link.click();
       link.parentNode.removeChild(link);
     } catch (err) {
-      setErr(friendlyAxiosError(err));
+      if (err.response && err.response.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data.errors) {
+            setMappingErrors(data.errors);
+            return;
+          }
+          setErr(data.message || friendlyAxiosError(err));
+        } catch (e) {
+          setErr(friendlyAxiosError(err));
+        }
+      } else {
+        setErr(friendlyAxiosError(err));
+      }
     } finally {
       setLoading(false);
       e.target.value = "";
@@ -163,6 +178,28 @@ export default function Picklists() {
       </div>
 
       {openId && <PicklistDrawer id={openId} onClose={() => setOpenId(null)} onChanged={load} />}
+      
+      {mappingErrors.length > 0 && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div className="p-4 border-b flex justify-between items-center bg-red-50 text-red-800 rounded-t-lg">
+              <h2 className="text-lg font-bold">Review: Mapping Errors Found</h2>
+              <button onClick={() => setMappingErrors([])}><X className="w-5 h-5 hover:text-red-900" /></button>
+            </div>
+            <div className="p-4 overflow-y-auto">
+              <p className="mb-4 text-sm text-slate-700">The CSV processor found SKUs that are not mapped to any internal Style Name. Please resolve these mappings in the <strong>SKU Map</strong> tab before generating the picklist.</p>
+              <ul className="list-disc pl-5 space-y-2 text-sm text-red-600">
+                {mappingErrors.map((eStr, i) => (
+                  <li key={i}>{eStr}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="p-4 border-t flex justify-end">
+              <BtnSecondary onClick={() => setMappingErrors([])}>Close</BtnSecondary>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

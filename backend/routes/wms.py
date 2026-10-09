@@ -33,6 +33,8 @@ wms_router = APIRouter(prefix="/api", tags=["Warehouse Management System (WMS)"]
 async def process_myntra_picklist(request: Request, file: UploadFile = File(...)):
     """Process Myntra picklist CSV to flatten quantities and add required columns."""
     from routes.sku_map import _resolve_marketplace_sku
+    from fastapi.responses import JSONResponse
+    from bson import ObjectId
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     
     if not file.filename.endswith(".csv"):
@@ -64,10 +66,11 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
             fieldnames.append(new_col)
             
     output_rows = []
+    errors = []
     seal_counter = 1
     bag_counter = 1
     
-    for row in reader:
+    for idx, row in enumerate(reader, start=2): # 1 is header
         try:
             qty_str = str(row.get(qty_col, "1")).strip()
             qty = int(float(qty_str)) if qty_str else 1
@@ -81,13 +84,22 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         size = ""
         if sku:
             resolved = await _resolve_marketplace_sku("myntra", sku, db)
-            if resolved:
-                style_name = resolved.get("internal_style_name") or ""
-                size = resolved.get("internal_size") or ""
-        
+            if resolved and resolved.get("resolved"):
+                style_id = resolved.get("erp_style_id")
+                if style_id:
+                    style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
+                    if style_doc:
+                        style_name = style_doc.get("name") or resolved.get("erp_style_code") or ""
+                size = resolved.get("erp_size") or ""
+            else:
+                errors.append(f"Row {idx}: sellerSkuCode '{sku}' is not mapped to any ERP style.")
+        else:
+            errors.append(f"Row {idx}: sellerSkuCode is empty.")
+            
         sku_name = f"{style_name} {size}".strip()
         
         for _ in range(max(1, qty)):
+
             new_row = dict(row)
             new_row[qty_col] = "1"
             new_row["SealTag"] = f"MP2692{seal_counter:05d}"
@@ -97,6 +109,9 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
             output_rows.append(new_row)
             seal_counter += 1
             bag_counter += 1
+
+    if errors:
+        return JSONResponse(status_code=400, content={"message": "Mapping Errors Found", "errors": errors})
 
     out_csv = io.StringIO()
     writer = csv.DictWriter(out_csv, fieldnames=fieldnames)
