@@ -32,7 +32,8 @@ wms_router = APIRouter(prefix="/api", tags=["Warehouse Management System (WMS)"]
 @wms_router.post("/wms/myntra-picklist/preview")
 async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)):
     """Dry-run analysis of Myntra picklist for the review & commit UI."""
-    from routes.sku_map import resolve_style, strip_known_prefixes
+    from routes.sku_map import resolve_style
+    from routes.online_orders import strip_known_prefixes
     from bson import ObjectId
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     
@@ -121,7 +122,8 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
 @wms_router.post("/wms/myntra-picklist/process")
 async def process_myntra_picklist(request: Request, file: UploadFile = File(...)):
     """Process Myntra picklist CSV to flatten quantities and add required columns."""
-    from routes.sku_map import resolve_style, strip_known_prefixes
+    from routes.sku_map import resolve_style
+    from routes.online_orders import strip_known_prefixes
     from fastapi.responses import JSONResponse
     from bson import ObjectId
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
