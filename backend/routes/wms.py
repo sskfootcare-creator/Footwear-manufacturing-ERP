@@ -29,10 +29,99 @@ log = logging.getLogger(__name__)
 
 wms_router = APIRouter(prefix="/api", tags=["Warehouse Management System (WMS)"])
 
+@wms_router.post("/wms/myntra-picklist/preview")
+async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)):
+    """Dry-run analysis of Myntra picklist for the review & commit UI."""
+    from routes.sku_map import resolve_style, strip_known_prefixes
+    from bson import ObjectId
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(400, "Only CSV files are supported")
+        
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin1")
+        
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(400, "Empty or invalid CSV file")
+        
+    fieldnames = list(reader.fieldnames)
+    qty_col = next((c for c in fieldnames if c.strip().lower() in ("quantity", "qty")), None)
+    sku_col = next((c for c in fieldnames if c.strip().lower() in ("sellerskucode", "seller sku code")), None)
+    
+    if not qty_col or not sku_col:
+        raise HTTPException(400, "Missing required columns (Quantity, sellerSkuCode)")
+        
+    cfg = await db.order_import_format_configs.find_one({"platform": "myntra", "role": "order"}) or {}
+    prefixes = cfg.get("known_sku_prefixes_to_strip") or []
+    replacements = cfg.get("known_sku_prefix_replacements") or {}
+        
+    preview_rows = []
+    stats = {
+        "total": 0,
+        "matched": 0,
+        "unmatched": 0,
+        "total_qty": 0,
+    }
+    
+    for idx, row in enumerate(reader, start=1):
+        try:
+            qty_str = str(row.get(qty_col, "1")).strip()
+            qty = int(float(qty_str)) if qty_str else 1
+        except ValueError:
+            qty = 1
+            
+        sku = str(row.get(sku_col, "")).strip()
+        stats["total"] += 1
+        stats["total_qty"] += max(1, qty)
+        
+        row_data = {
+            "row_idx": idx,
+            "raw_sku": sku,
+            "qty": qty,
+            "mapped": False,
+            "erp_style_code": "",
+            "erp_style_name": "",
+            "size": "",
+            "error": ""
+        }
+        
+        if sku:
+            clean_sku = strip_known_prefixes(sku, prefixes)
+            for old, new in replacements.items():
+                if clean_sku.startswith(old):
+                    clean_sku = new + clean_sku[len(old):]
+                    
+            resolved = await resolve_style("online_channel", "myntra", clean_sku, db=db)
+            if resolved and resolved.get("matched"):
+                style_id = resolved.get("style_id")
+                if style_id:
+                    style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
+                    if style_doc:
+                        row_data["erp_style_name"] = style_doc.get("name") or resolved.get("style_code") or ""
+                row_data["erp_style_code"] = resolved.get("style_code") or ""
+                row_data["size"] = resolved.get("size") or ""
+                row_data["mapped"] = True
+                stats["matched"] += 1
+            else:
+                row_data["error"] = "No SKU Mapping"
+                stats["unmatched"] += 1
+        else:
+            row_data["error"] = "Empty SKU"
+            stats["unmatched"] += 1
+            
+        preview_rows.append(row_data)
+
+    return {"stats": stats, "rows": preview_rows}
+
 @wms_router.post("/wms/myntra-picklist/process")
 async def process_myntra_picklist(request: Request, file: UploadFile = File(...)):
     """Process Myntra picklist CSV to flatten quantities and add required columns."""
-    from routes.sku_map import _resolve_marketplace_sku
+    from routes.sku_map import resolve_style, strip_known_prefixes
     from fastapi.responses import JSONResponse
     from bson import ObjectId
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
@@ -65,6 +154,10 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         if new_col not in fieldnames:
             fieldnames.append(new_col)
             
+    cfg = await db.order_import_format_configs.find_one({"platform": "myntra", "role": "order"}) or {}
+    prefixes = cfg.get("known_sku_prefixes_to_strip") or []
+    replacements = cfg.get("known_sku_prefix_replacements") or {}
+            
     output_rows = []
     errors = []
     seal_counter = 1
@@ -83,14 +176,19 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         style_name = ""
         size = ""
         if sku:
-            resolved = await _resolve_marketplace_sku("myntra", sku, db)
-            if resolved and resolved.get("resolved"):
-                style_id = resolved.get("erp_style_id")
+            clean_sku = strip_known_prefixes(sku, prefixes)
+            for old, new in replacements.items():
+                if clean_sku.startswith(old):
+                    clean_sku = new + clean_sku[len(old):]
+                    
+            resolved = await resolve_style("online_channel", "myntra", clean_sku, db=db)
+            if resolved and resolved.get("matched"):
+                style_id = resolved.get("style_id")
                 if style_id:
                     style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
                     if style_doc:
-                        style_name = style_doc.get("name") or resolved.get("erp_style_code") or ""
-                size = resolved.get("erp_size") or ""
+                        style_name = style_doc.get("name") or resolved.get("style_code") or ""
+                size = resolved.get("size") or ""
             else:
                 errors.append(f"Row {idx}: sellerSkuCode '{sku}' is not mapped to any ERP style.")
         else:

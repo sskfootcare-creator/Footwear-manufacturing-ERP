@@ -6,6 +6,7 @@ import { SafeImage } from "../components/ImageUploader";
 import CameraScanner from "../components/CameraScanner";
 import { QRCodeSVG } from "qrcode.react";
 import { RefreshCw, ClipboardList, X, Printer, ScanLine, CheckCircle2, Trash2, Zap, ZapOff, Camera, FileUp } from "lucide-react";
+import { Drawer } from "./Materials";
 
 const STATUS_COLORS = {
   pending: "yellow",
@@ -34,7 +35,9 @@ export default function Picklists() {
   const [channelFilter, setChannel] = useState("");
   const [search, setSearch]     = useState("");
   const [openId, setOpenId]     = useState(null);
-  const [mappingErrors, setMappingErrors] = useState([]);
+  const [previewData, setPreviewData] = useState(null);
+  const [previewFile, setPreviewFile] = useState(null);
+  const [isCommitting, setIsCommitting] = useState(false);
 
   async function load() {
     setLoading(true); setErr("");
@@ -59,6 +62,22 @@ export default function Picklists() {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      const res = await http.post("/wms/myntra-picklist/preview", fd);
+      setPreviewData(res.data);
+      setPreviewFile(file);
+    } catch (err) {
+      setErr(friendlyAxiosError(err));
+    } finally {
+      setLoading(false);
+      e.target.value = "";
+    }
+  }
+
+  async function handleProcessAndDownload(file) {
+    setIsCommitting(true); setErr("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
       const res = await http.post("/wms/myntra-picklist/process", fd, { responseType: "blob" });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement("a");
@@ -67,25 +86,12 @@ export default function Picklists() {
       document.body.appendChild(link);
       link.click();
       link.parentNode.removeChild(link);
+      setPreviewData(null);
+      setPreviewFile(null);
     } catch (err) {
-      if (err.response && err.response.data instanceof Blob) {
-        try {
-          const text = await err.response.data.text();
-          const data = JSON.parse(text);
-          if (data.errors) {
-            setMappingErrors(data.errors);
-            return;
-          }
-          setErr(data.message || friendlyAxiosError(err));
-        } catch (e) {
-          setErr(friendlyAxiosError(err));
-        }
-      } else {
-        setErr(friendlyAxiosError(err));
-      }
+      setErr(friendlyAxiosError(err));
     } finally {
-      setLoading(false);
-      e.target.value = "";
+      setIsCommitting(false);
     }
   }
 
@@ -179,28 +185,115 @@ export default function Picklists() {
 
       {openId && <PicklistDrawer id={openId} onClose={() => setOpenId(null)} onChanged={load} />}
       
-      {mappingErrors.length > 0 && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
-            <div className="p-4 border-b flex justify-between items-center bg-red-50 text-red-800 rounded-t-lg">
-              <h2 className="text-lg font-bold">Review: Mapping Errors Found</h2>
-              <button onClick={() => setMappingErrors([])}><X className="w-5 h-5 hover:text-red-900" /></button>
-            </div>
-            <div className="p-4 overflow-y-auto">
-              <p className="mb-4 text-sm text-slate-700">The CSV processor found SKUs that are not mapped to any internal Style Name. Please resolve these mappings in the <strong>SKU Map</strong> tab before generating the picklist.</p>
-              <ul className="list-disc pl-5 space-y-2 text-sm text-red-600">
-                {mappingErrors.map((eStr, i) => (
-                  <li key={i}>{eStr}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="p-4 border-t flex justify-end">
-              <BtnSecondary onClick={() => setMappingErrors([])}>Close</BtnSecondary>
-            </div>
-          </div>
-        </div>
+      {previewData && (
+        <MyntraPreviewDrawer
+          previewData={previewData}
+          file={previewFile}
+          onClose={() => { setPreviewData(null); setPreviewFile(null); }}
+          onCommit={handleProcessAndDownload}
+          isCommitting={isCommitting}
+        />
       )}
     </div>
+  );
+}
+
+function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommitting }) {
+  const stats = previewData.stats;
+  const rows = previewData.rows;
+  const [filter, setFilter] = useState("all");
+
+  const filteredRows = rows.filter(r => {
+    if (filter === "unmatched") return !r.mapped;
+    if (filter === "matched") return r.mapped;
+    return true;
+  });
+
+  return (
+    <Drawer
+      onClose={onClose}
+      title="Import picklist — step 2: review & commit"
+      width="max-w-6xl"
+    >
+      <div className="space-y-6 bg-slate-50 p-4 -m-4 min-h-screen">
+        {/* STATS */}
+        <div className="flex flex-wrap gap-4">
+          <div className="bg-white p-3 border-l-4 border-slate-700 shadow-sm flex-1 min-w-[120px]">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Total Rows</div>
+            <div className="text-2xl font-bold font-mono mt-1">{stats.total}</div>
+          </div>
+          <div className="bg-white p-3 border-l-4 border-green-500 shadow-sm flex-1 min-w-[120px]">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Matched</div>
+            <div className="text-2xl font-bold font-mono mt-1 text-green-700">{stats.matched}</div>
+          </div>
+          <div className="bg-white p-3 border-l-4 border-red-500 shadow-sm flex-1 min-w-[120px]">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Unmatched</div>
+            <div className="text-2xl font-bold font-mono mt-1 text-red-700">{stats.unmatched}</div>
+          </div>
+          <div className="bg-white p-3 border-l-4 border-blue-500 shadow-sm flex-1 min-w-[120px]">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Total Qty (Pairs)</div>
+            <div className="text-2xl font-bold font-mono mt-1">{stats.total_qty}</div>
+          </div>
+        </div>
+
+        {/* FILTERS & ACTION */}
+        <div className="flex items-center justify-between bg-white p-3 shadow-sm border border-slate-200 sticky top-0 z-10">
+          <div className="flex gap-2 text-sm font-semibold items-center">
+            <span className="text-slate-400 text-xs mr-2 uppercase tracking-wide font-bold">Filter:</span>
+            <button onClick={() => setFilter("all")} className={`px-4 py-1.5 rounded text-xs transition-colors ${filter === "all" ? "bg-slate-800 text-white" : "bg-slate-100 hover:bg-slate-200 text-slate-700"}`}>All ({stats.total})</button>
+            <button onClick={() => setFilter("unmatched")} className={`px-4 py-1.5 rounded text-xs transition-colors ${filter === "unmatched" ? "bg-red-600 text-white" : "bg-red-50 text-red-600 hover:bg-red-100"}`}>Unmatched ({stats.unmatched})</button>
+            <button onClick={() => setFilter("matched")} className={`px-4 py-1.5 rounded text-xs transition-colors ${filter === "matched" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>Matched ({stats.matched})</button>
+          </div>
+          <div>
+            <BtnPrimary onClick={() => onCommit(file)} disabled={stats.unmatched > 0 || isCommitting}>
+              {isCommitting ? "Processing..." : "Process & Download CSV"}
+            </BtnPrimary>
+          </div>
+        </div>
+
+        {/* TABLE */}
+        <div className="bg-white shadow-sm border border-slate-200 overflow-x-auto rounded-sm">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+              <tr>
+                <th className="px-4 py-3 text-left font-bold text-[10px] uppercase tracking-wider">Row #</th>
+                <th className="px-4 py-3 text-left font-bold text-[10px] uppercase tracking-wider">Raw SkuCode</th>
+                <th className="px-4 py-3 text-center font-bold text-[10px] uppercase tracking-wider">Qty</th>
+                <th className="px-4 py-3 text-left font-bold text-[10px] uppercase tracking-wider">ERP Style Name</th>
+                <th className="px-4 py-3 text-left font-bold text-[10px] uppercase tracking-wider">Size</th>
+                <th className="px-4 py-3 text-left font-bold text-[10px] uppercase tracking-wider">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredRows.map(r => (
+                <tr key={r.row_idx} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-4 py-3 font-mono text-xs text-slate-500">{r.row_idx}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-blue-700 font-semibold">{r.raw_sku}</td>
+                  <td className="px-4 py-3 text-center font-bold">{r.qty}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-700">{r.erp_style_name || "—"}</td>
+                  <td className="px-4 py-3 text-slate-600">{r.size || "—"}</td>
+                  <td className="px-4 py-3">
+                    {r.mapped ? (
+                      <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 border border-green-200 text-[10px] font-bold rounded">SKU_MAP</span>
+                    ) : (
+                      <div className="flex flex-col gap-1 items-start">
+                        <span className="inline-block px-2 py-0.5 bg-red-100 text-red-700 border border-red-200 text-[10px] font-bold rounded">UNMAPPED</span>
+                        <span className="text-[10px] text-red-500 font-mono tracking-tighter">{r.error}</span>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {filteredRows.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-slate-400 text-sm italic">No rows match the filter.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </Drawer>
   );
 }
 
