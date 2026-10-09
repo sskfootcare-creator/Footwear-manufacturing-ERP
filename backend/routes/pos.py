@@ -2265,19 +2265,25 @@ async def create_payment(payload: PaymentIn, request: Request):
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
 
-    # >>> SYNC PAYMENT RECEIPT TO SUPABASE FINANCIAL CORE <<<
+    # >>> Outbox pattern for Supabase Financial Core sync <<<
     try:
-        from services.supabase_invoice_service import sync_invoice_payment_to_supabase
-        sync_res = sync_invoice_payment_to_supabase(doc, invoices)
-        if not sync_res:
-            raise RuntimeError("Supabase invoice payment sync returned no confirmation (service unavailable or failed)")
+        import json
+        from bson import json_util
+        await db.outbox_events.insert_one({
+            "type": "payment_received",
+            "collection": "payments",
+            "doc_id": str(res.inserted_id),
+            "payload": {
+                "payment_doc": json.loads(json_util.dumps(doc)),
+                "invoice_docs": [json.loads(json_util.dumps(i)) for i in invoices]
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
     except Exception as se:
-        log.warning("Supabase invoice payment sync warning: %s", se)
-        try:
-            from services.supabase_sync_failure_service import record_supabase_sync_failure
-            await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
-        except Exception:
-            pass
+        log.warning("Failed to queue payment receipt for Supabase sync: %s", se)
 
     # Check for active investor advances tied to invoices' POs (Stage 4)
     investor_actions_prompt = []

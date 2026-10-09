@@ -1840,6 +1840,11 @@ async def _ensure_startup_indexes(database):
         log.debug(f"POs po_number index notice: {err}")
 
     try:
+        await database.outbox_events.create_index([("status", 1), ("created_at", 1)], name="outbox_status_ts")
+    except Exception as e:
+        log.warning(f"Could not create outbox_events indexes: {e}")
+
+    try:
         await database.production_jobs.create_index("po_id")
         await database.production_jobs.create_index("style_id")
         await database.production_jobs.create_index("style_code")
@@ -1998,9 +2003,9 @@ async def _ensure_startup_indexes(database):
 @app.on_event("startup")
 async def on_startup():
     """Decoupled, replica-safe startup initialization (DB-002, DB-004, DEPLOY-004)."""
-    # Validate critical secrets and configuration on boot
     default_secrets_manager.validate_all_secrets(get_environment())
     validate_jwt_secret()
+    from services.outbox_processor import start_outbox_processor
     global get_current_user, client, db
     if db is None:
         try:
@@ -2041,6 +2046,7 @@ async def on_startup():
         log.warning(f"Could not load company profile from DB: {e}")
 
     log.info("Startup complete; admin verified; migrations evaluated.")
+    start_outbox_processor(db)
 
 @app.on_event("shutdown")
 async def on_shutdown():

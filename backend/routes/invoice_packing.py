@@ -1096,7 +1096,7 @@ async def po_invoice(pid: str, request: Request):
         query_or.extend([{"po_numbers": po_number}, {"po_number": po_number}])
     existing = await db.invoices.find({"$or": query_or}).sort("created_at", -1).to_list(100)
 
-    if len(existing) == 1:
+    if existing:
         inv = existing[0]
         file_b64 = inv.get("file_b64")
         if file_b64:
@@ -1113,65 +1113,64 @@ async def po_invoice(pid: str, request: Request):
             BytesIO(pdf_bytes), media_type="application/pdf",
             headers={"Content-Disposition": f'inline; filename="{inv_no}.pdf"'},
         )
-    elif len(existing) > 1:
-        inv_list = [
-            {
-                "id": str(inv["_id"]),
-                "invoice_no": inv.get("invoice_no"),
-                "invoice_date": inv.get("invoice_date"),
-                "job_ids": inv.get("job_ids", []),
-                "grand_total": inv.get("grand_total"),
-                "created_at": inv.get("created_at"),
-            }
-            for inv in existing
-        ]
-        return JSONResponse({"multiple": True, "invoices": inv_list})
 
-    invoice_no = po.get("invoice_no")
-    invoice_date = po.get("invoice_date")
-    if not invoice_no:
-        invoice_no = await next_invoice_no(db=db)
-        invoice_date = datetime.now().strftime("%d/%m/%Y")
-        await db.pos.update_one({"_id": oid(pid)}, {"$set": {"invoice_no": invoice_no, "invoice_date": invoice_date}})
-        po["invoice_no"] = invoice_no
-        po["invoice_date"] = invoice_date
-
-    po, line_items = await _generate_invoice_payload(po, None, db=db)
-    pdf_bytes = build_invoice(po, invoice_no, invoice_date, line_items=line_items)
-
-    totals = _compute_invoice_totals(po, line_items)
-    credit_days = _extract_credit_days(po.get("payment_terms", ""))
-    invoice_iso = _invoice_iso_date(invoice_date)
-    user_email = u.get("email", "system") if isinstance(u, dict) else "system"
-    inv_doc = {
-        "invoice_no": invoice_no,
-        "invoice_date": invoice_date,
-        "invoice_iso_date": invoice_iso,
-        "due_date": None,
-        "grn_date": None,
-        "grn_recorded": False,
-        "payment_terms_days": credit_days,
-        "po_id": pid,
-        "po_number": po.get("po_number"),
-        "po_numbers": [po.get("po_number")] if po.get("po_number") else [],
-        "client_name": po.get("client_name"),
-        "job_ids": [],
-        "line_items_snapshot": line_items,
-        **totals,
-        "transport_mode": "",
-        "vehicle_no": "",
-        "supply_date": "",
-        "by": user_email,
-        "created_at": now_iso(),
-        "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
-        "merged": False,
-    }
-    await db.invoices.insert_one(inv_doc)
-
-    return StreamingResponse(
-        BytesIO(pdf_bytes), media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{invoice_no}.pdf"'},
+    # Atomic lock to prevent duplicate invoice generation race condition
+    lock_res = await db.pos.find_one_and_update(
+        {"_id": oid(pid), "invoice_generation_lock": {"$ne": True}},
+        {"$set": {"invoice_generation_lock": True}}
     )
+    if not lock_res:
+        raise HTTPException(429, "Invoice generation in progress. Please wait a few seconds and try again.")
+
+    try:
+
+        invoice_no = po.get("invoice_no")
+        invoice_date = po.get("invoice_date")
+        if not invoice_no:
+            invoice_no = await next_invoice_no(db=db)
+            invoice_date = datetime.now().strftime("%d/%m/%Y")
+            await db.pos.update_one({"_id": oid(pid)}, {"$set": {"invoice_no": invoice_no, "invoice_date": invoice_date}})
+            po["invoice_no"] = invoice_no
+            po["invoice_date"] = invoice_date
+
+        po, line_items = await _generate_invoice_payload(po, None, db=db)
+        pdf_bytes = build_invoice(po, invoice_no, invoice_date, line_items=line_items)
+
+        totals = _compute_invoice_totals(po, line_items)
+        credit_days = _extract_credit_days(po.get("payment_terms", ""))
+        invoice_iso = _invoice_iso_date(invoice_date)
+        user_email = u.get("email", "system") if isinstance(u, dict) else "system"
+        inv_doc = {
+            "invoice_no": invoice_no,
+            "invoice_date": invoice_date,
+            "invoice_iso_date": invoice_iso,
+            "due_date": None,
+            "grn_date": None,
+            "grn_recorded": False,
+            "payment_terms_days": credit_days,
+            "po_id": pid,
+            "po_number": po.get("po_number"),
+            "po_numbers": [po.get("po_number")] if po.get("po_number") else [],
+            "client_name": po.get("client_name"),
+            "job_ids": [],
+            "line_items_snapshot": line_items,
+            **totals,
+            "transport_mode": "",
+            "vehicle_no": "",
+            "supply_date": "",
+            "by": user_email,
+            "created_at": now_iso(),
+            "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+            "merged": False,
+        }
+        await db.invoices.insert_one(inv_doc)
+
+        return StreamingResponse(
+            BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{invoice_no}.pdf"'},
+        )
+    finally:
+        await db.pos.update_one({"_id": oid(pid)}, {"$unset": {"invoice_generation_lock": ""}})
 
 
 @invoice_packing_router.post("/invoices/job", dependencies=[Depends(pdf_rate_limiter)])
@@ -1574,19 +1573,22 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     res = await db.invoices.insert_one(inv_doc)
     inv_doc["_id"] = res.inserted_id
 
-    # 7. Sync to Supabase Financial Core
+    # 7. Outbox pattern for Supabase Financial Core sync
     try:
-        from services.supabase_invoice_service import sync_direct_invoice_to_supabase
-        sync_res = sync_direct_invoice_to_supabase(inv_doc)
-        if not sync_res:
-            raise RuntimeError("Supabase invoice sync returned no confirmation (service unavailable or failed)")
+        import json
+        from bson import json_util
+        await db.outbox_events.insert_one({
+            "type": "direct_invoice_created",
+            "collection": "invoices",
+            "doc_id": str(res.inserted_id),
+            "payload": json.loads(json_util.dumps(inv_doc)),
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
     except Exception as se:
-        log.warning("Supabase direct invoice sync warning: %s", se)
-        try:
-            from services.supabase_sync_failure_service import record_supabase_sync_failure
-            await record_supabase_sync_failure(db, "invoices", str(res.inserted_id), str(se))
-        except Exception:
-            pass
+        log.warning("Failed to queue direct invoice for Supabase sync: %s", se)
 
     decorated = _decorate_invoice(inv_doc, payments_map={}, grns_map={})
     return JSONResponse(
