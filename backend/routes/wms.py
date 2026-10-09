@@ -6,8 +6,11 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Request, Depends, Query
+from fastapi import APIRouter, HTTPException, Request, Depends, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import csv
+import io
 
 from models.wms import (
     PicklistItemIn,
@@ -25,6 +28,87 @@ from routes.inventory import _apply_movement
 log = logging.getLogger(__name__)
 
 wms_router = APIRouter(prefix="/api", tags=["Warehouse Management System (WMS)"])
+
+@wms_router.post("/wms/myntra-picklist/process")
+async def process_myntra_picklist(request: Request, file: UploadFile = File(...)):
+    """Process Myntra picklist CSV to flatten quantities and add required columns."""
+    from routes.sku_map import _resolve_marketplace_sku
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(400, "Only CSV files are supported")
+        
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin1")
+        
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(400, "Empty or invalid CSV file")
+        
+    fieldnames = list(reader.fieldnames)
+    
+    # Identify columns flexibly
+    qty_col = next((c for c in fieldnames if c.strip().lower() in ("quantity", "qty")), None)
+    sku_col = next((c for c in fieldnames if c.strip().lower() in ("sellerskucode", "seller sku code")), None)
+    
+    if not qty_col:
+        raise HTTPException(400, "Quantity column not found in CSV")
+    if not sku_col:
+        raise HTTPException(400, "sellerSkuCode column not found in CSV")
+        
+    for new_col in ["SealTag", "BagId", "SkuName"]:
+        if new_col not in fieldnames:
+            fieldnames.append(new_col)
+            
+    output_rows = []
+    seal_counter = 1
+    bag_counter = 1
+    
+    for row in reader:
+        try:
+            qty_str = str(row.get(qty_col, "1")).strip()
+            qty = int(float(qty_str)) if qty_str else 1
+        except ValueError:
+            qty = 1
+            
+        sku = str(row.get(sku_col, "")).strip()
+        
+        # Resolve SKU
+        style_name = ""
+        size = ""
+        if sku:
+            resolved = await _resolve_marketplace_sku("myntra", sku, db)
+            if resolved:
+                style_name = resolved.get("internal_style_name") or ""
+                size = resolved.get("internal_size") or ""
+        
+        sku_name = f"{style_name} {size}".strip()
+        
+        for _ in range(max(1, qty)):
+            new_row = dict(row)
+            new_row[qty_col] = "1"
+            new_row["SealTag"] = f"MP2692{seal_counter:05d}"
+            new_row["BagId"] = f"MPP4EM{bag_counter:09d}"
+            new_row["SkuName"] = sku_name
+            
+            output_rows.append(new_row)
+            seal_counter += 1
+            bag_counter += 1
+
+    out_csv = io.StringIO()
+    writer = csv.DictWriter(out_csv, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(output_rows)
+    
+    filename_out = file.filename.replace(".csv", "_Processed.csv")
+    return StreamingResponse(
+        io.BytesIO(out_csv.getvalue().encode("utf-8-sig")),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename_out}"'}
+    )
 
 # ── WMS Constants ────────────────────────────────────────────────────────
 WAREHOUSE_ROWS = 10

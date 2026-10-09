@@ -5,7 +5,7 @@ import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from
 import { SafeImage } from "../components/ImageUploader";
 import CameraScanner from "../components/CameraScanner";
 import { QRCodeSVG } from "qrcode.react";
-import { RefreshCw, ClipboardList, X, Printer, ScanLine, CheckCircle2, Trash2, Zap, ZapOff, Camera } from "lucide-react";
+import { RefreshCw, ClipboardList, X, Printer, ScanLine, CheckCircle2, Trash2, Zap, ZapOff, Camera, FileUp } from "lucide-react";
 
 const STATUS_COLORS = {
   pending: "yellow",
@@ -51,6 +51,29 @@ export default function Picklists() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [statusFilter, channelFilter]);
 
+  async function handleMyntraCSVUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setLoading(true); setErr("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await http.post("/wms/myntra-picklist/process", fd, { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", file.name.replace(".csv", "_Processed.csv"));
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode.removeChild(link);
+    } catch (err) {
+      setErr(friendlyAxiosError(err));
+    } finally {
+      setLoading(false);
+      e.target.value = "";
+    }
+  }
+
   const filtered = search
     ? rows.filter(r => r.picklist_no.toLowerCase().includes(search.toLowerCase()) ||
                        r.order_id.toLowerCase().includes(search.toLowerCase()))
@@ -63,10 +86,16 @@ export default function Picklists() {
           title="Picklists"
           subtitle="Online Commerce / WMS"
           action={
-            <BtnSecondary onClick={load} disabled={loading}>
-              <RefreshCw className={`w-3.5 h-3.5 inline mr-1 ${loading ? "animate-spin" : ""}`} />
-              Refresh
-            </BtnSecondary>
+            <div className="flex gap-2">
+              <label className="cursor-pointer inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-orange-500 rounded-md hover:bg-orange-600 transition-colors">
+                <FileUp className="w-3.5 h-3.5" /> Myntra CSV Converter
+                <input type="file" accept=".csv" className="hidden" onChange={handleMyntraCSVUpload} />
+              </label>
+              <BtnSecondary onClick={load} disabled={loading}>
+                <RefreshCw className={`w-3.5 h-3.5 inline mr-1 ${loading ? "animate-spin" : ""}`} />
+                Refresh
+              </BtnSecondary>
+            </div>
           }
         />
 
