@@ -44,6 +44,9 @@ def match_filter(doc, filter_dict):
             else:
                 if val not in target_list:
                     return False
+        elif isinstance(v, dict) and "$ne" in v:
+            if val == v["$ne"]:
+                return False
         else:
             if val != v:
                 return False
@@ -244,8 +247,8 @@ async def test_po_invoice_single_existing_serves_same(mock_db, mock_user_overrid
 
 
 @pytest.mark.anyio
-async def test_po_invoice_multiple_existing_returns_json(mock_db, mock_user_override, async_client):
-    """When multiple invoices exist in db.invoices for a PO, po_invoice returns JSON listing them."""
+async def test_po_invoice_multiple_existing_returns_most_recent_pdf(mock_db, mock_user_override, async_client):
+    """When multiple invoices exist in db.invoices for a PO, po_invoice returns the most recent PDF."""
     po_doc = {
         "po_number": f"PO-TEST-003-{ObjectId()}",
         "po_date": "09/08/2026",
@@ -287,14 +290,8 @@ async def test_po_invoice_multiple_existing_returns_json(mock_db, mock_user_over
     # Call GET /api/pos/{pid}/invoice.pdf
     response = await async_client.get(f"/api/pos/{pid}/invoice.pdf")
     assert response.status_code == 200
-    data = response.json()
-
-    assert data.get("multiple") is True
-    assert "invoices" in data
-    assert len(data["invoices"]) == 2
-    inv_nos = [i["invoice_no"] for i in data["invoices"]]
-    assert "INV-BATCH-1" in inv_nos
-    assert "INV-BATCH-2" in inv_nos
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content == b"%PDF-2"
 
     # Call GET /api/pos/{pid}/invoices
     res_list = await async_client.get(f"/api/pos/{pid}/invoices")
