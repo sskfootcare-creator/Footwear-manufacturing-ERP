@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { http, friendlyAxiosError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge } from "../components/ui-kit";
-import { SafeImage } from "../components/ImageUploader";
+import { SafeImage, ImageThumb } from "../components/ImageUploader";
 import CameraScanner from "../components/CameraScanner";
 import { QRCodeSVG } from "qrcode.react";
 import { RefreshCw, ClipboardList, X, Printer, ScanLine, CheckCircle2, Trash2, Zap, ZapOff, Camera, FileUp } from "lucide-react";
@@ -198,37 +198,102 @@ export default function Picklists() {
   );
 }
 
+const SIZE_LABELS = new Set(["xs", "s", "m", "l", "xl", "xxl", "fs", "freesize"]);
+
+function extractBaseSkuAndSize(rawSku) {
+  let baseSku = (rawSku || "").trim();
+  let size = "";
+  const lastDash = baseSku.lastIndexOf("-");
+  const lastUnder = baseSku.lastIndexOf("_");
+  const cut = Math.max(lastDash, lastUnder);
+  if (cut > 0 && cut < baseSku.length - 1) {
+    const tail = baseSku.slice(cut + 1).trim();
+    if (/^\d{1,2}(\.\d{1,2})?$/.test(tail) || SIZE_LABELS.has(tail.toLowerCase())) {
+      baseSku = baseSku.slice(0, cut).trim();
+      size = tail;
+    }
+  }
+  return { baseSku, size };
+}
+
 function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommitting }) {
-  const stats = previewData.stats;
-  const rows = previewData.rows;
+  const [stats, setStats] = useState(previewData?.stats || { total: 0, matched: 0, unmatched: 0, total_qty: 0 });
+  const [rows, setRows] = useState(previewData?.rows || []);
   const [filter, setFilter] = useState("all");
   const [styles, setStyles] = useState([]);
+  const [mappingSku, setMappingSku] = useState("");
 
   useEffect(() => {
     http.get("/styles").then(res => setStyles(res.data)).catch(console.error);
   }, []);
 
+  useEffect(() => {
+    if (previewData) {
+      setStats(previewData.stats || { total: 0, matched: 0, unmatched: 0, total_qty: 0 });
+      setRows(previewData.rows || []);
+    }
+  }, [previewData]);
+
   async function handleQuickMap(rawSku, styleId) {
     if (!styleId) return;
+    const { baseSku, size } = extractBaseSkuAndSize(rawSku);
+    setMappingSku(rawSku);
     try {
-      let baseSku = rawSku;
-      let size = "";
-      const m = rawSku.match(/^(.*)[-_]([0-9]+(?:[.][0-9]+)?)$/);
-      if (m) {
-        baseSku = m[1];
-        size = m[2];
-      }
-      
-      await http.post("/sku-map", {
+      await http.post("/sku-map?upsert=true", {
         style_id: styleId,
         source_type: "online_channel",
         source_name: "myntra",
         external_sku: baseSku,
-        size_map: size ? { [size]: rawSku } : {}
+        size_map: size ? { [size]: rawSku } : {},
+        upsert: true,
       });
-      alert(`Mapped ${rawSku} successfully! Please close this preview and re-upload the CSV to refresh.`);
+
+      const selStyle = styles.find(s => s.id === styleId);
+      const styleName = selStyle ? (selStyle.name || selStyle.code) : "";
+      const styleCode = selStyle?.code || "";
+      const imgUrl = selStyle?.image_thumbnail_url || selStyle?.image_display_url || selStyle?.image_url || "";
+
+      let newlyMatched = 0;
+      setRows(prevRows => prevRows.map(r => {
+        const matchesThis = r.raw_sku === rawSku || (baseSku && (r.raw_sku === baseSku || r.raw_sku.startsWith(baseSku + "-") || r.raw_sku.startsWith(baseSku + "_")));
+        if (!r.mapped && matchesThis) {
+          newlyMatched += 1;
+          const rInfo = extractBaseSkuAndSize(r.raw_sku);
+          return {
+            ...r,
+            mapped: true,
+            erp_style_code: styleCode,
+            erp_style_name: styleName,
+            erp_image_url: imgUrl,
+            size: rInfo.size || r.size,
+            error: "",
+          };
+        }
+        return r;
+      }));
+
+      setStats(prev => ({
+        ...prev,
+        matched: prev.matched + newlyMatched,
+        unmatched: Math.max(0, prev.unmatched - newlyMatched),
+      }));
+
+      if (file) {
+        const fd = new FormData();
+        fd.append("file", file);
+        http.post("/wms/myntra-picklist/preview", fd, {
+          headers: { "Content-Type": "multipart/form-data" }
+        }).then(fresh => {
+          if (fresh?.data?.rows) {
+            setStats(fresh.data.stats);
+            setRows(fresh.data.rows);
+          }
+        }).catch(() => {});
+      }
     } catch (e) {
       alert(friendlyAxiosError(e));
+    } finally {
+      setMappingSku("");
     }
   }
 
@@ -301,8 +366,14 @@ function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommittin
                   <td className="px-4 py-3 text-center font-bold">{r.qty}</td>
                   <td className="px-4 py-3 font-semibold text-slate-700">
                     <div className="flex items-center gap-3">
-                      {r.mapped && r.erp_image_url && (
-                        <SafeImage src={r.erp_image_url} alt="style" className="w-8 h-8 rounded-md object-cover border border-slate-200" />
+                      {r.mapped && (
+                        <ImageThumb
+                          image={r.erp_image_url}
+                          size={36}
+                          alt={r.erp_style_name || "ERP Style"}
+                          className="rounded-md flex-shrink-0"
+                          clickable
+                        />
                       )}
                       <span>{r.erp_style_name || "—"}</span>
                     </div>
@@ -321,8 +392,9 @@ function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommittin
                           className="text-xs border border-slate-300 rounded p-1 w-full max-w-[200px]"
                           onChange={(e) => handleQuickMap(r.raw_sku, e.target.value)}
                           defaultValue=""
+                          disabled={mappingSku === r.raw_sku}
                         >
-                          <option value="" disabled>Quick map to...</option>
+                          <option value="" disabled>{mappingSku === r.raw_sku ? "Assigning..." : "Quick map to..."}</option>
                           {styles.map(s => (
                             <option key={s.id} value={s.id}>{s.name} ({s.code})</option>
                           ))}

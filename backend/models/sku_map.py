@@ -24,6 +24,7 @@ class SkuMapIn(BaseModel):
     brand: Optional[str] = ""
     mrp: Optional[float] = None
     price: Optional[float] = None
+    upsert: Optional[bool] = False
 
 
 class SkuMapUpdate(BaseModel):

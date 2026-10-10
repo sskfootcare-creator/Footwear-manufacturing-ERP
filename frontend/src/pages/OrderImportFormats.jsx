@@ -311,7 +311,7 @@ function PrefixReplacementEditor({ value, onChange }) {
       <div className="flex flex-wrap gap-1.5">
         {entries.length === 0 && (
           <span className="text-xs text-neutral-400 italic">
-            None configured. Add typo variants like "FLL" → "FL" so Myntra's doubled-L SKUs normalise correctly.
+            None configured. Add typo variants like "TYPO" → "CORRECT" to normalise marketplace typos.
           </span>
         )}
         {entries.map(([k, v]) => (
@@ -328,7 +328,7 @@ function PrefixReplacementEditor({ value, onChange }) {
         <input
           type="text"
           className="h-9 px-2 rounded-md border border-neutral-300 bg-white text-sm w-32 focus:border-neutral-500 focus:outline-none"
-          placeholder="wrong (FLL)"
+          placeholder="wrong (e.g. FLK)"
           value={wrong}
           onChange={(e) => setWrong(e.target.value)}
           data-testid="oif-replace-wrong"
@@ -337,7 +337,7 @@ function PrefixReplacementEditor({ value, onChange }) {
         <input
           type="text"
           className="h-9 px-2 rounded-md border border-neutral-300 bg-white text-sm w-32 focus:border-neutral-500 focus:outline-none"
-          placeholder="correct (FL)"
+          placeholder="correct (e.g. FL)"
           value={right}
           onChange={(e) => setRight(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
@@ -573,7 +573,7 @@ export default function OrderImportFormats() {
             (e.g. Myntra <span className="font-mono">OP-xxxxx.csv</span>) — the filename stem becomes the
             <span className="font-mono"> picklist_batch_id</span>. Use{" "}
             <span className="font-semibold">known_sku_prefixes_to_strip</span> for platform prefixes (Flipkart "TH")
-            and <span className="font-semibold text-purple-700">known_sku_prefix_replacements</span> for typo variants (Myntra "FLL" → "FL").
+            and <span className="font-semibold text-purple-700">known_sku_prefix_replacements</span> for typo variants (e.g. "FLK" → "FL").
           </div>
         </div>
 
@@ -799,8 +799,8 @@ export default function OrderImportFormats() {
                 SKU prefix replacements <span className="text-purple-700">(typo variants)</span>
               </h4>
               <p className="text-[11px] text-neutral-500 leading-snug">
-                Rewrite a leading token — used for TYPO variants of a real SKU token, e.g. Myntra
-                sometimes ships "FLL_..." for our "FL_..." (doubled-L). Runs BEFORE the strip list
+                Rewrite a leading token — used for TYPO variants of a real SKU token (e.g. marketplace
+                mistyping "FLK_..." instead of "FL_..."). Runs BEFORE the strip list
                 above. Config-driven so new platform typos onboard without a code deploy.
               </p>
               <PrefixReplacementEditor value={form.known_sku_prefix_replacements}

@@ -419,6 +419,17 @@ async def _seed_order_import_format_configs(db=None) -> int:
     except Exception as e:
         log.warning(f"Could not create order_import_format_configs composite index: {e}")
 
+    # Ensure legacy incorrect 'FLL' -> 'FL' typo replacement is removed,
+    # because FLL (e.g. FLL_AK_005_GO -> SSK_00121) and FL (e.g. FL_AK_005_GO -> SSK_00098)
+    # are two distinct, real styles and must never be conflated.
+    try:
+        await db.order_import_format_configs.update_many(
+            {"known_sku_prefix_replacements.FLL": {"$exists": True}},
+            {"$unset": {"known_sku_prefix_replacements.FLL": ""}}
+        )
+    except Exception as e:
+        log.warning(f"Could not purge FLL from known_sku_prefix_replacements: {e}")
+
     for cfg in DEFAULT_ORDER_IMPORT_CONFIGS:
         role = cfg.get("role", "order")
         existing = await db.order_import_format_configs.find_one(
@@ -474,7 +485,10 @@ def strip_known_prefixes(leaf_sku: str, prefixes: List[str]) -> str:
     s = (leaf_sku or "").strip()
     for pfx in prefixes or []:
         pfx_clean = str(pfx or "").strip()
-        if not pfx_clean:
+        if not pfx_clean or pfx_clean.upper() == "FLL":
+            continue
+        # Do not strip FL from FLL (which is a separate style family, e.g. FLL_AK_005_GO)
+        if pfx_clean.upper() == "FL" and s.upper().startswith("FLL"):
             continue
         for delim in ["-", "_", ""]:
             full = f"{pfx_clean}{delim}"
@@ -1993,7 +2007,7 @@ def apply_prefix_replacements(sku: str, replacements: Dict[str, str]) -> Tuple[s
     if not s or not replacements:
         return s, None
     for wrong in sorted(replacements.keys(), key=len, reverse=True):
-        if not wrong:
+        if not wrong or wrong.upper() == "FLL":
             continue
         right = str(replacements.get(wrong) or "")
         if s.startswith(wrong):

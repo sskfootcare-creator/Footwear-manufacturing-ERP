@@ -1,15 +1,26 @@
 import { useEffect, useState } from "react";
-import { Upload, X, Loader2 } from "lucide-react";
+import { Upload, X, Loader2, Image as ImageIcon } from "lucide-react";
 import { http, getBackendUrl } from "../lib/api";
 
 /**
  * Normalise any relative backend URL (/api/uploads/... or /uploads/...)
  * into a fully-qualified URL pointing to the active backend server.
  * Leaves absolute URLs (http://, https://, data:) untouched.
+ * Preserves frontend static public assets (/company/, /static/, /assets/, etc.).
  */
 export function resolveImageUrl(url) {
   if (!url || typeof url !== "string") return url || "";
   const trimmed = url.trim();
+  // Static frontend public assets must NOT be redirected to backend server
+  if (
+    trimmed.startsWith("/company/") ||
+    trimmed.startsWith("/static/") ||
+    trimmed.startsWith("/assets/") ||
+    trimmed.startsWith("/favicon") ||
+    trimmed.startsWith("/logo")
+  ) {
+    return trimmed;
+  }
   if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
     try {
       const backendOrigin = getBackendUrl().replace(/\/api\/?$/, "").replace(/\/+$/, "");
@@ -330,13 +341,14 @@ export default function ImageUploader({
 
 /**
  * Compact thumbnail component for table rows / BOM lists / picker menus.
- * Falls back gracefully: display_url → thumbnail_url → 👟 placeholder.
+ * Falls back gracefully: display_url → thumbnail_url → ImageIcon placeholder.
  *
  * `clickable`: when true, clicking the thumbnail opens a lightbox modal
  * showing the full-size display_url with backdrop dismissal (ESC key + click).
  */
 export function ImageThumb({
   image,
+  src: propSrc,
   size = 36,
   alt = "",
   className = "",
@@ -346,10 +358,11 @@ export function ImageThumb({
   const [broken, setBroken] = useState(false);
   const [open, setOpen] = useState(false);
 
+  const rawInput = image !== undefined ? image : propSrc;
   const asObj =
-    typeof image === "string"
-      ? { url: image, thumbnail_url: image, display_url: image }
-      : image || {};
+    typeof rawInput === "string"
+      ? { url: rawInput, thumbnail_url: rawInput, display_url: rawInput }
+      : rawInput || {};
   const src = resolveImageUrl(asObj.thumbnail_url || asObj.display_url || asObj.url || "");
   const lightboxSrc = resolveImageUrl(
     asObj.display_url || asObj.url || asObj.thumbnail_url || ""
@@ -366,12 +379,12 @@ export function ImageThumb({
   if (!src || broken) {
     return (
       <div
-        className={`bg-slate-100 border border-slate-200 grid place-items-center text-slate-400 text-base ${className}`}
+        className={`bg-slate-100 border border-slate-200 grid place-items-center text-slate-400 rounded ${className}`}
         style={{ width: size, height: size }}
         data-testid={testId}
         title="No image"
       >
-        👟
+        <ImageIcon className="w-4 h-4 text-slate-400" />
       </div>
     );
   }
@@ -448,7 +461,7 @@ export function ImageThumb({
  * grid cards, detail drawers, and any medium-sized container.
  *
  * Enforces:
- *   • fallback chain display_url → url → thumbnail_url → 👟 placeholder
+ *   • fallback chain display_url → url → thumbnail_url → ImageIcon placeholder
  *   • fixed aspect ratio wrapper (prevents layout shift while loading)
  *   • loading="lazy" for grid/list contexts (dozens of thumbnails at once)
  *   • graceful placeholder — never a broken-image icon
@@ -464,6 +477,7 @@ export function ImageThumb({
  */
 export function SafeImage({
   image,
+  src: propSrc,
   alt = "",
   className = "",
   testId,
@@ -471,10 +485,11 @@ export function SafeImage({
   fit = "cover",
 }) {
   const [errStep, setErrStep] = useState(0); // 0=try display, 1=thumb, 2=placeholder
+  const rawInput = image !== undefined ? image : propSrc;
   const asObj =
-    typeof image === "string"
-      ? { url: image, display_url: image, thumbnail_url: image }
-      : image || {};
+    typeof rawInput === "string"
+      ? { url: rawInput, display_url: rawInput, thumbnail_url: rawInput }
+      : rawInput || {};
 
   const chain = Array.from(
     new Set(
@@ -488,7 +503,7 @@ export function SafeImage({
   const currentSrc = resolveImageUrl(chain[errStep]);
   const showPlaceholder = !currentSrc;
 
-  const wrapperStyle = { aspectRatio };
+  const wrapperStyle = aspectRatio ? { aspectRatio } : undefined;
   const wrapperClass = `relative overflow-hidden bg-slate-100 ${className}`;
 
   if (showPlaceholder) {
@@ -498,8 +513,8 @@ export function SafeImage({
         style={wrapperStyle}
         data-testid={testId}
       >
-        <div className="text-center">
-          <div className="text-3xl mb-1">👟</div>
+        <div className="text-center p-2">
+          <ImageIcon className="w-6 h-6 mx-auto mb-1 text-slate-400" />
           <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400 font-bold">
             No Image
           </div>

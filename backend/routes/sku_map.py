@@ -828,7 +828,7 @@ async def resolve_sku_endpoint(
 
 
 @sku_map_router.post("/sku-map")
-async def create_sku_map(payload: SkuMapIn, request: Request):
+async def create_sku_map(payload: SkuMapIn, request: Request, upsert: bool = False):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
@@ -843,9 +843,55 @@ async def create_sku_map(payload: SkuMapIn, request: Request):
         "source_name_key": _norm_marketplace(src_name),
         "external_sku_key": _norm_key(ext_sku),
     })
+    should_upsert = upsert or getattr(payload, "upsert", False)
     if existing:
-        raise HTTPException(409, f"A mapping for source '{src_name}' / SKU '{ext_sku}' already exists")
+        if not should_upsert:
+            raise HTTPException(409, f"A mapping for source '{src_name}' / SKU '{ext_sku}' already exists")
+        mid = existing["_id"]
+        update_fields: dict = {
+            "style_id": str(style["_id"]),
+            "style_code": style["code"],
+            "updated_at": now_iso(),
+            "updated_by": u.get("email") or u.get("name", ""),
+        }
+        if payload.external_style_name is not None and payload.external_style_name != "":
+            update_fields["external_style_name"] = payload.external_style_name
+        if payload.external_style_id is not None and payload.external_style_id != "":
+            update_fields["external_style_id"] = payload.external_style_id
+        if payload.brand:
+            update_fields["brand"] = payload.brand
+        if payload.mrp is not None:
+            update_fields["mrp"] = payload.mrp
+        if payload.price is not None:
+            update_fields["price"] = payload.price
+
+        norm_img = normalize_image_url(payload.image_url or "")
+        if not norm_img and style:
+            norm_img = style.get("image_thumbnail_url") or style.get("image_display_url") or style.get("image_url") or ""
+        if norm_img:
+            update_fields["image_url"] = norm_img
+
+        merged_size_map = dict(existing.get("size_map") or {})
+        if payload.size_map:
+            merged_size_map.update(payload.size_map)
+        update_fields["size_map"] = merged_size_map
+
+        merged_color_map = dict(existing.get("color_map") or {})
+        if payload.color_map:
+            merged_color_map.update(payload.color_map)
+        update_fields["color_map"] = merged_color_map
+
+        await db.sku_map.update_one({"_id": mid}, {"$set": update_fields})
+        await log_activity_db(db, "UPDATE", "sku_map", f"Updated/Re-mapped {ext_sku} ({src_name}) → {style['code']}", u.get("email") or u.get("name", ""))
+        updated_doc = await db.sku_map.find_one({"_id": mid})
+        ret = dict(updated_doc)
+        ret.pop("_id", None)
+        ret["id"] = str(mid)
+        await _update_unmatched_jobs_for_sku_mapping(mid, updated_doc, db=db)
+        return ret
+
     doc = payload.model_dump()
+    doc.pop("upsert", None)
     doc["source_type"] = src_type
     doc["source_name"] = src_name
     doc["external_sku"] = ext_sku
@@ -862,6 +908,31 @@ async def create_sku_map(payload: SkuMapIn, request: Request):
     try:
         res = await db.sku_map.insert_one(doc)
     except DuplicateKeyError:
+        if should_upsert:
+            existing_race = await db.sku_map.find_one({
+                "source_type": src_type,
+                "source_name_key": _norm_marketplace(src_name),
+                "external_sku_key": _norm_key(ext_sku),
+            })
+            if existing_race:
+                mid = existing_race["_id"]
+                update_fields = {
+                    "style_id": str(style["_id"]),
+                    "style_code": style["code"],
+                    "updated_at": now_iso(),
+                    "updated_by": u.get("email") or u.get("name", ""),
+                }
+                merged_size_map = dict(existing_race.get("size_map") or {})
+                if payload.size_map:
+                    merged_size_map.update(payload.size_map)
+                update_fields["size_map"] = merged_size_map
+                await db.sku_map.update_one({"_id": mid}, {"$set": update_fields})
+                updated_doc = await db.sku_map.find_one({"_id": mid})
+                ret = dict(updated_doc)
+                ret.pop("_id", None)
+                ret["id"] = str(mid)
+                await _update_unmatched_jobs_for_sku_mapping(mid, updated_doc, db=db)
+                return ret
         raise HTTPException(409, f"A mapping for source '{payload.source_name}' / SKU '{payload.external_sku}' already exists")
     await log_activity_db(db, "CREATE", "sku_map", f"Mapped {payload.external_sku} ({payload.source_name}) → {style['code']}", u.get("email") or u.get("name", ""))
     ret = dict(doc)

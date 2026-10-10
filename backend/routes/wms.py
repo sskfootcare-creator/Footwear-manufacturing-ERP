@@ -97,32 +97,98 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
         }
         
         if sku:
-            clean_sku = sku
-            for old, new in replacements.items():
-                if clean_sku.startswith(old):
-                    clean_sku = new + clean_sku[len(old):]
-                    break
-                    
-            clean_sku = strip_known_prefixes(clean_sku, prefixes)
-            
             from routes.sku_map import split_leaf_sku
-            group_id, size_token, _ = split_leaf_sku(clean_sku)
-                    
+            raw_group_id, raw_size_token, _ = split_leaf_sku(sku)
+            # Pass 1: Try resolving raw SKU directly without destructive prefix replacements
             resolved = await resolve_style(
                 "online_channel", 
                 "myntra", 
-                clean_sku, 
-                external_size=size_token or None,
+                sku, 
+                external_size=raw_size_token or None,
                 secondary_sku=sec_sku or None,
                 db=db
             )
+            # Pass 2: If not matched, try applying prefix replacements (never replacing distinct style prefix FLL) & stripping
+            if not (resolved and resolved.get("matched")):
+                clean_sku = sku
+                for old, new in replacements.items():
+                    if old == "FLL":
+                        continue
+                    if clean_sku.startswith(old):
+                        clean_sku = new + clean_sku[len(old):]
+                        break
+                        
+                clean_sku = strip_known_prefixes(clean_sku, prefixes)
+                group_id, size_token, _ = split_leaf_sku(clean_sku)
+                        
+                resolved = await resolve_style(
+                    "online_channel", 
+                    "myntra", 
+                    clean_sku, 
+                    external_size=size_token or None,
+                    secondary_sku=sec_sku or None,
+                    db=db
+                )
             if resolved and resolved.get("matched"):
                 style_id = resolved.get("style_id")
+                style_doc = None
                 if style_id:
-                    style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
-                    if style_doc:
-                        row_data["erp_style_name"] = style_doc.get("name") or resolved.get("style_code") or ""
-                        row_data["erp_image_url"] = style_doc.get("image_thumbnail_url") or style_doc.get("image_display_url") or style_doc.get("image_url") or ""
+                    try:
+                        style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
+                    except Exception:
+                        style_doc = await db.styles.find_one({"_id": style_id})
+                if not style_doc and resolved.get("style_code"):
+                    style_doc = await db.styles.find_one({
+                        "$or": [
+                            {"code": resolved.get("style_code")},
+                            {"code": {"$regex": f"^{re.escape(resolved.get('style_code'))}$", "$options": "i"}}
+                        ]
+                    })
+
+                img_url = ""
+                if style_doc:
+                    row_data["erp_style_name"] = style_doc.get("name") or resolved.get("style_code") or ""
+                    imgs = style_doc.get("images")
+                    img_from_list = ""
+                    if isinstance(imgs, list) and len(imgs) > 0:
+                        first_img = imgs[0]
+                        if isinstance(first_img, dict):
+                            img_from_list = first_img.get("thumbnail_url") or first_img.get("display_url") or first_img.get("url") or ""
+                        elif isinstance(first_img, str):
+                            img_from_list = first_img
+
+                    img_url = (
+                        style_doc.get("image_thumbnail_url")
+                        or style_doc.get("image_display_url")
+                        or style_doc.get("image_url")
+                        or img_from_list
+                        or ""
+                    )
+
+                if not img_url and resolved.get("mapping_id"):
+                    try:
+                        mapping_doc = await db.sku_map.find_one({"_id": ObjectId(resolved["mapping_id"])})
+                    except Exception:
+                        mapping_doc = await db.sku_map.find_one({"_id": resolved["mapping_id"]})
+                    if mapping_doc:
+                        img_url = (
+                            mapping_doc.get("image_url")
+                            or mapping_doc.get("image_thumbnail_url")
+                            or mapping_doc.get("image_display_url")
+                            or ""
+                        )
+
+                if not img_url and resolved.get("style_code"):
+                    osp = await db.online_style_photos.find_one({"style_code": resolved.get("style_code")})
+                    if osp and osp.get("image_url"):
+                        img_url = osp["image_url"]
+
+                if not img_url:
+                    from routes.online_returns_engine import get_footwear_placeholder_image
+                    code_for_placeholder = resolved.get("style_code") or row_data.get("erp_style_name") or sku
+                    img_url = get_footwear_placeholder_image(code_for_placeholder)
+
+                row_data["erp_image_url"] = img_url
                 row_data["erp_style_code"] = resolved.get("style_code") or ""
                 row_data["size"] = resolved.get("size") or ""
                 row_data["mapped"] = True
@@ -198,25 +264,38 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         style_name = ""
         size = ""
         if sku:
-            clean_sku = sku
-            for old, new in replacements.items():
-                if clean_sku.startswith(old):
-                    clean_sku = new + clean_sku[len(old):]
-                    break
-                    
-            clean_sku = strip_known_prefixes(clean_sku, prefixes)
-            
             from routes.sku_map import split_leaf_sku
-            group_id, size_token, _ = split_leaf_sku(clean_sku)
-                    
+            raw_group_id, raw_size_token, _ = split_leaf_sku(sku)
+            # Pass 1: Try resolving raw SKU directly without destructive prefix replacements
             resolved = await resolve_style(
                 "online_channel", 
                 "myntra", 
-                clean_sku, 
-                external_size=size_token or None,
+                sku, 
+                external_size=raw_size_token or None,
                 secondary_sku=sec_sku or None,
                 db=db
             )
+            # Pass 2: If not matched, try applying prefix replacements (never replacing distinct style prefix FLL) & stripping
+            if not (resolved and resolved.get("matched")):
+                clean_sku = sku
+                for old, new in replacements.items():
+                    if old == "FLL":
+                        continue
+                    if clean_sku.startswith(old):
+                        clean_sku = new + clean_sku[len(old):]
+                        break
+                        
+                clean_sku = strip_known_prefixes(clean_sku, prefixes)
+                group_id, size_token, _ = split_leaf_sku(clean_sku)
+                        
+                resolved = await resolve_style(
+                    "online_channel", 
+                    "myntra", 
+                    clean_sku, 
+                    external_size=size_token or None,
+                    secondary_sku=sec_sku or None,
+                    db=db
+                )
             if resolved and resolved.get("matched"):
                 style_id = resolved.get("style_id")
                 if style_id:
@@ -1139,6 +1218,12 @@ async def get_picklist(request: Request, pid: str):
         it["image_display_url"]   = info.get("image_display_url", "")
         it["image_thumbnail_url"] = info.get("image_thumbnail_url", "")
         it["style_name"]          = info.get("style_name", "")
+        if not it["image_url"] and it.get("style_code"):
+            from routes.online_returns_engine import get_footwear_placeholder_image
+            fallback_img = get_footwear_placeholder_image(it["style_code"])
+            it["image_url"]           = fallback_img
+            it["image_thumbnail_url"] = fallback_img
+            it["image_display_url"]   = fallback_img
     return stringify(doc)
 
 
