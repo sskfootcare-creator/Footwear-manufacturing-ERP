@@ -122,7 +122,7 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
                     style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
                     if style_doc:
                         row_data["erp_style_name"] = style_doc.get("name") or resolved.get("style_code") or ""
-                        row_data["erp_image_url"] = style_doc.get("image_url") or ""
+                        row_data["erp_image_url"] = style_doc.get("image_thumbnail_url") or style_doc.get("image_display_url") or style_doc.get("image_url") or ""
                 row_data["erp_style_code"] = resolved.get("style_code") or ""
                 row_data["size"] = resolved.get("size") or ""
                 row_data["mapped"] = True
@@ -1128,14 +1128,14 @@ async def get_picklist(request: Request, pid: str):
     if style_ids:
         async for s in db.styles.find({"_id": {"$in": style_ids}}):
             style_map[str(s["_id"])] = {
-                "image_url":              s.get("image_url", ""),
+                "image_url":              s.get("image_thumbnail_url") or s.get("image_display_url") or s.get("image_url") or "",
                 "image_display_url":      s.get("image_display_url", ""),
                 "image_thumbnail_url":    s.get("image_thumbnail_url", ""),
                 "style_name":             s.get("name", ""),
             }
     for it in doc.get("items", []):
         info = style_map.get(str(it.get("style_id")), {})
-        it["image_url"]           = info.get("image_url", "")
+        it["image_url"]           = info.get("image_thumbnail_url") or info.get("image_display_url") or info.get("image_url") or ""
         it["image_display_url"]   = info.get("image_display_url", "")
         it["image_thumbnail_url"] = info.get("image_thumbnail_url", "")
         it["style_name"]          = info.get("style_name", "")
@@ -1456,7 +1456,7 @@ async def pending_product_list(request: Request):
         if style_object_ids:
             async for s in db.styles.find({"_id": {"$in": style_object_ids}}):
                 style_lookup[str(s["_id"])] = {
-                    "image_url":              s.get("image_url", ""),
+                    "image_url":              s.get("image_thumbnail_url") or s.get("image_display_url") or s.get("image_url") or "",
                     "image_display_url":      s.get("image_display_url", ""),
                     "image_thumbnail_url":    s.get("image_thumbnail_url", ""),
                     "style_name":             s.get("name", ""),
@@ -1508,7 +1508,7 @@ async def pending_product_list(request: Request):
             jd["component_shortages"] = job_shortages
 
         s_meta = style_lookup.get(sid, {})
-        jd["image_url"]           = s_meta.get("image_url", "")
+        jd["image_url"]           = s_meta.get("image_thumbnail_url") or s_meta.get("image_display_url") or s_meta.get("image_url") or ""
         jd["image_display_url"]   = s_meta.get("image_display_url", "")
         jd["image_thumbnail_url"] = s_meta.get("image_thumbnail_url", "")
         jd["style_name"]          = s_meta.get("style_name", "")
