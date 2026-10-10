@@ -272,15 +272,54 @@ async def resolve_style(
     if not ext_size and derived_size:
         ext_size = derived_size
 
+    root_style = None
+    extracted_color = None
+    
+    # Try full pattern MATCH: STYLE-COLOR-SIZE
+    m_full = re.match(r'^([A-Za-z0-9_\-]+?)[-_]([A-Za-z]{1,5})[-_]([0-9]{1,4}(?:\.[0-9]{1,2})?|[A-Za-z]+)$', ext_sku)
+    if m_full:
+        root_style = m_full.group(1).strip()
+        extracted_color = m_full.group(2).strip()
+        if not ext_size:
+            ext_size = m_full.group(3).strip()
+    elif group_id and group_id != ext_sku:
+        # Try group MATCH: STYLE-COLOR
+        m_grp = re.match(r'^([A-Za-z0-9_\-]+?)[-_]([A-Za-z]{1,5})$', group_id)
+        if m_grp:
+            root_style = m_grp.group(1).strip()
+            extracted_color = m_grp.group(2).strip()
+            
+    if not ext_color and extracted_color:
+        ext_color = extracted_color
+
     sku_candidates = [ext_sku]
     if group_id and group_id != ext_sku:
         sku_candidates.append(group_id)
+    if root_style and root_style not in sku_candidates:
+        sku_candidates.append(root_style)
     if sec_sku and sec_sku not in sku_candidates:
         sku_candidates.append(sec_sku)
 
+    # Add normalized candidates handling SSK_ prefix optionally
+    style_lookup_candidates = []
+    for cand in sku_candidates:
+        if cand not in style_lookup_candidates:
+            style_lookup_candidates.append(cand)
+        cand_norm = cand.replace('-', '_')
+        if cand_norm not in style_lookup_candidates:
+            style_lookup_candidates.append(cand_norm)
+        if not cand.upper().startswith('SSK_') and not cand.upper().startswith('SSK-'):
+            ssk_prefixed = f'SSK_{cand_norm}'
+            if ssk_prefixed not in style_lookup_candidates:
+                style_lookup_candidates.append(ssk_prefixed)
+        elif cand_norm.upper().startswith('SSK_'):
+            unprefixed = cand_norm[4:]
+            if unprefixed and unprefixed not in style_lookup_candidates:
+                style_lookup_candidates.append(unprefixed)
+
     mapping = None
     matched_candidate = ext_sku
-    for cand in sku_candidates:
+    for cand in style_lookup_candidates:
         mapping = await _safe_find_one(db.sku_map, {
             "source_type": src_type,
             "source_name_key": _norm_marketplace(src_name),
@@ -454,7 +493,7 @@ async def resolve_style(
             }
 
     # Fallback: direct style code lookup
-    for cand in sku_candidates:
+    for cand in style_lookup_candidates:
         style = await _safe_find_one(db.styles, {
             "code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}
         })

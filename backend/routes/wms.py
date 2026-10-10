@@ -69,6 +69,8 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
         "total_qty": 0,
     }
     
+    myntra_sku_col = next((c for c in fieldnames if c.strip().lower() in ("myntraskucode", "myntra sku code")), None)
+    
     for idx, row in enumerate(reader, start=1):
         try:
             qty_str = str(row.get(qty_col, "1")).strip()
@@ -77,6 +79,8 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
             qty = 1
             
         sku = str(row.get(sku_col, "")).strip()
+        sec_sku = str(row.get(myntra_sku_col, "")).strip() if myntra_sku_col else None
+        
         stats["total"] += 1
         stats["total_qty"] += max(1, qty)
         
@@ -92,12 +96,25 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
         }
         
         if sku:
-            clean_sku = strip_known_prefixes(sku, prefixes)
+            clean_sku = sku
             for old, new in replacements.items():
                 if clean_sku.startswith(old):
                     clean_sku = new + clean_sku[len(old):]
+                    break
                     
-            resolved = await resolve_style("online_channel", "myntra", clean_sku, db=db)
+            clean_sku = strip_known_prefixes(clean_sku, prefixes)
+            
+            from routes.sku_map import split_leaf_sku
+            group_id, size_token, _ = split_leaf_sku(clean_sku)
+                    
+            resolved = await resolve_style(
+                "online_channel", 
+                "myntra", 
+                clean_sku, 
+                external_size=size_token or None,
+                secondary_sku=sec_sku or None,
+                db=db
+            )
             if resolved and resolved.get("matched"):
                 style_id = resolved.get("style_id")
                 if style_id:
@@ -165,6 +182,8 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
     seal_counter = 1
     bag_counter = 1
     
+    myntra_sku_col = next((c for c in fieldnames if c.strip().lower() in ("myntraskucode", "myntra sku code")), None)
+    
     for idx, row in enumerate(reader, start=2): # 1 is header
         try:
             qty_str = str(row.get(qty_col, "1")).strip()
@@ -173,17 +192,31 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
             qty = 1
             
         sku = str(row.get(sku_col, "")).strip()
+        sec_sku = str(row.get(myntra_sku_col, "")).strip() if myntra_sku_col else None
         
         # Resolve SKU
         style_name = ""
         size = ""
         if sku:
-            clean_sku = strip_known_prefixes(sku, prefixes)
+            clean_sku = sku
             for old, new in replacements.items():
                 if clean_sku.startswith(old):
                     clean_sku = new + clean_sku[len(old):]
+                    break
                     
-            resolved = await resolve_style("online_channel", "myntra", clean_sku, db=db)
+            clean_sku = strip_known_prefixes(clean_sku, prefixes)
+            
+            from routes.sku_map import split_leaf_sku
+            group_id, size_token, _ = split_leaf_sku(clean_sku)
+                    
+            resolved = await resolve_style(
+                "online_channel", 
+                "myntra", 
+                clean_sku, 
+                external_size=size_token or None,
+                secondary_sku=sec_sku or None,
+                db=db
+            )
             if resolved and resolved.get("matched"):
                 style_id = resolved.get("style_id")
                 if style_id:
