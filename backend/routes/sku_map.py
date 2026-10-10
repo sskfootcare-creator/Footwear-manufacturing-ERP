@@ -316,6 +316,24 @@ async def resolve_style(
             unprefixed = cand_norm[4:]
             if unprefixed and unprefixed not in style_lookup_candidates:
                 style_lookup_candidates.append(unprefixed)
+                
+        # Handle zero-padding discrepancies (e.g. 005 in SKU but 05 in ERP style)
+        import re as _re
+        zero_stripped = _re.sub(r'[-_]0+([0-9]+)', r'_\1', cand_norm)
+        if zero_stripped != cand_norm:
+            if zero_stripped not in style_lookup_candidates:
+                style_lookup_candidates.append(zero_stripped)
+            ssk_zero = f'SSK_{zero_stripped}'
+            if ssk_zero not in style_lookup_candidates:
+                style_lookup_candidates.append(ssk_zero)
+                
+        zero_padded_2 = _re.sub(r'[-_]0+([0-9]+)', lambda m: f"_{m.group(1).zfill(2)}", cand_norm)
+        if zero_padded_2 != cand_norm:
+            if zero_padded_2 not in style_lookup_candidates:
+                style_lookup_candidates.append(zero_padded_2)
+            ssk_zero_2 = f'SSK_{zero_padded_2}'
+            if ssk_zero_2 not in style_lookup_candidates:
+                style_lookup_candidates.append(ssk_zero_2)
 
     mapping = None
     matched_candidate = ext_sku
