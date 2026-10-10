@@ -372,7 +372,7 @@ async def resolve_style(
 
             if ext_color:
                 if not color_map:
-                    resolved_color = ext_color
+                    resolved_color = doc_color if doc_color else ext_color
                     color_exact = True
                 elif ext_color in color_map:
                     resolved_color = color_map[ext_color]
