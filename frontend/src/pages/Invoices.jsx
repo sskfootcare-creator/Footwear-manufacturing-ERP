@@ -451,7 +451,7 @@ export default function Invoices() {
                           <Eye className="w-4 h-4" />
                         </button>
                         <a
-                          href={`${API}/invoices/${r.id}/file`}
+                          href={`${API}/invoices/${r.id}/file?token=${localStorage.getItem('token') || ''}`}
                           target="_blank"
                           rel="noreferrer"
                           className="text-slate-600 hover:text-[#C27842] p-1.5 inline-block"
@@ -583,7 +583,8 @@ export default function Invoices() {
             setShowDirectModal(false);
             load();
             if (newInv?.invoice_id) {
-              window.open(`${API}/invoices/${newInv.invoice_id}/file`, "_blank");
+              const token = localStorage.getItem("token") || "";
+              window.open(`${API}/invoices/${newInv.invoice_id}/file?token=${token}`, "_blank");
             }
           }}
         />

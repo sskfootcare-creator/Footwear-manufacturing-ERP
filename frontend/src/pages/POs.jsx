@@ -1247,7 +1247,7 @@ export default function POs() {
                             </div>
                             <div className="flex items-center gap-2">
                               <a
-                                href={`${API}/invoices/${inv.id}/file`}
+                                href={`${API}/invoices/${inv.id}/file?token=${localStorage.getItem('token') || ''}`}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="px-2.5 py-1 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] rounded shadow-sm inline-flex items-center gap-1"
@@ -1343,7 +1343,7 @@ export default function POs() {
                 </div>
                 <div className="flex items-center gap-2">
                   <a
-                    href={`${API}/invoices/${poInvoicesList[0].id}/file`}
+                    href={`${API}/invoices/${poInvoicesList[0].id}/file?token=${localStorage.getItem('token') || ''}`}
                     target="_blank"
                     rel="noreferrer"
                     className="px-3 py-1.5 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] rounded shadow-sm inline-flex items-center gap-1.5"
@@ -1497,7 +1497,7 @@ export default function POs() {
                             </div>
                             <div className="flex items-center gap-2">
                               <a
-                                href={`${API}/invoices/${inv.id}/file`}
+                                href={`${API}/invoices/${inv.id}/file?token=${localStorage.getItem('token') || ''}`}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="px-3 py-1.5 text-xs font-medium text-white bg-[#C27842] hover:bg-[#a86535] rounded-md inline-flex items-center gap-1.5 shadow-sm"

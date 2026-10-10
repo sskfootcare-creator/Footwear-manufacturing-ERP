@@ -179,8 +179,6 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
             
     output_rows = []
     errors = []
-    seal_counter = 1
-    bag_counter = 1
     
     myntra_sku_col = next((c for c in fieldnames if c.strip().lower() in ("myntraskucode", "myntra sku code")), None)
     
@@ -232,19 +230,45 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         sku_name = f"{style_name} {size}".strip()
         
         for _ in range(max(1, qty)):
-
             new_row = dict(row)
             new_row[qty_col] = "1"
-            new_row["SealTag"] = f"MP2692{seal_counter:05d}"
-            new_row["BagId"] = f"MPP4EM{bag_counter:09d}"
+            new_row["SealTag"] = "" # To be filled after DB allocation
+            new_row["BagId"] = ""
             new_row["SkuName"] = sku_name
-            
             output_rows.append(new_row)
-            seal_counter += 1
-            bag_counter += 1
 
     if errors:
         return JSONResponse(status_code=400, content={"message": "Mapping Errors Found", "errors": errors})
+
+    total_labels = len(output_rows)
+    if total_labels > 0:
+        from pymongo import ReturnDocument
+        
+        # Allocate SealTag Block
+        seal_doc = await db.counters.find_one({"_id": "myntra_sealtag"})
+        if not seal_doc:
+            await db.counters.insert_one({"_id": "myntra_sealtag", "seq": 259240000})
+        seal_doc = await db.counters.find_one_and_update(
+            {"_id": "myntra_sealtag"},
+            {"$inc": {"seq": total_labels}},
+            return_document=ReturnDocument.AFTER
+        )
+        seal_start = seal_doc["seq"] - total_labels + 1
+        
+        # Allocate BagId Block
+        bag_doc = await db.counters.find_one({"_id": "myntra_bagid"})
+        if not bag_doc:
+            await db.counters.insert_one({"_id": "myntra_bagid", "seq": 883599})
+        bag_doc = await db.counters.find_one_and_update(
+            {"_id": "myntra_bagid"},
+            {"$inc": {"seq": total_labels}},
+            return_document=ReturnDocument.AFTER
+        )
+        bag_start = bag_doc["seq"] - total_labels + 1
+        
+        for i, row_out in enumerate(output_rows):
+            row_out["SealTag"] = f"MP{seal_start + i}"
+            row_out["BagId"] = f"MPP4EM{bag_start + i:08d}"
 
     out_csv = io.StringIO()
     writer = csv.DictWriter(out_csv, fieldnames=fieldnames)

@@ -90,6 +90,22 @@ function downloadCsv(filename, headers, rows) {
   }, 200);
 }
 
+function downloadDynamicCsv(filename, dataArray) {
+  if (!dataArray || dataArray.length === 0) return;
+  const allKeys = Array.from(new Set(dataArray.flatMap((item) => Object.keys(item || {}))));
+  const headers = allKeys.map((k) => (k || "").replace(/_/g, " ").toUpperCase());
+  const rows = dataArray.map((item) =>
+    allKeys.map((k) => {
+      let val = item[k];
+      if (typeof val === "object" && val !== null) {
+        val = JSON.stringify(val);
+      }
+      return val;
+    })
+  );
+  downloadCsv(filename, headers, rows);
+}
+
 export default function Reports() {
   const [activeTab, setActiveTab] = useState("business");
   const [fromDate, setFromDate] = useState("");
@@ -350,29 +366,7 @@ function BusinessSummaryTab({ data }) {
   if (!data) return <div className="p-8 text-center text-slate-400 font-mono">No financial data available.</div>;
 
   const handleExport = () => {
-    const headers = ["Metric", "Value (INR / Count)"];
-    const rows = [
-      ["Gross Operating Revenue", data.gross_revenue],
-      ["B2B Invoiced Revenue", data.total_b2b_invoiced],
-      ["Online Marketplace Revenue", data.total_online_revenue],
-      ["Raw Material Procurement Spend", data.total_procurement],
-      ["Direct Karigar Wages", data.labor_cost],
-      ["Cost of Goods Sold (COGS)", data.cogs],
-      ["Gross Operating Profit", data.gross_profit],
-      ["Gross Margin %", `${data.gross_margin_pct}%`],
-      ["Operating Expenses (OPEX)", data.operating_expenses],
-      ["Net Operating Profit", data.net_profit],
-      ["Net Profit Margin %", `${data.net_margin_pct}%`],
-      ["Total Liquid Funds (Bank & Cash)", data.total_liquid_funds],
-      ["Bank Balances", data.total_bank_balance],
-      ["Cash Balances", data.total_cash_balance],
-      ["Total Accounts Receivable (AR)", data.total_ar_receivables],
-      ["Total Accounts Payable (AP)", data.total_ap_payables],
-      ["Active WIP Pairs in Pipeline", data.pipeline_pairs_count],
-      ["Total Dispatched Pairs", data.dispatched_pairs_count],
-      ["Raw Material Inventory Valuation", data.inventory_valuation],
-    ];
-    downloadCsv("SSK_ERP_Executive_Business_Summary.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Executive_Business_Summary.csv", [data]);
   };
 
   return (
@@ -571,31 +565,7 @@ function InventoryValuationTab({ data }) {
   if (!data) return <div className="p-8 text-center text-slate-400 font-mono">No inventory data available.</div>;
 
   const handleExport = () => {
-    const headers = [
-      "Material Code",
-      "Material Name",
-      "Category",
-      "Current Stock",
-      "Unit",
-      "Weighted Avg Rate (INR)",
-      "Last Purchase Rate (INR)",
-      "Valuation (INR)",
-      "Reorder Level",
-      "Status",
-    ];
-    const rows = filteredMaterials.map((m) => [
-      m.code,
-      m.name,
-      m.category,
-      m.current_stock,
-      m.unit,
-      m.weighted_avg_rate,
-      m.last_purchase_rate,
-      m.total_valuation,
-      m.reorder_level,
-      m.status,
-    ]);
-    downloadCsv("SSK_ERP_Material_Inventory_Valuation.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Material_Inventory_Valuation.csv", filteredMaterials);
   };
 
   return (
@@ -790,9 +760,7 @@ function ProductionOverviewTab({ data }) {
   const stageBreakdown = data.stage_breakdown || [];
 
   const handleExport = () => {
-    const headers = ["Manufacturing Stage", "Job Cards Count", "Pairs in Stage"];
-    const rows = stageBreakdown.map((s) => [s.stage, s.job_count, s.total_pairs]);
-    downloadCsv("SSK_ERP_Production_Stage_Throughput.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Production_Stage_Throughput.csv", stageBreakdown);
   };
 
   return (
@@ -939,27 +907,7 @@ function InvoicesSalesTab({ data }) {
   if (!data) return <div className="p-8 text-center text-slate-400 font-mono">No sales data available.</div>;
 
   const handleExport = () => {
-    const headers = [
-      "Invoice Number",
-      "Invoice Date",
-      "Client Name",
-      "Total Pairs",
-      "Grand Total (INR)",
-      "Paid Amount (INR)",
-      "Balance Due (INR)",
-      "Status",
-    ];
-    const rows = filteredInvoices.map((i) => [
-      i.invoice_number,
-      i.invoice_date,
-      i.client_name,
-      i.total_pairs,
-      i.grand_total,
-      i.paid_amount,
-      i.balance_due,
-      i.status,
-    ]);
-    downloadCsv("SSK_ERP_Sales_Invoices_Register.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Sales_Invoices_Register.csv", filteredInvoices);
   };
 
   return (
@@ -1111,29 +1059,7 @@ function VendorProcurementTab({ data }) {
   const apAging = data.ap_aging || {};
 
   const handleExport = () => {
-    const headers = [
-      "PO Number",
-      "Vendor Name",
-      "Created Date",
-      "Ordered Qty",
-      "Received Qty",
-      "Total Amount (INR)",
-      "Paid Amount (INR)",
-      "Balance Due (INR)",
-      "Status",
-    ];
-    const rows = purchaseOrders.map((p) => [
-      p.po_number,
-      p.vendor_name,
-      p.created_at,
-      p.ordered_quantity,
-      p.received_quantity,
-      p.total_amount,
-      p.paid_amount,
-      p.balance_due,
-      p.status,
-    ]);
-    downloadCsv("SSK_ERP_Vendor_Procurement_AP.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Vendor_Procurement_AP.csv", purchaseOrders);
   };
 
   return (
@@ -1277,27 +1203,7 @@ function ClientReceivablesTab({ data }) {
   if (!data) return <div className="p-8 text-center text-slate-400 font-mono">No receivables data available.</div>;
 
   const handleExport = () => {
-    const headers = [
-      "Client Name",
-      "Contact Person",
-      "Phone",
-      "Invoiced Total (INR)",
-      "Paid Total (INR)",
-      "Outstanding Balance (INR)",
-      "Aging Bucket",
-      "Payment Terms (Days)",
-    ];
-    const rows = filteredClients.map((c) => [
-      c.name,
-      c.contact_person,
-      c.phone,
-      c.invoiced_total,
-      c.paid_total,
-      c.balance_due,
-      c.aging_bucket,
-      c.payment_terms_days,
-    ]);
-    downloadCsv("SSK_ERP_Client_Receivables_AR.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Client_Receivables_AR.csv", filteredClients);
   };
 
   return (
@@ -1459,17 +1365,7 @@ function DetailedPnlTab({ data }) {
   const monthlyPnl = data.monthly_pnl || [];
 
   const handleExport = () => {
-    const headers = ["Month", "Revenue (INR)", "COGS (INR)", "Gross Profit (INR)", "OPEX (INR)", "Net Profit (INR)", "Net Margin %"];
-    const rows = monthlyPnl.map((m) => [
-      m.month,
-      m.revenue,
-      m.cogs,
-      m.gross_profit,
-      m.opex,
-      m.net_profit,
-      `${m.net_margin_pct}%`,
-    ]);
-    downloadCsv("SSK_ERP_Detailed_PnL_Schedule.csv", headers, rows);
+    downloadDynamicCsv("SSK_ERP_Detailed_PnL_Schedule.csv", monthlyPnl);
   };
 
   return (

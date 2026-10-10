@@ -376,6 +376,9 @@ def _extract_token(request: Request) -> str | None:
     tok = request.cookies.get("access_token")
     if tok:
         return tok
+    query_tok = request.query_params.get("token")
+    if query_tok:
+        return query_tok
     return None
 
 
