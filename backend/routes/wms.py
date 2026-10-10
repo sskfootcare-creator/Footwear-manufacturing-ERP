@@ -91,6 +91,7 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
             "mapped": False,
             "erp_style_code": "",
             "erp_style_name": "",
+            "erp_image_url": "",
             "size": "",
             "error": ""
         }
@@ -121,6 +122,7 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
                     style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
                     if style_doc:
                         row_data["erp_style_name"] = style_doc.get("name") or resolved.get("style_code") or ""
+                        row_data["erp_image_url"] = style_doc.get("image_url") or ""
                 row_data["erp_style_code"] = resolved.get("style_code") or ""
                 row_data["size"] = resolved.get("size") or ""
                 row_data["mapped"] = True

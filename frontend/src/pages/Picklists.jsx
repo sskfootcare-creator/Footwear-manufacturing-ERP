@@ -202,6 +202,35 @@ function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommittin
   const stats = previewData.stats;
   const rows = previewData.rows;
   const [filter, setFilter] = useState("all");
+  const [styles, setStyles] = useState([]);
+
+  useEffect(() => {
+    http.get("/styles").then(res => setStyles(res.data)).catch(console.error);
+  }, []);
+
+  async function handleQuickMap(rawSku, styleId) {
+    if (!styleId) return;
+    try {
+      let baseSku = rawSku;
+      let size = "";
+      const m = rawSku.match(/^(.*)[-_]([0-9]+(?:[.][0-9]+)?)$/);
+      if (m) {
+        baseSku = m[1];
+        size = m[2];
+      }
+      
+      await http.post("/sku-map", {
+        style_id: styleId,
+        source_type: "online_channel",
+        source_name: "myntra",
+        external_sku: baseSku,
+        size_map: size ? { [size]: rawSku } : {}
+      });
+      alert(`Mapped ${rawSku} successfully! Please close this preview and re-upload the CSV to refresh.`);
+    } catch (e) {
+      alert(friendlyAxiosError(e));
+    }
+  }
 
   const filteredRows = rows.filter(r => {
     if (filter === "unmatched") return !r.mapped;
@@ -270,15 +299,34 @@ function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommittin
                   <td className="px-4 py-3 font-mono text-xs text-slate-500">{r.row_idx}</td>
                   <td className="px-4 py-3 font-mono text-xs text-blue-700 font-semibold">{r.raw_sku}</td>
                   <td className="px-4 py-3 text-center font-bold">{r.qty}</td>
-                  <td className="px-4 py-3 font-semibold text-slate-700">{r.erp_style_name || "—"}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-700">
+                    <div className="flex items-center gap-3">
+                      {r.mapped && r.erp_image_url && (
+                        <SafeImage src={r.erp_image_url} alt="style" className="w-8 h-8 rounded-md object-cover border border-slate-200" />
+                      )}
+                      <span>{r.erp_style_name || "—"}</span>
+                    </div>
+                  </td>
                   <td className="px-4 py-3 text-slate-600">{r.size || "—"}</td>
                   <td className="px-4 py-3">
                     {r.mapped ? (
                       <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 border border-green-200 text-[10px] font-bold rounded">SKU_MAP</span>
                     ) : (
-                      <div className="flex flex-col gap-1 items-start">
-                        <span className="inline-block px-2 py-0.5 bg-red-100 text-red-700 border border-red-200 text-[10px] font-bold rounded">UNMAPPED</span>
-                        <span className="text-[10px] text-red-500 font-mono tracking-tighter">{r.error}</span>
+                      <div className="flex flex-col gap-2 items-start">
+                        <div className="flex items-center gap-2">
+                          <span className="inline-block px-2 py-0.5 bg-red-100 text-red-700 border border-red-200 text-[10px] font-bold rounded">UNMAPPED</span>
+                          <span className="text-[10px] text-red-500 font-mono tracking-tighter">{r.error}</span>
+                        </div>
+                        <select
+                          className="text-xs border border-slate-300 rounded p-1 w-full max-w-[200px]"
+                          onChange={(e) => handleQuickMap(r.raw_sku, e.target.value)}
+                          defaultValue=""
+                        >
+                          <option value="" disabled>Quick map to...</option>
+                          {styles.map(s => (
+                            <option key={s.id} value={s.id}>{s.name} ({s.code})</option>
+                          ))}
+                        </select>
                       </div>
                     )}
                   </td>
