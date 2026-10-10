@@ -336,12 +336,22 @@ async def resolve_style(
                 style_lookup_candidates.append(ssk_zero_2)
 
     async def _find_valid_mapping(query: dict):
-        docs = await db.sku_map.find(query).to_list(10)
-        for m in docs:
+        q = dict(query)
+        excluded = []
+        for _ in range(5):
+            if excluded:
+                q["_id"] = {"$nin": excluded}
+            m = await _safe_find_one(db.sku_map, q)
+            if not m:
+                break
             sq = {"_id": ObjectId(m["style_id"]) if ObjectId.is_valid(str(m.get("style_id", ""))) else m.get("style_id")}
             s = await _safe_find_one(db.styles, sq)
             if s:
                 return m, s
+            if "_id" in m:
+                excluded.append(m["_id"])
+            else:
+                break
         return None, None
 
     mapping = None
