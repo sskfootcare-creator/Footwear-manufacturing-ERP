@@ -513,7 +513,10 @@ async def resolve_style(
     # Fallback: direct style code lookup
     for cand in style_lookup_candidates:
         style = await _safe_find_one(db.styles, {
-            "code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}
+            "$or": [
+                {"code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}},
+                {"name": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}}
+            ]
         })
         if style:
             return {
