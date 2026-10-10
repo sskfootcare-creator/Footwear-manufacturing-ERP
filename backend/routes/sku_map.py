@@ -335,10 +335,20 @@ async def resolve_style(
             if ssk_zero_2 not in style_lookup_candidates:
                 style_lookup_candidates.append(ssk_zero_2)
 
+    async def _find_valid_mapping(query: dict):
+        async for m in db.sku_map.find(query):
+            sq = {"_id": ObjectId(m["style_id"]) if ObjectId.is_valid(str(m.get("style_id", ""))) else m.get("style_id")}
+            s = await _safe_find_one(db.styles, sq)
+            if s:
+                return m, s
+        return None, None
+
     mapping = None
+    style = None
     matched_candidate = ext_sku
+    
     for cand in style_lookup_candidates:
-        mapping = await _safe_find_one(db.sku_map, {
+        mapping, style = await _find_valid_mapping({
             "source_type": src_type,
             "source_name_key": _norm_marketplace(src_name),
             "external_sku_key": _norm_key(cand),
@@ -346,7 +356,8 @@ async def resolve_style(
         if mapping:
             matched_candidate = cand
             break
-        mapping = await _safe_find_one(db.sku_map, {
+            
+        mapping, style = await _find_valid_mapping({
             "source_type": src_type,
             "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
             "external_sku": {"$regex": f"^{re.escape(cand)}$",  "$options": "i"},
@@ -357,7 +368,7 @@ async def resolve_style(
 
     # If not found by external_sku, check if ext_sku is inside size_map values or sample_skus
     if not mapping and ext_sku:
-        mapping = await _safe_find_one(db.sku_map, {
+        mapping, style = await _find_valid_mapping({
             "source_type": src_type,
             "source_name_key": _norm_marketplace(src_name),
             "$or": [
@@ -367,7 +378,7 @@ async def resolve_style(
             ]
         })
         if not mapping:
-            mapping = await _safe_find_one(db.sku_map, {
+            mapping, style = await _find_valid_mapping({
                 "source_type": src_type,
                 "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
                 "$or": [
@@ -376,10 +387,7 @@ async def resolve_style(
                 ]
             })
 
-    if mapping:
-        style_query = {"_id": ObjectId(mapping["style_id"]) if ObjectId.is_valid(str(mapping.get("style_id", ""))) else mapping.get("style_id")}
-        style = await _safe_find_one(db.styles, style_query)
-        if style:
+    if mapping and style:
             color_map: dict = mapping.get("color_map") or {}
             size_map:  dict = mapping.get("size_map")  or {}
             doc_color = mapping.get("color") or ""
