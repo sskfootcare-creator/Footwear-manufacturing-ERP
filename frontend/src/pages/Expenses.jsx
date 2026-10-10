@@ -37,6 +37,7 @@ import {
   Tag,
   Sparkles,
   Printer,
+  FileText,
 } from "lucide-react";
 import {
   ResponsiveContainer,
