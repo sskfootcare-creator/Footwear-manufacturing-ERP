@@ -35,8 +35,8 @@ import {
   UserCheck,
   ChevronDown,
   Tag,
-  FileText,
   Sparkles,
+  Printer,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -679,6 +679,16 @@ export default function Expenses() {
         title="Expenses & Simple P&L"
         subtitle="Financial Expense Logging, Recurring Expenses, Auto-generation & Profit & Loss Statement"
         testId="expenses-header"
+        action={
+          <button
+            onClick={() => window.print()}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+            title="Print Ledger"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print</span>
+          </button>
+        }
       />
 
       <div className="p-2 sm:p-4 lg:p-8 space-y-4 sm:space-y-6">

@@ -38,6 +38,7 @@ import {
   Users,
   Maximize2,
   Package,
+  Printer,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -158,14 +159,24 @@ export default function Invoices() {
         subtitle="Accounts / Receivables"
         testId="invoices-header"
         action={
-          <BtnPrimary
-            onClick={() => setShowDirectModal(true)}
-            data-testid="btn-create-direct-invoice"
-            className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] flex items-center gap-2 shadow-sm font-semibold"
-          >
-            <Plus className="w-4 h-4" />
-            Create Direct Invoice
-          </BtnPrimary>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.print()}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+              title="Print Ledger"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print</span>
+            </button>
+            <BtnPrimary
+              onClick={() => setShowDirectModal(true)}
+              data-testid="btn-create-direct-invoice"
+              className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] flex items-center gap-2 shadow-sm font-semibold"
+            >
+              <Plus className="w-4 h-4" />
+              Create Direct Invoice
+            </BtnPrimary>
+          </div>
         }
       />
       <div className="p-2 sm:p-4 lg:p-8 space-y-5">

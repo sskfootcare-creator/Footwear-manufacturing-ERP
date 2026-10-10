@@ -9,7 +9,7 @@ import {
   PaginationControls,
   usePagination,
 } from "../components/ui-kit";
-import { Truck, Plus, Pencil, PowerOff, X, AlertCircle } from "lucide-react";
+import { Truck, Plus, Pencil, PowerOff, X, AlertCircle, Printer } from "lucide-react";
 import { useAuth } from "../lib/auth";
 
 const EMPTY_FORM = {
@@ -148,12 +148,22 @@ export default function Vendors() {
         subtitle="Accounts Payable / Vendor Master"
         testId="vendors-header"
         action={
-          canWrite && (
-            <BtnPrimary onClick={openAdd} data-testid="add-vendor-btn" className="px-3 sm:px-5">
-              <Plus className="w-3.5 h-3.5 inline" />
-              <span className="hidden sm:inline ml-1">Add Vendor</span>
-            </BtnPrimary>
-          )
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.print()}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+              title="Print Ledger"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline ml-1">Print</span>
+            </button>
+            {canWrite && (
+              <BtnPrimary onClick={openAdd} data-testid="add-vendor-btn" className="px-3 sm:px-5">
+                <Plus className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline ml-1">Add Vendor</span>
+              </BtnPrimary>
+            )}
+          </div>
         }
       />
 

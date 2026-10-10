@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
 import { PageHeader, Card, Badge, BtnSecondary, PaginationControls, usePagination } from "../components/ui-kit";
-import { Users, BookOpen, X, AlertCircle, Download } from "lucide-react";
+import { Users, BookOpen, X, AlertCircle, Download, Printer } from "lucide-react";
 
 const STATUS_COLOR = {
   paid: "green",
@@ -63,6 +63,16 @@ export default function Clients() {
         title="Clients"
         subtitle="Accounts / Ledger"
         testId="clients-header"
+        action={
+          <button
+            onClick={() => window.print()}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+            title="Print Ledger"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print</span>
+          </button>
+        }
       />
       <div className="p-2 sm:p-4 lg:p-8 space-y-5">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

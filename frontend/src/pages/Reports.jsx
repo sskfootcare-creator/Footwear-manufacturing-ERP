@@ -21,6 +21,7 @@ import {
   CheckCircle2,
   ArrowDownRight,
   ArrowUpRight,
+  Printer,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -208,6 +209,15 @@ export default function Reports() {
         testId="reports-page-header"
         action={
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => window.print()}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+              title="Print Report"
+              data-testid="reports-print-btn"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print</span>
+            </button>
             <button
               onClick={loadActiveData}
               disabled={loading}
