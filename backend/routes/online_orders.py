@@ -280,7 +280,7 @@ DEFAULT_ORDER_IMPORT_CONFIGS = [
             "bin_barcode":      "binBarcode",
         },
         "known_sku_prefixes_to_strip": [],
-        "known_sku_prefix_replacements": {"FLL": "FL"},
+        "known_sku_prefix_replacements": {},
         "is_picklist": True,
         "active": True,
         "notes": "Myntra picklist (OP-xxxxx.csv).",
@@ -310,7 +310,7 @@ DEFAULT_ORDER_IMPORT_CONFIGS = [
             "store_packet_id":     "Store Packet ID",
         },
         "known_sku_prefixes_to_strip": [],
-        "known_sku_prefix_replacements": {"FLL": "FL"},
+        "known_sku_prefix_replacements": {},
         "is_picklist": False,
         "active": True,
         "notes": "Myntra daily dispatch file (Packed_order_data.csv).",
@@ -338,7 +338,7 @@ DEFAULT_ORDER_IMPORT_CONFIGS = [
             "seller_price":         "seller price",
         },
         "known_sku_prefixes_to_strip": [],
-        "known_sku_prefix_replacements": {"FLL": "FL"},
+        "known_sku_prefix_replacements": {},
         "is_picklist": False,
         "active": True,
         "notes": "Myntra Monthly_order_report.csv.",
@@ -361,7 +361,7 @@ DEFAULT_ORDER_IMPORT_CONFIGS = [
             "payment_id":      "payment id",
         },
         "known_sku_prefixes_to_strip": [],
-        "known_sku_prefix_replacements": {"FLL": "FL"},
+        "known_sku_prefix_replacements": {},
         "is_picklist": False,
         "active": True,
         "notes": "Myntra Settlement Advice CSV.",
@@ -2197,8 +2197,6 @@ async def _record_monthly_return(
 
 def _parse_sku_style_and_size(raw_sku: str) -> Tuple[str, str, str]:
     s = (raw_sku or "").strip()
-    if s.startswith("FLL_") or s.startswith("FLL-"):
-        s = "FL" + s[3:]
     m = re.match(r"^(.*?)[-_]([A-Za-z]{1,4})[-_]([0-9]{1,2}(?:\.[0-9])?)$", s)
     if m:
         return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
