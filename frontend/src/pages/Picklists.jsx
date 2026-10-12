@@ -73,11 +73,15 @@ export default function Picklists() {
     }
   }
 
-  async function handleProcessAndDownload(file) {
+  async function handleProcessAndDownload(file, rows = null) {
     setIsCommitting(true); setErr("");
     try {
       const fd = new FormData();
       fd.append("file", file);
+      const rowsToSend = rows || previewData?.rows || [];
+      if (rowsToSend.length > 0) {
+        fd.append("preview_rows", JSON.stringify(rowsToSend));
+      }
       const res = await http.post("/wms/myntra-picklist/process", fd, { responseType: "blob" });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement("a");
@@ -339,7 +343,7 @@ function MyntraPreviewDrawer({ previewData, file, onClose, onCommit, isCommittin
             <button onClick={() => setFilter("matched")} className={`px-4 py-1.5 rounded text-xs transition-colors ${filter === "matched" ? "bg-green-600 text-white" : "bg-green-50 text-green-700 hover:bg-green-100"}`}>Matched ({stats.matched})</button>
           </div>
           <div>
-            <BtnPrimary onClick={() => onCommit(file)} disabled={stats.unmatched > 0 || isCommitting}>
+            <BtnPrimary onClick={() => onCommit(file, rows)} disabled={stats.unmatched > 0 || isCommitting}>
               {isCommitting ? "Processing..." : "Process & Download CSV"}
             </BtnPrimary>
           </div>

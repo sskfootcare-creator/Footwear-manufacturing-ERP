@@ -358,6 +358,7 @@ async def resolve_style(
     style = None
     matched_candidate = ext_sku
     
+    # 1. Fast exact check by normalized external_sku_key across candidates in priority order
     for cand in style_lookup_candidates:
         mapping, style = await _find_valid_mapping({
             "source_type": src_type,
@@ -367,15 +368,18 @@ async def resolve_style(
         if mapping:
             matched_candidate = cand
             break
-            
-        mapping, style = await _find_valid_mapping({
-            "source_type": src_type,
-            "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
-            "external_sku": {"$regex": f"^{re.escape(cand)}$",  "$options": "i"},
-        })
-        if mapping:
-            matched_candidate = cand
-            break
+
+    # 2. Case-insensitive regex fallback only if none of the candidates matched exact key
+    if not mapping:
+        for cand in style_lookup_candidates:
+            mapping, style = await _find_valid_mapping({
+                "source_type": src_type,
+                "source_name": {"$regex": f"^{re.escape(src_name)}$", "$options": "i"},
+                "external_sku": {"$regex": f"^{re.escape(cand)}$",  "$options": "i"},
+            })
+            if mapping:
+                matched_candidate = cand
+                break
 
     # If not found by external_sku, check if ext_sku is inside size_map values or sample_skus
     if not mapping and ext_sku:
@@ -530,29 +534,42 @@ async def resolve_style(
             }
 
     # Fallback: direct style code lookup
-    for cand in style_lookup_candidates:
+    style = await _safe_find_one(db.styles, {
+        "$or": [
+            {"code": {"$in": style_lookup_candidates}},
+            {"name": {"$in": style_lookup_candidates}}
+        ]
+    })
+    matched_cand = None
+    if style:
+        matched_cand = next((c for c in style_lookup_candidates if c.upper() in (style.get("code", "").upper(), style.get("name", "").upper())), style_lookup_candidates[0])
+    elif style_lookup_candidates:
+        pattern = f"^({'|'.join(re.escape(c) for c in style_lookup_candidates)})$"
         style = await _safe_find_one(db.styles, {
             "$or": [
-                {"code": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}},
-                {"name": {"$regex": f"^{re.escape(cand)}$", "$options": "i"}}
+                {"code": {"$regex": pattern, "$options": "i"}},
+                {"name": {"$regex": pattern, "$options": "i"}}
             ]
         })
         if style:
-            return {
-                "style_id":            str(style["_id"]),
-                "style_code":          style.get("code", ""),
-                "color":               ext_color or style.get("color") or "",
-                "size":                ext_size,
-                "matched":             True,
-                "matched_exact":       True,
-                "color_matched_exact": True,
-                "size_matched_exact":  True,
-                "unmapped_color":      None,
-                "unmapped_size":       None,
-                "match_via":           "style_code",
-                "mapping_id":          None,
-                "mapped_from_sku":     cand,
-            }
+            matched_cand = next((c for c in style_lookup_candidates if c.upper() in (style.get("code", "").upper(), style.get("name", "").upper())), style_lookup_candidates[0])
+
+    if style:
+        return {
+            "style_id":            str(style["_id"]),
+            "style_code":          style.get("code", ""),
+            "color":               ext_color or style.get("color") or "",
+            "size":                ext_size,
+            "matched":             True,
+            "matched_exact":       True,
+            "color_matched_exact": True,
+            "size_matched_exact":  True,
+            "unmapped_color":      None,
+            "unmapped_size":       None,
+            "match_via":           "style_code",
+            "mapping_id":          None,
+            "mapped_from_sku":     matched_cand or style_lookup_candidates[0],
+        }
 
     return {
         "style_id":            None,

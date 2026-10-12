@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from bson import ObjectId
-from fastapi import APIRouter, HTTPException, Request, Depends, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, Depends, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import csv
@@ -69,6 +69,11 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
         "total_qty": 0,
     }
     
+    sku_cache = {}
+    style_cache = {}
+    mapping_cache = {}
+    photo_cache = {}
+    
     myntra_sku_col = next((c for c in fieldnames if c.strip().lower() in ("myntraskucode", "myntra sku code")), None)
     
     for idx, row in enumerate(reader, start=1):
@@ -95,6 +100,22 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
             "size": "",
             "error": ""
         }
+        
+        cache_key = (sku, sec_sku)
+        if sku and cache_key in sku_cache:
+            c = sku_cache[cache_key]
+            row_data["mapped"] = c["mapped"]
+            row_data["erp_style_code"] = c["erp_style_code"]
+            row_data["erp_style_name"] = c["erp_style_name"]
+            row_data["erp_image_url"] = c["erp_image_url"]
+            row_data["size"] = c["size"]
+            row_data["error"] = c["error"]
+            if c["mapped"]:
+                stats["matched"] += 1
+            else:
+                stats["unmatched"] += 1
+            preview_rows.append(row_data)
+            continue
         
         if sku:
             from routes.sku_map import split_leaf_sku
@@ -133,17 +154,22 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
                 style_id = resolved.get("style_id")
                 style_doc = None
                 if style_id:
-                    try:
-                        style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
-                    except Exception:
-                        style_doc = await db.styles.find_one({"_id": style_id})
+                    if style_id not in style_cache:
+                        try:
+                            style_cache[style_id] = await db.styles.find_one({"_id": ObjectId(style_id)})
+                        except Exception:
+                            style_cache[style_id] = await db.styles.find_one({"_id": style_id})
+                    style_doc = style_cache[style_id]
                 if not style_doc and resolved.get("style_code"):
-                    style_doc = await db.styles.find_one({
-                        "$or": [
-                            {"code": resolved.get("style_code")},
-                            {"code": {"$regex": f"^{re.escape(resolved.get('style_code'))}$", "$options": "i"}}
-                        ]
-                    })
+                    code_key = resolved.get("style_code")
+                    if code_key not in style_cache:
+                        style_cache[code_key] = await db.styles.find_one({
+                            "$or": [
+                                {"code": code_key},
+                                {"code": {"$regex": f"^{re.escape(code_key)}$", "$options": "i"}}
+                            ]
+                        })
+                    style_doc = style_cache[code_key]
 
                 img_url = ""
                 if style_doc:
@@ -166,10 +192,13 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
                     )
 
                 if not img_url and resolved.get("mapping_id"):
-                    try:
-                        mapping_doc = await db.sku_map.find_one({"_id": ObjectId(resolved["mapping_id"])})
-                    except Exception:
-                        mapping_doc = await db.sku_map.find_one({"_id": resolved["mapping_id"]})
+                    mid = resolved["mapping_id"]
+                    if mid not in mapping_cache:
+                        try:
+                            mapping_cache[mid] = await db.sku_map.find_one({"_id": ObjectId(mid)})
+                        except Exception:
+                            mapping_cache[mid] = await db.sku_map.find_one({"_id": mid})
+                    mapping_doc = mapping_cache[mid]
                     if mapping_doc:
                         img_url = (
                             mapping_doc.get("image_url")
@@ -179,9 +208,12 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
                         )
 
                 if not img_url and resolved.get("style_code"):
-                    osp = await db.online_style_photos.find_one({"style_code": resolved.get("style_code")})
-                    if osp and osp.get("image_url"):
-                        img_url = osp["image_url"]
+                    sc = resolved.get("style_code")
+                    if sc not in photo_cache:
+                        osp = await db.online_style_photos.find_one({"style_code": sc})
+                        photo_cache[sc] = osp.get("image_url") if osp else None
+                    if photo_cache[sc]:
+                        img_url = photo_cache[sc]
 
                 if not img_url:
                     from routes.online_returns_engine import get_footwear_placeholder_image
@@ -200,12 +232,26 @@ async def preview_myntra_picklist(request: Request, file: UploadFile = File(...)
             row_data["error"] = "Empty SKU"
             stats["unmatched"] += 1
             
+        if sku:
+            sku_cache[cache_key] = {
+                "mapped": row_data["mapped"],
+                "erp_style_code": row_data["erp_style_code"],
+                "erp_style_name": row_data["erp_style_name"],
+                "erp_image_url": row_data["erp_image_url"],
+                "size": row_data["size"],
+                "error": row_data["error"],
+            }
+            
         preview_rows.append(row_data)
 
     return {"stats": stats, "rows": preview_rows}
 
 @wms_router.post("/wms/myntra-picklist/process")
-async def process_myntra_picklist(request: Request, file: UploadFile = File(...)):
+async def process_myntra_picklist(
+    request: Request,
+    file: UploadFile = File(...),
+    preview_rows: Optional[str] = Form(None),
+):
     """Process Myntra picklist CSV to flatten quantities and add required columns."""
     from routes.sku_map import resolve_style
     from routes.online_orders import strip_known_prefixes
@@ -248,6 +294,25 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
     output_rows = []
     errors = []
     
+    preview_map = {}
+    if preview_rows:
+        try:
+            import json
+            parsed_preview = json.loads(preview_rows) if isinstance(preview_rows, str) else preview_rows
+            if isinstance(parsed_preview, list):
+                for pr in parsed_preview:
+                    r_sku = str(pr.get("raw_sku", "")).strip()
+                    if r_sku and pr.get("mapped"):
+                        preview_map[r_sku] = {
+                            "style_name": str(pr.get("erp_style_name", "")).strip(),
+                            "size": str(pr.get("size", "")).strip(),
+                        }
+        except Exception as e:
+            log.warning("Could not parse preview_rows: %s", e)
+
+    sku_process_cache = {}
+    style_cache = {}
+    
     myntra_sku_col = next((c for c in fieldnames if c.strip().lower() in ("myntraskucode", "myntra sku code")), None)
     
     for idx, row in enumerate(reader, start=2): # 1 is header
@@ -263,7 +328,20 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
         # Resolve SKU
         style_name = ""
         size = ""
-        if sku:
+        cache_key = (sku, sec_sku)
+        
+        if sku in preview_map:
+            p_info = preview_map[sku]
+            style_name = p_info["style_name"]
+            size = p_info["size"]
+        elif sku and cache_key in sku_process_cache:
+            c = sku_process_cache[cache_key]
+            if c["matched"]:
+                style_name = c["style_name"]
+                size = c["size"]
+            else:
+                errors.append(f"Row {idx}: sellerSkuCode '{sku}' is not mapped to any ERP style.")
+        elif sku:
             from routes.sku_map import split_leaf_sku
             raw_group_id, raw_size_token, _ = split_leaf_sku(sku)
             # Pass 1: Try resolving raw SKU directly without destructive prefix replacements
@@ -298,12 +376,30 @@ async def process_myntra_picklist(request: Request, file: UploadFile = File(...)
                 )
             if resolved and resolved.get("matched"):
                 style_id = resolved.get("style_id")
+                style_doc = None
                 if style_id:
-                    style_doc = await db.styles.find_one({"_id": ObjectId(style_id)})
-                    if style_doc:
-                        style_name = style_doc.get("name") or resolved.get("style_code") or ""
+                    if style_id not in style_cache:
+                        try:
+                            style_cache[style_id] = await db.styles.find_one({"_id": ObjectId(style_id)})
+                        except Exception:
+                            style_cache[style_id] = await db.styles.find_one({"_id": style_id})
+                    style_doc = style_cache[style_id]
+                if not style_doc and resolved.get("style_code"):
+                    code_key = resolved.get("style_code")
+                    if code_key not in style_cache:
+                        style_cache[code_key] = await db.styles.find_one({
+                            "$or": [
+                                {"code": code_key},
+                                {"code": {"$regex": f"^{re.escape(code_key)}$", "$options": "i"}}
+                            ]
+                        })
+                    style_doc = style_cache[code_key]
+                if style_doc:
+                    style_name = style_doc.get("name") or resolved.get("style_code") or ""
                 size = resolved.get("size") or ""
+                sku_process_cache[cache_key] = {"matched": True, "style_name": style_name, "size": size}
             else:
+                sku_process_cache[cache_key] = {"matched": False, "style_name": "", "size": ""}
                 errors.append(f"Row {idx}: sellerSkuCode '{sku}' is not mapped to any ERP style.")
         else:
             errors.append(f"Row {idx}: sellerSkuCode is empty.")
