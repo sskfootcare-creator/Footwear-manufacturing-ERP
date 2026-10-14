@@ -43,6 +43,7 @@ class InvestorAdvanceCreateIn(BaseModel):
     advance_date: Optional[str] = Field(None, description="Advance date (YYYY-MM-DD)")
     bank_account_id: Optional[str] = Field(None, description="Company bank account receiving the investor funding")
     payment_mode: Optional[str] = Field("Bank Transfer", description="Inflow mode: NEFT, RTGS, IMPS, Bank Transfer, Cheque")
+    mode: Optional[str] = Field(None, description="Alias for payment_mode")
     reference: Optional[str] = Field("", description="Transaction UTR / payment reference")
     notes: Optional[str] = ""
 
@@ -54,6 +55,7 @@ class InvestorBatchAdvanceCreateIn(BaseModel):
     advance_date: Optional[str] = Field(None, description="Advance date (YYYY-MM-DD)")
     bank_account_id: Optional[str] = Field(None, description="Company bank account receiving the investor funding")
     payment_mode: Optional[str] = Field("Bank Transfer", description="Inflow mode: NEFT, RTGS, IMPS, Bank Transfer, Cheque")
+    mode: Optional[str] = Field(None, description="Alias for payment_mode")
     reference: Optional[str] = Field("", description="Transaction UTR / payment reference")
     notes: Optional[str] = ""
 

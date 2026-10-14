@@ -71,12 +71,21 @@ async def queue_investor_advance_sync(db, adv_doc: dict, investor_doc: Optional[
         log.warning("Supabase investor advance sync skipped (queued in outbox): %s", se)
 
 
-async def queue_investor_repayment_sync(db, repayment_doc: dict, investor_doc: Optional[dict] = None, is_reinvestment: bool = False, payment_mode: str = "BANK_TRANSFER"):
+async def queue_investor_repayment_sync(
+    db,
+    repayment_doc: dict,
+    investor_doc: Optional[dict] = None,
+    is_reinvestment: bool = False,
+    payment_mode: str = "BANK_TRANSFER",
+    new_advance_doc: Optional[dict] = None,
+    bank_account_id: Optional[str] = None
+):
     try:
         import json
         from bson import json_util
         clean_rep = json.loads(json_util.dumps(repayment_doc))
         clean_inv = json.loads(json_util.dumps(investor_doc)) if investor_doc else None
+        clean_new_adv = json.loads(json_util.dumps(new_advance_doc)) if new_advance_doc else None
         doc_id = str(repayment_doc.get("_id") or repayment_doc.get("id"))
 
         evt_res = await db.outbox_events.insert_one({
@@ -87,7 +96,9 @@ async def queue_investor_repayment_sync(db, repayment_doc: dict, investor_doc: O
                 "repayment_doc": clean_rep,
                 "investor_doc": clean_inv,
                 "is_reinvestment": is_reinvestment,
+                "new_advance_doc": clean_new_adv,
                 "payment_mode": payment_mode,
+                "bank_account_id": bank_account_id,
             },
             "status": "pending",
             "retries": 0,
@@ -98,7 +109,9 @@ async def queue_investor_repayment_sync(db, repayment_doc: dict, investor_doc: O
             repayment_doc=repayment_doc,
             investor_doc=investor_doc,
             is_reinvestment=is_reinvestment,
-            payment_mode=payment_mode
+            new_advance_doc=new_advance_doc,
+            payment_mode=payment_mode,
+            bank_account_id=bank_account_id
         )
         if sync_res:
             await db.outbox_events.update_one(
@@ -572,7 +585,8 @@ async def _create_batch_advances_internal(
             except Exception as pe:
                 log.warning("Could not insert banking payment for advance %s: %s", adv_doc["_id"], pe)
 
-        await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=payload.mode or "BANK_TRANSFER")
+        eff_adv_mode = payment_mode or "BANK_TRANSFER"
+        await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=eff_adv_mode)
 
         created_advances.append(adv_doc)
 
@@ -711,7 +725,8 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
         except Exception as pe:
             log.warning("Could not sync live bank balance for advance %s: %s", adv_doc["_id"], pe)
 
-    await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=payload.mode or "BANK_TRANSFER")
+    eff_adv_mode = getattr(payload, "payment_mode", None) or getattr(payload, "mode", None) or "BANK_TRANSFER"
+    await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=eff_adv_mode)
 
     return stringify(adv_doc)
 
@@ -1015,7 +1030,8 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
             repayment_doc=repayment_doc,
             investor_doc=investor,
             is_reinvestment=False,
-            payment_mode=payload.mode or "BANK_TRANSFER"
+            payment_mode=eff_mode,
+            bank_account_id=payload.bank_account_id
         )
 
         return {
@@ -1137,7 +1153,9 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
             repayment_doc=repayment_doc,
             investor_doc=investor,
             is_reinvestment=True,
-            payment_mode=payload.mode or "BANK_TRANSFER"
+            payment_mode=eff_mode,
+            new_advance_doc=new_advance_doc,
+            bank_account_id=payload.bank_account_id
         )
 
         return {
@@ -1251,16 +1269,15 @@ async def execute_bulk_repay(payload: InvestorBulkRepayActionIn, request: Reques
                 }}
             )
 
-            try:
-                sync_investor_repayment_to_supabase(
-                    repayment_doc=repayment_doc,
-                    investor_doc=investor,
-                    is_reinvestment=False,
-                    payment_mode=payload.mode or "BANK_TRANSFER",
-                    bank_account_id=payload.bank_account_id
-                )
-            except Exception as se:
-                log.warning("Supabase bulk repayment sync skipped for advance %s: %s", adv_id, se)
+            eff_rep_mode = payload.payment_mode or payload.mode or "BANK_TRANSFER"
+            await queue_investor_repayment_sync(
+                db,
+                repayment_doc=repayment_doc,
+                investor_doc=investor,
+                is_reinvestment=False,
+                payment_mode=eff_rep_mode,
+                bank_account_id=payload.bank_account_id
+            )
 
             results.append(repayment_doc)
 
@@ -1323,17 +1340,16 @@ async def execute_bulk_repay(payload: InvestorBulkRepayActionIn, request: Reques
                 }}
             )
 
-            try:
-                sync_investor_repayment_to_supabase(
-                    repayment_doc=repayment_doc,
-                    investor_doc=investor,
-                    is_reinvestment=True,
-                    new_advance_doc=new_advance_doc,
-                    payment_mode=payload.mode or "BANK_TRANSFER",
-                    bank_account_id=payload.bank_account_id
-                )
-            except Exception as se:
-                log.warning("Supabase bulk reinvestment sync skipped for advance %s: %s", adv_id, se)
+            eff_rep_mode = payload.payment_mode or payload.mode or "BANK_TRANSFER"
+            await queue_investor_repayment_sync(
+                db,
+                repayment_doc=repayment_doc,
+                investor_doc=investor,
+                is_reinvestment=True,
+                payment_mode=eff_rep_mode,
+                new_advance_doc=new_advance_doc,
+                bank_account_id=payload.bank_account_id
+            )
 
             results.append(repayment_doc)
 
