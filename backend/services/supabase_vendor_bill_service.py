@@ -480,3 +480,40 @@ def sync_vendor_payment_to_supabase(
 
 # Alias for semantic clarity with bills vs purchase orders
 sync_vendor_bill_to_supabase = sync_vendor_po_to_supabase
+
+
+def void_vendor_bill_in_supabase(bill_id_or_doc: Any, voided_by: str = "system", reason: str = "Vendor Bill / PO voided") -> bool:
+    """
+    Void a vendor bill / purchase order in Supabase:
+    1. Sets public.vendor_bills status = 'VOIDED'
+    2. Sets public.journal_entries status = 'VOIDED' with audit metadata
+    """
+    client = get_supabase_admin_client()
+    if not client:
+        return False
+
+    try:
+        raw_id = bill_id_or_doc.get("_id") if isinstance(bill_id_or_doc, dict) else bill_id_or_doc
+        bill_uuid = to_uuid(raw_id)
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        # Update vendor_bills
+        client.table("vendor_bills").update({
+            "status": "VOIDED"
+        }).eq("id", bill_uuid).execute()
+
+        # Update journal_entries
+        je_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_BILL_{bill_uuid}"))
+        client.table("journal_entries").update({
+            "status": "VOIDED",
+            "voided_at": now_ts,
+            "voided_by": str(voided_by)[:100],
+            "void_reason": str(reason)[:255]
+        }).eq("id", je_id).execute()
+
+        log.info("Successfully voided vendor bill %s and journal entry %s in Supabase.", bill_uuid, je_id)
+        return True
+    except Exception as e:
+        log.error("Failed to void vendor bill in Supabase: %s", e)
+        return False
+

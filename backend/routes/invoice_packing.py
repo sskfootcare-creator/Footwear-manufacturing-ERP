@@ -786,7 +786,58 @@ async def _enrich_cartons_with_mapped_sku(cartons: list[dict], db=None) -> list[
     return cartons
 
 
-async def _flag_jobs(job_ids: list, field: str, db=None) -> None:
+async def queue_invoice_sync(inv_doc: dict, db=None) -> None:
+    """Enqueues an invoice into outbox_events and attempts immediate sync to Supabase."""
+    if not inv_doc:
+        return
+    if db is None:
+        db = getattr(__import__("server"), "db")
+    try:
+        import json
+        from bson import json_util
+        inv_id_str = str(inv_doc.get("_id") or inv_doc.get("id"))
+        payload = json.loads(json_util.dumps(inv_doc))
+
+        event_doc = {
+            "type": "invoice_created",
+            "collection": "invoices",
+            "doc_id": inv_id_str,
+            "payload": payload,
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        evt_res = await db.outbox_events.insert_one(event_doc)
+
+        # Attempt immediate sync to Supabase if available
+        try:
+            from services.supabase_invoice_service import sync_direct_invoice_to_supabase
+            res = sync_direct_invoice_to_supabase(payload)
+            if res:
+                await db.outbox_events.update_one(
+                    {"_id": evt_res.inserted_id},
+                    {"$set": {
+                        "status": "processed",
+                        "processed_at": now_iso(),
+                        "updated_at": now_iso(),
+                    }}
+                )
+                log.info("Directly synced invoice %s (%s) to Supabase sales_invoices.", inv_doc.get("invoice_no"), inv_id_str)
+        except Exception as sync_err:
+            log.debug("Immediate Supabase sync deferred to outbox processor: %s", sync_err)
+    except Exception as se:
+        log.warning("Failed to queue invoice for Supabase sync: %s", se)
+
+
+async def _flag_jobs(
+    job_ids: list,
+    field: str,
+    invoice_id: Optional[str] = None,
+    invoice_no: Optional[str] = None,
+    dispatch_record_id: Optional[str] = None,
+    db=None,
+) -> None:
     """Mark a batch of jobs with a timestamped field. If the other flag is also
     present, additionally mark archived=True/archived_at."""
     if not job_ids:
@@ -805,6 +856,12 @@ async def _flag_jobs(job_ids: list, field: str, db=None) -> None:
         update_fields["stage"] = "dispatched"
         update_fields["stage_entered_at"] = now
         update_fields["stage_deadline"] = None
+        if invoice_id:
+            update_fields["invoice_id"] = str(invoice_id)
+        if invoice_no:
+            update_fields["invoice_no"] = str(invoice_no)
+        if dispatch_record_id:
+            update_fields["dispatch_record_id"] = str(dispatch_record_id)
 
     await db.production_jobs.update_many(
         {"_id": {"$in": obj_ids}},
@@ -812,13 +869,14 @@ async def _flag_jobs(job_ids: list, field: str, db=None) -> None:
     )
     
     if field == "invoice_generated_at":
+        hist_note = f"Invoice {invoice_no} generated and job dispatched" if invoice_no else "Invoice generated and job dispatched"
         for o_id in obj_ids:
             await db.production_jobs.update_one(
                 {"_id": o_id},
                 {"$push": {"history": {
                     "stage": "dispatched", "at": now, "by": "system",
-                    "notes": "Invoice generated and job dispatched",
-                    "qc_pass": None, "rejected_qty": 0
+                    "notes": hist_note,
+                    "qc_pass": None, "rejected_qty": 0,
                 }}}
             )
 
@@ -1163,7 +1221,20 @@ async def po_invoice(pid: str, request: Request):
             "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
             "merged": False,
         }
-        await db.invoices.insert_one(inv_doc)
+        res = await db.invoices.insert_one(inv_doc)
+        inv_doc["_id"] = res.inserted_id
+        invoice_id = str(res.inserted_id)
+
+        # Queue and sync invoice to Supabase sales_invoices
+        await queue_invoice_sync(inv_doc, db=db)
+
+        try:
+            await db.pos.update_one(
+                {"_id": oid(pid)},
+                {"$set": {"invoice_no": invoice_no, "invoice_id": invoice_id, "invoice_date": invoice_date}}
+            )
+        except Exception:
+            pass
 
         return StreamingResponse(
             BytesIO(pdf_bytes), media_type="application/pdf",
@@ -1263,22 +1334,39 @@ async def invoice_for_jobs(payload: InvoiceGenerate, request: Request):
         "idempotency_key": idem_key,
     }
     res = await db.invoices.insert_one(inv_doc)
+    inv_doc["_id"] = res.inserted_id
+    invoice_id = str(res.inserted_id)
+
+    # Queue and sync invoice to Supabase sales_invoices
+    await queue_invoice_sync(inv_doc, db=db)
+
+    # Link invoice to PO in db.pos
+    if payload.po_id:
+        try:
+            await db.pos.update_one(
+                {"_id": oid(payload.po_id)},
+                {"$set": {"invoice_no": invoice_no, "invoice_id": invoice_id, "invoice_date": invoice_date}}
+            )
+        except Exception as po_err:
+            log.warning("Failed to link invoice to PO %s: %s", payload.po_id, po_err)
+
     cartons = await db.packing_cartons.find({"job_id": {"$in": payload.job_ids or []}, "status": "packed"}).to_list(10000)
     for idx, carton in enumerate(cartons):
         await db.packing_cartons.update_one(
             {"_id": carton["_id"]},
             {"$set": {
                 "status": "dispatched",
-                "invoice_id": str(res.inserted_id),
+                "invoice_id": invoice_id,
                 "box_number": idx + 1
             }}
         )
-    await _flag_jobs(payload.job_ids or [], "invoice_generated_at", db=db)
+    await _flag_jobs(payload.job_ids or [], "invoice_generated_at", invoice_id=invoice_id, invoice_no=invoice_no, db=db)
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{invoice_no}.pdf"',
-            "X-Invoice-Id": str(res.inserted_id),
+            "X-Invoice-Id": invoice_id,
+            "X-Invoice-No": invoice_no,
         },
     )
 
@@ -1574,21 +1662,7 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     inv_doc["_id"] = res.inserted_id
 
     # 7. Outbox pattern for Supabase Financial Core sync
-    try:
-        import json
-        from bson import json_util
-        await db.outbox_events.insert_one({
-            "type": "direct_invoice_created",
-            "collection": "invoices",
-            "doc_id": str(res.inserted_id),
-            "payload": json.loads(json_util.dumps(inv_doc)),
-            "status": "pending",
-            "retries": 0,
-            "created_at": now_iso(),
-            "updated_at": now_iso()
-        })
-    except Exception as se:
-        log.warning("Failed to queue direct invoice for Supabase sync: %s", se)
+    await queue_invoice_sync(inv_doc, db=db)
 
     decorated = _decorate_invoice(inv_doc, payments_map={}, grns_map={})
     return JSONResponse(
@@ -1659,7 +1733,38 @@ async def delete_invoice(id: str, request: Request):
         {"$set": {"status": "cancelled", "cancelled_at": now, "cancelled_by": u["email"]}}
     )
 
+    # Sync invoice voiding to Supabase financial core
+    try:
+        from services.supabase_invoice_service import void_invoice_in_supabase
+        await db.outbox_events.insert_one({
+            "type": "invoice_voided",
+            "collection": "invoices",
+            "doc_id": id,
+            "payload": {
+                "invoice_id": id,
+                "invoice_no": inv.get("invoice_no"),
+                "by": u["email"],
+                "reason": "Invoice voided"
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now,
+            "updated_at": now
+        })
+        try:
+            void_res = void_invoice_in_supabase(id, voided_by=u["email"], reason="Invoice voided")
+            if void_res:
+                await db.outbox_events.update_one(
+                    {"collection": "invoices", "doc_id": id, "type": "invoice_voided"},
+                    {"$set": {"status": "processed", "processed_at": now, "updated_at": now}}
+                )
+        except Exception as ve:
+            log.warning("Immediate Supabase invoice voiding failed (will retry via outbox): %s", ve)
+    except Exception as se:
+        log.warning("Could not queue invoice voiding event: %s", se)
+
     return {"ok": True, "status": "voided", "invoice_no": inv.get("invoice_no")}
+
 
 
 @invoice_packing_router.post("/invoices/{id}/void")
@@ -1762,22 +1867,39 @@ async def merged_invoice(payload: dict, request: Request):
         "carton_labels_file_b64": merged_labels_b64,
     }
     res_m = await db.invoices.insert_one(inv_doc_m)
+    inv_doc_m["_id"] = res_m.inserted_id
+    invoice_id = str(res_m.inserted_id)
+
+    # Queue and sync invoice to Supabase sales_invoices
+    await queue_invoice_sync(inv_doc_m, db=db)
+
+    # Link invoice to constituent POs in db.pos
+    for e in entries:
+        if e.get("po_id"):
+            try:
+                await db.pos.update_one(
+                    {"_id": oid(e["po_id"])},
+                    {"$set": {"invoice_no": invoice_no, "invoice_id": invoice_id, "invoice_date": invoice_date}}
+                )
+            except Exception:
+                pass
 
     for idx, carton in enumerate(cartons_list):
         await db.packing_cartons.update_one(
             {"_id": oid(carton["id"])},
             {"$set": {
                 "status": "dispatched",
-                "invoice_id": str(res_m.inserted_id),
+                "invoice_id": invoice_id,
                 "box_number": idx + 1
             }}
         )
-    await _flag_jobs(job_ids_all, "invoice_generated_at", db=db)
+    await _flag_jobs(job_ids_all, "invoice_generated_at", invoice_id=invoice_id, invoice_no=invoice_no, db=db)
     return StreamingResponse(
         BytesIO(pdf_bytes), media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{invoice_no}.pdf"',
-            "X-Invoice-Id": str(res_m.inserted_id),
+            "X-Invoice-Id": invoice_id,
+            "X-Invoice-No": invoice_no,
         },
     )
 
@@ -2851,6 +2973,20 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     }
     inv_res = await db.invoices.insert_one(inv_doc)
     invoice_id = str(inv_res.inserted_id)
+    inv_doc["_id"] = inv_res.inserted_id
+
+    # Queue and sync invoice to Supabase sales_invoices
+    await queue_invoice_sync(inv_doc, db=db)
+
+    # Link invoice to PO in db.pos
+    if payload.po_id:
+        try:
+            await db.pos.update_one(
+                {"_id": oid(payload.po_id)},
+                {"$set": {"invoice_no": invoice_no, "invoice_id": invoice_id, "invoice_date": invoice_date}}
+            )
+        except Exception as po_err:
+            log.warning("Failed to link invoice to PO %s: %s", payload.po_id, po_err)
 
     # 9. Persist carton updates
     for c in cartons:
@@ -2899,8 +3035,8 @@ async def create_dispatch(payload: DispatchCreate, request: Request):
     dr_res = await db.dispatch_records.insert_one(dispatch_doc)
     dispatch_record_id = str(dr_res.inserted_id)
 
-    # 11. Advance job stages
-    await _flag_jobs(effective_job_ids, "invoice_generated_at", db=db)
+    # 11. Advance job stages with invoice_id and invoice_no
+    await _flag_jobs(effective_job_ids, "invoice_generated_at", invoice_id=invoice_id, invoice_no=invoice_no, dispatch_record_id=dispatch_record_id, db=db)
 
     # 12. ZIP all documents
     date_tag = datetime.now().strftime("%Y%m%d-%H%M")

@@ -2150,12 +2150,37 @@ async def create_payment(payload: PaymentIn, request: Request):
 
         # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
         try:
+            import json
+            from bson import json_util
             from services.supabase_vendor_bill_service import sync_vendor_payment_to_supabase
+            
+            clean_doc = json.loads(json_util.dumps(doc))
+            clean_vendor = json.loads(json_util.dumps(vendor)) if vendor else None
+            
+            evt_res = await db.outbox_events.insert_one({
+                "type": "vendor_payment_created",
+                "collection": "payments",
+                "doc_id": str(res.inserted_id),
+                "payload": {
+                    "payment_doc": clean_doc,
+                    "vendor_doc": clean_vendor,
+                },
+                "status": "pending",
+                "retries": 0,
+                "created_at": now_iso(),
+                "updated_at": now_iso()
+            })
+
             sync_res = sync_vendor_payment_to_supabase(doc, vendor)
-            if not sync_res:
+            if sync_res:
+                await db.outbox_events.update_one(
+                    {"_id": evt_res.inserted_id},
+                    {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+                )
+            else:
                 raise RuntimeError("Supabase vendor payment sync returned no confirmation (service unavailable or failed)")
         except Exception as se:
-            log.warning("Supabase vendor payment sync warning: %s", se)
+            log.warning("Supabase vendor payment sync warning (queued in outbox): %s", se)
             try:
                 from services.supabase_sync_failure_service import record_supabase_sync_failure
                 await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
@@ -2164,6 +2189,7 @@ async def create_payment(payload: PaymentIn, request: Request):
 
         await _log_activity("create_vendor_payment", "vendor_payments", f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}", u["email"], db=db)
         return stringify(doc)
+
 
     if not payload.invoice_ids:
         raise HTTPException(400, "At least one invoice required")
@@ -2363,10 +2389,48 @@ async def delete_payment(pid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = get_db()
+    
+    pay = await db.payments.find_one({"_id": oid(pid)})
+    if not pay:
+        raise HTTPException(404, "Payment not found")
+
     r = await db.payments.delete_one({"_id": oid(pid)})
     if not r.deleted_count:
         raise HTTPException(404, "Payment not found")
+
+    # Queue payment reversal into outbox and attempt immediate Supabase update
+    now = now_iso()
+    try:
+        from services.supabase_invoice_service import reverse_payment_in_supabase
+        await db.outbox_events.insert_one({
+            "type": "payment_reversed",
+            "collection": "payments",
+            "doc_id": pid,
+            "payload": {
+                "payment_id": pid,
+                "payment_no": pay.get("payment_no"),
+                "by": u["email"],
+                "reason": "Payment deleted"
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now,
+            "updated_at": now
+        })
+        try:
+            rev_res = reverse_payment_in_supabase(pid, reversed_by=u["email"], reason="Payment deleted")
+            if rev_res:
+                await db.outbox_events.update_one(
+                    {"collection": "payments", "doc_id": pid, "type": "payment_reversed"},
+                    {"$set": {"status": "processed", "processed_at": now, "updated_at": now}}
+                )
+        except Exception as pe:
+            log.warning("Immediate Supabase payment reversal failed (will retry via outbox): %s", pe)
+    except Exception as se:
+        log.warning("Could not queue payment reversal event: %s", se)
+
     return {"ok": True}
+
 
 
 # ── Clients Master & Directory ─────────────────────────────────────────────
@@ -2927,6 +2991,30 @@ async def _enrich_jobs(docs: list, db) -> list:
                 d["created_at"] = d["_id"].generation_time.isoformat()
             elif d.get("stage_entered_at"):
                 d["created_at"] = d["stage_entered_at"]
+
+    # Enrich jobs missing invoice_id or invoice_no from db.invoices
+    missing_inv_jids = [str(d["_id"]) for d in docs if ("_id" in d and (not d.get("invoice_id") or not d.get("invoice_no")))]
+    if missing_inv_jids and hasattr(db, "invoices"):
+        try:
+            inv_cursor = db.invoices.find(
+                {"job_ids": {"$in": missing_inv_jids}},
+                {"_id": 1, "invoice_no": 1, "job_ids": 1}
+            )
+            inv_docs = await inv_cursor.to_list(1000) if hasattr(inv_cursor, "to_list") else []
+            job_to_inv = {}
+            for inv in inv_docs:
+                for jid in inv.get("job_ids", []):
+                    job_to_inv[str(jid)] = (str(inv["_id"]), inv.get("invoice_no"))
+            for d in docs:
+                jid_str = str(d.get("_id") or d.get("id"))
+                if jid_str in job_to_inv:
+                    i_id, i_no = job_to_inv[jid_str]
+                    if not d.get("invoice_id"):
+                        d["invoice_id"] = i_id
+                    if not d.get("invoice_no"):
+                        d["invoice_no"] = i_no
+        except Exception as e:
+            log.warning("Job invoice enrichment warning: %s", e)
 
     return docs
 
@@ -3906,12 +3994,38 @@ async def complete_job_outside_labour(jid: str, item_id: str, payload: Dict[str,
     except Exception:
         pass
 
-    # Sync to Supabase AP vendor bills (non-blocking)
+    # Sync to Supabase AP vendor bills (resilient with outbox)
     try:
+        import json
+        from bson import json_util
         from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
-        sync_vendor_po_to_supabase(bill_doc, vendor)
+        
+        clean_bill = json.loads(json_util.dumps(bill_doc))
+        clean_vendor = json.loads(json_util.dumps(vendor)) if vendor else None
+        
+        evt_res = await db.outbox_events.insert_one({
+            "type": "vendor_bill_created",
+            "collection": "vendor_purchase_orders",
+            "doc_id": str(bill_res.inserted_id),
+            "payload": {
+                "po_doc": clean_bill,
+                "vendor_doc": clean_vendor,
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
+        
+        sync_res = sync_vendor_po_to_supabase(bill_doc, vendor)
+        if sync_res:
+            await db.outbox_events.update_one(
+                {"_id": evt_res.inserted_id},
+                {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+            )
     except Exception as e:
-        log.warning("Supabase AP vendor bill sync failed (non-blocking): %s", e)
+        log.warning("Supabase AP vendor bill sync failed (queued in outbox): %s", e)
+
 
     target_item["completed"] = True
     target_item["completed_at"] = now_iso()

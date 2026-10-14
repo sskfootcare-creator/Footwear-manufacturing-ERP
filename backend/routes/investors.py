@@ -39,6 +39,77 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def queue_investor_advance_sync(db, adv_doc: dict, investor_doc: Optional[dict] = None, payment_mode: str = "BANK_TRANSFER"):
+    try:
+        import json
+        from bson import json_util
+        clean_adv = json.loads(json_util.dumps(adv_doc))
+        clean_inv = json.loads(json_util.dumps(investor_doc)) if investor_doc else None
+        doc_id = str(adv_doc.get("_id") or adv_doc.get("id"))
+        
+        evt_res = await db.outbox_events.insert_one({
+            "type": "investor_advance_created",
+            "collection": "investor_advances",
+            "doc_id": doc_id,
+            "payload": {
+                "advance_doc": clean_adv,
+                "investor_doc": clean_inv,
+                "payment_mode": payment_mode,
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
+        sync_res = sync_investor_advance_to_supabase(adv_doc, investor_doc=investor_doc, payment_mode=payment_mode)
+        if sync_res:
+            await db.outbox_events.update_one(
+                {"_id": evt_res.inserted_id},
+                {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+            )
+    except Exception as se:
+        log.warning("Supabase investor advance sync skipped (queued in outbox): %s", se)
+
+
+async def queue_investor_repayment_sync(db, repayment_doc: dict, investor_doc: Optional[dict] = None, is_reinvestment: bool = False, payment_mode: str = "BANK_TRANSFER"):
+    try:
+        import json
+        from bson import json_util
+        clean_rep = json.loads(json_util.dumps(repayment_doc))
+        clean_inv = json.loads(json_util.dumps(investor_doc)) if investor_doc else None
+        doc_id = str(repayment_doc.get("_id") or repayment_doc.get("id"))
+
+        evt_res = await db.outbox_events.insert_one({
+            "type": "investor_repayment_created",
+            "collection": "investor_repayments",
+            "doc_id": doc_id,
+            "payload": {
+                "repayment_doc": clean_rep,
+                "investor_doc": clean_inv,
+                "is_reinvestment": is_reinvestment,
+                "payment_mode": payment_mode,
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
+        sync_res = sync_investor_repayment_to_supabase(
+            repayment_doc=repayment_doc,
+            investor_doc=investor_doc,
+            is_reinvestment=is_reinvestment,
+            payment_mode=payment_mode
+        )
+        if sync_res:
+            await db.outbox_events.update_one(
+                {"_id": evt_res.inserted_id},
+                {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+            )
+    except Exception as se:
+        log.warning("Supabase repayment sync skipped (queued in outbox): %s", se)
+
+
+
 def stringify(doc: Any) -> Any:
     if isinstance(doc, list):
         return [stringify(d) for d in doc]
@@ -501,10 +572,7 @@ async def _create_batch_advances_internal(
             except Exception as pe:
                 log.warning("Could not insert banking payment for advance %s: %s", adv_doc["_id"], pe)
 
-        try:
-            sync_investor_advance_to_supabase(adv_doc, investor_doc=investor)
-        except Exception as se:
-            log.warning("Supabase investor advance sync skipped for PO %s: %s", adv_doc.get("po_number"), se)
+        await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=payload.mode or "BANK_TRANSFER")
 
         created_advances.append(adv_doc)
 
@@ -643,11 +711,7 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
         except Exception as pe:
             log.warning("Could not sync live bank balance for advance %s: %s", adv_doc["_id"], pe)
 
-    # Optional mirror to Supabase financial ledger (fire-and-forget safety)
-    try:
-        sync_investor_advance_to_supabase(adv_doc, investor_doc=investor)
-    except Exception as se:
-        log.warning("Supabase investor advance sync skipped: %s", se)
+    await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=payload.mode or "BANK_TRANSFER")
 
     return stringify(adv_doc)
 
@@ -945,17 +1009,14 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
             except Exception as pe:
                 log.warning("Could not sync live bank balance for repayment %s: %s", repayment_doc["_id"], pe)
 
-        # Sync Straight Repayment to Supabase Ledger
-        try:
-            sync_investor_repayment_to_supabase(
-                repayment_doc=repayment_doc,
-                investor_doc=investor,
-                is_reinvestment=False,
-                payment_mode=payload.mode or "BANK_TRANSFER",
-                bank_account_id=payload.bank_account_id
-            )
-        except Exception as se:
-            log.warning("Supabase repayment sync skipped: %s", se)
+        # Sync Straight Repayment to Supabase Ledger via Outbox
+        await queue_investor_repayment_sync(
+            db,
+            repayment_doc=repayment_doc,
+            investor_doc=investor,
+            is_reinvestment=False,
+            payment_mode=payload.mode or "BANK_TRANSFER"
+        )
 
         return {
             "ok": True,
@@ -1070,18 +1131,14 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
             except Exception as pe:
                 log.warning("Could not sync live bank balance for margin disbursement %s: %s", repayment_doc["_id"], pe)
 
-        # Sync Reinvestment to Supabase Ledger
-        try:
-            sync_investor_repayment_to_supabase(
-                repayment_doc=repayment_doc,
-                investor_doc=investor,
-                is_reinvestment=True,
-                new_advance_doc=new_advance_doc,
-                payment_mode=payload.mode or "BANK_TRANSFER",
-                bank_account_id=payload.bank_account_id
-            )
-        except Exception as se:
-            log.warning("Supabase reinvestment sync skipped: %s", se)
+        # Sync Reinvestment to Supabase Ledger via Outbox
+        await queue_investor_repayment_sync(
+            db,
+            repayment_doc=repayment_doc,
+            investor_doc=investor,
+            is_reinvestment=True,
+            payment_mode=payload.mode or "BANK_TRANSFER"
+        )
 
         return {
             "ok": True,

@@ -1461,6 +1461,8 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
 
             # >>> SYNC TO SUPABASE FINANCIAL CORE <<<
             try:
+                import json
+                from bson import json_util
                 from services.supabase_payroll_service import sync_wage_payment_to_supabase
                 bank_acc_doc = None
                 if payload.paid_via in ("bank_transfer", "upi") and payload.bank_account_id and hasattr(db, "bank_accounts"):
@@ -1468,17 +1470,43 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                         bank_acc_doc = await db.bank_accounts.find_one({"_id": oid(payload.bank_account_id)})
                     except Exception:
                         pass
+
+                clean_wage = json.loads(json_util.dumps(wage_payment_doc))
+                clean_worker = json.loads(json_util.dumps(worker)) if worker else None
+                clean_bank = json.loads(json_util.dumps(bank_acc_doc)) if bank_acc_doc else None
+
+                evt_res = await db.outbox_events.insert_one({
+                    "type": "wage_payment_created",
+                    "collection": "wage_payments",
+                    "doc_id": str(res.inserted_id),
+                    "payload": {
+                        "payment_doc": clean_wage,
+                        "worker_doc": clean_worker,
+                        "bank_acc_doc": clean_bank,
+                    },
+                    "status": "pending",
+                    "retries": 0,
+                    "created_at": now_iso(),
+                    "updated_at": now_iso()
+                })
+
                 sync_res = sync_wage_payment_to_supabase(wage_payment_doc, worker, bank_acc_doc=bank_acc_doc)
-                if not sync_res:
+                if sync_res:
+                    await db.outbox_events.update_one(
+                        {"_id": evt_res.inserted_id},
+                        {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+                    )
+                else:
                     raise RuntimeError("Supabase wage payment sync returned no confirmation (service unavailable or failed)")
             except Exception as se:
                 import logging
-                logging.getLogger(__name__).warning("Supabase wage payment sync failed: %s", se)
+                logging.getLogger(__name__).warning("Supabase wage payment sync failed (queued in outbox): %s", se)
                 try:
                     from services.supabase_sync_failure_service import record_supabase_sync_failure
                     await record_supabase_sync_failure(db, "wage_payments", str(res.inserted_id), str(se))
                 except Exception:
                     pass
+
         except Exception as e:
             if payload.paid_via == "cash" and payload.cash_ledger_id:
                 try:

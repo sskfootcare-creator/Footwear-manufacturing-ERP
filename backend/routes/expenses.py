@@ -129,7 +129,54 @@ async def _check_and_generate_recurring_expenses_db(db) -> dict:
     return {"generated_count": generated_count, "updated_count": updated_count}
 
 
+async def queue_expense_sync(db, expense_doc: dict, event_type: str = "expense_created"):
+    """Enqueue expense into outbox_events and attempt immediate sync to Supabase."""
+    try:
+        import json
+        from bson import json_util
+        from services.supabase_expense_service import sync_expense_to_supabase, void_expense_in_supabase
+
+        clean_doc = json.loads(json_util.dumps(expense_doc))
+        doc_id = str(expense_doc.get("_id") or expense_doc.get("id"))
+
+        event_doc = {
+            "type": event_type,
+            "collection": "expenses",
+            "doc_id": doc_id,
+            "payload": clean_doc,
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        }
+        evt_res = await db.outbox_events.insert_one(event_doc)
+
+        # Attempt immediate direct sync
+        try:
+            if event_type in ("expense_created", "expense_confirmed"):
+                res = sync_expense_to_supabase(clean_doc)
+            elif event_type in ("expense_voided", "expense_deleted"):
+                res = void_expense_in_supabase(doc_id, voided_by=clean_doc.get("by", "system"))
+            else:
+                res = None
+
+            if res:
+                await db.outbox_events.update_one(
+                    {"_id": evt_res.inserted_id},
+                    {"$set": {
+                        "status": "processed",
+                        "processed_at": now_iso(),
+                        "updated_at": now_iso()
+                    }}
+                )
+        except Exception as se:
+            log.warning("Immediate Supabase expense sync failed (will retry via outbox): %s", se)
+    except Exception as e:
+        log.warning("Could not queue expense for Supabase sync: %s", e)
+
+
 # ---------- EXPENSE CRUD (STATIC PATHS FIRST) ----------
+
 
 @expenses_router.post("/expenses")
 async def create_expense(payload: ExpenseIn, request: Request):
@@ -279,6 +326,10 @@ async def create_expense(payload: ExpenseIn, request: Request):
     }
     res = await db.expenses.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Queue expense sync for Supabase financial ledger
+    await queue_expense_sync(db, doc, "expense_created")
+
     await log_activity_db(
         db,
         "CREATE", "expenses",
@@ -286,6 +337,7 @@ async def create_expense(payload: ExpenseIn, request: Request):
         u.get("email") or u.get("name", "")
     )
     return stringify(doc)
+
 
 
 @expenses_router.get("/expenses")
@@ -813,6 +865,10 @@ async def confirm_expense(eid: str, request: Request, payload: Optional[dict] = 
 
     await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_fields})
     doc = await db.expenses.find_one({"_id": oid(eid)})
+
+    # Queue sync on confirmation
+    await queue_expense_sync(db, doc, "expense_confirmed")
+
     await log_activity_db(
         db,
         "CONFIRM", "expenses",
@@ -852,6 +908,10 @@ async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
         update_data["updated_at"] = now_iso()
         await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_data})
         doc.update(update_data)
+
+        # Queue re-sync on update
+        await queue_expense_sync(db, doc, "expense_created")
+
         await log_activity_db(db, "UPDATE", "expenses", f"Updated expense id={eid}", u.get("email") or u.get("name", ""))
     return stringify(doc)
 
@@ -883,6 +943,10 @@ async def delete_expense(eid: str, request: Request):
                     )
                 except Exception:
                     pass
+
+    # Queue expense voiding in Supabase
+    await queue_expense_sync(db, {"_id": eid, "by": u.get("email"), "reason": f"Deleted expense id={eid}"}, "expense_voided")
+
     await db.expenses.delete_one({"_id": oid(eid)})
     await log_activity_db(
         db,
@@ -891,3 +955,4 @@ async def delete_expense(eid: str, request: Request):
         u.get("email") or u.get("name", "")
     )
     return {"ok": True, "deleted_id": eid}
+

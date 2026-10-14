@@ -477,17 +477,45 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
 
     # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
     try:
+        import json
+        from bson import json_util
         from services.supabase_vendor_bill_service import sync_vendor_payment_to_supabase
+        
+        clean_doc = json.loads(json_util.dumps(doc))
+        clean_vendor = json.loads(json_util.dumps(vendor)) if vendor else None
+        clean_po = [json.loads(json_util.dumps(po))] if po else None
+
+        evt_res = await db.outbox_events.insert_one({
+            "type": "vendor_payment_created",
+            "collection": "payments",
+            "doc_id": str(res.inserted_id),
+            "payload": {
+                "payment_doc": clean_doc,
+                "vendor_doc": clean_vendor,
+                "po_docs": clean_po,
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now_iso(),
+            "updated_at": now_iso()
+        })
+
         sync_res = sync_vendor_payment_to_supabase(doc, vendor, [po] if po else None)
-        if not sync_res:
+        if sync_res:
+            await db.outbox_events.update_one(
+                {"_id": evt_res.inserted_id},
+                {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+            )
+        else:
             raise RuntimeError("Supabase vendor payment sync returned no confirmation (service unavailable or failed)")
     except Exception as se:
-        log.warning("Supabase vendor payment sync warning: %s", se)
+        log.warning("Supabase vendor payment sync warning (queued in outbox): %s", se)
         try:
             from services.supabase_sync_failure_service import record_supabase_sync_failure
             await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
         except Exception:
             pass
+
 
     detail_msg = f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}"
     if vendor_po_number:
@@ -1064,12 +1092,38 @@ async def receive_vendor_po(id: str, payload: VendorPOReceiveIn, request: Reques
 
         # >>> SYNC VENDOR BILL TO SUPABASE FINANCIAL CORE <<<
         try:
+            import json
+            from bson import json_util
             from services.supabase_vendor_bill_service import sync_vendor_po_to_supabase
+            
+            clean_rec = json.loads(json_util.dumps(receive_doc))
+            clean_v = json.loads(json_util.dumps(vendor)) if vendor else None
+
+            rec_id = str(receive_doc.get("_id") or receive_doc.get("id") or receipt_id)
+            evt_res = await db.outbox_events.insert_one({
+                "type": "vendor_bill_created",
+                "collection": "vendor_po_receives",
+                "doc_id": rec_id,
+                "payload": {
+                    "po_doc": clean_rec,
+                    "vendor_doc": clean_v,
+                },
+                "status": "pending",
+                "retries": 0,
+                "created_at": now_iso(),
+                "updated_at": now_iso()
+            })
+
             sync_res = sync_vendor_po_to_supabase(receive_doc, vendor)
-            if not sync_res:
+            if sync_res:
+                await db.outbox_events.update_one(
+                    {"_id": evt_res.inserted_id},
+                    {"$set": {"status": "processed", "processed_at": now_iso(), "updated_at": now_iso()}}
+                )
+            else:
                 raise RuntimeError("Supabase vendor bill sync returned no confirmation (service unavailable or failed)")
         except Exception as se:
-            log.warning("Supabase vendor bill sync warning: %s", se)
+            log.warning("Supabase vendor bill sync warning (queued in outbox): %s", se)
             try:
                 from services.supabase_sync_failure_service import record_supabase_sync_failure
                 rec_id = str(receive_doc.get("_id") or receive_doc.get("id") or receipt_id)
@@ -1086,8 +1140,46 @@ async def delete_vendor_po(id: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    
+    po = await db.vendor_purchase_orders.find_one({"_id": oid(id)})
+    if not po:
+        raise HTTPException(404, "Vendor Purchase Order not found")
+
     r = await db.vendor_purchase_orders.delete_one({"_id": oid(id)})
     if not r.deleted_count:
         raise HTTPException(404, "Vendor Purchase Order not found")
+
+    # Queue vendor bill voiding into outbox and attempt immediate Supabase update
+    now = now_iso()
+    try:
+        from services.supabase_vendor_bill_service import void_vendor_bill_in_supabase
+        await db.outbox_events.insert_one({
+            "type": "vendor_bill_voided",
+            "collection": "vendor_purchase_orders",
+            "doc_id": id,
+            "payload": {
+                "po_id": id,
+                "po_number": po.get("po_number"),
+                "by": u.get("email", ""),
+                "reason": "Vendor PO deleted"
+            },
+            "status": "pending",
+            "retries": 0,
+            "created_at": now,
+            "updated_at": now
+        })
+        try:
+            void_res = void_vendor_bill_in_supabase(id, voided_by=u.get("email", "system"), reason="Vendor PO deleted")
+            if void_res:
+                await db.outbox_events.update_one(
+                    {"collection": "vendor_purchase_orders", "doc_id": id, "type": "vendor_bill_voided"},
+                    {"$set": {"status": "processed", "processed_at": now, "updated_at": now}}
+                )
+        except Exception as ve:
+            log.warning("Immediate Supabase vendor bill voiding failed (will retry via outbox): %s", ve)
+    except Exception as se:
+        log.warning("Could not queue vendor bill voiding event: %s", se)
+
     await log_activity_db(db, "delete_vendor_po", "vendor_pos", f"Deleted Vendor PO id={id}", u.get("email", ""))
     return {"ok": True}
+

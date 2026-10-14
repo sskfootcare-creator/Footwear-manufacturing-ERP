@@ -422,3 +422,133 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
     except Exception as e:
         log.error("Failed to sync invoice payment to Supabase: %s", e)
         return None
+
+
+def void_invoice_in_supabase(invoice_id_or_doc: Any, voided_by: str = "system", reason: str = "Invoice voided") -> bool:
+    """
+    Void a sales invoice in Supabase:
+    1. Sets public.sales_invoices status = 'VOIDED'
+    2. Sets public.journal_entries status = 'VOIDED' with audit metadata
+    """
+    client = get_supabase_admin_client()
+    if not client:
+        return False
+
+    try:
+        raw_id = invoice_id_or_doc.get("_id") if isinstance(invoice_id_or_doc, dict) else invoice_id_or_doc
+        inv_uuid = to_uuid(raw_id)
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        # Update sales_invoices
+        client.table("sales_invoices").update({
+            "status": "VOIDED",
+            "notes": f"VOIDED: {reason}"
+        }).eq("id", inv_uuid).execute()
+
+        # Update journal_entries
+        je_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_INV_{inv_uuid}"))
+        client.table("journal_entries").update({
+            "status": "VOIDED",
+            "voided_at": now_ts,
+            "voided_by": str(voided_by)[:100],
+            "void_reason": str(reason)[:255]
+        }).eq("id", je_id).execute()
+
+        log.info("Successfully voided sales invoice %s and journal entry %s in Supabase.", inv_uuid, je_id)
+        return True
+    except Exception as e:
+        log.error("Failed to void sales invoice in Supabase: %s", e)
+        return False
+
+
+def reverse_payment_in_supabase(payment_id_or_doc: Any, reversed_by: str = "system", reason: str = "Payment reversed/deleted") -> bool:
+    """
+    Reverse / void a payment voucher in Supabase:
+    1. Reverts allocated amounts on linked sales_invoices or vendor_bills.
+    2. Deletes voucher_allocations.
+    3. Sets journal_entries status = 'VOIDED'.
+    4. Updates payment_vouchers notes to record reversal.
+    """
+    client = get_supabase_admin_client()
+    if not client:
+        return False
+
+    try:
+        raw_id = payment_id_or_doc.get("_id") if isinstance(payment_id_or_doc, dict) else payment_id_or_doc
+        pay_uuid = to_uuid(raw_id)
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        # Try both receipt and payment voucher IDs
+        voucher_id_rec = str(uuid.uuid5(uuid.NAMESPACE_OID, f"VCH_REC_{pay_uuid}"))
+        voucher_id_pay = str(uuid.uuid5(uuid.NAMESPACE_OID, f"VCH_PAY_{pay_uuid}"))
+        v_ids = [voucher_id_rec, voucher_id_pay]
+
+        for vid in v_ids:
+            try:
+                # Fetch allocations
+                alloc_res = client.table("voucher_allocations").select("id, sales_invoice_id, vendor_bill_id, allocated_amount").eq("voucher_id", vid).execute()
+                allocations = alloc_res.data or []
+                for a in allocations:
+                    amt = float(a.get("allocated_amount") or 0.0)
+                    if a.get("sales_invoice_id") and amt > 0:
+                        s_id = a["sales_invoice_id"]
+                        cur_inv = client.table("sales_invoices").select("grand_total, paid_amount").eq("id", s_id).execute()
+                        if cur_inv.data:
+                            gt = float(cur_inv.data[0].get("grand_total") or 0.0)
+                            cur_paid = float(cur_inv.data[0].get("paid_amount") or 0.0)
+                            new_paid = max(0.0, round(cur_paid - amt, 2))
+                            new_net = max(0.0, round(gt - new_paid, 2))
+                            st = "PAID" if new_net <= 0.01 else ("PARTIALLY_PAID" if new_paid > 0 else "POSTED")
+                            client.table("sales_invoices").update({
+                                "paid_amount": new_paid,
+                                "net_receivable": new_net,
+                                "status": st
+                            }).eq("id", s_id).execute()
+
+                    if a.get("vendor_bill_id") and amt > 0:
+                        vb_id = a["vendor_bill_id"]
+                        cur_bill = client.table("vendor_bills").select("total_amount, paid_amount").eq("id", vb_id).execute()
+                        if cur_bill.data:
+                            tot = float(cur_bill.data[0].get("total_amount") or 0.0)
+                            cur_paid = float(cur_bill.data[0].get("paid_amount") or 0.0)
+                            new_paid = max(0.0, round(cur_paid - amt, 2))
+                            st = "PAID" if new_paid >= (tot - 0.01) else ("PARTIALLY_PAID" if new_paid > 0 else "POSTED")
+                            client.table("vendor_bills").update({
+                                "paid_amount": new_paid,
+                                "status": st
+                            }).eq("id", vb_id).execute()
+
+                # Delete allocations
+                if allocations:
+                    client.table("voucher_allocations").delete().eq("voucher_id", vid).execute()
+
+                # Update payment voucher
+                client.table("payment_vouchers").update({
+                    "notes": f"REVERSED / VOIDED: {reason}"
+                }).eq("id", vid).execute()
+
+            except Exception as ve:
+                log.debug("Voucher reverse attempt for %s: %s", vid, ve)
+
+        # Void Journal Entries (both receipt and payment JE patterns)
+        je_ids = [
+            str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_REC_{pay_uuid}")),
+            str(uuid.uuid5(uuid.NAMESPACE_OID, f"JE_PAY_{pay_uuid}")),
+        ]
+        for je_id in je_ids:
+            try:
+                client.table("journal_entries").update({
+                    "status": "VOIDED",
+                    "voided_at": now_ts,
+                    "voided_by": str(reversed_by)[:100],
+                    "void_reason": str(reason)[:255]
+                }).eq("id", je_id).execute()
+            except Exception:
+                pass
+
+        log.info("Successfully reversed payment %s in Supabase.", pay_uuid)
+        return True
+    except Exception as e:
+        log.error("Failed to reverse payment in Supabase: %s", e)
+        return False
+

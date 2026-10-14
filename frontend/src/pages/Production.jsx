@@ -210,8 +210,15 @@ function groupJobsByColor(jobs) {
     const poDateFormatted = rawPoDate ? String(rawPoDate).slice(0, 10) : "";
     const deliveryDateFormatted = rawDeliveryDate ? String(rawDeliveryDate).slice(0, 10) : "";
 
+    const resolvedInvId = g.rows.find(r => r.invoice_id)?.invoice_id || "";
+    const resolvedInvNo = g.rows.find(r => r.invoice_no)?.invoice_no || "";
+    const resolvedDrId = g.rows.find(r => r.dispatch_record_id)?.dispatch_record_id || "";
+
     return {
       ...g,
+      invoice_id: resolvedInvId,
+      invoice_no: resolvedInvNo,
+      dispatch_record_id: resolvedDrId,
       po_style_code: poStyleCode,
       sku_id: skuId,
       has_mapped_code: hasMappedCode,
@@ -868,10 +875,24 @@ export default function Production() {
       return;
     }
 
+    // 2b. If invoice already exists for this card, re-download without re-creating
+    const existingInvId = group.invoice_id || group.rows?.find(r => r.invoice_id)?.invoice_id;
+    const existingInvNo = group.invoice_no || group.rows?.find(r => r.invoice_no)?.invoice_no;
+    if (existingInvId) {
+      try {
+        const res = await http.get(`/invoices/${existingInvId}/file`, { responseType: "blob" });
+        triggerDownload(res.data, `Invoice-${existingInvNo || "job"}.pdf`, "application/pdf");
+        return;
+      } catch (err) {
+        console.warn("Could not download existing invoice file, falling back to generate...", err);
+      }
+    }
+
     // 3. Fallback: if no dispatch record is found, call /invoices/job
     try {
       const res = await http.post("/invoices/job", { po_id: group.po_id, job_ids: jobIds }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
+      await load();
     } catch (e) { alert("Invoice failed: " + (e.response?.data?.detail || e.message)); }
   };
   const downloadMergedInvoice = async () => {
@@ -891,6 +912,7 @@ export default function Production() {
       const res = await http.post("/invoices/merged", { entries: Object.values(byPo) }, { responseType: "blob" });
       window.open(URL.createObjectURL(new Blob([res.data], { type: "application/pdf" })), "_blank");
       setSelected({});
+      await load();
     } catch (e) { alert("Merged failed: " + (e.response?.data?.detail || e.message)); }
     finally { setMerging(false); }
   };
@@ -2137,6 +2159,19 @@ function ColorGroupCard(props) {
                   <>
                     <span className="text-slate-400">·</span>
                     <span className="text-xs text-green-700 font-mono font-semibold">{completedTotal} done</span>
+                  </>
+                )}
+                {(group.invoice_no || drec?.invoice_no) && (
+                  <>
+                    <span className="text-slate-400">·</span>
+                    <span
+                      className="text-[10px] font-mono font-bold text-amber-900 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex items-center gap-1 shadow-xs"
+                      title={`Invoice: ${group.invoice_no || drec?.invoice_no}`}
+                      data-testid={`card-invoice-badge-${group.key}`}
+                    >
+                      <FileText className="w-3 h-3 text-[#C27842]" />
+                      Inv: {group.invoice_no || drec?.invoice_no}
+                    </span>
                   </>
                 )}
               </div>
@@ -4580,8 +4615,8 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
 
         // 3. Match invoice data
         let inv = null;
-        const invId = fullDrec?.invoice_id || item?.invoice_id;
-        const invNo = fullDrec?.invoice_no || item?.invoice_no;
+        const invId = fullDrec?.invoice_id || item?.invoice_id || item?.rows?.find(r => r.invoice_id)?.invoice_id;
+        const invNo = fullDrec?.invoice_no || item?.invoice_no || item?.rows?.find(r => r.invoice_no)?.invoice_no;
         if (invId) {
           inv = invoices.find(i => String(i.id || i._id) === String(invId));
           if (!inv) {
@@ -4592,6 +4627,15 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
           }
         } else if (invNo) {
           inv = invoices.find(i => i.invoice_no === invNo);
+        }
+
+        // Deep fallback across invoices by job_ids, po_id, or po_number
+        if (!inv && invoices && invoices.length > 0) {
+          inv = invoices.find(i =>
+            (Array.isArray(i.job_ids) && i.job_ids.some(j => jobIds.includes(String(j)))) ||
+            (item?.po_id && String(i.po_id) === String(item.po_id)) ||
+            (item?.po_number && (i.po_number === item.po_number || (Array.isArray(i.po_numbers) && i.po_numbers.includes(item.po_number))))
+          );
         }
 
         if (isMounted) {
@@ -4651,18 +4695,19 @@ function DispatchDetailsModal({ item, dispatchRecordByJobId = {}, invoices = [],
   const driverPhone = invoiceData?.driver_phone || dispatchRecord?.driver_phone || "—";
 
   const downloadDoc = async (type, filename, mimeType) => {
+    const invFileId = invoiceData?.id || invoiceData?._id;
     if (dispatchRecord?.id) {
       onDownloadDispatchFile(dispatchRecord.id, type, filename, mimeType);
-    } else if (invoiceData?.id && type === "invoice") {
+    } else if (invFileId && type === "invoice") {
       try {
-        const res = await http.get(`/invoices/${invoiceData.id}/file`, { responseType: "blob" });
+        const res = await http.get(`/invoices/${invFileId}/file`, { responseType: "blob" });
         triggerDownload(res.data, filename, "application/pdf");
       } catch (e) {
         alert("Download failed: " + (e.response?.data?.detail || e.message));
       }
-    } else if (invoiceData?.id && type === "ewaybill") {
+    } else if (invFileId && type === "ewaybill") {
       try {
-        const res = await http.get(`/invoices/${invoiceData.id}/ewaybill`, { responseType: "blob" });
+        const res = await http.get(`/invoices/${invFileId}/ewaybill`, { responseType: "blob" });
         triggerDownload(res.data, filename, "application/json");
       } catch (e) {
         alert("Download failed: " + (e.response?.data?.detail || e.message));
