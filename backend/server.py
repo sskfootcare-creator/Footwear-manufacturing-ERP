@@ -90,6 +90,7 @@ from models import *
 from rate_limiter import upload_rate_limiter, pdf_rate_limiter, bulk_import_rate_limiter
 from services.imagekit_service import (
     is_imagekit_configured,
+    get_imagekit_config,
     upload_to_imagekit_async,
     delete_from_imagekit_async,
     generate_v2_auth_token,
@@ -430,6 +431,16 @@ else:
     s3_client = None
 
 
+def is_ephemeral_environment() -> bool:
+    """Return True if running in a serverless/container environment where local disk is wiped on restart."""
+    return bool(
+        os.environ.get("VERCEL")
+        or os.environ.get("RENDER")
+        or os.environ.get("ENVIRONMENT", "").strip().lower() in ("production", "prod")
+    )
+
+
+
 @api.post("/upload/image", dependencies=[Depends(upload_rate_limiter)])
 async def upload_image(file: UploadFile = File(...), request: Request = None):
     u = await get_current_user(request)
@@ -557,6 +568,12 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
             }
         except Exception as e:
             logger.warning(f"ImageKit image upload failed ({e}); falling through to cloud/local storage")
+            if is_ephemeral_environment() and not s3_client:
+                raise HTTPException(
+                    502,
+                    f"ImageKit upload failed: {e}. "
+                    "Local file fallback is disabled in serverless/cloud environments to prevent data loss."
+                )
 
     if s3_client:
         uploaded_keys = []
@@ -609,6 +626,14 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
             "width":         orig_w,
             "height":        orig_h,
         }
+
+    if is_ephemeral_environment():
+        raise HTTPException(
+            503,
+            "Cloud image storage (ImageKit) is not configured on this server. "
+            "Please configure IMAGEKIT_PUBLIC_KEY, IMAGEKIT_PRIVATE_KEY, and IMAGEKIT_URL_ENDPOINT in your environment settings. "
+            "Local file fallback is disabled in serverless/cloud environments to prevent data loss."
+        )
 
     # ── Local storage: images/{uuid}/original.jpg etc.
     folder = os.path.join("uploads", "images", key)
@@ -727,6 +752,18 @@ async def upload_file(
             }
         except Exception as e:
             logger.warning(f"ImageKit file upload failed ({e}); falling through to local storage")
+            if is_ephemeral_environment():
+                raise HTTPException(
+                    502,
+                    f"ImageKit file upload failed: {e}. "
+                    "Local file fallback is disabled in serverless/cloud environments to prevent data loss."
+                )
+    elif is_ephemeral_environment():
+        raise HTTPException(
+            503,
+            "Cloud file storage (ImageKit) is not configured on this server. "
+            "Please configure IMAGEKIT_PUBLIC_KEY, IMAGEKIT_PRIVATE_KEY, and IMAGEKIT_URL_ENDPOINT in your environment settings."
+        )
 
     # Local storage fallback
     doc_folder = os.path.join("uploads", "documents", key)
@@ -762,6 +799,27 @@ async def upload_file(
         "file_type": "document",
         "size": len(content),
         "storage": "local",
+    }
+
+
+@api.get("/upload/storage-status")
+async def get_storage_status(request: Request = None):
+    """Diagnostic endpoint to verify storage backend configuration."""
+    ik_configured = is_imagekit_configured()
+    s3_configured = bool(s3_client)
+    cfg = get_imagekit_config()
+    return {
+        "storage_provider": "imagekit" if ik_configured else ("s3" if s3_configured else "local"),
+        "imagekit": {
+            "configured": ik_configured,
+            "url_endpoint": cfg.get("url_endpoint") or None,
+            "public_key_present": bool(cfg.get("public_key")),
+            "private_key_present": bool(cfg.get("private_key")),
+        },
+        "s3": {
+            "configured": s3_configured,
+        },
+        "ephemeral_host": is_ephemeral_environment(),
     }
 
 

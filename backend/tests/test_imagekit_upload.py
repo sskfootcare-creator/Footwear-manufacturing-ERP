@@ -244,3 +244,38 @@ async def test_api_upload_imagekit_auth_endpoint(monkeypatch):
     assert "token" in res
     assert res["expire"] == 1800
     assert res["publicKey"] == "public_auth_test_123"
+
+
+@pytest.mark.anyio
+async def test_get_storage_status(monkeypatch):
+    monkeypatch.setenv("IMAGEKIT_PUBLIC_KEY", "public_auth_test_123")
+    monkeypatch.setenv("IMAGEKIT_PRIVATE_KEY", "private_auth_secret_key_32bytes!!")
+    monkeypatch.setenv("IMAGEKIT_URL_ENDPOINT", "https://ik.imagekit.io/test_endpoint")
+
+    res = await server.get_storage_status()
+    assert res["storage_provider"] == "imagekit"
+    assert res["imagekit"]["configured"] is True
+    assert res["imagekit"]["url_endpoint"] == "https://ik.imagekit.io/test_endpoint"
+
+
+@pytest.mark.anyio
+async def test_ephemeral_upload_blocks_silent_fallback(monkeypatch):
+    # Simulate Vercel environment without ImageKit configured
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("IMAGEKIT_PRIVATE_KEY", "")
+
+    img = Image.new("RGB", (50, 50), color="blue")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    buf.seek(0)
+    upload_file = UploadFile(file=buf, filename="test.jpg", headers={"content-type": "image/jpeg"})
+
+    async def mock_get_current_user(request=None):
+        return {"email": "admin@sskfootcare.com", "role": "admin"}
+    monkeypatch.setattr(server, "get_current_user", mock_get_current_user)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await server.upload_image(file=upload_file, request=DummyRequest())
+    assert exc_info.value.status_code == 503
+    assert "Cloud image storage (ImageKit) is not configured" in exc_info.value.detail
+
