@@ -476,10 +476,23 @@ def compute_style_costing(style: dict, color: Optional[str] = None) -> dict:
             yld = 1.0
         waste = float(b.get("waste_pct", 0) or 0)
         materials_cost += (rate * qty / yld) * (1 + waste / 100)
-    labor_items = (style.get("labor") or []) + (style.get("outside_labour") or [])
-    labor_cost = sum(float(l.get("rate", 0)) for l in labor_items)
-    labor_is_set = len(labor_items) > 0
-    base_cost = materials_cost + labor_cost
+    inhouse_items = []
+    outside_items = []
+    for item in (style.get("labor") or []):
+        it = item.model_dump() if hasattr(item, "model_dump") else (item if isinstance(item, dict) else dict(item))
+        if it.get("is_outside"):
+            outside_items.append(it)
+        else:
+            inhouse_items.append(it)
+    for item in (style.get("outside_labour") or []):
+        it = item.model_dump() if hasattr(item, "model_dump") else (item if isinstance(item, dict) else dict(item))
+        outside_items.append(it)
+
+    labor_cost = sum(float(l.get("rate") or l.get("rate_per_pair") or 0) for l in inhouse_items)
+    outside_cost = sum(float(l.get("rate") or l.get("rate_per_pair") or 0) for l in outside_items)
+    labor_is_set = len(inhouse_items) > 0
+    outside_is_set = len(outside_items) > 0
+    base_cost = materials_cost + labor_cost + outside_cost
     overhead_cost = base_cost * (style.get("overhead_pct", 0) / 100)
     packing = style.get("packing_cost", 0)
     total_cost = base_cost + overhead_cost + packing
@@ -494,6 +507,8 @@ def compute_style_costing(style: dict, color: Optional[str] = None) -> dict:
         "materials_cost": round(materials_cost, 2),
         "labor_cost": round(labor_cost, 2),
         "labor_is_set": labor_is_set,
+        "outside_cost": round(outside_cost, 2),
+        "outside_is_set": outside_is_set,
         "overhead_cost": round(overhead_cost, 2),
         "packing_cost": round(packing, 2),
         "total_cost": round(total_cost, 2),
@@ -511,13 +526,17 @@ def compute_style_costing_from_jobs(style: dict, jobs: list, color: Optional[str
     """Computes style costing given a list of pre-fetched production jobs."""
     c = compute_style_costing(style, color=color)
     c["planned_labor_cost"] = c["labor_cost"]
+    c["planned_outside_cost"] = c.get("outside_cost", 0.0)
     c["labor_source"] = "estimated"
+    c["outside_source"] = "estimated"
     c["is_assigned"] = False
     c["assigned_roles"] = []
+    c["has_outside_work"] = c.get("outside_cost", 0.0) > 0
 
     try:
         assigned_roles_map = {}
         job_rates = []
+        job_outside_rates = []
 
         for job in jobs:
             assignments = job.get("assignments") or {}
@@ -540,6 +559,21 @@ def compute_style_costing_from_jobs(style: dict, jobs: list, color: Optional[str
                 if has_valid:
                     job_rates.append(total_job_rate)
 
+            ol_list = job.get("outside_labour") or []
+            if isinstance(ol_list, list) and ol_list:
+                total_job_ol = 0.0
+                has_valid_ol = False
+                for it in ol_list:
+                    if isinstance(it, dict):
+                        rate = float(it.get("rate") or it.get("rate_per_pair") or 0)
+                        if rate > 0:
+                            total_job_ol += rate
+                            has_valid_ol = True
+                if has_valid_ol:
+                    job_outside_rates.append(total_job_ol)
+
+        has_actual_changes = False
+
         if job_rates:
             actual_labor_cost = round(sum(job_rates) / len(job_rates), 2)
             c["actual_labor_cost"] = actual_labor_cost
@@ -547,9 +581,21 @@ def compute_style_costing_from_jobs(style: dict, jobs: list, color: Optional[str
             c["labor_source"] = "actual"
             c["is_assigned"] = True
             c["assigned_roles"] = list(assigned_roles_map.values())
+            has_actual_changes = True
 
+        if job_outside_rates:
+            actual_outside_cost = round(sum(job_outside_rates) / len(job_outside_rates), 2)
+            c["actual_outside_cost"] = actual_outside_cost
+            c["outside_cost"] = actual_outside_cost
+            c["outside_source"] = "actual"
+            c["has_outside_work"] = True
+            has_actual_changes = True
+
+        if has_actual_changes:
             materials_cost = c["materials_cost"]
-            base_cost = materials_cost + actual_labor_cost
+            labor_cost = c["labor_cost"]
+            outside_cost = c.get("outside_cost", 0.0)
+            base_cost = materials_cost + labor_cost + outside_cost
             overhead_pct = float(style.get("overhead_pct", 0) or 0)
             overhead_cost = base_cost * (overhead_pct / 100)
             packing = c["packing_cost"]
@@ -613,9 +659,11 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
     packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
     labor_cost = float(c.get("labor_cost", 0))
     labor_source = c.get("labor_source", "estimated")
+    outside_cost = float(c.get("outside_cost", 0))
+    outside_source = c.get("outside_source", "estimated")
 
     unit_price = float(po_line.get("unit_price", 0))
-    total_cost = round(bom_cost + labor_cost + packing, 2)
+    total_cost = round(bom_cost + labor_cost + outside_cost + packing, 2)
     profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
     profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
 
@@ -626,6 +674,9 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "outside_cost": round(outside_cost, 2),
+        "outside_source": outside_source,
+        "is_outside_estimated": outside_source == "estimated",
         "overhead_cost": round(overhead, 2),
         "packing_cost": round(packing, 2),
         "total_cost": total_cost,

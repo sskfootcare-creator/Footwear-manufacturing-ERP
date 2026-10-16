@@ -1029,7 +1029,7 @@ export default function POs() {
                   Line Items &amp; PO Profitability
                 </h3>
                 <span className="text-[11px] text-slate-500 italic">
-                  Profit = PO Rate − (BOM + Labor + Packing)
+                  Profit = PO Rate − (BOM + Labor + Outside + Packing)
                 </span>
               </div>
               <div className="overflow-x-auto border-2 border-slate-200">
@@ -1071,11 +1071,14 @@ export default function POs() {
                           <td className="px-2.5 py-2 text-[11px]">
                             {prof ? (
                               <div className="space-y-0.5">
-                                <div className="flex gap-2 text-slate-600">
+                                <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-slate-600">
                                   <span>BOM: <strong className="font-mono">{inr(prof.bom_cost)}</strong></span>
                                   <span>Pack: <strong className="font-mono">{inr(prof.packing_cost)}</strong></span>
+                                  {Number(prof.outside_cost || 0) > 0 && (
+                                    <span>Outside: <strong className="font-mono text-purple-700">{inr(prof.outside_cost)}</strong></span>
+                                  )}
                                 </div>
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                                   <span>Labor: <strong className="font-mono">{inr(prof.labor_cost)}</strong></span>
                                   {prof.is_estimated ? (
                                     <span
@@ -1091,6 +1094,23 @@ export default function POs() {
                                     >
                                       Actual Labor
                                     </span>
+                                  )}
+                                  {Number(prof.outside_cost || 0) > 0 && (
+                                    prof.outside_source === "actual" ? (
+                                      <span
+                                        className="px-1.5 py-0.2 bg-purple-100 text-purple-900 border border-purple-300 text-[9px] font-bold uppercase rounded"
+                                        title="Computed from production job outside labour / subcontract work."
+                                      >
+                                        Actual Outside
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="px-1.5 py-0.2 bg-violet-100 text-violet-900 border border-violet-300 text-[9px] font-bold uppercase rounded"
+                                        title="Planned outside labour / subcontract from style master."
+                                      >
+                                        Est Outside
+                                      </span>
+                                    )
                                   )}
                                 </div>
                               </div>

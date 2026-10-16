@@ -202,9 +202,11 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
     packing = float(c.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
     labor_cost = float(c.get("labor_cost", 0))
     labor_source = c.get("labor_source", "estimated")
+    outside_cost = float(c.get("outside_cost", 0))
+    outside_source = c.get("outside_source", "estimated")
 
     unit_price = float(po_line.get("unit_price", 0))
-    total_cost = round(bom_cost + labor_cost + packing, 2)
+    total_cost = round(bom_cost + labor_cost + outside_cost + packing, 2)
     profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
     profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
 
@@ -215,6 +217,9 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "outside_cost": round(outside_cost, 2),
+        "outside_source": outside_source,
+        "is_outside_estimated": outside_source == "estimated",
         "overhead_cost": round(overhead, 2),
         "packing_cost": round(packing, 2),
         "total_cost": total_cost,
@@ -229,9 +234,11 @@ def _format_po_line_profitability(po_line: dict, style_obj: dict, costing: dict)
     packing = float(costing.get("packing_cost", 0) or style_obj.get("packing_cost", 0) or 0)
     labor_cost = float(costing.get("labor_cost", 0))
     labor_source = costing.get("labor_source", "estimated")
+    outside_cost = float(costing.get("outside_cost", 0))
+    outside_source = costing.get("outside_source", "estimated")
 
     unit_price = float(po_line.get("unit_price", 0))
-    total_cost = round(bom_cost + labor_cost + packing, 2)
+    total_cost = round(bom_cost + labor_cost + outside_cost + packing, 2)
     profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
     profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
 
@@ -242,6 +249,9 @@ def _format_po_line_profitability(po_line: dict, style_obj: dict, costing: dict)
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "outside_cost": round(outside_cost, 2),
+        "outside_source": outside_source,
+        "is_outside_estimated": outside_source == "estimated",
         "overhead_cost": round(overhead, 2),
         "packing_cost": round(packing, 2),
         "total_cost": total_cost,
@@ -386,9 +396,11 @@ async def _attach_po_profitability(po_docs: list, db=None):
                 packing = float(costing.get("packing_cost", 0) or style_doc.get("packing_cost", 0) or 0)
                 labor_cost = float(costing.get("labor_cost", 0))
                 labor_source = costing.get("labor_source", "estimated")
+                outside_cost = float(costing.get("outside_cost", 0))
+                outside_source = costing.get("outside_source", "estimated")
 
                 unit_price = float(item.get("unit_price", 0))
-                total_cost = round(bom_cost + labor_cost + packing, 2)
+                total_cost = round(bom_cost + labor_cost + outside_cost + packing, 2)
                 profit = round(unit_price - total_cost, 2) if unit_price > 0 else None
                 profit_pct = round(profit / unit_price * 100, 1) if (profit is not None and unit_price > 0) else None
 
@@ -399,6 +411,9 @@ async def _attach_po_profitability(po_docs: list, db=None):
                     "labor_cost": round(labor_cost, 2),
                     "labor_source": labor_source,
                     "is_estimated": labor_source == "estimated",
+                    "outside_cost": round(outside_cost, 2),
+                    "outside_source": outside_source,
+                    "is_outside_estimated": outside_source == "estimated",
                     "overhead_cost": round(overhead, 2),
                     "packing_cost": round(packing, 2),
                     "total_cost": total_cost,
@@ -1311,9 +1326,11 @@ async def get_b2b_profitability(
             packing = float(costing.get("packing_cost", 0) or style_doc.get("packing_cost", 0) or 0)
             labor_cost = float(costing.get("labor_cost", 0))
             labor_source = costing.get("labor_source", "estimated")
+            outside_cost = float(costing.get("outside_cost", 0))
+            outside_source = costing.get("outside_source", "estimated")
 
             unit_price = float(it.get("unit_price", 0))
-            total_cost_val = round(bom_cost + labor_cost + packing, 2)
+            total_cost_val = round(bom_cost + labor_cost + outside_cost + packing, 2)
             profit_val = round(unit_price - total_cost_val, 2) if unit_price > 0 else None
             profit_pct_val = round(profit_val / unit_price * 100, 1) if (profit_val is not None and unit_price > 0) else None
 
@@ -1324,6 +1341,9 @@ async def get_b2b_profitability(
                 "labor_cost": round(labor_cost, 2),
                 "labor_source": labor_source,
                 "is_estimated": labor_source == "estimated",
+                "outside_cost": round(outside_cost, 2),
+                "outside_source": outside_source,
+                "is_outside_estimated": outside_source == "estimated",
                 "overhead_cost": round(overhead, 2),
                 "packing_cost": round(packing, 2),
                 "total_cost": total_cost_val,
@@ -1337,6 +1357,8 @@ async def get_b2b_profitability(
                 "bom_cost": 0.0,
                 "labor_cost": 0.0,
                 "labor_source": "estimated",
+                "outside_cost": 0.0,
+                "outside_source": "estimated",
                 "is_estimated": True,
                 "overhead_cost": 0.0,
                 "packing_cost": 0.0,
@@ -1348,6 +1370,7 @@ async def get_b2b_profitability(
         unit_price = float(prof.get("unit_price", 0))
         unit_bom = float(prof.get("bom_cost", 0))
         unit_labor = float(prof.get("labor_cost", 0))
+        unit_outside = float(prof.get("outside_cost", 0))
         unit_overhead = float(prof.get("overhead_cost", 0))
         unit_packing = float(prof.get("packing_cost", 0))
         unit_total_cost = float(prof.get("total_cost", 0))
@@ -1377,6 +1400,8 @@ async def get_b2b_profitability(
             "bom_cost": unit_bom,
             "labor_cost": unit_labor,
             "labor_source": prof.get("labor_source", "estimated"),
+            "outside_cost": unit_outside,
+            "outside_source": prof.get("outside_source", "estimated"),
             "is_estimated": is_est,
             "overhead_cost": unit_overhead,
             "packing_cost": unit_packing,

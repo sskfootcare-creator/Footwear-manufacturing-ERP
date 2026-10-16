@@ -178,6 +178,8 @@ export default function B2BProfitability() {
       "BOM Cost (₹)",
       "Labor Cost (₹)",
       "Labor Source",
+      "Outside Cost (₹)",
+      "Outside Source",
       "Packing Cost (₹)",
       "Overhead Cost (₹)",
       "Total Unit Cost (₹)",
@@ -199,6 +201,8 @@ export default function B2BProfitability() {
       l.bom_cost || 0,
       l.labor_cost || 0,
       l.labor_source || "estimated",
+      l.outside_cost || 0,
+      l.outside_source || "estimated",
       l.packing_cost || 0,
       l.overhead_cost || 0,
       l.unit_total_cost || 0,
@@ -349,7 +353,7 @@ export default function B2BProfitability() {
         <StatTile
           label="Total Production Cost"
           value={inr(summary.total_cost || 0)}
-          sub="BOM + Labor + Packing + Overhead"
+          sub="BOM + Labor + Outside + Packing + Overhead"
           accent="#64748B"
         />
         <StatTile
@@ -863,6 +867,7 @@ function LineItemsTable({ lines }) {
             <th className="py-3 px-3 text-right">Unit Price</th>
             <th className="py-3 px-3 text-right">BOM Cost</th>
             <th className="py-3 px-3 text-right">Labor Cost</th>
+            <th className="py-3 px-3 text-right">Outside Cost</th>
             <th className="py-3 px-3 text-right">Packing</th>
             <th className="py-3 px-3 text-right">Total Unit Cost</th>
             <th className="py-3 px-3 text-right">Line Revenue</th>
@@ -892,6 +897,18 @@ function LineItemsTable({ lines }) {
                 >
                   {l.is_estimated ? "⚡ Estimated" : "✓ Actual"}
                 </span>
+              </td>
+              <td className="py-3 px-3 text-right whitespace-nowrap">
+                <span className="font-bold text-slate-800">{inr(l.outside_cost || 0)}</span>
+                {Number(l.outside_cost || 0) > 0 && (
+                  <span
+                    className={`block text-[9px] font-sans font-bold uppercase tracking-wider ${
+                      l.outside_source === "actual" ? "text-purple-600" : "text-violet-600"
+                    }`}
+                  >
+                    {l.outside_source === "actual" ? "✓ Actual" : "⚡ Estimated"}
+                  </span>
+                )}
               </td>
               <td className="py-3 px-3 text-right text-slate-600">{inr(l.packing_cost)}</td>
               <td className="py-3 px-3 text-right font-bold text-slate-800">{inr(l.unit_total_cost)}</td>
