@@ -1976,7 +1976,95 @@ async def _ensure_startup_indexes(database):
         log.warning(f"Could not create notifications indexes: {e}")
 
     try:
-        await database.sku_map.create_index([("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)], unique=True, name="sku_map_unique_normalized")
+        # DB-009 / FIX-E11000: Auto-heal legacy or malformed sku_map documents before index creation
+        from routes.sku_map import _norm_marketplace, _norm_key
+
+        # 1. Backfill missing keys from legacy documents
+        unindexed_cursor = database.sku_map.find({
+            "$or": [
+                {"source_name_key": {"$exists": False}},
+                {"source_name_key": None},
+                {"external_sku_key": {"$exists": False}},
+                {"external_sku_key": None},
+            ]
+        })
+        async for sm_doc in unindexed_cursor:
+            src_name = sm_doc.get("source_name") or sm_doc.get("client_name") or ""
+            ext_sku = sm_doc.get("external_sku") or sm_doc.get("sku") or ""
+            upd = {}
+            if src_name and not sm_doc.get("source_name_key"):
+                upd["source_name_key"] = _norm_marketplace(src_name)
+            if ext_sku and not sm_doc.get("external_sku_key"):
+                upd["external_sku_key"] = _norm_key(ext_sku)
+            if upd:
+                await database.sku_map.update_one({"_id": sm_doc["_id"]}, {"$set": upd})
+
+        # 2. Prune blank/corrupt duplicate mappings that have no usable external_sku
+        await database.sku_map.delete_many({
+            "$or": [
+                {"external_sku": {"$in": [None, ""]}},
+                {"external_sku": {"$exists": False}},
+            ],
+            "$and": [
+                {"$or": [{"external_sku_key": None}, {"external_sku_key": {"$exists": False}}]},
+                {"$or": [{"source_name_key": None}, {"source_name_key": {"$exists": False}}]},
+            ]
+        })
+
+        # 3. Deduplicate genuine conflicting duplicates keeping the most recent document
+        dup_pipeline = [
+            {"$match": {
+                "source_type": {"$type": "string"},
+                "source_name_key": {"$type": "string"},
+                "external_sku_key": {"$type": "string"}
+            }},
+            {"$group": {
+                "_id": {
+                    "source_type": "$source_type",
+                    "source_name_key": "$source_name_key",
+                    "external_sku_key": "$external_sku_key"
+                },
+                "count": {"$sum": 1},
+                "docs": {"$push": {"id": "$_id", "updated_at": "$updated_at", "created_at": "$created_at"}}
+            }},
+            {"$match": {"count": {"$gt": 1}}}
+        ]
+        async for dup in database.sku_map.aggregate(dup_pipeline):
+            docs = dup.get("docs", [])
+            sorted_docs = sorted(docs, key=lambda d: str(d.get("updated_at") or d.get("created_at") or d.get("id")), reverse=True)
+            for old_doc in sorted_docs[1:]:
+                await database.sku_map.delete_one({"_id": old_doc["id"]})
+
+        # 4. Create compound unique index guarded with partialFilterExpression
+        try:
+            await database.sku_map.create_index(
+                [("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)],
+                unique=True,
+                name="sku_map_unique_normalized",
+                partialFilterExpression={
+                    "source_name_key": {"$type": "string"},
+                    "external_sku_key": {"$type": "string"},
+                }
+            )
+        except Exception as idx_err:
+            err_str = str(idx_err)
+            if "IndexOptionsConflict" in err_str or "IndexKeySpecsConflict" in err_str or "already exists" in err_str:
+                try:
+                    await database.sku_map.drop_index("sku_map_unique_normalized")
+                    await database.sku_map.create_index(
+                        [("source_type", 1), ("source_name_key", 1), ("external_sku_key", 1)],
+                        unique=True,
+                        name="sku_map_unique_normalized",
+                        partialFilterExpression={
+                            "source_name_key": {"$type": "string"},
+                            "external_sku_key": {"$type": "string"},
+                        }
+                    )
+                except Exception as drop_rebuild_err:
+                    log.warning(f"Rebuild of sku_map_unique_normalized index notice: {drop_rebuild_err}")
+            else:
+                raise idx_err
+
         await database.sku_map.create_index("style_id", name="sku_map_style_id")
     except Exception as e:
         log.warning(f"Could not create sku_map indexes: {e}")

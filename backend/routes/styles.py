@@ -1139,18 +1139,32 @@ async def _upsert_provisional_sku_map(
     user_email: str,
 ) -> str:
     db = get_db()
+    from routes.sku_map import _norm_marketplace, _norm_key
+    src_key = _norm_marketplace(platform)
+    ext_key = _norm_key(group_sku)
     filter_ = {
-        "source_type":  "online_channel",
-        "source_name":  platform,
-        "external_sku": group_sku,
+        "source_type":      "online_channel",
+        "source_name_key":  src_key,
+        "external_sku_key": ext_key,
     }
     existing = await db.sku_map.find_one(filter_)
+    if not existing:
+        # Legacy fallback match before normalized keys existed
+        existing = await db.sku_map.find_one({
+            "source_type":  "online_channel",
+            "source_name":  platform,
+            "external_sku": group_sku,
+        })
     color_map = {color_name: color_name}
     size_map  = {s: str(s) for s in sizes_covered}
     if existing:
         update: Dict[str, Any] = {}
         if existing.get("style_id") != style_id:
             update["style_id"] = style_id
+        if not existing.get("source_name_key"):
+            update["source_name_key"] = src_key
+        if not existing.get("external_sku_key"):
+            update["external_sku_key"] = ext_key
         merged_cm = {**(existing.get("color_map") or {}), **color_map}
         merged_sm = {**(existing.get("size_map")  or {}), **size_map}
         if merged_cm != (existing.get("color_map") or {}):
@@ -1169,6 +1183,8 @@ async def _upsert_provisional_sku_map(
         "source_type":         "online_channel",
         "source_name":         platform,
         "external_sku":        group_sku,
+        "source_name_key":     src_key,
+        "external_sku_key":    ext_key,
         "external_style_name": "",
         "color_map":           color_map,
         "size_map":            size_map,
