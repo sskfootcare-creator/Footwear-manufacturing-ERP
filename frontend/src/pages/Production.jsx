@@ -5,7 +5,7 @@ import { PageHeader, Card, BtnPrimary, BtnSecondary } from "../components/ui-kit
 import { SafeImage } from "../components/ImageUploader";
 import ImageViewModal from "../components/ImageViewModal";
 import { useAuth } from "../lib/auth";
-import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart, Maximize2 } from "lucide-react";
+import { FileDown, FileText, Check, UserPlus, Edit3, ClipboardList, X, HardHat, GripVertical, Printer, MessageCircle, AlertTriangle, Clock, Package, Archive, Eye, CheckCircle, Trash2, Save, Plus, ChevronDown, ChevronUp, Layers, Truck, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, Barcode, Zap, RefreshCw, ChevronRight, Palette, Calendar, ShoppingCart, Maximize2, Search } from "lucide-react";
 import ResponsiveTable from "../components/ResponsiveTable";
 import ComponentProductionBoard from "../components/ComponentProductionBoard";
 
@@ -3293,6 +3293,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
   const [selectedWid, setSelectedWid] = useState(current?.worker_id || "");
   const [rate, setRate] = useState(current?.rate_per_pair ?? "");
   const [overwriteSubtasks, setOverwriteSubtasks] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const selectedWorker = workers.find(w => w.id === selectedWid);
 
   const style = styleByCode[group.style_code];
@@ -3327,6 +3328,17 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
       const bm = (b.skill === matchingSkill || b.skill === "general") ? 0 : 1;
       return am - bm;
     });
+
+  const filteredWorkers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter(w => {
+      const name = (w.name || "").toLowerCase();
+      const skill = (w.skill || "").toLowerCase();
+      const phone = (w.phone || "").toLowerCase();
+      return name.includes(q) || skill.includes(q) || phone.includes(q);
+    });
+  }, [sorted, searchQuery]);
 
   const roleHistory = useMemo(() => {
     const events = [];
@@ -3388,6 +3400,47 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
           </div>
         )}
 
+        {!isReadySoleDisabled && (
+          <div className="px-5 py-3 border-b border-slate-200 bg-slate-50/70">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && filteredWorkers.length > 0) {
+                    e.preventDefault();
+                    onPickWorker(filteredWorkers[0]);
+                  }
+                }}
+                placeholder="Search karigar by name, skill, or phone..."
+                data-testid="assign-worker-search"
+                className="w-full pl-9 pr-8 py-2 text-xs border-2 border-slate-200 rounded-md bg-white focus:border-[#C27842] focus:ring-1 focus:ring-[#C27842] focus:outline-none transition-colors"
+                autoFocus
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full hover:bg-slate-100"
+                  title="Clear search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            {searchQuery && (
+              <div className="text-[10px] text-slate-500 mt-1.5 flex items-center justify-between px-0.5">
+                <span>Showing {filteredWorkers.length} of {sorted.length} karigars</span>
+                {filteredWorkers.length > 0 && (
+                  <span className="text-slate-400">Press Enter to select</span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="p-5 max-h-[40vh] overflow-y-auto">
           {isReadySoleDisabled ? (
             <div className="text-center text-xs text-slate-500 py-8 bg-slate-50 border border-dashed border-slate-200 rounded-lg" data-testid="assign-sole-disabled-placeholder">
@@ -3395,16 +3448,30 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
             </div>
           ) : sorted.length === 0 ? (
             <div className="text-center text-sm text-slate-500 py-8">No karigars yet.</div>
+          ) : filteredWorkers.length === 0 ? (
+            <div className="text-center text-xs text-slate-500 py-8 bg-slate-50 border border-dashed border-slate-200 rounded-lg">
+              <div className="font-semibold text-slate-700">No karigar found</div>
+              <div className="text-[11px] text-slate-400 mt-1">No worker matches "{searchQuery}"</div>
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="mt-2.5 text-[11px] text-[#C27842] hover:underline font-bold"
+              >
+                Clear Search
+              </button>
+            </div>
           ) : (
             <div className="space-y-1.5">
-              <button
-                onClick={() => onSave(null, null, overwriteSubtasks)}
-                data-testid="assign-clear"
-                className="w-full text-left px-3 py-3 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider min-h-[44px] touch-manipulation"
-              >
-                ✕ Unassign
-              </button>
-              {sorted.map(w => (
+              {(!searchQuery || "unassign".includes(searchQuery.toLowerCase())) && (
+                <button
+                  onClick={() => onSave(null, null, overwriteSubtasks)}
+                  data-testid="assign-clear"
+                  className="w-full text-left px-3 py-3 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider min-h-[44px] touch-manipulation"
+                >
+                  ✕ Unassign
+                </button>
+              )}
+              {filteredWorkers.map(w => (
                 <button
                   key={w.id}
                   onClick={() => onPickWorker(w)}
