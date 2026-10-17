@@ -4851,6 +4851,19 @@ async def production_card_pdf(payload: dict, request: Request, variant: str = Qu
         j0.get("_id").generation_time.isoformat() if hasattr(j0.get("_id"), "generation_time") else ""
     ) or j0.get("stage_entered_at") or ""
 
+    style = await db.styles.find_one({"code": j0.get("style_code")})
+    style_d = stringify(style) if style else None
+
+    merged_assignments = {}
+    for j in jobs:
+        for k, v in (j.get("assignments") or {}).items():
+            if v and (k not in merged_assignments or not merged_assignments[k].get("worker_name")):
+                merged_assignments[k] = v
+
+    outside_labour = j0.get("outside_labour") or []
+    if not outside_labour and style and style.get("outside_labour"):
+        outside_labour = style.get("outside_labour") or []
+
     group = {
         "po_number": j0.get("po_number", ""),
         "client_name": j0.get("client_name", ""),
@@ -4863,10 +4876,13 @@ async def production_card_pdf(payload: dict, request: Request, variant: str = Qu
         "sizes": sizes,
         "total_qty": total_qty,
         "components": comp,
-        "assignments": j0.get("assignments") or {},
+        "component_tracks": j0.get("component_tracks") or {},
+        "component_specs": j0.get("component_specs") or (style.get("component_specs") if style else {}),
+        "footwear_type": j0.get("footwear_type") or (style.get("footwear_type") if style else "flat"),
+        "sole_ready_to_use": j0.get("sole_ready_to_use") or (style.get("sole_ready_to_use") if style else False),
+        "outside_labour": outside_labour,
+        "assignments": merged_assignments or j0.get("assignments") or {},
     }
-    style = await db.styles.find_one({"code": j0.get("style_code")})
-    style_d = stringify(style) if style else None
     is_dual = variant == "dual" or payload.get("variant") == "dual" or payload.get("dual") is True
     if is_dual:
         pdf_bytes = build_production_card_dual_a4(group, style_d)

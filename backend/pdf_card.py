@@ -298,56 +298,126 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 7),
     ]))
 
-    # --- Karigar Assignments ---
+    # --- Process Sub-tasks & Karigar Assignments ---
     assigns = job_group.get("assignments", {}) or {}
-    role_labels = [
-        ("upper", "UPPER"), ("bottom", "BOTTOM"), ("sole", "SOLE"),
-        ("lasting", "LASTING"), ("sole_pasting", "SOLE PASTING"),
-        ("finishing", "FINISHING"), ("qc_pack", "QC & PACK"),
+    outside_list = job_group.get("outside_labour", []) or []
+    if not outside_list and style and style.get("outside_labour"):
+        outside_list = style.get("outside_labour") or []
+
+    specs = job_group.get("component_specs", {}) or (style.get("component_specs") if style else {}) or {}
+    is_heel = (job_group.get("footwear_type") == "heel") or (specs.get("footwear_type") == "heel") or (style and style.get("footwear_type") == "heel") or bool(assigns.get("heel_gola"))
+    is_ready_sole = job_group.get("sole_ready_to_use") or (style and (style.get("sole_ready_to_use") or style.get("ready_to_use_sole")))
+
+    # Left Column: Upper Track & Sole Track (+ Heel if heel style)
+    left_items = [
+        ("upper", "Upper: Lead", "upper", None),
+        ("upper.cutting", "Upper: Cutting", "cutting", "upper"),
+        ("upper.stitching", "Upper: Stitching", "stitching", "upper"),
+        ("upper.folding", "Upper: Folding", None, "upper"),
+        ("upper.attachment", "Upper: Attachment", None, "upper"),
     ]
-    if assigns.get("heel_gola"):
-        role_labels.insert(3, ("heel_gola", "HEEL / GOLA"))
-    if assigns.get("cutting") and not assigns.get("upper"):
-        role_labels.insert(0, ("cutting", "CUTTING"))
-
-    if with_rates:
-        kar_rows = [["ROLE", "KARIGAR", "RATE / PAIR", "SIGN"]]
-        for rk, rl in role_labels:
-            a = assigns.get(rk) or {}
-            kar_rows.append([
-                rl,
-                a.get("worker_name", "_______________"),
-                f"Rs.{a.get('rate_per_pair', '')}" if a.get("rate_per_pair") is not None else "_______",
-                "________________",
-            ])
-        kar_col_widths = [35 * mm, 60 * mm, 25 * mm, 60 * mm]
-        rate_align = [("ALIGN", (2, 1), (2, -1), "RIGHT")]
+    if is_ready_sole:
+        left_items.append(("sole_ready", "Sole: Ready-to-Use", None, None))
     else:
-        kar_rows = [["ROLE", "KARIGAR", "SIGN"]]
-        for rk, rl in role_labels:
-            a = assigns.get(rk) or {}
-            kar_rows.append([
-                rl,
-                a.get("worker_name", "________________________"),
-                "________________________",
-            ])
-        kar_col_widths = [40 * mm, 70 * mm, 70 * mm]
-        rate_align = []
+        left_items.append(("sole", "Sole: Lead", "sole", None))
+        left_items.append(("sole.prep", "Sole: Prep / Buffing", None, "sole"))
 
-    kar_t = Table(kar_rows, colWidths=kar_col_widths)
-    kar_style = [
-        ("BOX", (0, 0), (-1, -1), 1, BLACK),
-        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+    if is_heel:
+        left_items.append(("heel_gola", "Heel/Gola: Lead", "heel_gola", None))
+        left_items.append(("heel_gola.cutting", "Heel: Cover Cut / Prep", None, "heel_gola"))
+
+    # Right Column: Bottom / Insole Track + Assembly Pipeline + Outside Work
+    right_items = [
+        ("bottom", "Bottom: Lead", "bottom", None),
+        ("bottom.cutting", "Bottom: Cutting", None, "bottom"),
+        ("bottom.stitching", "Bottom: Stitching", None, "bottom"),
+        ("bottom.stamping", "Bottom: Stamping", None, "bottom"),
+        ("bottom.assembly", "Bottom: Insole Prep", None, "bottom"),
+        ("lasting", "Lasting Master", "lasting", None),
+        ("sole_pasting", "Sole Pasting", "sole_pasting", None),
+        ("finishing", "Finishing Tech", "finishing", None),
+        ("qc_pack", "QC & Packing", "qc_pack", None),
+    ]
+    for o in outside_list:
+        oname = o.get("name") or "Job Work"
+        right_items.append(("outside", f"Out: {oname[:13]}", o, None))
+
+    max_len = max(len(left_items), len(right_items))
+    while len(left_items) < max_len:
+        left_items.append(("blank", "Other / Special", None, None))
+    while len(right_items) < max_len:
+        right_items.append(("blank", "Other / Special", None, None))
+
+    fs_h = 5.5 if compact else 7.5
+    fs_r = 5.0 if compact else 7.0
+    pad = 0.5 if compact else 2.0
+
+    def format_row(item):
+        k, label, extra, parent = item
+        if k == "sole_ready":
+            w_disp = "Vendor Supplied"
+            r_disp = "—"
+        elif k == "outside":
+            v_name = (extra.get("vendor") or extra.get("vendor_name") or "Outside")[:14]
+            w_disp = v_name
+            rate_val = extra.get("rate")
+            r_disp = f"Rs.{rate_val}" if rate_val is not None else ("___" if compact else "_____")
+        elif k == "blank":
+            w_disp = "____" if compact else "________"
+            r_disp = "___" if compact else "____"
+        else:
+            asgn = assigns.get(k) or (assigns.get(extra) if extra else None) or (assigns.get(parent) if parent else None)
+            w = asgn.get("worker_name") if asgn else ""
+            r = asgn.get("rate_per_pair") if asgn else None
+            if not w:
+                w_disp = "____" if compact else "________"
+            else:
+                w_disp = f"{w[:12]} (L)" if (not assigns.get(k) and parent and assigns.get(parent) and compact) else w[:14]
+            r_disp = f"Rs.{r}" if r is not None else ("___" if compact else "____")
+
+        if with_rates:
+            return [label, w_disp, r_disp, "___"]
+        else:
+            return [label, w_disp, "___"]
+
+    left_rows = [["UPPER & SOLE SUB-TASKS", "KARIGAR", "RATE", "SIGN"] if with_rates else ["UPPER & SOLE SUB-TASKS", "KARIGAR", "SIGN"]]
+    for it in left_items:
+        left_rows.append(format_row(it))
+
+    right_rows = [["BOTTOM & ASSEMBLY", "KARIGAR / VENDOR", "RATE", "SIGN"] if with_rates else ["BOTTOM & ASSEMBLY", "KARIGAR / VENDOR", "SIGN"]]
+    for it in right_items:
+        right_rows.append(format_row(it))
+
+    col_w = [25.5 * mm, 31 * mm, 15 * mm, 18 * mm] if with_rates else [28.5 * mm, 34 * mm, 27 * mm]
+    t_left = Table(left_rows, colWidths=col_w)
+    t_right = Table(right_rows, colWidths=col_w)
+
+    st = [
+        ("BOX", (0, 0), (-1, -1), 0.8, BLACK),
+        ("GRID", (0, 0), (-1, -1), 0.3, LINE),
         ("BACKGROUND", (0, 0), (-1, 0), HEAD),
         ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
-        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 6 if compact else 8),
-        ("FONT", (0, 1), (-1, -1), "Helvetica", 6.5 if compact else 9),
+        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", fs_h),
+        ("FONT", (0, 1), (-1, -1), "Helvetica", fs_r),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 0.5 if compact else 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5 if compact else 4),
-    ] + rate_align
-    kar_t.setStyle(TableStyle(kar_style))
+        ("TOPPADDING", (0, 0), (-1, -1), pad),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), pad),
+        ("LEFTPADDING", (0, 0), (-1, -1), 1),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+    ]
+    if with_rates:
+        st.append(("ALIGN", (2, 1), (2, -1), "RIGHT"))
+    t_left.setStyle(TableStyle(st))
+    t_right.setStyle(TableStyle(st))
+
+    kar_t = Table([[t_left, t_right]], colWidths=[89.5 * mm, 89.5 * mm])
+    kar_t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
 
     # --- Footer ---
     if compact:
@@ -403,7 +473,7 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         Spacer(1, 0.5 if compact else 1),
         comp_t,
         sp_sm,
-        Paragraph("KARIGAR ASSIGNMENTS", S["h2"]),
+        Paragraph("PROCESS SUB-TASKS & KARIGAR ASSIGNMENTS", S["h2"]),
         Spacer(1, 0.5 if compact else 1),
         kar_t,
         sp_sm,
