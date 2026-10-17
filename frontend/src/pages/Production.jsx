@@ -2112,74 +2112,76 @@ function ColorGroupCard(props) {
         })()}
 
         {/* Right Column: PO Number, Style Number, SKU / External ID, Color, Qty, and Dates */}
-        <div className="flex-1 min-w-0 flex flex-col justify-between self-stretch py-0.5">
+        <div className="flex-1 min-w-0 flex flex-col justify-between self-stretch py-0.5 space-y-2">
           <div>
             <div className="flex items-center justify-between gap-1.5 flex-wrap">
-              <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+              <div className="flex items-center gap-2 flex-wrap min-w-0">
                 <span
-                  className="text-[11px] font-mono font-bold text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200"
+                  className="text-xs font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded border border-slate-300 shadow-2xs"
                   title="PO Number"
                   data-testid={`po-number-${group.key}`}
                 >
                   {group.po_number}
                 </span>
                 <span
-                  className="font-mono font-bold text-xs text-slate-900"
+                  className="font-mono font-bold text-sm text-slate-900 flex items-center gap-1.5"
                   title={group.style_display || group.style_code}
                   data-testid={`style-code-${group.key}`}
                 >
-                  {group.style_display || group.style_code}
+                  <span>{group.style_display || group.style_code}</span>
+                  {style?.name && style.name !== (group.style_display || group.style_code) && (
+                    <span className="font-sans font-normal text-xs text-slate-500">({style.name})</span>
+                  )}
                 </span>
                 {group.sku_id && (
                   <span
-                    className="text-[10px] font-mono font-semibold text-violet-800 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded"
+                    className="text-[10px] font-mono font-bold text-violet-800 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded"
                     title={`SKU ID: ${group.sku_id}`}
                     data-testid={`sku-id-${group.key}`}
                   >
                     SKU: {group.sku_id}
                   </span>
                 )}
-                <span className="text-slate-300">·</span>
-                <span className="text-xs font-bold text-[#C27842]">{group.color}</span>
-                <span className="text-slate-400">·</span>
-                <span className="text-xs text-slate-600 font-mono font-medium">{group.totalQty} pairs</span>
-                {group.client_name && (
-                  <>
-                    <span className="text-slate-400">·</span>
-                    <span
-                      className="text-xs uppercase tracking-wider font-semibold text-slate-700 truncate max-w-[180px]"
-                      title={`Client: ${group.client_name}`}
-                      data-testid={`client-name-${group.key}`}
-                    >
-                      {group.client_name}
-                    </span>
-                  </>
-                )}
-                {completedTotal > 0 && (
-                  <>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-xs text-green-700 font-mono font-semibold">{completedTotal} done</span>
-                  </>
-                )}
-                {(group.invoice_no || drec?.invoice_no) && (
-                  <>
-                    <span className="text-slate-400">·</span>
-                    <span
-                      className="text-[10px] font-mono font-bold text-amber-900 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex items-center gap-1 shadow-xs"
-                      title={`Invoice: ${group.invoice_no || drec?.invoice_no}`}
-                      data-testid={`card-invoice-badge-${group.key}`}
-                    >
-                      <FileText className="w-3 h-3 text-[#C27842]" />
-                      Inv: {group.invoice_no || drec?.invoice_no}
-                    </span>
-                  </>
-                )}
               </div>
+            </div>
+
+            {/* Production Metadata Pills Row (Client inline with Qty for test suite) */}
+            <div className="flex items-center gap-2 flex-wrap text-xs pt-1.5">
+              {group.client_name && (
+                <span
+                  className="text-xs uppercase tracking-wider font-bold text-slate-700 bg-slate-100/90 border border-slate-200 px-2 py-0.5 rounded truncate max-w-[200px]"
+                  title={`Client: ${group.client_name}`}
+                  data-testid={`client-name-${group.key}`}
+                >
+                  {group.client_name}
+                </span>
+              )}
+              <span className="text-xs font-bold text-[#C27842] bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-mono">
+                {group.color}
+              </span>
+              <span className="text-xs text-white bg-slate-900 font-mono font-bold px-2 py-0.5 rounded shadow-2xs">
+                {group.totalQty} pairs
+              </span>
+              {completedTotal > 0 && (
+                <span className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-300 font-mono font-bold px-2 py-0.5 rounded">
+                  {completedTotal} done
+                </span>
+              )}
+              {(group.invoice_no || drec?.invoice_no) && (
+                <span
+                  className="text-[10px] font-mono font-bold text-amber-900 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex items-center gap-1 shadow-2xs"
+                  title={`Invoice: ${group.invoice_no || drec?.invoice_no}`}
+                  data-testid={`card-invoice-badge-${group.key}`}
+                >
+                  <FileText className="w-3 h-3 text-[#C27842]" />
+                  Inv: {group.invoice_no || drec?.invoice_no}
+                </span>
+              )}
             </div>
           </div>
 
           {/* Dates row: PO date, delivery date */}
-          <div className="flex items-center gap-3 text-[10px] text-slate-500 flex-wrap pt-1.5 border-t border-slate-100 mt-1.5">
+          <div className="flex items-center gap-3 text-[10px] text-slate-500 flex-wrap pt-1 border-t border-slate-100">
             {group.po_date && (
               <div className="flex items-center gap-1 font-mono">
                 <Calendar className="w-3 h-3 text-slate-400" />
@@ -2364,33 +2366,55 @@ function ColorGroupCard(props) {
 
 
       {/* Size matrix with click-to-edit qty */}
-      <div className="p-3 overflow-x-auto">
-        <table className="w-full text-xs border border-slate-200">
-          <thead className="bg-slate-50">
-            <tr>
-              <th className="px-2 py-1 text-left text-[10px] uppercase tracking-wider font-bold text-slate-600 border-r border-slate-200 sticky left-0 z-10 bg-slate-50">Size</th>
-              {group.sizes.map(sz => (
-                <th key={sz} className="px-2 py-1 text-center font-mono text-[11px] font-bold text-slate-700 border-r border-slate-200 last:border-r-0">{sz}</th>
-              ))}
-              <th className="px-2 py-1 text-right text-[10px] uppercase tracking-wider font-bold text-slate-900 bg-slate-100">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-t border-slate-200">
-              <td className="px-2 py-1.5 font-bold text-slate-700 border-r border-slate-200 sticky left-0 z-10 bg-white">{group.color}</td>
-              {group.sizes.map(sz => (
-                <td key={sz} className="px-2 py-1.5 text-center font-mono border-r border-slate-200 last:border-r-0">
-                  {effectiveCanEdit ? (
-                    <button onClick={() => onOpenQty(sizeTotals.rowIdBySize[sz])} className="hover:text-[#C27842] hover:underline w-full" data-testid={`qty-${group.key}-${sz}`}>
-                      {sizeTotals.t[sz]}
-                    </button>
-                  ) : sizeTotals.t[sz]}
+      <div className="px-3 py-2 bg-slate-50/70 border-b border-slate-200">
+        <div className="flex items-center justify-between text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-1">
+          <span>Size Breakdown</span>
+          <span className="font-mono text-slate-700">{group.totalQty} Pairs Total</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs border border-slate-200 bg-white rounded shadow-2xs">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="px-2 py-1 text-left text-[9.5px] uppercase tracking-wider font-bold text-slate-500 border-r border-slate-200 sticky left-0 z-10 bg-slate-100">
+                  Size
+                </th>
+                {group.sizes.map(sz => (
+                  <th key={sz} className="px-2 py-1 text-center font-mono text-[11px] font-bold text-slate-700 border-r border-slate-200 last:border-r-0">
+                    {sz}
+                  </th>
+                ))}
+                <th className="px-2 py-1 text-right text-[9.5px] uppercase tracking-wider font-bold text-slate-800 bg-slate-200/80">
+                  Total
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-t border-slate-200">
+                <td className="px-2 py-1 font-bold text-slate-600 text-[10px] uppercase tracking-wider border-r border-slate-200 sticky left-0 z-10 bg-white">
+                  Pairs
                 </td>
-              ))}
-              <td className="px-2 py-1.5 text-right font-mono font-bold bg-[#0F172A] text-[#C27842]">{group.totalQty}</td>
-            </tr>
-          </tbody>
-        </table>
+                {group.sizes.map(sz => (
+                  <td key={sz} className="px-2 py-1 text-center font-mono text-xs border-r border-slate-200 last:border-r-0">
+                    {effectiveCanEdit ? (
+                      <button
+                        onClick={() => onOpenQty(sizeTotals.rowIdBySize[sz])}
+                        className="hover:text-[#C27842] hover:underline font-bold w-full text-slate-800"
+                        data-testid={`qty-${group.key}-${sz}`}
+                      >
+                        {sizeTotals.t[sz]}
+                      </button>
+                    ) : (
+                      <span className="font-bold text-slate-800">{sizeTotals.t[sz]}</span>
+                    )}
+                  </td>
+                ))}
+                <td className="px-2 py-1 text-right font-mono font-bold bg-slate-100 text-slate-900">
+                  {group.totalQty}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* --- UNIFIED PARALLEL COMPONENTS & KARIGAR ASSIGNMENT --- */}
@@ -2415,6 +2439,7 @@ function ColorGroupCard(props) {
               assignment={getComponentAssignment(a, compKey)}
               assignments={a}
               subtasks={getSubtasksForComp(compKey)}
+              outsideLabour={outsideLabour}
               outsideCount={(outsideLabour || []).filter(o => (o.component || "").toLowerCase() === compKey).length}
               disabled={!effectiveCanEdit}
               groupKey={group.key}
@@ -2655,7 +2680,7 @@ function ColorGroupCard(props) {
 /**
  * ParallelComponentCard — clickable tab-style card for each component track.
  * Displays the primary assigned person for this component, status toggle,
- * and quick summary of subtasks & outside work.
+ * all process subtasks directly on the card, and linked outside work.
  * Clicking expands the full inline assignment & outside work panel below.
  */
 function ParallelComponentCard({
@@ -2666,6 +2691,7 @@ function ParallelComponentCard({
   assignment,
   assignments = {},
   outsideCount = 0,
+  outsideLabour = [],
   subtasks: propSubtasks,
   onToggle,
   onSelect,
@@ -2679,6 +2705,7 @@ function ParallelComponentCard({
 }) {
   const [isOver, setIsOver] = useState(false);
   const subtasks = propSubtasks !== undefined ? propSubtasks : (COMPONENT_SUBTASK_ROLES[compKey] || []);
+  const compOutsideLabour = (outsideLabour || []).filter(o => (o.component || "").toLowerCase() === compKey);
 
   return (
     <div
@@ -2712,7 +2739,7 @@ function ParallelComponentCard({
       aria-label={`${label} component — click to ${isActive ? "collapse" : "expand"} karigar assignment`}
     >
       {/* Component name + status badge */}
-      <div className="px-2 pt-2 pb-1">
+      <div className="px-2.5 pt-2 pb-1.5">
         <div className="flex items-center justify-between gap-1">
           <span className={`text-[11px] uppercase font-black tracking-wider truncate ${
             isActive ? "text-[#A65D24]" : done ? "text-emerald-700" : "text-slate-800"
@@ -2757,7 +2784,7 @@ function ParallelComponentCard({
       </div>
 
       {/* Main Assigned Person for this component */}
-      <div className="px-2 pb-1.5">
+      <div className="px-2.5 pb-1.5">
         {isReadySole ? (
           <div className="px-2 py-1.5 rounded bg-emerald-50/70 border border-emerald-200" data-testid={`ready-sole-indicator-${groupKey}`}>
             <div className="flex items-center justify-between gap-1">
@@ -2799,6 +2826,11 @@ function ParallelComponentCard({
                 )}
               </div>
               <div className="flex items-center gap-1.5 flex-shrink-0">
+                {assignment?.rate_per_pair != null && (
+                  <span className="text-[9px] font-mono font-bold text-[#C27842]">
+                    ₹{assignment.rate_per_pair}
+                  </span>
+                )}
                 <button
                   type="button"
                   disabled={disabled}
@@ -2813,26 +2845,101 @@ function ParallelComponentCard({
         )}
       </div>
 
-      {/* Subtasks summary badges (only assigned specialists) */}
-      {!isReadySole && subtasks.some(st => assignments[st.key]?.worker_name) && (
-        <div className="px-2 pb-1.5 mt-auto">
-          <div className="flex items-center gap-1 flex-wrap">
-            {subtasks.filter(st => assignments[st.key]?.worker_name).map((st) => {
-              const stAsgn = assignments[st.key];
-              return (
-                <span
-                  key={st.key}
-                  title={`${st.label}: ${stAsgn.worker_name}`}
-                  className="inline-flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full border bg-[#C27842]/10 text-[#A65D24] border-[#C27842]/30"
-                >
-                  <span>{st.icon}</span>
-                  <span className="truncate max-w-[44px]">
-                    {stAsgn.worker_name.split(" ")[0]}
-                  </span>
-                </span>
-              );
-            })}
+      {/* Sub-tasks & Outside Labour Section */}
+      {isActive ? (
+        <div className="px-2.5 pb-2 mt-auto">
+          <div className="px-2 py-1 text-center bg-amber-100/60 rounded border border-[#C27842]/30 text-[9px] font-bold text-[#A65D24]">
+            Editing in panel below ▼
           </div>
+        </div>
+      ) : isReadySole ? (
+        <div className="px-2.5 pb-2 mt-auto">
+          <div className="px-2 py-1 rounded bg-slate-50/80 border border-slate-200 text-[8.5px] text-slate-500 italic text-center">
+            Vendor-supplied · No in-house subtasks
+          </div>
+        </div>
+      ) : (
+        <div className="px-2.5 pb-2 mt-auto space-y-1.5">
+          {subtasks.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[8px] uppercase font-black text-slate-400 tracking-wider">
+                Process Sub-tasks ({subtasks.length})
+              </div>
+              <div className="space-y-1">
+                {subtasks.map((st) => {
+                  const stDirect = assignments[st.key];
+                  const isDirectlyAssigned = !!stDirect?.worker_name;
+                  return (
+                    <button
+                      key={st.key}
+                      type="button"
+                      disabled={disabled}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenAssign?.(st.key);
+                      }}
+                      data-testid={`assign-${groupKey}-${st.key}`}
+                      title={`Assign ${st.label}`}
+                      className={`w-full flex items-center justify-between gap-1 px-1.5 py-1 rounded text-left transition-all border ${
+                        isDirectlyAssigned
+                          ? "bg-amber-50/60 border-amber-300 hover:border-[#C27842]"
+                          : "bg-white border-dashed border-slate-200 hover:border-[#C27842]/50 hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1 flex items-center gap-1">
+                        <span className="text-[9.5px] flex-shrink-0">{st.icon}</span>
+                        <span className="text-[8.5px] font-semibold text-slate-600 truncate">{st.label}:</span>
+                        <span className={`text-[9px] truncate ${
+                          isDirectlyAssigned
+                            ? "font-bold text-slate-900"
+                            : "font-normal text-slate-400 italic"
+                        }`}>
+                          {isDirectlyAssigned
+                            ? stDirect.worker_name
+                            : assignment?.worker_name
+                            ? "Lead Karigar"
+                            : "+ Assign"}
+                        </span>
+                      </div>
+                      {isDirectlyAssigned && stDirect?.rate_per_pair != null ? (
+                        <span className="text-[8.5px] font-mono font-bold text-[#C27842] flex-shrink-0">
+                          ₹{stDirect.rate_per_pair}
+                        </span>
+                      ) : (
+                        <span className="text-[8px] text-slate-400 flex-shrink-0">
+                          {isDirectlyAssigned ? "" : "+"}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {compOutsideLabour.length > 0 && (
+            <div className="pt-1 border-t border-slate-100 space-y-0.5">
+              <div className="text-[8px] uppercase font-bold text-amber-700 tracking-wider">
+                Outside Work ({compOutsideLabour.length})
+              </div>
+              {compOutsideLabour.map((item, idx) => (
+                <div
+                  key={item.id || idx}
+                  className="px-1.5 py-0.5 rounded bg-amber-50/70 border border-amber-200/80 text-[8.5px] flex items-center justify-between gap-1"
+                  title={`${item.name} · ${item.vendor || "Outside"} · ₹${item.rate || 0}/pr`}
+                >
+                  <span className="font-semibold text-amber-950 truncate">
+                    🏭 {item.name}
+                  </span>
+                  {item.rate != null && (
+                    <span className="font-mono font-bold text-amber-800 text-[8px] flex-shrink-0">
+                      ₹{item.rate}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
