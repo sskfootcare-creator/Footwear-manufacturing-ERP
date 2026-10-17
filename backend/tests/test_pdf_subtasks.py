@@ -65,11 +65,14 @@ def test_production_card_pdf_with_all_subtasks():
         text_single += page.extract_text() or ""
 
     # Verify all sub-tasks and assignments are present in single PDF
+    assert len(reader_single.pages) == 1, f"Single A4 must fit on exactly 1 page, got {len(reader_single.pages)}"
     assert "Upper: Cutting" in text_single or "Upper: Lead" in text_single
     assert "Pooja Stitcher" in text_single
     assert "Mohan Master" in text_single
     assert "Gold Foil Emb" in text_single
     assert "Royal Prints" in text_single
+    assert "COMPONENTS & SWATCHES" not in text_single
+    assert "MANUFACTURING PROCESS TALLY" in text_single
 
     # 2. Dual A4 PDF (fits on 1 single page)
     dual_pdf = build_production_card_dual_a4(job_group, style)
@@ -83,6 +86,8 @@ def test_production_card_pdf_with_all_subtasks():
     assert "Pooja Stitcher" in text_dual
     assert "Mohan Master" in text_dual
     assert "Gold Foil Emb" in text_dual
+    assert "COMPONENTS & SWATCHES" not in text_dual
+    assert "MANUFACTURING PROCESS TALLY" in text_dual
 
 
 def test_production_card_pdf_ready_to_use_sole():

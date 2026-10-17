@@ -14,7 +14,8 @@ BLACK = colors.black
 HEAD = colors.HexColor("#0F172A")
 ACCENT = colors.HexColor("#C27842")
 LINE = colors.HexColor("#94A3B8")
-LIGHT = colors.HexColor("#F1F5F9")
+LIGHT = colors.HexColor("#F8FAFC")
+ZEBRA = colors.HexColor("#F1F5F9")
 WHITE = colors.white
 
 USABLE_MM = 180
@@ -27,86 +28,56 @@ def _img_from_dataurl(image_url: str, max_h_mm: float = 50, max_w_mm: float = 50
 
 
 def _make_mini_swatch_box(size_mm=8):
+    """Deprecated: Component swatches removed from production card."""
     t = Table([[""]], colWidths=[size_mm * mm], rowHeights=[size_mm * mm])
     t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.6, BLACK),
         ("BACKGROUND", (0, 0), (-1, -1), WHITE),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
     return t
 
 
 def _build_comp_cell(title, done, layers, compact=False):
-    check = "[X]" if done else "[ ]"
-    header_fs = 8.5 if compact else 11
-    header_lead = 10 if compact else 13
-    header_p = Paragraph(f"<b>{check} {title}</b>",
-                         ParagraphStyle("ch", fontName="Helvetica-Bold", fontSize=header_fs, leading=header_lead, textColor=BLACK))
-
-    box_sz = 5.5 if compact else 8
-    font_sz = 6 if compact else 7.5
-    lead_sz = 7 if compact else 9.0
-
-    rows = [[header_p, ""]]
-    for l in layers:
-        sb = _make_mini_swatch_box(size_mm=box_sz)
-        p = Paragraph(l, ParagraphStyle("cl", fontName="Helvetica", fontSize=font_sz, leading=lead_sz, textColor=colors.HexColor("#334155")))
-        rows.append([sb, p])
-
-    t = Table(rows, colWidths=[(box_sz + 2) * mm, (58 - box_sz - 2) * mm])
-    t.setStyle(TableStyle([
-        ("SPAN", (0, 0), (1, 0)),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 1), (0, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 0.5 if compact else 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5 if compact else 2),
-        ("LEFTPADDING", (0, 0), (-1, -1), 1),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 1),
-    ]))
-    return t
+    """Deprecated: Component swatches removed from production card."""
+    return Table([[Paragraph(f"<b>{title}</b>", ParagraphStyle("ch", fontName="Helvetica-Bold", fontSize=8))]], colWidths=[60 * mm])
 
 
 def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool = True, compact: bool = False) -> list:
     if compact:
         S = {
-            "h_co": ParagraphStyle("h_co", fontName="Helvetica-Bold", fontSize=9, leading=11, textColor=WHITE),
-            "co_sub": ParagraphStyle("cs", fontName="Helvetica", fontSize=6, leading=8, alignment=2, textColor=colors.HexColor("#CBD5E1")),
-            "h_style": ParagraphStyle("hst", fontName="Helvetica-Bold", fontSize=11, leading=13, textColor=BLACK),
-            "h2": ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=7, leading=8.5, textColor=ACCENT),
+            "h_co": ParagraphStyle("h_co", fontName="Helvetica-Bold", fontSize=8.5, leading=10, textColor=WHITE),
+            "co_sub": ParagraphStyle("cs", fontName="Helvetica", fontSize=5.5, leading=7.5, alignment=2, textColor=colors.HexColor("#CBD5E1")),
+            "h_style": ParagraphStyle("hst", fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=BLACK),
+            "h2": ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=6.5, leading=8, textColor=ACCENT),
             "lab": ParagraphStyle("lab", fontName="Helvetica-Bold", fontSize=5, textColor=ACCENT, leading=6),
-            "val": ParagraphStyle("v", fontName="Helvetica", fontSize=6, textColor=BLACK, leading=7.5),
-            "valb": ParagraphStyle("vb", fontName="Helvetica-Bold", fontSize=6.5, textColor=BLACK, leading=8),
+            "val": ParagraphStyle("v", fontName="Helvetica", fontSize=5.5, textColor=BLACK, leading=7),
+            "valb": ParagraphStyle("vb", fontName="Helvetica-Bold", fontSize=6, textColor=BLACK, leading=7.5),
             "small": ParagraphStyle("sm", fontName="Helvetica", fontSize=5, textColor=colors.HexColor("#475569"), leading=6.5),
-            "huge_color": ParagraphStyle("hc", fontName="Helvetica-Bold", fontSize=9.5, textColor=ACCENT, leading=11, alignment=1),
-            "huge_qty": ParagraphStyle("hq", fontName="Helvetica-Bold", fontSize=13, leading=15, textColor=HEAD, alignment=1),
+            "huge_color": ParagraphStyle("hc", fontName="Helvetica-Bold", fontSize=9, textColor=ACCENT, leading=10.5, alignment=1),
+            "huge_qty": ParagraphStyle("hq", fontName="Helvetica-Bold", fontSize=12, leading=14, textColor=HEAD, alignment=1),
         }
-        sp_xs, sp_sm = Spacer(1, 1), Spacer(1, 1.5)
+        sp_xs, sp_sm = Spacer(1, 0.8), Spacer(1, 1.2)
     else:
         S = {
-            "h_co": ParagraphStyle("h_co", fontName="Helvetica-Bold", fontSize=14, leading=16, textColor=WHITE),
-            "co_sub": ParagraphStyle("cs", fontName="Helvetica", fontSize=8, leading=10, alignment=2, textColor=colors.HexColor("#CBD5E1")),
-            "h_style": ParagraphStyle("hst", fontName="Helvetica-Bold", fontSize=18, leading=20, textColor=BLACK),
-            "h2": ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=10, leading=12, textColor=ACCENT),
-            "lab": ParagraphStyle("lab", fontName="Helvetica-Bold", fontSize=7, textColor=ACCENT, leading=9),
-            "val": ParagraphStyle("v", fontName="Helvetica", fontSize=8, textColor=BLACK, leading=10),
-            "valb": ParagraphStyle("vb", fontName="Helvetica-Bold", fontSize=9, textColor=BLACK, leading=11),
-            "small": ParagraphStyle("sm", fontName="Helvetica", fontSize=6.5, textColor=colors.HexColor("#475569"), leading=8.5),
-            "huge_color": ParagraphStyle("hc", fontName="Helvetica-Bold", fontSize=16, textColor=ACCENT, leading=18, alignment=1),
-            "huge_qty": ParagraphStyle("hq", fontName="Helvetica-Bold", fontSize=22, leading=24, textColor=HEAD, alignment=1),
+            "h_co": ParagraphStyle("h_co", fontName="Helvetica-Bold", fontSize=13, leading=15, textColor=WHITE),
+            "co_sub": ParagraphStyle("cs", fontName="Helvetica", fontSize=7.5, leading=9.5, alignment=2, textColor=colors.HexColor("#CBD5E1")),
+            "h_style": ParagraphStyle("hst", fontName="Helvetica-Bold", fontSize=16, leading=18, textColor=BLACK),
+            "h2": ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=9, leading=11, textColor=ACCENT),
+            "lab": ParagraphStyle("lab", fontName="Helvetica-Bold", fontSize=6.5, textColor=ACCENT, leading=8),
+            "val": ParagraphStyle("v", fontName="Helvetica", fontSize=7.5, textColor=BLACK, leading=9.5),
+            "valb": ParagraphStyle("vb", fontName="Helvetica-Bold", fontSize=8.5, textColor=BLACK, leading=10.5),
+            "small": ParagraphStyle("sm", fontName="Helvetica", fontSize=6, textColor=colors.HexColor("#475569"), leading=8),
+            "huge_color": ParagraphStyle("hc", fontName="Helvetica-Bold", fontSize=14, textColor=ACCENT, leading=16, alignment=1),
+            "huge_qty": ParagraphStyle("hq", fontName="Helvetica-Bold", fontSize=20, leading=22, textColor=HEAD, alignment=1),
         }
-        sp_xs, sp_sm = Spacer(1, 2), Spacer(1, 4)
+        sp_xs, sp_sm = Spacer(1, 2), Spacer(1, 3.5)
 
-    # --- Company strip ---
+    # 1. Company Header Strip
     card_type_text = "SHOP FLOOR CIRCULATION" if not with_rates else "ADMIN / OFFICE RECORD"
     company = Table(
         [[
             Paragraph("SSK FOOTCARE MANUFACTURING LLP", S["h_co"]),
-            Paragraph(f"Production Card ({card_type_text}) · {datetime.now().strftime('%d %b %Y')}", S["co_sub"]),
+            Paragraph(f"PRODUCTION JOB CARD ({card_type_text}) · {datetime.now().strftime('%d %b %Y')}", S["co_sub"]),
         ]],
         colWidths=[105 * mm, 75 * mm],
     )
@@ -114,21 +85,33 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         ("BOX", (0, 0), (-1, -1), 1, BLACK),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (0, 0), (-1, -1), HEAD),
-        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
     ]))
 
-    # --- Header Card ---
-    img_max_h = 22 if compact else 46
-    img_max_w = 22 if compact else 46
-    img_cell = load_image_for_pdf(style or {}, max_h_mm=img_max_h, max_w_mm=img_max_w)
-    if img_cell is None:
-        img_cell = Table([[Paragraph("No Image", ParagraphStyle("ni", fontName="Helvetica", fontSize=6 if compact else 8, alignment=1))]],
+    # 2. Header Card (Image + Details + Qty Box)
+    img_max_h = 20 if compact else 38
+    img_max_w = 20 if compact else 38
+    raw_img = load_image_for_pdf(style or {}, max_h_mm=img_max_h, max_w_mm=img_max_w)
+    if raw_img is not None:
+        img_cell = Table([[raw_img]], colWidths=[img_max_w * mm], rowHeights=[img_max_h * mm])
+        img_cell.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.8, LINE),
+            ("BACKGROUND", (0, 0), (-1, -1), WHITE),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+    else:
+        img_cell = Table([[Paragraph("No Image", ParagraphStyle("ni", fontName="Helvetica", fontSize=5.5 if compact else 7.5, alignment=1))]],
                          colWidths=[img_max_w * mm], rowHeights=[img_max_h * mm])
         img_cell.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 1, LINE),
+            ("BOX", (0, 0), (-1, -1), 0.8, LINE),
             ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
@@ -152,97 +135,111 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     except Exception:
         card_created_date = str(created_raw)[:10] or "—"
 
-    h_style_fs = (8.5 if compact else 13) if len(style_display) > 16 else (11 if compact else 18)
+    h_style_fs = (8 if compact else 12) if len(style_display) > 16 else (10 if compact else 15)
     h_style_lead = h_style_fs + 2
     h_style_p = Paragraph(f"<b>{style_display}</b>", ParagraphStyle("hst_dyn", fontName="Helvetica-Bold", fontSize=h_style_fs, leading=h_style_lead, textColor=BLACK))
 
     info_rows = [
-        [Paragraph("PO NUMBER", S["lab"]), Paragraph(job_group.get("po_number", "—"), S["valb"])],
-        [Paragraph("CLIENT", S["lab"]), Paragraph(job_group.get("client_name", "—"), S["val"])],
+        [Paragraph("PO NUMBER", S["lab"]), Paragraph(job_group.get("po_number", "—") or "—", S["valb"])],
+        [Paragraph("CLIENT", S["lab"]), Paragraph(job_group.get("client_name", "—") or "—", S["val"])],
         [Paragraph("STYLE", S["lab"]), h_style_p],
-        [Paragraph("ARTICLE", S["lab"]), Paragraph((style or {}).get("name", "") or job_group.get("description", "—"), S["val"])],
+        [Paragraph("ARTICLE", S["lab"]), Paragraph((style or {}).get("name", "") or job_group.get("description", "—") or "—", S["val"])],
         [Paragraph("CREATED", S["lab"]), Paragraph(card_created_date, S["val"])],
-        [Paragraph("DELIVERY", S["lab"]), Paragraph(job_group.get("delivery_date", "—"), S["valb"])],
+        [Paragraph("DELIVERY", S["lab"]), Paragraph(job_group.get("delivery_date", "—") or "—", S["valb"])],
     ]
-    info_col1 = 18 if compact else 20
-    info_col2 = 89 if compact else 90
+    info_col1 = 17 if compact else 20
+    info_col2 = 104 if compact else 74
     info_t = Table(info_rows, colWidths=[info_col1 * mm, info_col2 * mm])
     info_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0 if compact else 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 0 if compact else 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0 if compact else 1.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 0 if compact else 1.5),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
     ]))
 
+    sizes = job_group.get("sizes") or job_group.get("rows") or []
+    total_qty = job_group.get("total_qty")
+    if total_qty is None:
+        total_qty = job_group.get("quantity")
+    if total_qty is None:
+        total_qty = sum(s.get("quantity", 0) for s in sizes)
+
     color_qty = Table([
         [Paragraph("COLOR", S["lab"])],
-        [Paragraph(job_group.get("color", "—"), S["huge_color"])],
-        [Spacer(1, 0.5 if compact else 4)],
+        [Paragraph(job_group.get("color", "—") or "—", S["huge_color"])],
+        [Spacer(1, 0.5 if compact else 3)],
         [Paragraph("TOTAL PAIRS", S["lab"])],
-        [Paragraph(str(job_group.get("total_qty", 0)), S["huge_qty"])],
-    ], colWidths=[33 * mm if compact else 40 * mm])
+        [Paragraph(str(total_qty), S["huge_qty"])],
+    ], colWidths=[34 * mm if compact else 40 * mm])
     color_qty.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1, ACCENT),
         ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 2.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 2.5),
     ]))
 
     img_col_w = (img_max_w + 2) * mm
-    header_card = Table([[img_cell, info_t, color_qty]],
-                        colWidths=[img_col_w, (USABLE_MM - img_max_w - 2 - (33 if compact else 40)) * mm, (33 if compact else 40) * mm])
+    right_col_w = (34 if compact else 40) * mm
+    mid_col_w = (USABLE_MM - (img_max_w + 2) - (34 if compact else 40)) * mm
+    header_card = Table([[img_cell, info_t, color_qty]], colWidths=[img_col_w, mid_col_w, right_col_w])
     header_card.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1, BLACK),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 1 if compact else 3),
         ("RIGHTPADDING", (0, 0), (-1, -1), 1 if compact else 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 2.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 2.5),
     ]))
 
-    # --- Size Breakdown ---
-    sizes = job_group.get("sizes", [])
+    # 3. Size Breakdown Matrix
     n = max(len(sizes), 1)
-    lbl_w = 26 if compact else 36
-    tot_w = 15 if compact else 22
+    lbl_w = 24 if compact else 32
+    tot_w = 14 if compact else 20
     remaining = USABLE_MM - lbl_w - tot_w
-    size_col_w = max(5, remaining / n)
+    size_col_w = max(4.5, remaining / n)
 
-    size_data = [["SIZE"] + [str(s["size"]) for s in sizes] + ["TOTAL"]]
-    qty_row = [job_group.get("color", "")] + [str(s["quantity"]) for s in sizes] + [str(job_group.get("total_qty", 0))]
+    size_data = [["SIZE"] + [str(s.get("size", "")) for s in sizes] + ["TOTAL"]]
+    qty_row = ["PAIRS"] + [str(s.get("quantity", 0)) for s in sizes] + [str(total_qty)]
     size_data.append(qty_row)
 
     size_t = Table(size_data, colWidths=[lbl_w * mm] + [size_col_w * mm] * n + [tot_w * mm])
     size_t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1, BLACK),
-        ("GRID", (0, 0), (-1, -1), 0.5, LINE),
+        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
         ("BACKGROUND", (0, 0), (-1, 0), HEAD),
         ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
-        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5 if compact else 10),
-        ("FONT", (0, 1), (-1, -1), "Helvetica-Bold", 8.5 if compact else 12),
+        ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 6.5 if compact else 9),
+        ("FONT", (0, 1), (-1, -1), "Helvetica-Bold", 7.5 if compact else 10.5),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (-1, 1), (-1, 1), LIGHT),
         ("TEXTCOLOR", (-1, 1), (-1, 1), ACCENT),
-        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.8 if compact else 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.8 if compact else 3),
     ]))
 
-    # --- Process Tally ---
-    proc_rows = ["CUTTING", "UPPER", "BOTTOM", "STITCHING", "LASTING", "SOLE PASTING", "FINISH / QC"]
-    tally_header = ["PROCESS"] + [str(s["size"]) for s in sizes] + ["DONE", "REJ", "SIGN"]
+    # 4. Manufacturing Process Tally
+    proc_rows = [
+        "1. UPPER CUTTING",
+        "2. UPPER STITCHING",
+        "3. BOTTOM PREP / STAMP",
+        "4. TOE & HEEL LASTING",
+        "5. SOLE PASTING & PRESS",
+        "6. FINISHING & PACKING",
+    ]
+    tally_header = ["MANUFACTURING PROCESS"] + [str(s.get("size", "")) for s in sizes] + ["DONE", "REJ", "SIGN"]
     tally_data = [tally_header]
-    tally_data.append(["PLANNED"] + [str(s["quantity"]) for s in sizes] + [str(job_group.get("total_qty", 0)), "—", "—"])
+    tally_data.append(["PLANNED TARGET"] + [str(s.get("quantity", 0)) for s in sizes] + [str(total_qty), "—", "—"])
     for label in proc_rows:
         tally_data.append([label] + ["" for _ in sizes] + ["", "", ""])
 
-    p_lbl_w = 24 if compact else 30
-    p_done_w = 8 if compact else 12
-    p_rej_w = 7 if compact else 10
-    p_sign_w = 18 if compact else 28
+    p_lbl_w = 34 if compact else 44
+    p_done_w = 9 if compact else 13
+    p_rej_w = 8 if compact else 11
+    p_sign_w = 19 if compact else 26
     tally_size_w = max(4.5, (USABLE_MM - p_lbl_w - p_done_w - p_rej_w - p_sign_w) / n)
 
     tally_t = Table(
@@ -251,54 +248,24 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     )
     tally_t.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 1, BLACK),
-        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+        ("GRID", (0, 0), (-1, -1), 0.35, LINE),
         ("BACKGROUND", (0, 0), (-1, 0), HEAD),
         ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
         ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 5.5 if compact else 7.5),
-        ("FONT", (0, 1), (0, -1), "Helvetica-Bold", 5.5 if compact else 7.5),
-        ("FONT", (1, 1), (-1, -1), "Helvetica", 6.5 if compact else 8.5),
+        ("FONT", (0, 1), (0, -1), "Helvetica-Bold", 5.2 if compact else 7.2),
+        ("FONT", (1, 1), (-1, -1), "Helvetica", 6 if compact else 8),
         ("BACKGROUND", (0, 1), (-1, 1), LIGHT),
         ("TEXTCOLOR", (0, 1), (-1, 1), ACCENT),
-        ("FONT", (0, 1), (-1, 1), "Helvetica-Bold", 6.5 if compact else 8.5),
+        ("FONT", (0, 1), (-1, 1), "Helvetica-Bold", 6 if compact else 8),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (0, 1), (0, -1), "LEFT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 0.5 if compact else 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5 if compact else 6),
-        ("LINEBELOW", (0, 1), (-1, 1), 1, BLACK),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.4 if compact else 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.4 if compact else 3),
+        ("LINEBELOW", (0, 1), (-1, 1), 0.8, BLACK),
     ]))
 
-    # --- Components with Swatches ---
-    comp = job_group.get("components", {}) or {}
-    tracks = job_group.get("component_tracks", {}) or {}
-    specs = job_group.get("component_specs", {}) or {}
-    is_heel = specs.get("footwear_type") == "heel"
-
-    upper_done = (tracks.get("upper", {}).get("status") == "ready") if "upper" in tracks else comp.get("upper_done")
-    bottom_done = (tracks.get("bottom", {}).get("status") == "ready") if "bottom" in tracks else comp.get("bottom_done")
-    sole_done = (tracks.get("sole", {}).get("status") == "ready") if "sole" in tracks else comp.get("sole_done")
-
-    c1 = _build_comp_cell("UPPER", upper_done, ["Upper Top", "Mid Layer / Reinforce", "Lining"], compact=compact)
-    c2 = _build_comp_cell("BOTTOM / INSOLE", bottom_done, ["Bottom Layer", "Insole Board+Cushion", "Insole Cover"], compact=compact)
-    c3 = _build_comp_cell("SOLE", sole_done, ["Outsole"], compact=compact)
-
-    if is_heel:
-        heel_done = (tracks.get("heel_gola", {}).get("status") == "ready") if "heel_gola" in tracks else False
-        c4 = _build_comp_cell("HEEL / GOLA", heel_done, ["Heel / Platform", "Cover / Gola"], compact=compact)
-        comp_t = Table([[c1, c2, c3, c4]], colWidths=[45 * mm, 45 * mm, 45 * mm, 45 * mm])
-    else:
-        comp_t = Table([[c1, c2, c3]], colWidths=[60 * mm, 60 * mm, 60 * mm])
-    comp_t.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 1, BLACK),
-        ("LINEAFTER", (0, 0), (-2, -1), 1, LINE),
-        ("BACKGROUND", (0, 0), (-1, -1), WHITE),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 1 if compact else 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 1 if compact else 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 1 if compact else 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1 if compact else 7),
-    ]))
-
-    # --- Process Sub-tasks & Karigar Assignments ---
+    # 5. Process Sub-tasks & Karigar Assignments (NO COMPONENT SWATCHES)
     assigns = job_group.get("assignments", {}) or {}
     outside_list = job_group.get("outside_labour", []) or []
     if not outside_list and style and style.get("outside_labour"):
@@ -308,7 +275,7 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     is_heel = (job_group.get("footwear_type") == "heel") or (specs.get("footwear_type") == "heel") or (style and style.get("footwear_type") == "heel") or bool(assigns.get("heel_gola"))
     is_ready_sole = job_group.get("sole_ready_to_use") or (style and (style.get("sole_ready_to_use") or style.get("ready_to_use_sole")))
 
-    # Left Column: Upper Track & Sole Track (+ Heel if heel style)
+    # Left: Upper Track + Sole Track (+ Heel if heel)
     left_items = [
         ("upper", "Upper: Lead", "upper", None),
         ("upper.cutting", "Upper: Cutting", "cutting", "upper"),
@@ -326,7 +293,7 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         left_items.append(("heel_gola", "Heel/Gola: Lead", "heel_gola", None))
         left_items.append(("heel_gola.cutting", "Heel: Cover Cut / Prep", None, "heel_gola"))
 
-    # Right Column: Bottom / Insole Track + Assembly Pipeline + Outside Work
+    # Right: Bottom Track + Assembly Pipeline + Outside Work
     right_items = [
         ("bottom", "Bottom: Lead", "bottom", None),
         ("bottom.cutting", "Bottom: Cutting", None, "bottom"),
@@ -388,11 +355,11 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     for it in right_items:
         right_rows.append(format_row(it))
 
-    col_w = [25.5 * mm, 31 * mm, 15 * mm, 18 * mm] if with_rates else [28.5 * mm, 34 * mm, 27 * mm]
+    col_w = [26 * mm, 32 * mm, 14 * mm, 18 * mm] if with_rates else [29 * mm, 35 * mm, 26 * mm]
     t_left = Table(left_rows, colWidths=col_w)
     t_right = Table(right_rows, colWidths=col_w)
 
-    st = [
+    st_base = [
         ("BOX", (0, 0), (-1, -1), 0.8, BLACK),
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
         ("BACKGROUND", (0, 0), (-1, 0), HEAD),
@@ -405,12 +372,16 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         ("LEFTPADDING", (0, 0), (-1, -1), 1),
         ("RIGHTPADDING", (0, 0), (-1, -1), 1),
     ]
+    for r_idx in range(1, len(left_rows)):
+        if r_idx % 2 == 0:
+            st_base.append(("BACKGROUND", (0, r_idx), (-1, r_idx), ZEBRA))
     if with_rates:
-        st.append(("ALIGN", (2, 1), (2, -1), "RIGHT"))
-    t_left.setStyle(TableStyle(st))
-    t_right.setStyle(TableStyle(st))
+        st_base.append(("ALIGN", (2, 1), (2, -1), "RIGHT"))
 
-    kar_t = Table([[t_left, t_right]], colWidths=[89.5 * mm, 89.5 * mm])
+    t_left.setStyle(TableStyle(st_base))
+    t_right.setStyle(TableStyle(st_base))
+
+    kar_t = Table([[t_left, t_right]], colWidths=[90 * mm, 90 * mm])
     kar_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -419,15 +390,15 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]))
 
-    # --- Footer ---
+    # 6. Footer (Special Instructions & Quality Control)
     if compact:
         footer_t = Table([[
-            Paragraph("<b>NOTES:</b> ____________________________________________________________________", ParagraphStyle("n", fontName="Helvetica", fontSize=6, leading=7)),
-            Paragraph("<b>QC PASS:</b> [ ]   <b>SIGN:</b> ____________", ParagraphStyle("qc", fontName="Helvetica", fontSize=6, leading=7, alignment=1)),
+            Paragraph("<b>SPECIAL INSTRUCTIONS:</b> ____________________________________________________", ParagraphStyle("n", fontName="Helvetica", fontSize=5.5, leading=7)),
+            Paragraph("<b>QC PASS:</b> [ ]   <b>SIGN:</b> ____________", ParagraphStyle("qc", fontName="Helvetica", fontSize=5.5, leading=7, alignment=1)),
         ]], colWidths=[120 * mm, 60 * mm])
         footer_t.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 1, BLACK),
-            ("LINEAFTER", (0, 0), (0, 0), 1, BLACK),
+            ("BOX", (0, 0), (-1, -1), 0.8, BLACK),
+            ("LINEAFTER", (0, 0), (0, 0), 0.8, BLACK),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 2),
             ("RIGHTPADDING", (0, 0), (-1, -1), 2),
@@ -437,23 +408,25 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
     else:
         footer_t = Table([[
             Paragraph(
-                "<b>NOTES / INSTRUCTIONS:</b><br/><br/>"
-                "________________________________________________________________<br/><br/>"
+                "<b>SPECIAL INSTRUCTIONS / SHOP FLOOR NOTES:</b><br/><br/>"
                 "________________________________________________________________<br/><br/>"
                 "________________________________________________________________",
-                ParagraphStyle("n", fontName="Helvetica", fontSize=8, leading=12)),
+                ParagraphStyle("n", fontName="Helvetica", fontSize=7.5, leading=11)),
             Paragraph(
-                "<b>QC PASS:</b> [ ]<br/><br/><b>SIGN:</b><br/><br/>____________________<br/>Supervisor",
-                ParagraphStyle("qc", fontName="Helvetica", fontSize=8, leading=12, alignment=1)),
+                "<b>QUALITY CONTROL:</b><br/>"
+                "[ ] PASSED   [ ] REWORK<br/><br/>"
+                "<b>SUPERVISOR SIGN:</b><br/>"
+                "____________________",
+                ParagraphStyle("qc", fontName="Helvetica", fontSize=7.5, leading=11, alignment=1)),
         ]], colWidths=[120 * mm, 60 * mm])
         footer_t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 1, BLACK),
             ("LINEAFTER", (0, 0), (0, 0), 1, BLACK),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ]))
 
     return [
@@ -462,19 +435,15 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
         header_card,
         sp_xs,
         Paragraph("SIZE BREAKDOWN", S["h2"]),
-        Spacer(1, 0.5 if compact else 1),
+        Spacer(1, 0.4 if compact else 1),
         size_t,
         sp_sm,
-        Paragraph("PROCESS TALLY · Fill in qty processed per size at each stage", S["h2"]),
-        Spacer(1, 0.5 if compact else 1),
+        Paragraph("MANUFACTURING PROCESS TALLY", S["h2"]),
+        Spacer(1, 0.4 if compact else 1),
         tally_t,
         sp_sm,
-        Paragraph("COMPONENTS & SWATCHES", S["h2"]),
-        Spacer(1, 0.5 if compact else 1),
-        comp_t,
-        sp_sm,
         Paragraph("PROCESS SUB-TASKS & KARIGAR ASSIGNMENTS", S["h2"]),
-        Spacer(1, 0.5 if compact else 1),
+        Spacer(1, 0.4 if compact else 1),
         kar_t,
         sp_sm,
         footer_t,
@@ -486,7 +455,7 @@ def build_production_card(job_group: dict, style: dict | None, with_rates: bool 
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=12 * mm, rightMargin=12 * mm,
-        topMargin=10 * mm, bottomMargin=10 * mm,
+        topMargin=8 * mm, bottomMargin=8 * mm,
         title=f"Production Card {job_group.get('style_code','')}-{job_group.get('color','')}",
     )
     elements = _build_card_elements(job_group, style, with_rates=with_rates, compact=False)
@@ -499,7 +468,7 @@ def build_production_card_dual_a4(job_group: dict, style: dict | None) -> bytes:
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=12 * mm, rightMargin=12 * mm,
-        topMargin=5 * mm, bottomMargin=5 * mm,
+        topMargin=4 * mm, bottomMargin=4 * mm,
         title=f"Dual Production Card {job_group.get('style_code','')}-{job_group.get('color','')}",
     )
 
@@ -507,13 +476,13 @@ def build_production_card_dual_a4(job_group: dict, style: dict | None) -> bytes:
     top_elements = _build_card_elements(job_group, style, with_rates=False, compact=True)
 
     # Dashed Cut Line
-    cut_d = Drawing(180 * mm, 6 * mm)
-    cut_d.add(Line(0, 3 * mm, 180 * mm, 3 * mm, strokeWidth=1, strokeColor=BLACK, strokeDashArray=[4, 4]))
-    cut_d.add(String(90 * mm, 1 * mm, "✂  CUT HERE  (Top: Shop Floor Circulation  |  Bottom: Admin Retention)  ✂", fontName="Helvetica-Bold", fontSize=6.5, textAnchor="middle"))
+    cut_d = Drawing(180 * mm, 4 * mm)
+    cut_d.add(Line(0, 2 * mm, 180 * mm, 2 * mm, strokeWidth=1, strokeColor=BLACK, strokeDashArray=[4, 4]))
+    cut_d.add(String(90 * mm, 0.5 * mm, "✂  CUT HERE  (Top: Shop Floor Circulation  |  Bottom: Admin Retention)  ✂", fontName="Helvetica-Bold", fontSize=6, textAnchor="middle"))
 
     # Bottom half: Admin Retention (with_rates=True, compact=True)
     bottom_elements = _build_card_elements(job_group, style, with_rates=True, compact=True)
 
-    elements = top_elements + [Spacer(1, 1), cut_d, Spacer(1, 1)] + bottom_elements
+    elements = top_elements + [cut_d] + bottom_elements
     doc.build(elements)
     return buf.getvalue()
