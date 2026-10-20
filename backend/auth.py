@@ -116,10 +116,10 @@ def validate_jwt_secret() -> str:
             )
     else:
         if not secret:
-            secret = "supersecretjwtkey12345!"
+            secret = _get_local_random_jwt_secret()
             log.warning(
-                "[auth] JWT_SECRET is not set. Using insecure default 'supersecretjwtkey12345!' "
-                "for development/test mode. Do NOT use this in production."
+                "[auth] JWT_SECRET is not set. Generated dynamic cryptographically secure local secret "
+                "for development/test mode. Set explicit JWT_SECRET in production."
             )
         elif secret in _INSECURE_JWT_DEFAULTS or secret.lower() in _INSECURE_JWT_DEFAULTS:
             log.warning(
@@ -139,7 +139,7 @@ def get_jwt_secret() -> str:
     secret = os.environ.get("JWT_SECRET", "").strip()
     if not secret:
         if get_environment() != "production":
-            return "supersecretjwtkey12345!"
+            return _get_local_random_jwt_secret()
         raise RuntimeError("FATAL: JWT_SECRET environment variable is not set.")
     return secret
 

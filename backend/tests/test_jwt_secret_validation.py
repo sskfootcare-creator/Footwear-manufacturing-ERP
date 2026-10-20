@@ -55,13 +55,14 @@ def test_production_valid_secret_succeeds(monkeypatch):
 
 
 def test_non_production_missing_jwt_secret_falls_back(monkeypatch):
-    """Verify that in development/test, missing JWT_SECRET falls back to default and does not raise."""
+    """Verify that in development/test, missing JWT_SECRET generates a dynamic secure secret and does not raise."""
     monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.delenv("JWT_SECRET", raising=False)
 
     result = validate_jwt_secret()
-    assert result == "supersecretjwtkey12345!"
-    assert get_jwt_secret() == "supersecretjwtkey12345!"
+    assert len(result) >= 32
+    assert get_jwt_secret() == result
+    assert result != "supersecretjwtkey12345!"
 
 
 def test_non_production_insecure_default_allowed(monkeypatch):
