@@ -1205,7 +1205,10 @@ async def wms_dashboard(request: Request):
     """Aggregate stats for the warehouse dashboard."""
     await _get_user(request)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
-    locs = await db.warehouse_locations.find({}).to_list(1000)
+    locs = await db.warehouse_locations.find(
+        {},
+        projection={"capacity_pairs": 1, "occupied_pairs": 1, "available_pairs": 1, "status": 1, "rack": 1, "location_code": 1}
+    ).to_list(1000)
     total_cells      = len(locs)
     total_capacity   = sum(int(l.get("capacity_pairs", 0))  for l in locs)
     total_occupied   = sum(int(l.get("occupied_pairs", 0))  for l in locs)
@@ -1387,7 +1390,10 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
     now = now_iso()
     claim = await db.picklists.update_one(
         {"_id": ObjectId(pid), "status": {"$nin": ["cancelled", "completed"]}, f"items.{payload.item_index}.picked": {"$ne": True}},
-        {"$set": {f"items.{payload.item_index}.picked": True, f"items.{payload.item_index}.picked_at": now, f"items.{payload.item_index}.picked_by": u["email"], "updated_at": now}},
+        {
+            "$set": {f"items.{payload.item_index}.picked": True, f"items.{payload.item_index}.picked_at": now, f"items.{payload.item_index}.picked_by": u["email"], "updated_at": now},
+            "$inc": {f"items.{payload.item_index}.version": 1, "version": 1},
+        },
     )
     if not claim.modified_count:
         raise HTTPException(400, "Item already picked or picklist is closed")
@@ -1407,6 +1413,23 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
             online_order_id=doc["order_id"], notes=f"Picklist {doc['picklist_no']} item {payload.item_index}",
         )
         await _apply_movement(mv, u["email"], skip_location_sync=True, db=db)
+
+        try:
+            from services.audit_service import record_audit_event
+            await record_audit_event(
+                db=db,
+                action="pick_item_confirm",
+                category="wms",
+                actor=u.get("email", "unknown"),
+                details=f"Confirmed pick item {payload.item_index} for picklist {doc.get('picklist_no')}",
+                entity_type="picklist",
+                entity_id=str(pid),
+                before={"item_index": payload.item_index, "picked": False},
+                after={"item_index": payload.item_index, "picked": True, "location_code": item["location_code"], "qty": int(item["qty"])},
+                metadata={"order_id": doc.get("order_id"), "picklist_no": doc.get("picklist_no")},
+            )
+        except Exception as a_err:
+            log.warning(f"Failed to record pick item audit event: {a_err}")
     except Exception as e:
         log.error(f"Dispatched ledger failed for picklist item {payload.item_index}: {e}")
         # F-007: Rollback location deduction and picklist claim if ledger posting fails
@@ -1428,6 +1451,22 @@ async def pick_item(request: Request, pid: str, payload: PickItemIn):
                 {"_id": ObjectId(pid)},
                 {"$set": {f"items.{payload.item_index}.picked": False, f"items.{payload.item_index}.picked_at": None, f"items.{payload.item_index}.picked_by": None, "updated_at": now_iso()}}
             )
+            try:
+                from services.audit_service import record_audit_event
+                await record_audit_event(
+                    db=db,
+                    action="pick_item_rollback",
+                    category="wms",
+                    actor=u.get("email", "unknown"),
+                    details=f"Rolled back pick item {payload.item_index} due to: {e}",
+                    entity_type="picklist",
+                    entity_id=str(pid),
+                    before={"item_index": payload.item_index, "picked": True},
+                    after={"item_index": payload.item_index, "picked": False, "reason": str(e)},
+                    metadata={"order_id": doc.get("order_id"), "picklist_no": doc.get("picklist_no")},
+                )
+            except Exception:
+                pass
         except Exception as _rb_err:
             log.error("Compensating rollback failed for pick_item: %s", _rb_err)
         raise HTTPException(500, f"Failed to post dispatched inventory movement: {e}")

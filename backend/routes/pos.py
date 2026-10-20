@@ -2863,7 +2863,14 @@ async def overdue_jobs(request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = get_db()
-    jobs = await db.production_jobs.find({"stage": {"$ne": "dispatched"}}).to_list(5000)
+    jobs = await db.production_jobs.find(
+        {"stage": {"$ne": "dispatched"}},
+        projection={
+            "_id": 1, "id": 1, "job_card_no": 1, "po_number": 1, "style_code": 1,
+            "color": 1, "quantity": 1, "stage": 1, "stage_deadline": 1,
+            "stage_entered_at": 1, "updated_at": 1, "created_at": 1, "target_date": 1, "source_type": 1,
+        }
+    ).to_list(5000)
     out = []
     durations = await _get_stage_durations(db=db)
     for j in jobs:

@@ -85,7 +85,27 @@ jobs:
           python -m pytest backend/tests/ -v --ignore=backend/tests/fixtures
           TEST_EXIT_CODE=$?
           kill -9 $SERVER_PID 2>/dev/null || true
-          exit $TEST_EXIT_CODE
+
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            exit $TEST_EXIT_CODE
+          fi
+
+      - name: Validate Legacy Normalization Dry-Run (P2-002)
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: ssk_ci_db
+          PYTHONPATH: backend
+        run: |
+          python backend/scripts/normalize_legacy_records.py --dry-run
+
+      - name: Test Disaster Recovery Snapshot & Verification Drill (P1-016)
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: ssk_ci_db
+          PYTHONPATH: backend
+        run: |
+          python backend/db/backup_restore.py --backup --dir /tmp/ci_backup
+          python backend/db/backup_restore.py --verify /tmp/ci_backup
 
   supabase-validation:
     name: Supabase Migrations & Declarative Schema Validation (DB-003)

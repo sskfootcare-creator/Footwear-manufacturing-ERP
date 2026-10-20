@@ -1092,6 +1092,8 @@ async def import_online_orders(
 
     imported = 0
     unresolved = 0
+    skipped_duplicates = 0
+    duplicate_records = []
     errors = []
     fulfilled_from_stock = 0
     picklist_lines_by_order: Dict[str, List[dict]] = {}
@@ -1132,6 +1134,29 @@ async def import_online_orders(
                 raise ValueError()
         except ValueError:
             errors.append({"row": row_idx, "order_id": order_id, "style_sku": raw_sku, "reason": f"Invalid quantity '{qty_str}'"})
+            continue
+
+        # P1-001: Compute canonical composite deduplication key
+        norm_order_ref = str(order_id).strip().upper()
+        norm_sku_ref = str(raw_sku).strip().upper()
+        dedupe_payload = f"{channel}:{norm_order_ref}:{today}:{norm_sku_ref}:{color}:{size}"
+        row_dedupe_key = hashlib.sha256(dedupe_payload.encode("utf-8")).hexdigest()
+
+        # Check for duplicate order item in production_jobs or online_orders
+        existing_dup = await db.production_jobs.find_one({"import_dedupe_key": row_dedupe_key})
+        if not existing_dup and hasattr(db, "online_orders"):
+            existing_dup = await db.online_orders.find_one({"import_dedupe_key": row_dedupe_key})
+        if existing_dup:
+            skipped_duplicates += 1
+            duplicate_records.append({
+                "row": row_idx,
+                "order_id": order_id,
+                "style_sku": raw_sku,
+                "channel": channel,
+                "reason": "Duplicate order import: order item already exists in database",
+                "dedupe_key": row_dedupe_key,
+                "imported_at": now_iso(),
+            })
             continue
 
         result = await resolve_style(
@@ -1188,6 +1213,26 @@ async def import_online_orders(
                     "qty": quantity,
                 })
 
+        # Record idempotency trace in online_orders collection
+        if hasattr(db, "online_orders"):
+            try:
+                await db.online_orders.update_one(
+                    {"import_dedupe_key": row_dedupe_key},
+                    {"$setOnInsert": {
+                        "platform": channel,
+                        "channel": channel,
+                        "order_id": order_id,
+                        "order_date": today,
+                        "style_sku": raw_sku,
+                        "quantity": quantity,
+                        "import_dedupe_key": row_dedupe_key,
+                        "created_at": now_iso(),
+                    }},
+                    upsert=True,
+                )
+            except Exception:
+                pass
+
         if remaining_qty <= 0:
             imported += 1
             fulfilled_from_stock += covered_qty
@@ -1220,6 +1265,7 @@ async def import_online_orders(
             "stage_deadline": deadline,
             "split_from_job_id": None,
             "split_history": None,
+            "import_dedupe_key": row_dedupe_key,
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "history": [{"stage": "procurement", "at": now_iso(), "by": u["email"],
@@ -1232,6 +1278,22 @@ async def import_online_orders(
 
     if jobs_to_insert:
         await db.production_jobs.insert_many(jobs_to_insert)
+
+    if duplicate_records and hasattr(db, "online_order_exceptions"):
+        try:
+            await db.online_order_exceptions.insert_many([
+                {
+                    "order_id": d["order_id"],
+                    "raw_sku": d.get("style_sku", ""),
+                    "reason": d["reason"],
+                    "import_dedupe_key": d["dedupe_key"],
+                    "created_at": now_iso(),
+                    "status": "duplicate_rejected",
+                }
+                for d in duplicate_records
+            ])
+        except Exception:
+            pass
 
     picklists_created = []
     for oid_key, lines in picklist_lines_by_order.items():
@@ -1251,12 +1313,14 @@ async def import_online_orders(
     await _log_activity(
         "IMPORT", "online_orders",
         f"{channel.capitalize()} CSV import: {imported} orders, {fulfilled_from_stock} pairs from stock, "
-        f"{len(picklists_created)} picklists, {unresolved} unresolved, {len(errors)-unresolved} errors",
+        f"{len(picklists_created)} picklists, {skipped_duplicates} duplicates skipped, {unresolved} unresolved, {len(errors)-unresolved} errors",
         u["email"], db=db
     )
     return {
         "channel": channel,
         "imported": imported,
+        "skipped_duplicates": skipped_duplicates,
+        "duplicate_records": duplicate_records,
         "unresolved": unresolved,
         "fulfilled_from_stock": fulfilled_from_stock,
         "picklists_created": picklists_created,
@@ -5058,12 +5122,47 @@ async def import_settlement_report(
         raise HTTPException(400, "Nothing to commit — no rows matched.")
 
     import_batch_id = f"settle_{now_iso().replace(':', '-').replace('.', '-')}_{uuid.uuid4().hex[:6]}"
+    file_hash = hashlib.sha256(content).hexdigest()
+    skipped_duplicates = 0
+    inserted_count = 0
 
     for idx, canon in enumerate(canonical_rows):
         settle_id = f"settle:{platform_lc}:{canon.get('order_ref') or 'noref'}:{canon.get('leaf_sku') or 'nosku'}:{idx}"
+        _row_raw = f"{platform_lc}:{canon.get('payment_id') or ''}:{canon.get('order_ref') or ''}:{canon.get('leaf_sku') or ''}:{canon.get('settlement_date') or ''}:{canon.get('gross_amount') or 0.0}:{canon.get('net_payout') or 0.0}"
+        settlement_row_key = hashlib.sha256(_row_raw.encode("utf-8")).hexdigest()
+
+        existing_settle = None
+        find_fn = getattr(db.online_settlements, "find_one", None)
+        if find_fn:
+            try:
+                res = find_fn({"settlement_row_key": settlement_row_key})
+                if hasattr(res, "__await__"):
+                    existing_settle = await res
+                elif isinstance(res, dict):
+                    existing_settle = res
+            except Exception:
+                existing_settle = None
+        if existing_settle:
+            skipped_duplicates += 1
+            await db.online_settlement_exceptions.insert_one({
+                "settlement_row_key": settlement_row_key,
+                "platform": platform_lc,
+                "order_ref": canon.get("order_ref"),
+                "leaf_sku": canon.get("leaf_sku"),
+                "payment_id": canon.get("payment_id"),
+                "reason": "duplicate_settlement_record",
+                "import_batch_id": import_batch_id,
+                "created_at": now_iso(),
+            })
+            continue
+
         settle_doc = {
             "id": settle_id,
             "import_batch_id": import_batch_id,
+            "settlement_row_key": settlement_row_key,
+            "raw_import_hash": settlement_row_key,
+            "file_hash": file_hash,
+            "processed_status": "processed",
             "platform": platform_lc,
             "order_ref": canon.get("order_ref"),
             "leaf_sku": canon.get("leaf_sku"),
@@ -5091,6 +5190,7 @@ async def import_settlement_report(
             {"$set": settle_doc},
             upsert=True
         )
+        inserted_count += 1
 
         if canon.get("matched") and canon.get("matched_item_id"):
             try:
@@ -5128,4 +5228,7 @@ async def import_settlement_report(
         "platform": platform_lc,
         "stats": stats,
         "committed": True,
+        "inserted_count": inserted_count,
+        "skipped_duplicates": skipped_duplicates,
+        "total_rows": len(canonical_rows),
     }

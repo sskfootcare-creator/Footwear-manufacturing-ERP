@@ -77,14 +77,32 @@ async def log_activity_db(db, action: str, category: str, details: str, email: s
         pass
 
 
+def canonical_sku_key(value: Optional[str]) -> str:
+    """Canonical normalized SKU builder using standard case rules, separator filtering,
+    whitespace trimming, and validated marketplace-specific parsing (P1-003).
+
+    Standardizes:
+    - Whitespace trimming
+    - Case folding (lowercase)
+    - Collapses diverse separator sequences (_ , - , . , / , spaces) into uniform single dash '-'
+    - Filters non-alphanumeric separator characters
+    """
+    if not value:
+        return ""
+    val = str(value).strip().casefold()
+    val = re.sub(r"[\s_\-\/\.\\]+", "-", val)
+    val = re.sub(r"[^a-z0-9\-]", "", val)
+    return val.strip("-")
+
+
 def _norm_key(value: Optional[str]) -> str:
-    """Canonical key for marketplace/order identities: trimmed, case-folded."""
-    return (value or "").strip().casefold()
+    """Canonical key for marketplace/order identities: trimmed, case-folded and separator-normalized."""
+    return canonical_sku_key(value)
 
 
 def _norm_marketplace(value: Optional[str]) -> str:
     """Canonical marketplace/source name used by unique-key guards."""
-    return _norm_key(value)
+    return (value or "").strip().casefold()
 
 
 def normalize_image_url(raw: str) -> str:
@@ -517,6 +535,7 @@ async def resolve_style(
                     except Exception as err:
                         log.warning("Failed to record unmapped encountered: %s", err)
 
+            confidence = 1.0 if matched_exact else 0.85
             return {
                 "style_id":            str(style["_id"]),
                 "style_code":          style.get("code", ""),
@@ -531,6 +550,8 @@ async def resolve_style(
                 "match_via":           "sku_map",
                 "mapping_id":          str(mapping.get("_id") or mapping.get("id") or ""),
                 "mapped_from_sku":     matched_candidate,
+                "confidence_score":    confidence,
+                "confidence_reason":   "canonical_sku_map_exact" if matched_exact else "partial_color_size_translation",
             }
 
     # Fallback: direct style code lookup
@@ -569,7 +590,29 @@ async def resolve_style(
             "match_via":           "style_code",
             "mapping_id":          None,
             "mapped_from_sku":     matched_cand or style_lookup_candidates[0],
+            "confidence_score":    0.90,
+            "confidence_reason":   "direct_style_code_match",
         }
+
+    # Unresolved or ambiguous collision: queue for manual review (P1-003)
+    if db is not None and hasattr(db, "sku_map_review_queue") and ext_sku:
+        try:
+            await db.sku_map_review_queue.update_one(
+                {"source_name": src_name, "external_sku": ext_sku},
+                {"$setOnInsert": {
+                    "source_type": src_type,
+                    "source_name": src_name,
+                    "external_sku": ext_sku,
+                    "canonical_sku": canonical_sku_key(ext_sku),
+                    "confidence_score": 0.0,
+                    "confidence_reason": "unresolved_collision_or_missing",
+                    "status": "pending_review",
+                    "created_at": now_iso(),
+                }},
+                upsert=True,
+            )
+        except Exception:
+            pass
 
     return {
         "style_id":            None,
@@ -585,6 +628,8 @@ async def resolve_style(
         "match_via":           None,
         "mapping_id":          None,
         "mapped_from_sku":     None,
+        "confidence_score":    0.0,
+        "confidence_reason":   "unresolved",
     }
 
 

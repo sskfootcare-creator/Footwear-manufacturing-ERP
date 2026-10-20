@@ -14,6 +14,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import List, Optional, Literal, Dict, Any, Tuple
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Query
 from starlette.middleware.cors import CORSMiddleware
@@ -23,6 +24,10 @@ from pydantic_core import PydanticCustomError
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
+
+from common.id_utils import to_object_id, to_str_id, is_valid_object_id, query_entity_id, normalize_document_ids
+from services.upload_validator import validate_uploaded_file, sanitize_filename, enforce_durable_storage_policy, get_deployment_profile, ALLOWED_IMAGE_EXTENSIONS
+from services.audit_service import record_audit_event, compute_diff
 
 import jwt
 from auth import (
@@ -341,13 +346,85 @@ from routes.po_ean import (
     _seed_po_ean_format_configs,
 )
 
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ["DB_NAME"]]
+mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+db_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
+try:
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+except Exception as _init_err:
+    logger.warning(f"Initial MongoDB client initialization deferred: {_init_err}")
+    client = None
+    db = None
 
-app = FastAPI(title="SSK Footcare ERP")
 
-# Configure CORS dynamically to allow local development, production domains, Vercel deployments, and custom env vars
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern FastAPI unified startup/shutdown lifecycle handler (P1-010, P1-011)."""
+    default_secrets_manager.validate_all_secrets(get_environment())
+    validate_jwt_secret()
+
+    global get_current_user, client, db
+    if client is None or db is None:
+        try:
+            m_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+            d_name = os.environ.get("DB_NAME", "ssk_footwear_erp")
+            client = AsyncIOMotorClient(m_url)
+            db = client[d_name]
+        except Exception as init_err:
+            logger.error(f"Failed to initialize AsyncIOMotorClient in lifespan: {init_err}")
+
+    if db is not None:
+        get_current_user = await get_current_user_factory(db)
+        await _ensure_startup_indexes(db)
+        await seed_admin(db)
+
+        # Lightweight database connectivity check
+        try:
+            await db.command("ping")
+            logger.info("MongoDB connectivity ping successful.")
+        except Exception as ping_err:
+            logger.error(f"MongoDB ping failed on boot: {ping_err}")
+
+        # Run versioned schema migrations via distributed lock (DB-002, DB-004)
+        if os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "true").lower() in ("true", "1", "yes"):
+            try:
+                from db.migrations.runner import run_mongo_migrations
+                mig_res = await run_mongo_migrations(db)
+                logger.info(f"MongoDB schema migration check: {mig_res.get('status')}")
+            except Exception as mig_err:
+                logger.warning(f"Startup migration runner execution notice: {mig_err}")
+
+        # Load custom company profile if present
+        try:
+            profile = await db.settings.find_one({"_id": "company_profile"})
+            if profile:
+                from pdf_docs import update_company_profile
+                update_company_profile(profile)
+                logger.info("Loaded custom company profile from DB.")
+        except Exception as e:
+            logger.warning(f"Could not load company profile from DB: {e}")
+
+        from services.outbox_processor import start_outbox_processor
+        start_outbox_processor(db)
+
+    awake_task = asyncio.create_task(keep_awake_job())
+    logger.info("Lifespan startup sequence complete.")
+
+    yield
+
+    # Lifespan shutdown sequence
+    awake_task.cancel()
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    logger.info("Lifespan shutdown sequence complete.")
+
+
+app = FastAPI(title="SSK Footcare ERP", lifespan=lifespan)
+
+# Configure CORS dynamically with strict allow-list validation (P1-009)
 _frontend_url_env = os.getenv("FRONTEND_URL", "").strip()
 _cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
 _raw_origins = [
@@ -360,6 +437,19 @@ if _frontend_url_env:
     _raw_origins.extend([o.strip() for o in _frontend_url_env.split(",") if o.strip()])
 if _cors_origins_env:
     _raw_origins.extend([o.strip() for o in _cors_origins_env.split(",") if o.strip()])
+
+_clean_origins = []
+for orig in set(_raw_origins):
+    orig = orig.strip()
+    if not orig:
+        continue
+    if orig == "*":
+        logger.warning("[CORS] Wildcard '*' rejected for security reasons with credentials enabled.")
+        continue
+    if re.match(r"^https?://[a-zA-Z0-9.\-]+(:[0-9]+)?$", orig):
+        _clean_origins.append(orig)
+    else:
+        logger.warning(f"[CORS] Ignored invalid origin: '{orig}'")
 
 _default_cors_regex = r"^https:\/\/(?:[a-zA-Z0-9_-]+\.)*(?:ssk-footcare-manufacturing-erp|footwear-manufacturing(?:-[a-zA-Z0-9_-]+)?-ssk-footcare)\.vercel\.app$"
 _cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or _default_cors_regex
@@ -383,7 +473,7 @@ _ALLOWED_CORS_HEADERS = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(set(_raw_origins)),
+    allow_origins=_clean_origins,
     allow_origin_regex=_cors_regex,
     allow_credentials=True,
     allow_methods=_ALLOWED_CORS_METHODS,
@@ -447,22 +537,17 @@ async def upload_image(file: UploadFile = File(...), request: Request = None):
     if not u:
         raise HTTPException(401, "Authentication required to upload images")
 
-    ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
-    if ext not in ALLOWED_IMAGE_EXTENSIONS:
-        raise HTTPException(400, "Invalid image format")
+    # Centralized upload validation & MIME magic byte anti-spoofing (P1-019)
+    content, safe_name = await validate_uploaded_file(
+        file=file,
+        allowed_extensions={"jpg", "jpeg", "png", "webp"},
+        max_bytes=MAX_IMAGE_UPLOAD_BYTES,
+        category_label="image",
+    )
 
-    if file.content_type:
-        clean_ct = file.content_type.split(";")[0].strip().lower()
-        if clean_ct not in ALLOWED_IMAGE_MIME_TYPES and clean_ct not in ("application/octet-stream", "image/pjpeg", "image/x-png"):
-            raise HTTPException(400, f"Unsupported Content-Type '{file.content_type}'. Must be a valid image MIME type.")
-
-    # ── Read up to cap + 1 byte to enforce bounded memory allocation (CODE-004)
-    content = await file.read(MAX_IMAGE_UPLOAD_BYTES + 1)
-    if len(content) > MAX_IMAGE_UPLOAD_BYTES:
-        raise HTTPException(
-            413,
-            f"Image too large. Max allowed is {MAX_IMAGE_UPLOAD_BYTES // (1024 * 1024)} MB."
-        )
+    # Enforce durable storage policy for production (P1-008, P1-018)
+    active_storage = "imagekit" if is_imagekit_configured() else ("s3" if s3_client else "local")
+    enforce_durable_storage_policy(active_storage)
 
     # ── Verify it's really an image (spoofed extension → PIL will raise) & pixel-bomb protection (F-030, CODE-004)
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -1028,10 +1113,6 @@ async def keep_awake_job():
                 log.info(f"Self-ping status: {res.status_code}")
         except Exception as e:
             log.error(f"Error during self-ping: {e}")
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(keep_awake_job())
 
 # ---------- Helpers ----------
 def now_iso() -> str:
@@ -1626,7 +1707,7 @@ async def get_entity_revisions(entity_type: str, entity_id: str, request: Reques
 
 @app.post("/api/revisions/{entity_type}/{entity_id}/revert")
 async def revert_entity_revision(entity_type: str, entity_id: str, payload: Dict[str, Any], request: Request):
-    """Reverts an entity back to a chosen previous revision snapshot with full audit trail (U-008)."""
+    """Reverts an entity back to a chosen previous revision snapshot with full audit trail (P1-014, U-008)."""
     u = await _get_auth_user(request)
     require_roles("admin", "manager")(u)
 
@@ -1639,8 +1720,24 @@ async def revert_entity_revision(entity_type: str, entity_id: str, payload: Dict
         raise HTTPException(404, "Revision snapshot not found")
 
     snapshot_data = rev.get("snapshot")
-    if not snapshot_data:
+    if not snapshot_data or not isinstance(snapshot_data, dict):
         raise HTTPException(400, "Revision has no valid snapshot data")
+
+    # Financial record protection: require admin role and documented approval
+    financial_entities = {"invoice", "invoices", "po", "pos", "settlement", "settlements", "banking"}
+    if entity_type.lower() in financial_entities:
+        if u.get("role") != "admin":
+            raise HTTPException(
+                403,
+                f"Destructive reversion on financial record type '{entity_type}' requires admin privileges. "
+                "Manager role is insufficient."
+            )
+        approval_reason = payload.get("approval_reason") or payload.get("reason")
+        if not approval_reason:
+            raise HTTPException(
+                422,
+                f"Financial entity reversion requires an explicit 'approval_reason' documented in the payload."
+            )
 
     collection_map = {
         "invoice": "invoices",
@@ -1655,28 +1752,105 @@ async def revert_entity_revision(entity_type: str, entity_id: str, payload: Dict
     coll = db[coll_name]
     target_oid = ObjectId(entity_id) if ObjectId.is_valid(entity_id) else entity_id
 
-    # Create safety backup snapshot before revert
     current = await coll.find_one({"_id": target_oid})
-    now = datetime.now(timezone.utc).isoformat()
-    if current:
-        safe_curr = dict(current)
-        safe_curr.pop("_id", None)
-        await db.entity_revisions.insert_one({
-            "entity_type": entity_type,
-            "entity_id": str(entity_id),
-            "snapshot": safe_curr,
-            "reason": f"Pre-revert safety snapshot prior to restoring revision {revision_id}",
-            "created_by": u.get("email", "system"),
-            "created_at": now,
-        })
+    if not current:
+        raise HTTPException(404, f"Target entity {entity_id} not found in collection {coll_name}")
 
+    now = datetime.now(timezone.utc).isoformat()
     restore_copy = dict(snapshot_data)
     restore_copy.pop("_id", None)
     restore_copy["reverted_at"] = now
     restore_copy["reverted_by"] = u.get("email", "system")
 
+    diff = compute_diff(dict(current), restore_copy)
+
+    # Dry-run preview support (P1-014)
+    dry_run = bool(payload.get("dry_run", False))
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "entity_type": entity_type,
+            "entity_id": str(entity_id),
+            "target_revision_id": revision_id,
+            "validation_passed": True,
+            "diff": diff,
+            "current_summary": {k: current.get(k) for k in list(current.keys())[:10] if k != "_id"},
+            "restoring_summary": {k: restore_copy.get(k) for k in list(restore_copy.keys())[:10]},
+        }
+
+    # Create safety backup snapshot before revert
+    safe_curr = dict(current)
+    safe_curr.pop("_id", None)
+    await db.entity_revisions.insert_one({
+        "entity_type": entity_type,
+        "entity_id": str(entity_id),
+        "snapshot": safe_curr,
+        "reason": f"Pre-revert safety snapshot prior to restoring revision {revision_id}",
+        "created_by": u.get("email", "system"),
+        "created_at": now,
+    })
+
     await coll.update_one({"_id": target_oid}, {"$set": restore_copy})
-    return {"ok": True, "reverted_to_revision": revision_id, "entity_type": entity_type, "entity_id": entity_id}
+
+    # Deep immutable audit log (P1-017)
+    await record_audit_event(
+        db=db,
+        action="REVERT_REVISION",
+        category="revisions",
+        actor=u.get("email", "system"),
+        details=f"Reverted {entity_type} {entity_id} to revision {revision_id}",
+        entity_type=entity_type,
+        entity_id=str(entity_id),
+        before=safe_curr,
+        after=restore_copy,
+        diff=diff,
+        metadata={"revision_id": revision_id, "approval_reason": payload.get("approval_reason")},
+    )
+
+    return {"ok": True, "reverted_to_revision": revision_id, "entity_type": entity_type, "entity_id": str(entity_id), "diff": diff}
+
+
+@app.get("/api/admin/audit-logs", tags=["Admin & Audit"])
+async def list_audit_logs(
+    request: Request,
+    category: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    actor: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50,
+):
+    """Expose queryable, tamper-evident audit logs dashboard API (P1-017)."""
+    u = await _get_auth_user(request)
+    require_roles("admin", "manager")(u)
+    q: Dict[str, Any] = {}
+    if category:
+        q["category"] = category
+    if entity_type:
+        q["entity_type"] = entity_type
+    if actor:
+        q["actor"] = {"$regex": re.escape(actor), "$options": "i"}
+    if from_date or to_date:
+        ts_q: Dict[str, Any] = {}
+        if from_date:
+            ts_q["$gte"] = from_date
+        if to_date:
+            ts_q["$lte"] = to_date
+        q["timestamp"] = ts_q
+
+    total = await db.audit_logs.count_documents(q)
+    skip = (max(1, page) - 1) * limit
+    cursor = db.audit_logs.find(q).sort("created_at", -1).skip(skip).limit(min(100, limit))
+    items = await cursor.to_list(100)
+    return {
+        "items": [stringify(it) for it in items],
+        "total": total,
+        "page": page,
+        "limit": limit,
+    }
+
 
 
 # ── Warehouse Offline Mode & Sync-on-Reconnect (U-010) ────────────────────────
@@ -1814,43 +1988,91 @@ app.include_router(investors_router)
 
 
 
-# ── Observability & Health Endpoints (OPS-023, DB-004) ───────────────────────
+# ── Observability & Health Endpoints (P1-020, OPS-023, DB-004) ───────────────────────
 
 @app.get("/healthz", tags=["System"])
 async def healthz():
-    """Liveness probe: verifies process is alive and responding."""
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    """Liveness probe: verifies process is alive and returns runtime deployment profile."""
+    profile = get_deployment_profile()
+    return {
+        "status": "ok",
+        "deployment_profile": profile,
+        "environment": get_environment(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "1.0.0",
+    }
 
 
 @app.get("/readyz", tags=["System"])
 async def readyz():
-    """Readiness probe: verifies operational MongoDB connection and readiness to accept traffic."""
+    """Readiness probe: comprehensive dependency health matrix (P1-020)."""
     checks = {}
     is_ready = True
+    start_ts = asyncio.get_event_loop().time()
 
-    # MongoDB check
+    # 1. MongoDB check & latency
     try:
-        await db.command("ping")
-        checks["mongodb"] = "connected"
+        t0 = asyncio.get_event_loop().time()
+        if db is not None:
+            await db.command("ping")
+            latency_ms = round((asyncio.get_event_loop().time() - t0) * 1000, 2)
+            checks["mongodb"] = {"status": "connected", "latency_ms": latency_ms}
+        else:
+            checks["mongodb"] = {"status": "unhealthy", "error": "Database client uninitialized"}
+            is_ready = False
     except Exception as e:
-        checks["mongodb"] = f"unhealthy: {str(e)}"
+        checks["mongodb"] = {"status": "unhealthy", "error": str(e)}
         is_ready = False
 
-    # Supabase optional check
+    # 2. JWT Configuration check
+    try:
+        from auth import validate_jwt_secret
+        validate_jwt_secret()
+        checks["jwt_auth"] = {"status": "valid"}
+    except Exception as jwt_err:
+        checks["jwt_auth"] = {"status": "unhealthy", "error": str(jwt_err)}
+        is_ready = False
+
+    # 3. Object Storage check (ImageKit / S3)
+    profile = get_deployment_profile()
+    storage_status = "unconfigured"
+    if is_imagekit_configured():
+        storage_status = "imagekit_configured"
+    elif s3_client is not None:
+        storage_status = "s3_configured"
+    else:
+        storage_status = "local_storage" if profile == "dev" else "missing_required_durable_storage"
+        if profile in ("production", "staging"):
+            is_ready = False
+
+    checks["object_storage"] = {
+        "status": storage_status,
+        "profile": profile,
+    }
+
+    # 4. Supabase optional check
     try:
         from db.supabase_client import get_supabase_admin_client
         sb = get_supabase_admin_client()
-        checks["supabase"] = "configured" if sb else "unconfigured_optional"
+        checks["supabase"] = {"status": "configured" if sb else "unconfigured_optional"}
     except Exception as e:
-        checks["supabase"] = f"warning: {str(e)}"
+        checks["supabase"] = {"status": "warning", "error": str(e)}
 
-    if not is_ready:
-        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
-
-    # Include circuit breaker statuses for external dependencies (DEPLOY-003)
+    # 5. Circuit breaker statuses (DEPLOY-003)
     checks["circuit_breakers"] = get_circuit_breakers_status()
 
-    return {"status": "ready", "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
+    total_latency_ms = round((asyncio.get_event_loop().time() - start_ts) * 1000, 2)
+    resp_body = {
+        "status": "ready" if is_ready else "not_ready",
+        "checks": checks,
+        "total_latency_ms": total_latency_ms,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    if not is_ready:
+        raise HTTPException(status_code=503, detail=resp_body)
+
+    return resp_body
 
 
 @app.post("/api/test-helpers/create-test-invoice")
@@ -2145,55 +2367,49 @@ async def _ensure_startup_indexes(database):
     except Exception as e:
         log.warning(f"Could not create picklists indexes: {e}")
 
-
-@app.on_event("startup")
-async def on_startup():
-    """Decoupled, replica-safe startup initialization (DB-002, DB-004, DEPLOY-004)."""
-    default_secrets_manager.validate_all_secrets(get_environment())
-    validate_jwt_secret()
-    from services.outbox_processor import start_outbox_processor
-    global get_current_user, client, db
-    if db is None:
-        try:
-            client = AsyncIOMotorClient(mongo_url)
-            db = client[os.environ["DB_NAME"]]
-        except Exception as init_err:
-            log.error(f"Failed to initialize AsyncIOMotorClient: {init_err}")
-
-    get_current_user = await get_current_user_factory(db)
-    await _ensure_startup_indexes(db)
-    await seed_admin(db)
-
-    # Lightweight database connectivity check
+    # P1-001: Online orders composite uniqueness & idempotency indexes
     try:
-        await db.command("ping")
-        log.info("MongoDB connectivity ping successful.")
-    except Exception as ping_err:
-        log.error(f"MongoDB ping failed on boot: {ping_err}")
-
-    # Run versioned schema migrations via distributed lock (DB-002, DB-004)
-    # Releases immediately, idempotent forward-only, safe across multiple workers.
-    if os.environ.get("RUN_MIGRATIONS_ON_STARTUP", "true").lower() in ("true", "1", "yes"):
-        try:
-            from db.migrations.runner import run_mongo_migrations
-            mig_res = await run_mongo_migrations(db)
-            log.info(f"MongoDB schema migration check: {mig_res.get('status')}")
-        except Exception as mig_err:
-            log.warning(f"Startup migration runner execution notice: {mig_err}")
-
-    # Load custom company profile if present
-    try:
-        profile = await db.settings.find_one({"_id": "company_profile"})
-        if profile:
-            from pdf_docs import update_company_profile
-            update_company_profile(profile)
-            log.info("Loaded custom company profile from DB.")
+        await database.online_orders.create_index(
+            [("platform", 1), ("order_id", 1), ("order_date", 1)],
+            unique=True,
+            name="online_orders_unique_composite",
+            partialFilterExpression={"order_id": {"$type": "string"}, "platform": {"$type": "string"}},
+        )
+        await database.online_orders.create_index("channel", name="online_orders_channel")
+        await database.online_orders.create_index("created_at", name="online_orders_created")
     except Exception as e:
-        log.warning(f"Could not load company profile from DB: {e}")
+        log.warning(f"Could not create online_orders indexes: {e}")
 
-    log.info("Startup complete; admin verified; migrations evaluated.")
-    start_outbox_processor(db)
+    # P1-004: Online settlements deduplication indexes
+    try:
+        await database.online_settlements.create_index(
+            "settlement_row_key",
+            unique=True,
+            name="online_settlements_row_key_unique",
+            partialFilterExpression={"settlement_row_key": {"$type": "string"}},
+        )
+        await database.online_settlements.create_index(
+            [("platform", 1), ("order_ref", 1), ("settlement_date", 1)],
+            name="online_settlements_platform_order",
+        )
+    except Exception as e:
+        log.warning(f"Could not create online_settlements indexes: {e}")
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    client.close()
+    # P1-017: Immutable audit logs indexes
+    try:
+        await database.audit_logs.create_index([("category", 1), ("created_at", -1)], name="audit_logs_cat_created")
+        await database.audit_logs.create_index([("entity_type", 1), ("entity_id", 1)], name="audit_logs_entity")
+        await database.audit_logs.create_index([("actor", 1), ("created_at", -1)], name="audit_logs_actor")
+    except Exception as e:
+        log.warning(f"Could not create audit_logs indexes: {e}")
+
+    # P1-003: SKU mapping review queue indexes
+    try:
+        await database.sku_map_review_queue.create_index(
+            [("source_name", 1), ("external_sku", 1)],
+            name="sku_map_review_source_sku",
+        )
+        await database.sku_map_review_queue.create_index("status", name="sku_map_review_status")
+    except Exception as e:
+        log.warning(f"Could not create sku_map_review_queue indexes: {e}")
+

@@ -23,6 +23,7 @@ import re
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, Request
 from bson import ObjectId
 
@@ -56,14 +57,27 @@ def get_environment() -> str:
     return env
 
 
+import secrets
+
 _INSECURE_JWT_DEFAULTS = {
     "supersecretjwtkey12345!",
     "secret",
     "changeme",
     "jwtsecret",
     "password",
+    "admin123",
 }
 MIN_JWT_SECRET_LENGTH = 32
+
+_LOCAL_RANDOM_SECRET: Optional[str] = None
+
+
+def _get_local_random_jwt_secret() -> str:
+    """Generate and cache a cryptographically secure random secret for local development/test."""
+    global _LOCAL_RANDOM_SECRET
+    if not _LOCAL_RANDOM_SECRET:
+        _LOCAL_RANDOM_SECRET = secrets.token_urlsafe(32)
+    return _LOCAL_RANDOM_SECRET
 
 
 def validate_jwt_secret() -> str:
@@ -76,7 +90,7 @@ def validate_jwt_secret() -> str:
 
     In non-production (development | test):
     - Warns if JWT_SECRET is weak or using default, but does not block startup.
-    - Falls back to 'supersecretjwtkey12345!' if unset.
+    - Automatically generates a cryptographically random local secret if unset.
     """
     secret = os.environ.get("JWT_SECRET", "").strip()
     environment = get_environment()
@@ -102,10 +116,10 @@ def validate_jwt_secret() -> str:
             )
     else:
         if not secret:
-            secret = "supersecretjwtkey12345!"
+            secret = _get_local_random_jwt_secret()
             log.warning(
-                "[auth] JWT_SECRET is not set. Using insecure default 'supersecretjwtkey12345!' "
-                "for development/test mode. Do NOT use this in production."
+                "[auth] JWT_SECRET is not set. Generated dynamic cryptographically secure local secret "
+                "for development/test mode. Set explicit JWT_SECRET in production."
             )
         elif secret in _INSECURE_JWT_DEFAULTS or secret.lower() in _INSECURE_JWT_DEFAULTS:
             log.warning(
@@ -125,7 +139,7 @@ def get_jwt_secret() -> str:
     secret = os.environ.get("JWT_SECRET", "").strip()
     if not secret:
         if get_environment() != "production":
-            return "supersecretjwtkey12345!"
+            return _get_local_random_jwt_secret()
         raise RuntimeError("FATAL: JWT_SECRET environment variable is not set.")
     return secret
 
@@ -622,6 +636,16 @@ async def seed_admin(db) -> None:
     admin_email    = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower().strip()
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
 
+    _INSECURE_ADMIN_PASSWORDS = {
+        _EXAMPLE_SEED_PASSWORD.lower(),
+        _SSK_SEED_PASSWORD.lower(),
+        "admin123",
+        "admin@123",
+        "password",
+        "12345678",
+        "admin",
+    }
+
     if environment == "production":
         if not admin_password:
             # Hard abort — do NOT start with a weak or missing password in prod.
@@ -630,10 +654,11 @@ async def seed_admin(db) -> None:
                 "The server refuses to start in production without an explicit "
                 "admin password. Set ADMIN_PASSWORD in your deployment secrets."
             )
-        if admin_password == _EXAMPLE_SEED_PASSWORD:
-            log.warning(
-                "[seed_admin] ADMIN_PASSWORD is set to the insecure default 'admin123'. "
-                "Change it immediately."
+        if admin_password.lower().strip() in _INSECURE_ADMIN_PASSWORDS or len(admin_password) < 8:
+            raise RuntimeError(
+                f"FATAL: ADMIN_PASSWORD in production is set to an insecure default or weak password. "
+                "Production requires a strong, dedicated admin password with at least 8 characters. "
+                "Process boot aborted."
             )
 
     # Fall back to insecure default only in non-production environments
