@@ -357,9 +357,8 @@ except Exception as _init_err:
     db = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Modern FastAPI unified startup/shutdown lifecycle handler (P1-010, P1-011)."""
+async def on_startup():
+    """Decoupled, replica-safe startup initialization (DB-002, DB-004, DEPLOY-004)."""
     default_secrets_manager.validate_all_secrets(get_environment())
     validate_jwt_secret()
 
@@ -371,7 +370,7 @@ async def lifespan(app: FastAPI):
             client = AsyncIOMotorClient(m_url)
             db = client[d_name]
         except Exception as init_err:
-            logger.error(f"Failed to initialize AsyncIOMotorClient in lifespan: {init_err}")
+            logger.error(f"Failed to initialize AsyncIOMotorClient in startup: {init_err}")
 
     if db is not None:
         get_current_user = await get_current_user_factory(db)
@@ -407,18 +406,28 @@ async def lifespan(app: FastAPI):
         from services.outbox_processor import start_outbox_processor
         start_outbox_processor(db)
 
-    awake_task = asyncio.create_task(keep_awake_job())
-    logger.info("Lifespan startup sequence complete.")
 
-    yield
-
-    # Lifespan shutdown sequence
-    awake_task.cancel()
+async def on_shutdown():
+    """Graceful shutdown handler for database and connection pools."""
+    global client
     if client is not None:
         try:
             client.close()
         except Exception:
             pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern FastAPI unified startup/shutdown lifecycle handler (P1-010, P1-011)."""
+    await on_startup()
+    awake_task = asyncio.create_task(keep_awake_job())
+    logger.info("Lifespan startup sequence complete.")
+
+    yield
+
+    awake_task.cancel()
+    await on_shutdown()
     logger.info("Lifespan shutdown sequence complete.")
 
 
@@ -2016,12 +2025,13 @@ async def readyz():
         if db is not None:
             await db.command("ping")
             latency_ms = round((asyncio.get_event_loop().time() - t0) * 1000, 2)
-            checks["mongodb"] = {"status": "connected", "latency_ms": latency_ms}
+            checks["mongodb"] = "connected"
+            checks["mongodb_latency_ms"] = latency_ms
         else:
-            checks["mongodb"] = {"status": "unhealthy", "error": "Database client uninitialized"}
+            checks["mongodb"] = "unhealthy: Database client uninitialized"
             is_ready = False
     except Exception as e:
-        checks["mongodb"] = {"status": "unhealthy", "error": str(e)}
+        checks["mongodb"] = f"unhealthy: {str(e)}"
         is_ready = False
 
     # 2. JWT Configuration check

@@ -82,7 +82,7 @@ class MockWmsDB:
     @property
     def warehouse_locations(self):
         m = MagicMock()
-        m.find = lambda q=None, proj=None, sort=None: MockCursor(
+        m.find = lambda q=None, *a, **k: MockCursor(
             [d for d in self.warehouse_locations_store.values() if self._matches_loc(d, q)]
         )
         m.find_one = AsyncMock(side_effect=lambda q, sort=None: self._find_one_loc(q))
@@ -190,7 +190,7 @@ class MockWmsDB:
     @property
     def fg_location_inventory(self):
         m = MagicMock()
-        m.find = lambda q=None, proj=None, sort=None: MockCursor(
+        m.find = lambda q=None, *a, **k: MockCursor(
             [d for d in self.fg_location_inventory_store.values() if self._matches_fg_loc(d, q)]
         )
         m.find_one = AsyncMock(side_effect=lambda q, sort=None: self._find_one_fg_loc(q))
@@ -332,7 +332,7 @@ class MockWmsDB:
     @property
     def picklists(self):
         m = MagicMock()
-        m.find = lambda q=None, proj=None, sort=None: MockCursor(
+        m.find = lambda q=None, *a, **k: MockCursor(
             [d for d in self.picklists_store.values() if self._matches_pl(d, q)]
         )
         m.find_one = AsyncMock(side_effect=lambda q, sort=None: self._find_one_pl(q))
@@ -424,7 +424,7 @@ class MockWmsDB:
     @property
     def styles(self):
         m = MagicMock()
-        m.find = lambda q=None, proj=None: MockCursor(list(self.styles_store.values()))
+        m.find = lambda q=None, *a, **k: MockCursor(list(self.styles_store.values()))
         m.find_one = AsyncMock(side_effect=self._find_one_style)
         return m
 
@@ -481,7 +481,7 @@ class MockWmsDB:
     @property
     def production_jobs(self):
         m = MagicMock()
-        m.find = lambda q=None, proj=None: MockCursor([d for d in self.production_jobs_store.values() if self._matches_generic(d, q)])
+        m.find = lambda q=None, *a, **k: MockCursor([d for d in self.production_jobs_store.values() if self._matches_generic(d, q)])
         m.find_one = AsyncMock(side_effect=lambda q: self._find_one_generic(self.production_jobs_store, q))
         m.update_one = AsyncMock(side_effect=self._update_prod_job)
         return m

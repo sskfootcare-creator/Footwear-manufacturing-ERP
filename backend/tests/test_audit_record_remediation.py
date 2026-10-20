@@ -342,6 +342,7 @@ def test_u008_revision_history_and_revert(mock_env):
 
     rev_post = client.post(f"/api/revisions/invoice/{ent_id}/revert", json={
         "revision_id": rev_id,
+        "approval_reason": "Approved revision revert by admin",
     })
     assert rev_post.status_code == 200, rev_post.text
     assert rev_post.json()["ok"] is True

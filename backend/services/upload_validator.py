@@ -137,7 +137,7 @@ async def validate_uploaded_file(
         max_mb = max_bytes // (1024 * 1024)
         raise HTTPException(
             413,
-            f"File size exceeds maximum allowed limit of {max_mb} MB."
+            f"Image too large. File size exceeds maximum allowed limit of {max_mb} MB."
         )
 
     if len(content) == 0:
