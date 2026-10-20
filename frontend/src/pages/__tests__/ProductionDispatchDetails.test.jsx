@@ -132,7 +132,7 @@ describe("Production View Dispatch Details Modal", () => {
     expect(modalScope.getByText("MH-04-AB-9999")).toBeInTheDocument();
     expect(modalScope.getByText("Road Express")).toBeInTheDocument();
     expect(modalScope.getByText("Suresh Kumar (+91 9876543210)")).toBeInTheDocument();
-    expect(modalScope.getByText("60 pairs")).toBeInTheDocument();
+    expect(modalScope.getAllByText("60 pairs")[0]).toBeInTheDocument();
     expect(modalScope.getByText("3 cartons")).toBeInTheDocument();
 
     // 2. Verify Consolidated Generated Document download buttons
