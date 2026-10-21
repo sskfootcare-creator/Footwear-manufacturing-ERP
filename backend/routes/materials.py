@@ -57,6 +57,13 @@ def _get_db(request: Request = None):
 
 
 async def _get_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
+    app = getattr(request, "app", None)
+    getter = getattr(getattr(app, "state", None), "get_current_user", None)
+    if getter:
+        return await getter(request)
     import server
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
@@ -766,6 +773,97 @@ async def list_inventory(request: Request):
         })
     out.sort(key=lambda r: (r["category"] or "", r["name"] or ""))
     return out
+
+
+@materials_router.get("/inventory/export")
+async def export_inventory(
+    request: Request,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    low_stock: Optional[bool] = None,
+    format: str = "xlsx",
+):
+    """Export Raw Materials & Inventory valuation as Excel (.xlsx) or CSV (.csv)."""
+    items = await list_inventory(request)
+    from services.export_service import build_export_response
+
+    if category and category.lower() != "all":
+        c_low = category.lower()
+        items = [i for i in items if (i.get("category") or "").lower() == c_low]
+
+    if low_stock:
+        items = [i for i in items if float(i.get("balance") or 0) <= float(i.get("reorder_level") or 0)]
+
+    if search:
+        s_low = search.lower()
+        items = [
+            i for i in items
+            if s_low in f"{i.get('code', '')} {i.get('name', '')} {i.get('category', '')} {i.get('vendor_name', '')}".lower()
+        ]
+
+    tot_val = sum(float(i.get("value") or 0) for i in items)
+    low_stock_count = sum(1 for i in items if float(i.get("balance") or 0) <= float(i.get("reorder_level") or 0) and float(i.get("reorder_level") or 0) > 0)
+
+    summary_kpis = {
+        "Total Material Items": len(items),
+        "Total Stock Valuation (₹)": round(tot_val, 2),
+        "Low Stock Alerts": low_stock_count,
+    }
+
+    headers = [
+        "Material Code",
+        "Item Name",
+        "Category",
+        "Color / Shade",
+        "UOM",
+        "Stock Balance",
+        "Reorder Level",
+        "Stock Status",
+        "Weighted Avg Rate (₹)",
+        "Last Purchase Rate (₹)",
+        "Last Purchase Date",
+        "Stock Valuation (₹)",
+        "Preferred Vendor",
+    ]
+
+    export_rows = []
+    for i in items:
+        bal = float(i.get("balance") or 0)
+        reorder = float(i.get("reorder_level") or 0)
+        if bal <= 0:
+            st = "OUT OF STOCK"
+        elif reorder > 0 and bal <= reorder:
+            st = "REORDER NEEDED"
+        else:
+            st = "ADEQUATE"
+
+        export_rows.append([
+            i.get("code") or "—",
+            i.get("name") or "—",
+            (i.get("category") or "—").capitalize(),
+            i.get("color") or "—",
+            (i.get("unit") or "PCS").upper(),
+            round(bal, 2),
+            round(reorder, 2),
+            st,
+            round(float(i.get("weighted_avg_rate") or 0), 2),
+            round(float(i.get("last_purchase_rate") or 0), 2),
+            i.get("last_purchase_date") or "—",
+            round(float(i.get("value") or 0), 2),
+            i.get("vendor_name") or "—",
+        ])
+
+    return build_export_response(
+        filename_base="SSK_Inventory_Valuation",
+        title="SSK Footcare - Raw Materials & Inventory Valuation Register",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[9, 10, 12],
+        total_col_indices=[6, 12],
+        sheet_name="Stock Valuation",
+    )
 
 
 @materials_router.get("/inventory/movements")

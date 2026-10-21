@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { http } from "../lib/api";
+import { triggerApiExport } from "../lib/exportUtils";
 import { PageHeader, Card, BtnPrimary, BtnSecondary, Input, Select, Badge, ConfirmDialog } from "../components/ui-kit";
 import { Drawer } from "./Materials";
-import { Plus, Trash2, Pencil, Save, AlertOctagon } from "lucide-react";
+import { Plus, Trash2, Pencil, Save, AlertOctagon, FileDown } from "lucide-react";
 
 const STAGES = ["procurement", "cutting", "folding", "attachment", "stitching", "lasting", "sole_pasting", "finishing", "qc_pack"];
 const DEFECT_TYPES = ["Material", "Workmanship", "Machine", "Design", "Operator Error", "Other"];
@@ -60,10 +61,43 @@ export default function Defects() {
         subtitle="Quality / Defects"
         testId="defects-header"
         action={
-          <BtnPrimary onClick={startNew} data-testid="add-defect-btn" className="px-3 sm:px-5">
-            <Plus className="w-3.5 h-3.5 inline -mt-0.5" />
-            <span className="hidden sm:inline ml-1">Log Defect</span>
-          </BtnPrimary>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="defects-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/defects/export",
+                    { format: "xlsx" },
+                    "SSK_QC_Defects.xlsx"
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export QC Defects to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export (Excel)</span>
+              </button>
+              <button
+                data-testid="defects-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/defects/export",
+                    { format: "csv" },
+                    "SSK_QC_Defects.csv"
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export QC Defects to CSV"
+              >
+                CSV
+              </button>
+            </div>
+            <BtnPrimary onClick={startNew} data-testid="add-defect-btn" className="px-3 sm:px-5">
+              <Plus className="w-3.5 h-3.5 inline -mt-0.5" />
+              <span className="hidden sm:inline ml-1">Log Defect</span>
+            </BtnPrimary>
+          </div>
         }
       />
       <div className="p-4 sm:p-8">

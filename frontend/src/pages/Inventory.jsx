@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { http, inr } from "../lib/api";
 import { useCrossTabSync } from "../lib/sync";
+import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
   Card,
@@ -21,6 +22,7 @@ import {
   Save,
   History,
   AlertTriangle,
+  FileDown,
 } from "lucide-react";
 
 const TYPE_LABEL = {
@@ -150,7 +152,38 @@ export default function Inventory() {
         subtitle="Stock / Inventory"
         testId="inventory-header"
         action={
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center flex-wrap">
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="inventory-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/inventory/export",
+                    { format: "xlsx" },
+                    "SSK_Inventory_Valuation.xlsx"
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Inventory Valuation to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export (Excel)</span>
+              </button>
+              <button
+                data-testid="inventory-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/inventory/export",
+                    { format: "csv" },
+                    "SSK_Inventory_Valuation.csv"
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Inventory Valuation to CSV"
+              >
+                CSV
+              </button>
+            </div>
             <BtnPrimary
               onClick={() => openType("in")}
               data-testid="add-stock-in-btn"

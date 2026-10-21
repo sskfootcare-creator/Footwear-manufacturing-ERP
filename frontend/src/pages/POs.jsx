@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
+import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
   Card,
@@ -388,7 +389,38 @@ export default function POs() {
         subtitle="Orders / Purchase Orders"
         testId="pos-header"
         action={
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center flex-wrap">
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="pos-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/pos/export",
+                    { format: "xlsx" },
+                    "SSK_Customer_POs.xlsx"
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Customer POs to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export (Excel)</span>
+              </button>
+              <button
+                data-testid="pos-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/pos/export",
+                    { format: "csv" },
+                    "SSK_Customer_POs.csv"
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Customer POs to CSV"
+              >
+                CSV
+              </button>
+            </div>
             <label
               className="bg-[#C27842] text-white font-bold uppercase tracking-wider text-xs px-3 sm:px-5 py-2.5 border-2 border-[#C27842] shadow-ind hover:bg-[#A65D24] cursor-pointer flex items-center gap-2"
               data-testid="upload-po-label"

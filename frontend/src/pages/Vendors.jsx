@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { http } from "../lib/api";
+import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
   Card,
@@ -9,7 +10,7 @@ import {
   PaginationControls,
   usePagination,
 } from "../components/ui-kit";
-import { Truck, Plus, Pencil, PowerOff, X, AlertCircle, Printer } from "lucide-react";
+import { Truck, Plus, Pencil, PowerOff, X, AlertCircle, Printer, FileDown } from "lucide-react";
 import { useAuth } from "../lib/auth";
 
 const EMPTY_FORM = {
@@ -148,7 +149,7 @@ export default function Vendors() {
         subtitle="Accounts Payable / Vendor Master"
         testId="vendors-header"
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => window.print()}
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
@@ -157,6 +158,37 @@ export default function Vendors() {
               <Printer className="w-3.5 h-3.5" />
               <span className="hidden sm:inline ml-1">Print</span>
             </button>
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="vendors-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/vendors/export",
+                    { include_inactive: showInactive, format: "xlsx" },
+                    "SSK_Vendors_AP.xlsx"
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Vendors & AP register to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export (Excel)</span>
+              </button>
+              <button
+                data-testid="vendors-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/vendors/export",
+                    { include_inactive: showInactive, format: "csv" },
+                    "SSK_Vendors_AP.csv"
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Vendors & AP register to CSV"
+              >
+                CSV
+              </button>
+            </div>
             {canWrite && (
               <BtnPrimary onClick={openAdd} data-testid="add-vendor-btn" className="px-3 sm:px-5">
                 <Plus className="w-3.5 h-3.5 inline" />

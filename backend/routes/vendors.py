@@ -49,6 +49,13 @@ def oid(id_str: str) -> ObjectId:
 
 
 async def _get_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
+    app = getattr(request, "app", None)
+    getter = getattr(getattr(app, "state", None), "get_current_user", None)
+    if getter:
+        return await getter(request)
     import server
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
@@ -350,6 +357,95 @@ async def get_all_vendors_ageing(request: Request, include_inactive: bool = Fals
         "vendors": records
     }
 
+
+@vendors_router.get("/vendors/export")
+async def export_vendors(
+    request: Request,
+    include_inactive: bool = False,
+    format: str = "xlsx",
+):
+    """Export Vendors & Accounts Payable aging register as Excel (.xlsx) or CSV (.csv)."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    from services.export_service import build_export_response
+
+    q = {} if include_inactive else {"active": {"$ne": False}}
+    vendors = await db.vendors.find(q).sort("name", 1).to_list(1000)
+
+    records = []
+    tot_out = 0.0
+    tot_curr = 0.0
+    tot_1_30 = 0.0
+    tot_31_60 = 0.0
+    tot_60_plus = 0.0
+
+    for v in vendors:
+        vid = str(v["_id"])
+        ledger = await _build_vendor_ledger(db, vid)
+        ageing = _compute_ageing_buckets(ledger)
+        records.append({**ageing, "raw": v})
+        tot_out += ageing["outstanding_balance"]
+        tot_curr += ageing["current"]
+        tot_1_30 += ageing["days_1_30"]
+        tot_31_60 += ageing["days_31_60"]
+        tot_60_plus += ageing["days_60_plus"]
+
+    summary_kpis = {
+        "Total Vendors": len(records),
+        "Total AP Outstanding (₹)": round(tot_out, 2),
+        "Current (0-30d) (₹)": round(tot_curr, 2),
+        "1-30 Days Overdue (₹)": round(tot_1_30, 2),
+        "31-60 Days Overdue (₹)": round(tot_31_60, 2),
+        "60+ Days Overdue (₹)": round(tot_60_plus, 2),
+    }
+
+    headers = [
+        "Vendor Name",
+        "Contact Person",
+        "Phone / Mobile",
+        "Email",
+        "GSTIN",
+        "Credit Terms (Days)",
+        "Outstanding Balance (₹)",
+        "Not Due / Current (₹)",
+        "1-30 Days Due (₹)",
+        "31-60 Days Due (₹)",
+        "60+ Days Overdue (₹)",
+        "Status",
+    ]
+
+    export_rows = []
+    for r in records:
+        raw = r.get("raw") or {}
+        st = "ACTIVE" if raw.get("active", True) else "INACTIVE"
+        export_rows.append([
+            r.get("vendor_name") or "—",
+            raw.get("contact_person") or raw.get("contact") or "—",
+            raw.get("phone") or "—",
+            raw.get("email") or "—",
+            raw.get("gstin") or "—",
+            int(r.get("payment_terms_days") or 30),
+            round(float(r.get("outstanding_balance") or 0.0), 2),
+            round(float(r.get("current") or 0.0), 2),
+            round(float(r.get("days_1_30") or 0.0), 2),
+            round(float(r.get("days_31_60") or 0.0), 2),
+            round(float(r.get("days_60_plus") or 0.0), 2),
+            st,
+        ])
+
+    return build_export_response(
+        filename_base="SSK_Vendors_Payables",
+        title="SSK Footcare - Vendors & Accounts Payable Directory",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[7, 8, 9, 10, 11],
+        total_col_indices=[7, 8, 9, 10, 11],
+        sheet_name="Vendors AP",
+    )
+
+
 @vendors_router.get("/vendors/{vid}/ledger")
 async def get_vendor_ledger(vid: str, request: Request):
     await _get_user(request)
@@ -358,6 +454,81 @@ async def get_vendor_ledger(vid: str, request: Request):
     ledger.pop("_receives", None)
     ledger.pop("_payments", None)
     return ledger
+
+
+@vendors_router.get("/vendors/{vid}/ledger/export")
+async def export_vendor_ledger(
+    vid: str,
+    request: Request,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export single vendor ledger statement as Excel (.xlsx) or CSV (.csv)."""
+    await _get_user(request)
+    import re
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    from services.export_service import build_export_response
+
+    ledger = await _build_vendor_ledger(db, vid)
+    vname = ledger.get("vendor_name") or vid
+    txs = ledger.get("transactions") or []
+
+    if from_date:
+        txs = [t for t in txs if (t.get("date") or "")[:10] >= from_date]
+    if to_date:
+        txs = [t for t in txs if (t.get("date") or "")[:10] <= to_date]
+
+    tot_bills = sum(float(t.get("credit") or 0) for t in txs)
+    tot_payments = sum(float(t.get("debit") or 0) for t in txs)
+    net_bal = tot_bills - tot_payments
+
+    summary_kpis = {
+        "Vendor Name": vname,
+        "Total Billed / Received (₹)": round(tot_bills, 2),
+        "Total Paid (₹)": round(tot_payments, 2),
+        "Net Balance Payable (₹)": round(net_bal, 2),
+    }
+
+    headers = [
+        "Date",
+        "Type",
+        "Reference #",
+        "Description",
+        "Billed / Credit (₹)",
+        "Paid / Debit (₹)",
+        "Running Balance (₹)",
+        "PO Number",
+        "Payment Mode",
+    ]
+
+    export_rows = []
+    for t in txs:
+        t_type = "Receive/Bill" if t.get("type") == "receive" else "Payment"
+        export_rows.append([
+            t.get("date") or "—",
+            t_type,
+            t.get("reference") or "—",
+            t.get("description") or "—",
+            round(float(t.get("credit") or 0.0), 2),
+            round(float(t.get("debit") or 0.0), 2),
+            round(float(t.get("running_balance") or 0.0), 2),
+            t.get("po_number") or "—",
+            (t.get("mode") or "—").upper() if t.get("mode") else "—",
+        ])
+
+    safe_name = re.sub(r"[^\w\-]", "_", vname)
+    return build_export_response(
+        filename_base=f"SSK_Vendor_Ledger_{safe_name}",
+        title=f"SSK Footcare - Vendor AP Ledger: {vname}",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[5, 6, 7],
+        total_col_indices=[5, 6],
+        sheet_name="Vendor Ledger",
+    )
 
 
 @vendors_router.post("/vendors/{vid}/payments", status_code=201)
@@ -812,6 +983,133 @@ async def generate_planning_vendor_pos(payload: GeneratePlanningVendorPOsIn, req
         "vendor_po_numbers": vpo_numbers,
     }
 
+
+@vendors_router.get("/vendor-pos/export")
+async def export_vendor_pos(
+    request: Request,
+    vendor_id: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export Vendor Purchase Orders as Excel (.xlsx) or CSV (.csv)."""
+    await _get_user(request)
+    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    from services.export_service import build_export_response
+
+    q: dict = {}
+    if vendor_id:
+        q["vendor_id"] = vendor_id
+    if status:
+        q["status"] = status
+
+    docs = await db.vendor_purchase_orders.find(q).sort("created_at", -1).to_list(2000)
+    vendors = await db.vendors.find({}).to_list(2000)
+    vendor_map = {str(v["_id"]): v.get("name", "") for v in vendors}
+
+    po_ids = [str(d["_id"]) for d in docs]
+    po_numbers = [d.get("po_number") for d in docs if d.get("po_number")]
+
+    pay_docs = []
+    if po_ids or po_numbers:
+        pay_or = []
+        if po_ids:
+            pay_or.append({"vendor_po_id": {"$in": po_ids}})
+        if po_numbers:
+            pay_or.append({"vendor_po_number": {"$in": po_numbers}})
+        pay_docs = await db.payments.find({"$or": pay_or}).to_list(5000)
+
+    paid_by_po = defaultdict(float)
+    for p in pay_docs:
+        amt = float(p.get("amount", 0) or 0)
+        v_po_id = str(p.get("vendor_po_id") or "")
+        v_po_no = str(p.get("vendor_po_number") or "")
+        key = v_po_id or v_po_no
+        if key:
+            paid_by_po[key] += amt
+
+    records = []
+    for d in docs:
+        d = stringify(d)
+        d_id = str(d.get("id") or "")
+        d_po_no = str(d.get("po_number") or "")
+        vname = vendor_map.get(d.get("vendor_id", ""), "Unknown Vendor")
+        d["vendor_name"] = vname
+
+        total_amt = float(d.get("total_amount") or 0)
+        if total_amt <= 0 and d.get("line_items"):
+            total_amt = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in d.get("line_items", []))
+        total_amt = round(total_amt, 2)
+        paid_amt = round(paid_by_po.get(d_id, 0.0) or paid_by_po.get(d_po_no, 0.0), 2)
+        bal_due = max(0.0, round(total_amt - paid_amt, 2))
+
+        pay_st = "paid" if (total_amt > 0 and paid_amt >= total_amt) else ("partially_paid" if paid_amt > 0 else "unpaid")
+
+        d["computed_total"] = total_amt
+        d["computed_paid"] = paid_amt
+        d["computed_bal"] = bal_due
+        d["computed_pay_st"] = pay_st
+        records.append(d)
+
+    if search:
+        s_low = search.lower()
+        records = [
+            r for r in records
+            if s_low in f"{r.get('po_number', '')} {r.get('vendor_name', '')} {r.get('notes', '')}".lower()
+        ]
+
+    tot_order_val = sum(r["computed_total"] for r in records)
+    tot_paid_val = sum(r["computed_paid"] for r in records)
+    tot_bal_val = sum(r["computed_bal"] for r in records)
+
+    summary_kpis = {
+        "Total Vendor POs": len(records),
+        "Total Order Value (₹)": round(tot_order_val, 2),
+        "Total Paid (₹)": round(tot_paid_val, 2),
+        "Total Balance Due (₹)": round(tot_bal_val, 2),
+    }
+
+    headers = [
+        "PO Number",
+        "PO Date",
+        "Expected Date",
+        "Vendor Name",
+        "Line Items Count",
+        "Total Amount (₹)",
+        "Paid Amount (₹)",
+        "Balance Due (₹)",
+        "Fulfillment Status",
+        "Payment Status",
+        "Remarks",
+    ]
+
+    export_rows = []
+    for r in records:
+        export_rows.append([
+            r.get("po_number") or "—",
+            str(r.get("created_at") or "")[:10] or "—",
+            str(r.get("expected_delivery_date") or "—")[:10],
+            r.get("vendor_name") or "—",
+            len(r.get("line_items") or []),
+            round(r["computed_total"], 2),
+            round(r["computed_paid"], 2),
+            round(r["computed_bal"], 2),
+            (r.get("status") or "pending").upper(),
+            r["computed_pay_st"].upper(),
+            r.get("notes") or "",
+        ])
+
+    return build_export_response(
+        filename_base="SSK_Vendor_Purchase_Orders",
+        title="SSK Footcare - Vendor Purchase Orders Register",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[6, 7, 8],
+        total_col_indices=[5, 6, 7, 8],
+        sheet_name="Vendor POs",
+    )
 
 
 @vendors_router.get("/vendor-pos/{id}")

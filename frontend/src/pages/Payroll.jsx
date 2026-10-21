@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { http, API, inr } from "../lib/api";
+import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
   Card,
@@ -219,7 +220,7 @@ export default function Payroll() {
         subtitle="Reports / Payroll"
         testId="payroll-header"
         action={
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center flex-wrap">
             <BtnPrimary
               onClick={openAdvancesDrawer}
               data-testid="open-advances-btn"
@@ -228,6 +229,37 @@ export default function Payroll() {
               <IndianRupee className="w-3.5 h-3.5 inline -mt-0.5" />
               <span className="inline ml-1">Transactions</span>
             </BtnPrimary>
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="payroll-excel-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/reports/payroll/export",
+                    { from_date: fromDate, to_date: toDate, format: "xlsx" },
+                    `SSK_Payroll_${fromDate}_to_${toDate}.xlsx`
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Payroll to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600 inline -mt-0.5" />
+                <span>Excel</span>
+              </button>
+              <button
+                data-testid="payroll-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/reports/payroll/export",
+                    { from_date: fromDate, to_date: toDate, format: "csv" },
+                    `SSK_Payroll_${fromDate}_to_${toDate}.csv`
+                  )
+                }
+                className="px-2.5 py-2 text-xs sm:text-sm font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Payroll to CSV"
+              >
+                CSV
+              </button>
+            </div>
             <BtnPrimary
               onClick={dlPayrollPdf}
               data-testid="payroll-pdf-btn"

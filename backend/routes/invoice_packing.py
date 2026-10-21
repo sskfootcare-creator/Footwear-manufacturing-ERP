@@ -2082,6 +2082,141 @@ async def overdue_invoices(request: Request):
     return [r for r in rows if r["status"] == "overdue"]
 
 
+@invoice_packing_router.get("/invoices/export")
+async def export_invoices(
+    request: Request,
+    status: Optional[str] = None,
+    client: Optional[str] = None,
+    search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export invoices (all, overdue, or filtered) as audit-grade Excel (.xlsx) or CSV (.csv)."""
+    await _get_user(request)
+    db = _get_db(request)
+    from services.export_service import build_export_response
+
+    q: dict = {"legacy": {"$ne": True}}
+    if client:
+        q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
+
+    docs = await db.invoices.find(q, {"file_b64": 0}).sort("invoice_date", -1).to_list(5000)
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+    rows_data = [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    # Filter by status if specified
+    if status and status.lower() != "all":
+        target_status = status.lower()
+        if target_status == "overdue":
+            rows_data = [r for r in rows_data if r.get("status") == "overdue"]
+        elif target_status == "grn_recorded":
+            rows_data = [r for r in rows_data if r.get("grn_recorded") or r.get("grn_date")]
+        elif target_status == "awaiting_grn":
+            rows_data = [r for r in rows_data if not r.get("grn_recorded") and not r.get("grn_date")]
+        else:
+            rows_data = [r for r in rows_data if r.get("status") == target_status]
+
+    # Filter by search string if specified
+    if search:
+        s_low = search.lower()
+        rows_data = [
+            r for r in rows_data
+            if s_low in f"{r.get('invoice_no', '')} {r.get('client_name', '')} {r.get('po_number', '')} {r.get('grn_no', '')}".lower()
+        ]
+
+    # Date filters
+    if from_date:
+        rows_data = [r for r in rows_data if str(r.get("due_date") or r.get("invoice_date") or "")[:10] >= from_date]
+    if to_date:
+        rows_data = [r for r in rows_data if str(r.get("due_date") or r.get("invoice_date") or "")[:10] <= to_date]
+
+    is_overdue_export = (status or "").lower() == "overdue"
+    title = "SSK Footcare - Overdue Invoices Report" if is_overdue_export else "SSK Footcare - Invoices & Receivables Register"
+    filename_base = "SSK_Overdue_Invoices" if is_overdue_export else "SSK_Invoices_Export"
+
+    total_invoiced = sum(float(r.get("net_amount") or 0) for r in rows_data)
+    total_received = sum(float(r.get("received_amount") or 0) for r in rows_data)
+    total_outstanding = sum(float(r.get("outstanding") or 0) for r in rows_data)
+    total_pairs = sum(int(r.get("total_quantity") or 0) for r in rows_data)
+
+    summary_kpis = {
+        "Total Invoices": len(rows_data),
+        "Total Pairs": total_pairs,
+        "Total Invoiced (₹)": round(total_invoiced, 2),
+        "Total Received (₹)": round(total_received, 2),
+        "Total Outstanding (₹)": round(total_outstanding, 2),
+    }
+
+    headers = [
+        "Invoice #",
+        "Invoice Date",
+        "Due Date",
+        "Overdue Days / Terms",
+        "Status",
+        "Client Name",
+        "Client GSTIN",
+        "PO Number",
+        "Total Pairs",
+        "Gross Total (₹)",
+        "GRN Adj (₹)",
+        "Net Amount (₹)",
+        "Received Amount (₹)",
+        "Outstanding Balance (₹)",
+        "GRN #",
+        "GRN Date",
+        "Transporter",
+        "Vehicle #",
+        "Payment Terms",
+    ]
+
+    export_rows = []
+    for r in rows_data:
+        days_to_due = r.get("days_to_due")
+        if r.get("status") == "overdue":
+            overdue_label = f"{abs(days_to_due)} days overdue" if days_to_due is not None else "Overdue"
+        elif days_to_due is not None:
+            overdue_label = f"Due in {days_to_due} days" if days_to_due > 0 else "Due today"
+        else:
+            overdue_label = f"{r.get('payment_terms_days', 45)} days credit"
+
+        export_rows.append([
+            r.get("invoice_no") or "—",
+            r.get("invoice_date") or r.get("supply_date") or "—",
+            r.get("due_date") or "—",
+            overdue_label,
+            (r.get("status") or "pending").upper(),
+            r.get("client_name") or "—",
+            r.get("client_gstin") or "—",
+            r.get("po_number") or (", ".join(r.get("po_numbers", [])) if r.get("po_numbers") else "—"),
+            int(r.get("total_quantity") or 0),
+            float(r.get("grand_total") or 0.0),
+            float(r.get("grn_adjustment") or 0.0),
+            float(r.get("net_amount") or 0.0),
+            float(r.get("received_amount") or 0.0),
+            float(r.get("outstanding") or 0.0),
+            r.get("grn_no") or "—",
+            r.get("grn_date") or "—",
+            r.get("transporter") or "—",
+            r.get("vehicle_no") or "—",
+            r.get("payment_terms") or f"{r.get('payment_terms_days', 45)} days",
+        ])
+
+    return build_export_response(
+        filename_base=filename_base,
+        title=title,
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[10, 11, 12, 13, 14],
+        total_col_indices=[9, 10, 11, 12, 13, 14],
+        sheet_name="Overdue Invoices" if is_overdue_export else "Invoices Register",
+    )
+
+
 @invoice_packing_router.get("/invoices/{iid}")
 async def get_invoice(iid: str, request: Request):
     await _get_user(request)

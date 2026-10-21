@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { http, inr, API } from "../lib/api";
+import { triggerApiExport } from "../lib/exportUtils";
 import ImageViewModal from "../components/ImageViewModal";
 import {
 
@@ -168,6 +169,45 @@ export default function Invoices() {
               <Printer className="w-3.5 h-3.5" />
               <span>Print</span>
             </button>
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="invoices-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/invoices/export",
+                    {
+                      status: filter !== "all" ? filter : undefined,
+                      search: search || undefined,
+                      format: "xlsx",
+                    },
+                    `SSK_Invoices_${filter || "all"}.xlsx`
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export current invoice register to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export {filter === "overdue" ? "Overdue" : "Invoices"} (Excel)</span>
+              </button>
+              <button
+                data-testid="invoices-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/invoices/export",
+                    {
+                      status: filter !== "all" ? filter : undefined,
+                      search: search || undefined,
+                      format: "csv",
+                    },
+                    `SSK_Invoices_${filter || "all"}.csv`
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export current invoice register to CSV"
+              >
+                CSV
+              </button>
+            </div>
             <BtnPrimary
               onClick={() => setShowDirectModal(true)}
               data-testid="btn-create-direct-invoice"
@@ -182,11 +222,11 @@ export default function Invoices() {
       <div className="p-2 sm:p-4 lg:p-8 space-y-5">
         {overdue.length > 0 && (
           <Card
-            className="bg-red-50 border-2 border-red-300 px-4 py-3 flex items-center justify-between"
+            className="bg-red-50 border-2 border-red-300 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
             data-testid="overdue-banner"
           >
             <div className="flex items-center gap-3">
-              <AlertCircle className="w-5 h-5 text-red-600" />
+              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
               <div>
                 <div className="font-bold text-red-700 text-sm">
                   {overdue.length} invoice{overdue.length > 1 ? "s" : ""}{" "}
@@ -198,12 +238,43 @@ export default function Invoices() {
                 </div>
               </div>
             </div>
-            <button
-              onClick={() => setFilter("overdue")}
-              className="text-xs uppercase tracking-wider font-bold text-red-700 hover:underline"
-            >
-              View overdue →
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                data-testid="export-overdue-banner-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/invoices/export",
+                    { status: "overdue", format: "xlsx" },
+                    "SSK_Overdue_Invoices.xlsx"
+                  )
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded bg-red-600 text-white hover:bg-red-700 shadow-sm transition-colors"
+                title="Export Overdue Invoices to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Export Overdue (Excel)</span>
+              </button>
+              <button
+                data-testid="export-overdue-csv-banner-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/invoices/export",
+                    { status: "overdue", format: "csv" },
+                    "SSK_Overdue_Invoices.csv"
+                  )
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider rounded bg-white text-red-700 border border-red-300 hover:bg-red-50 transition-colors"
+                title="Export Overdue Invoices to CSV"
+              >
+                CSV
+              </button>
+              <button
+                onClick={() => setFilter("overdue")}
+                className="text-xs uppercase tracking-wider font-bold text-red-700 hover:underline ml-2"
+              >
+                View overdue →
+              </button>
+            </div>
           </Card>
         )}
 

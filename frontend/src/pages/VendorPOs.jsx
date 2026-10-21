@@ -2,6 +2,7 @@ import { useEffect, useState, Fragment } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
 import { broadcastSync } from "../lib/sync";
+import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
   Card,
@@ -11,6 +12,7 @@ import {
 } from "../components/ui-kit";
 import {
   FileText,
+  FileDown,
   Plus,
   Pencil,
   Trash2,
@@ -678,12 +680,45 @@ export default function VendorPOs() {
         subtitle="Accounts Payable / Material Procurements, PO Payments & Vendor Ledgers"
         testId="vendor-pos-header"
         action={
-          canWrite && (
-            <BtnPrimary onClick={openAdd} data-testid="add-vendor-po-btn" className="px-3 sm:px-5">
-              <FilePlus className="w-3.5 h-3.5 inline" />
-              <span className="hidden sm:inline ml-1">Raise PO</span>
-            </BtnPrimary>
-          )
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="vendor-pos-export-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/vendor-pos/export",
+                    { format: "xlsx" },
+                    "SSK_Vendor_Purchase_Orders.xlsx"
+                  )
+                }
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Vendor POs to Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export (Excel)</span>
+              </button>
+              <button
+                data-testid="vendor-pos-export-csv-btn"
+                onClick={() =>
+                  triggerApiExport(
+                    "/vendor-pos/export",
+                    { format: "csv" },
+                    "SSK_Vendor_Purchase_Orders.csv"
+                  )
+                }
+                className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider bg-white border-2 border-slate-300 hover:border-slate-900 transition-colors shadow-sm text-slate-700"
+                title="Export Vendor POs to CSV"
+              >
+                CSV
+              </button>
+            </div>
+            {canWrite && (
+              <BtnPrimary onClick={openAdd} data-testid="add-vendor-po-btn" className="px-3 sm:px-5">
+                <FilePlus className="w-3.5 h-3.5 inline" />
+                <span className="hidden sm:inline ml-1">Raise PO</span>
+              </BtnPrimary>
+            )}
+          </div>
         }
       />
 

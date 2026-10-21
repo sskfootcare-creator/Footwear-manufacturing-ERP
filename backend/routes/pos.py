@@ -1579,6 +1579,104 @@ async def list_pos(request: Request, status: Optional[str] = Query(None)):
     return [stringify(d) for d in docs]
 
 
+@pos_router.get("/pos/export")
+async def export_pos(
+    request: Request,
+    status: Optional[str] = Query(None),
+    search: Optional[str] = None,
+    client: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export Customer Purchase Orders as audit-grade Excel (.xlsx) or CSV (.csv)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
+    db = get_db()
+    from services.export_service import build_export_response
+
+    docs = await db.pos.find({}).sort("created_at", -1).to_list(2000)
+    await _attach_po_profitability(docs, db)
+    await _attach_po_status(docs, db)
+
+    if status == "completed":
+        docs = [d for d in docs if d.get("is_completed")]
+    elif status == "active":
+        docs = [d for d in docs if not d.get("is_completed")]
+
+    if client:
+        c_low = client.lower()
+        docs = [d for d in docs if c_low in (d.get("client_name") or "").lower()]
+
+    if search:
+        s_low = search.lower()
+        docs = [
+            d for d in docs
+            if s_low in f"{d.get('po_number', '')} {d.get('client_name', '')} {d.get('notes', '')}".lower()
+        ]
+
+    total_pairs = sum(int(d.get("total_quantity") or 0) for d in docs)
+    total_revenue = sum(float(d.get("total_amount") or d.get("grand_total") or 0) for d in docs)
+    total_cost = sum(float((d.get("profitability") or {}).get("total_cost") or 0) for d in docs)
+    total_profit = sum(float((d.get("profitability") or {}).get("total_profit") or 0) for d in docs)
+
+    summary_kpis = {
+        "Total POs": len(docs),
+        "Total Pairs": total_pairs,
+        "Total PO Revenue (₹)": round(total_revenue, 2),
+        "Estimated Cost (₹)": round(total_cost, 2),
+        "Estimated Profit (₹)": round(total_profit, 2),
+    }
+
+    headers = [
+        "PO Number",
+        "PO Date",
+        "Delivery Date",
+        "Client Name",
+        "Total Pairs",
+        "Total Amount (₹)",
+        "Est Cost (₹)",
+        "Est Profit (₹)",
+        "Margin %",
+        "Completion Status",
+        "Remarks",
+    ]
+
+    export_rows = []
+    for d in docs:
+        prof = d.get("profitability") or {}
+        rev = float(d.get("total_amount") or d.get("grand_total") or prof.get("total_revenue") or 0.0)
+        cst = float(prof.get("total_cost") or 0.0)
+        prf = float(prof.get("total_profit") or (rev - cst if rev and cst else 0.0))
+        pct = float(prof.get("profit_pct") or ((prf / rev * 100) if rev > 0 else 0.0))
+
+        st = "COMPLETED" if d.get("is_completed") else (d.get("status") or "ACTIVE").upper()
+
+        export_rows.append([
+            d.get("po_number") or "—",
+            str(d.get("po_date") or d.get("order_date") or d.get("created_at") or "")[:10] or "—",
+            str(d.get("delivery_date") or "—")[:10],
+            d.get("client_name") or "—",
+            int(d.get("total_quantity") or 0),
+            round(rev, 2),
+            round(cst, 2),
+            round(prf, 2),
+            f"{pct:.1f}%",
+            st,
+            d.get("notes") or "",
+        ])
+
+    return build_export_response(
+        filename_base="SSK_Customer_POs",
+        title="SSK Footcare - Customer Purchase Orders",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[6, 7, 8],
+        total_col_indices=[5, 6, 7, 8],
+        sheet_name="Purchase Orders",
+    )
+
+
 @pos_router.get("/pos/{pid}")
 async def get_po(pid: str, request: Request):
     u = await _get_user(request)
@@ -2598,6 +2696,117 @@ async def list_clients(request: Request):
     return out
 
 
+@pos_router.get("/clients/export")
+async def export_clients(request: Request, search: Optional[str] = None, format: str = "xlsx"):
+    """Export all clients with AR summaries as Excel (.xlsx) or CSV (.csv)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = get_db()
+    from routes.invoice_packing import _aggregate_payments_for_invoices, _aggregate_grn_adjustments, _decorate_invoice
+    from services.export_service import build_export_response
+
+    docs = await db.invoices.find({}, {"file_b64": 0}).to_list(5000)
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+    decorated = [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    master_clients = await db.clients.find({}).to_list(1000)
+    master_map = {}
+    for m in master_clients:
+        name = (m.get("company_name") or m.get("name") or "").strip().lower()
+        if name:
+            master_map[name] = m
+
+    summary: dict[str, dict] = {}
+    for r in decorated:
+        client = r.get("client_name") or "—"
+        slot = summary.setdefault(client, {
+            "client_name": client, "invoice_count": 0,
+            "total_invoiced": 0.0, "total_received": 0.0,
+            "outstanding": 0.0, "overdue_count": 0, "overdue_amount": 0.0,
+        })
+        slot["invoice_count"] += 1
+        slot["total_invoiced"] += float(r.get("net_amount") or 0)
+        slot["total_received"] += float(r.get("received_amount") or 0)
+        slot["outstanding"] += float(r.get("outstanding") or 0)
+        if r.get("status") == "overdue":
+            slot["overdue_count"] += 1
+            slot["overdue_amount"] += float(r.get("outstanding") or 0)
+
+    for m in master_clients:
+        m_name = m.get("company_name") or m.get("name") or ""
+        if m_name and m_name not in summary:
+            summary[m_name] = {
+                "client_name": m_name, "invoice_count": 0,
+                "total_invoiced": 0.0, "total_received": 0.0,
+                "outstanding": 0.0, "overdue_count": 0, "overdue_amount": 0.0,
+            }
+
+    clients_list = list(summary.values())
+    if search:
+        s_low = search.lower()
+        clients_list = [c for c in clients_list if s_low in c["client_name"].lower()]
+
+    clients_list.sort(key=lambda s: -s["outstanding"])
+
+    tot_invoiced = sum(c["total_invoiced"] for c in clients_list)
+    tot_received = sum(c["total_received"] for c in clients_list)
+    tot_out = sum(c["outstanding"] for c in clients_list)
+    tot_overdue = sum(c["overdue_amount"] for c in clients_list)
+
+    summary_kpis = {
+        "Total Clients": len(clients_list),
+        "Total Invoiced (₹)": round(tot_invoiced, 2),
+        "Total Received (₹)": round(tot_received, 2),
+        "Total Outstanding (₹)": round(tot_out, 2),
+        "Total Overdue AR (₹)": round(tot_overdue, 2),
+    }
+
+    headers = [
+        "Client Name",
+        "Contact Person",
+        "Phone / Mobile",
+        "GSTIN",
+        "State",
+        "Invoices Count",
+        "Total Invoiced (₹)",
+        "Total Received (₹)",
+        "Outstanding Balance (₹)",
+        "Overdue Invoices Count",
+        "Overdue Balance (₹)",
+    ]
+
+    export_rows = []
+    for c in clients_list:
+        m_info = master_map.get(c["client_name"].strip().lower(), {})
+        export_rows.append([
+            c["client_name"],
+            m_info.get("contact_person") or "—",
+            m_info.get("phone") or "—",
+            m_info.get("gstin") or "—",
+            m_info.get("state") or "—",
+            int(c["invoice_count"]),
+            round(c["total_invoiced"], 2),
+            round(c["total_received"], 2),
+            round(c["outstanding"], 2),
+            int(c["overdue_count"]),
+            round(c["overdue_amount"], 2),
+        ])
+
+    return build_export_response(
+        filename_base="SSK_Clients_Receivables",
+        title="SSK Footcare - Clients & Accounts Receivable Directory",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[7, 8, 9, 11],
+        total_col_indices=[6, 7, 8, 9, 10, 11],
+        sheet_name="Clients AR",
+    )
+
+
 @pos_router.get("/clients/ageing")
 async def get_clients_ageing(request: Request):
     """Client aging summary across all clients."""
@@ -2703,6 +2912,80 @@ async def client_ledger(cid: str, request: Request):
     require_roles("admin", "manager", "sales")(u)
     db = get_db()
     return await _build_client_ledger(cid, db=db)
+
+
+@pos_router.get("/clients/{cid}/ledger/export")
+async def export_client_ledger(
+    cid: str,
+    request: Request,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export single client ledger as Excel (.xlsx) or CSV (.csv)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = get_db()
+    from services.export_service import build_export_response
+
+    ledger_data = await _build_client_ledger(cid, db=db)
+    client_name = ledger_data.get("client_name") or cid
+    entries = ledger_data.get("entries") or []
+
+    if from_date:
+        entries = [e for e in entries if (e.get("date") or "")[:10] >= from_date]
+    if to_date:
+        entries = [e for e in entries if (e.get("date") or "")[:10] <= to_date]
+
+    tot_debit = sum(float(e.get("debit") or 0) for e in entries)
+    tot_credit = sum(float(e.get("credit") or 0) for e in entries)
+    net_bal = tot_debit - tot_credit
+
+    summary_kpis = {
+        "Client Name": client_name,
+        "Total Debit / Invoiced (₹)": round(tot_debit, 2),
+        "Total Credit / Paid (₹)": round(tot_credit, 2),
+        "Net Closing Balance (₹)": round(net_bal, 2),
+    }
+
+    headers = [
+        "Date",
+        "Voucher Type",
+        "Voucher / Ref #",
+        "Particulars",
+        "Debit (₹)",
+        "Credit (₹)",
+        "Balance (₹)",
+        "Dr / Cr",
+        "Due Date",
+    ]
+
+    export_rows = []
+    for e in entries:
+        export_rows.append([
+            e.get("date") or "—",
+            e.get("vch_type") or "—",
+            e.get("vch_no") or e.get("ref_id") or "—",
+            e.get("particulars") or "—",
+            round(float(e.get("debit") or 0.0), 2),
+            round(float(e.get("credit") or 0.0), 2),
+            round(float(e.get("balance") or 0.0), 2),
+            e.get("balance_type") or ("Dr" if float(e.get("balance") or 0) >= 0 else "Cr"),
+            e.get("due_date") or "—",
+        ])
+
+    safe_name = re.sub(r"[^\w\-]", "_", client_name)
+    return build_export_response(
+        filename_base=f"SSK_Ledger_{safe_name}",
+        title=f"SSK Footcare - Client Ledger: {client_name}",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[5, 6, 7],
+        total_col_indices=[5, 6],
+        sheet_name="Client Ledger",
+    )
 
 
 # ── Production Reports ──────────────────────────────────────────────────────
@@ -4759,6 +5042,83 @@ async def report_payroll(request: Request, from_date: Optional[str] = None, to_d
     return await compute_payroll(from_date=from_date, to_date=to_date)
 
 
+@pos_router.get("/reports/payroll/export")
+async def export_payroll(
+    request: Request,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    department: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export Karigar payroll & piece-rate statement as Excel (.xlsx) or CSV (.csv)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    from services.export_service import build_export_response
+
+    payroll_data = await compute_payroll(from_date=from_date, to_date=to_date)
+    rows = payroll_data.get("rows") or []
+
+    if department and department.lower() != "all":
+        rows = [r for r in rows if (r.get("department") or "").lower() == department.lower()]
+
+    summary_kpis = {
+        "Total Karigars": len(rows),
+        "Total Piece Earning (₹)": payroll_data.get("grand_total", 0.0),
+        "Total Bonus (₹)": payroll_data.get("grand_bonus", 0.0),
+        "Total Advances Deducted (₹)": payroll_data.get("grand_payments", 0.0),
+        "Net Payable (₹)": payroll_data.get("grand_net_payable", 0.0),
+        "Disbursed Amount (₹)": payroll_data.get("grand_disbursed", 0.0),
+        "Remaining Balance Owed (₹)": payroll_data.get("grand_balance_owed", 0.0),
+    }
+
+    headers = [
+        "Karigar Name",
+        "Department",
+        "Payment Mode",
+        "Opening Bal (₹)",
+        "Pairs Made",
+        "Piece Earnings (₹)",
+        "Bonus (₹)",
+        "Advances Taken (₹)",
+        "Advance Deductions (₹)",
+        "Net Payable (₹)",
+        "Disbursed / Paid (₹)",
+        "Balance Owed (₹)",
+        "Status",
+    ]
+
+    export_rows = []
+    for r in rows:
+        export_rows.append([
+            r.get("worker_name") or "—",
+            (r.get("department") or "—").capitalize(),
+            (r.get("payment_mode") or "cash").upper(),
+            round(float(r.get("opening_balance") or 0.0), 2),
+            int(r.get("total_pairs") or 0),
+            round(float(r.get("total_earning") or 0.0), 2),
+            round(float(r.get("total_bonus") or 0.0), 2),
+            round(float(r.get("advances_taken") or 0.0), 2),
+            round(float(r.get("payments_paid") or 0.0), 2),
+            round(float(r.get("net_payable") or 0.0), 2),
+            round(float(r.get("disbursed_amount") or 0.0), 2),
+            round(float(r.get("balance_owed") or 0.0), 2),
+            (r.get("payment_status") or "unpaid").upper(),
+        ])
+
+    date_tag = f"{from_date or 'start'}_to_{to_date or 'end'}"
+    return build_export_response(
+        filename_base=f"SSK_Karigar_Payroll_{date_tag}",
+        title="SSK Footcare - Karigar Payroll & Wages Statement",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[4, 6, 7, 8, 9, 10, 11, 12],
+        total_col_indices=[5, 6, 7, 8, 9, 10, 11, 12],
+        sheet_name="Payroll Statement",
+    )
+
+
 @pos_router.get("/reports/payroll.pdf")
 async def report_payroll_pdf(request: Request,
                              from_date: Optional[str] = None,
@@ -4910,6 +5270,69 @@ async def list_defects(request: Request):
     db = get_db()
     docs = await db.defects.find({}).sort("created_at", -1).to_list(2000)
     return [stringify(d) for d in docs]
+
+
+@pos_router.get("/defects/export")
+async def export_defects(
+    request: Request,
+    stage: Optional[str] = None,
+    format: str = "xlsx",
+):
+    """Export Quality Control defects and rework log as Excel (.xlsx) or CSV (.csv)."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    from services.export_service import build_export_response
+
+    q = {}
+    if stage and stage.lower() != "all":
+        q["stage"] = stage
+
+    docs = await db.defects.find(q).sort("created_at", -1).to_list(3000)
+
+    total_defect_qty = sum(int(d.get("quantity") or 0) for d in docs)
+    summary_kpis = {
+        "Total Defect Incidents": len(docs),
+        "Total Defective Pairs": total_defect_qty,
+    }
+
+    headers = [
+        "Logged Date",
+        "PO Number",
+        "Style Code",
+        "Stage",
+        "Defect Type",
+        "Quantity (Pairs)",
+        "Action Taken",
+        "Status",
+        "Notes / Remarks",
+    ]
+
+    export_rows = []
+    for d in docs:
+        export_rows.append([
+            str(d.get("created_at") or "")[:10] or "—",
+            d.get("po_number") or "—",
+            d.get("style_code") or "—",
+            (d.get("stage") or "—").capitalize(),
+            d.get("defect_type") or "—",
+            int(d.get("quantity") or 0),
+            d.get("action") or "—",
+            (d.get("status") or "open").upper(),
+            d.get("notes") or "",
+        ])
+
+    return build_export_response(
+        filename_base="SSK_QC_Defects_Log",
+        title="SSK Footcare - Quality Control & Defects Register",
+        headers=headers,
+        rows=export_rows,
+        format=format,
+        summary_kpis=summary_kpis,
+        currency_col_indices=[],
+        total_col_indices=[6],
+        sheet_name="QC Defects",
+    )
 
 
 @pos_router.post("/defects")
