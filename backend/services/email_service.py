@@ -430,7 +430,7 @@ def _verify_gmail_api_credentials(config: Dict[str, Any], timeout: int = 15) -> 
         return (False, f"Gmail REST API verification failed: {e}")
 
 
-def generate_google_auth_url(client_id: str, redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob") -> str:
+def generate_google_auth_url(client_id: str, redirect_uri: str = "https://ssk-footcare-manufacturing-erp.vercel.app/settings") -> str:
     """Generate the Google OAuth 2.0 authorization URL for Gmail API."""
     from urllib.parse import urlencode
     params = {
@@ -448,7 +448,7 @@ def exchange_google_auth_code(
     client_id: str,
     client_secret: str,
     auth_code: str,
-    redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob",
+    redirect_uri: str = "https://ssk-footcare-manufacturing-erp.vercel.app/settings",
     timeout: int = 15,
 ) -> Dict[str, Any]:
     """Exchange an authorization code for permanent Google OAuth tokens (access_token + refresh_token)."""

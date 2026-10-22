@@ -423,7 +423,7 @@ async def get_google_auth_url_endpoint(payload: dict, request: Request):
     from services.email_service import get_email_config, generate_google_auth_url
     cfg = await get_email_config(db)
     client_id = (payload.get("client_id") or cfg.get("gmail_client_id") or "").strip()
-    redirect_uri = (payload.get("redirect_uri") or "urn:ietf:wg:oauth:2.0:oob").strip()
+    redirect_uri = (payload.get("redirect_uri") or "https://ssk-footcare-manufacturing-erp.vercel.app/settings").strip()
 
     if not client_id:
         raise HTTPException(400, "Google OAuth Client ID is required to generate authorization URL.")
@@ -452,7 +452,7 @@ async def exchange_google_oauth_code_endpoint(payload: dict, request: Request):
     client_id = (payload.get("client_id") or cfg.get("gmail_client_id") or "").strip()
     client_secret = (payload.get("client_secret") or cfg.get("gmail_client_secret") or "").strip()
     code = (payload.get("code") or "").strip()
-    redirect_uri = (payload.get("redirect_uri") or "urn:ietf:wg:oauth:2.0:oob").strip()
+    redirect_uri = (payload.get("redirect_uri") or "https://ssk-footcare-manufacturing-erp.vercel.app/settings").strip()
 
     if not client_id or not client_secret:
         raise HTTPException(400, "Both Client ID and Client Secret are required for Google OAuth token exchange.")

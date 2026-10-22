@@ -706,14 +706,12 @@ function GmailSettingsSection() {
     }
   };
 
-  const handleOpenAuth = async (useOob = false) => {
+  const handleOpenAuth = async () => {
     if (!config.gmail_client_id) {
       setStatusMsg({ type: "error", text: "Please enter your Google OAuth Client ID first." });
       return;
     }
-    const targetRedirect = useOob
-      ? "urn:ietf:wg:oauth:2.0:oob"
-      : window.location.origin + window.location.pathname;
+    const targetRedirect = window.location.origin + window.location.pathname;
     setUsedRedirectUri(targetRedirect);
 
     try {
