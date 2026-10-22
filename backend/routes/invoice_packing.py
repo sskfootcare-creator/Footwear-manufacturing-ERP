@@ -2252,6 +2252,136 @@ async def download_invoice_file(iid: str, request: Request):
     )
 
 
+class PaymentReminderIn(BaseModel):
+    to_email: str
+    cc_emails: Optional[str] = None
+    subject: Optional[str] = None
+    custom_message: Optional[str] = None
+    attach_pdf: bool = True
+    include_bank_details: bool = True
+
+
+@invoice_packing_router.get("/invoices/{iid}/payment-reminder-preview")
+async def get_invoice_payment_reminder_preview(iid: str, request: Request):
+    """Retrieve preview data and suggested recipient/templates for sending an invoice payment reminder."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    doc = await db.invoices.find_one({"_id": oid(iid)})
+    if not doc:
+        raise HTTPException(404, "Invoice not found")
+
+    pay_map = await _aggregate_payments_for_invoices([iid], db=db)
+    grn_map = await _aggregate_grn_adjustments([iid], db=db)
+    inv = _decorate_invoice(doc, pay_map, grn_map)
+
+    # Resolve client details from client master
+    client_name = inv.get("client_name") or ""
+    client_doc = {}
+    if client_name:
+        client_doc = await db.clients.find_one({
+            "$or": [
+                {"company_name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}},
+                {"name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}},
+            ]
+        }) or {}
+
+    from services.email_service import (
+        get_email_config,
+        build_payment_reminder_template,
+    )
+    from pdf_docs import COMPANY
+
+    cfg = await get_email_config(db)
+    company_profile = await db.settings.find_one({"_id": "company_profile"})
+    if not company_profile:
+        company_profile = dict(COMPANY)
+
+    # Check if PDF exists
+    has_pdf = bool(doc.get("file_b64"))
+    if not has_pdf and doc.get("dispatch_record_id"):
+        try:
+            dr = await db.dispatch_records.find_one({"_id": oid(doc["dispatch_record_id"])}, {"invoice_file_b64": 1})
+            has_pdf = bool(dr and dr.get("invoice_file_b64"))
+        except Exception:
+            pass
+
+    tmpl_subj, tmpl_txt, tmpl_html = build_payment_reminder_template(
+        invoice=inv,
+        client=client_doc,
+        company=company_profile,
+        custom_message=None,
+        include_bank_details=True,
+    )
+
+    suggested_to = client_doc.get("email") or inv.get("client_email") or ""
+
+    return {
+        "ok": True,
+        "invoice_id": iid,
+        "invoice_no": inv.get("invoice_no"),
+        "client_name": inv.get("client_name"),
+        "client_email": suggested_to,
+        "contact_person": client_doc.get("contact_person") or "",
+        "client_phone": client_doc.get("phone") or "",
+        "net_amount": inv.get("net_amount", 0),
+        "received_amount": inv.get("received_amount", 0),
+        "outstanding": inv.get("outstanding", 0),
+        "due_date": inv.get("due_date"),
+        "is_overdue": inv.get("status") == "overdue",
+        "days_to_due": inv.get("days_to_due"),
+        "status": inv.get("status"),
+        "po_number": inv.get("po_number"),
+        "has_pdf": has_pdf,
+        "pdf_filename": f"{inv.get('invoice_no', 'invoice')}.pdf",
+        "email_configured": cfg.get("is_configured", False),
+        "from_email": cfg.get("gmail_user", ""),
+        "from_name": cfg.get("from_name", ""),
+        "default_cc": cfg.get("default_cc", ""),
+        "default_subject": tmpl_subj,
+        "default_message_text": tmpl_txt,
+        "preview_html": tmpl_html,
+        "bank_details": {
+            "bank_name": company_profile.get("bank_name"),
+            "bank_acc": company_profile.get("bank_acc"),
+            "bank_ifsc": company_profile.get("bank_ifsc"),
+            "upi_id": company_profile.get("upi_id", ""),
+        },
+        "reminder_history": doc.get("reminder_history", []),
+        "last_reminder_sent_at": doc.get("last_reminder_sent_at"),
+        "last_reminder_sent_to": doc.get("last_reminder_sent_to"),
+        "reminder_count": doc.get("reminder_count", 0),
+    }
+
+
+@invoice_packing_router.post("/invoices/{iid}/send-payment-reminder")
+async def send_invoice_payment_reminder_route(iid: str, payload: PaymentReminderIn, request: Request):
+    """Directly send payment reminder email via company Gmail to client with attached invoice PDF."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    from services.email_service import send_invoice_payment_reminder
+
+    res = await send_invoice_payment_reminder(
+        db=db,
+        invoice_id=iid,
+        to_email=payload.to_email,
+        cc_emails=payload.cc_emails,
+        subject=payload.subject,
+        custom_message=payload.custom_message,
+        attach_pdf=payload.attach_pdf,
+        include_bank_details=payload.include_bank_details,
+        user_email=u.get("email", "system"),
+    )
+
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "Failed to send payment reminder"))
+
+    return res
+
+
 @invoice_packing_router.get("/invoices/{iid}/carton-labels", dependencies=[Depends(pdf_rate_limiter)])
 async def download_invoice_carton_labels(iid: str, request: Request):
     """Re-download carton labels PDF stored on an invoice without regeneration."""

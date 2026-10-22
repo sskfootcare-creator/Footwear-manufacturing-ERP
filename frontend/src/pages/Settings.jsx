@@ -19,6 +19,15 @@ import {
   FileSpreadsheet,
   Settings2,
   History,
+  Mail,
+  Send,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  AlertCircle,
+  CheckCircle2,
+  HelpCircle,
+  ShieldCheck,
 } from "lucide-react";
 
 const STAGE_LABEL = {
@@ -189,6 +198,7 @@ export default function Settings() {
 
         <PackingTemplatesSection />
         <CompanyProfileSection />
+        <GmailSettingsSection />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <BackupExportSection />
@@ -562,6 +572,382 @@ function CompanyProfileSection() {
           onChange={(e) => setForm((s) => ({ ...s, email: e.target.value }))}
         />
       </div>
+    </Card>
+  );
+}
+
+/* -------------------- GMAIL & EMAIL SETTINGS SECTION -------------------- */
+function GmailSettingsSection() {
+  const [config, setConfig] = useState({
+    gmail_user: "",
+    gmail_app_password: "",
+    from_name: "SSK Footcare Manufacturing",
+    reply_to: "",
+    default_cc: "",
+    smtp_host: "smtp.gmail.com",
+    smtp_port: 465,
+    is_configured: false,
+    has_app_password: false,
+    masked_app_password: "",
+    source: "none",
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+  const [testModal, setTestModal] = useState(false);
+  const [testRecipient, setTestRecipient] = useState("");
+
+  const load = async () => {
+    try {
+      setLoading(true);
+      const { data } = await http.get("/settings/email");
+      setConfig((prev) => ({
+        ...prev,
+        ...data,
+        gmail_app_password: "",
+      }));
+    } catch (err) {
+      console.error("Failed to load email settings", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const handleSave = async (verifyFirst = false) => {
+    if (!config.gmail_user) {
+      setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
+      return;
+    }
+    if (!config.has_app_password && !config.gmail_app_password) {
+      setStatusMsg({
+        type: "error",
+        text: "Please enter the 16-character Google App Password (generated in Google Account Security).",
+      });
+      return;
+    }
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const payload = {
+        gmail_user: config.gmail_user.trim(),
+        gmail_app_password: config.gmail_app_password,
+        from_name: config.from_name,
+        reply_to: config.reply_to,
+        default_cc: config.default_cc,
+        smtp_host: config.smtp_host || "smtp.gmail.com",
+        smtp_port: Number(config.smtp_port) || 465,
+        verify_now: verifyFirst,
+      };
+      await http.put("/settings/email", payload);
+      setStatusMsg({
+        type: "success",
+        text: verifyFirst
+          ? "Gmail connection verified and settings saved successfully!"
+          : "Gmail settings saved successfully!",
+      });
+      load();
+    } catch (e) {
+      setStatusMsg({
+        type: "error",
+        text: e.response?.data?.detail || e.message || "Failed to save settings",
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVerifyOnly = async () => {
+    if (!config.gmail_user) {
+      setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
+      return;
+    }
+    if (!config.has_app_password && !config.gmail_app_password) {
+      setStatusMsg({ type: "error", text: "Please enter the Google App Password to test." });
+      return;
+    }
+    setVerifying(true);
+    setStatusMsg(null);
+    try {
+      const { data } = await http.post("/settings/email/verify", {
+        gmail_user: config.gmail_user.trim(),
+        gmail_app_password: config.gmail_app_password,
+      });
+      if (data.ok) {
+        setStatusMsg({ type: "success", text: "Verification Succeeded! " + data.message });
+      } else {
+        setStatusMsg({ type: "error", text: data.message });
+      }
+    } catch (e) {
+      setStatusMsg({
+        type: "error",
+        text: e.response?.data?.detail || e.message || "Verification failed",
+      });
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleSendTestEmail = async () => {
+    if (!testRecipient) {
+      alert("Please provide a recipient email address.");
+      return;
+    }
+    setTesting(true);
+    try {
+      const { data } = await http.post("/settings/email/test", {
+        test_recipient: testRecipient.trim(),
+      });
+      alert(data.message || "Test email sent successfully!");
+      setTestModal(false);
+      setTestRecipient("");
+    } catch (e) {
+      alert("Test email failed: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <Card className="p-6" data-testid="gmail-settings-section">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-bold flex items-center gap-2">
+              <Mail className="w-5 h-5 text-[#C27842]" /> Company Gmail & Email Integration
+            </h2>
+            {config.is_configured ? (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-green-100 text-green-800 border border-green-300">
+                <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+                Gmail Connected
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                Not Configured
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            Connect your company Google/Gmail account to directly email Invoice Payment Reminders, statements, and dispatch advisories to clients.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowHelp(!showHelp)}
+            className="text-xs text-slate-600 hover:text-slate-900 border border-slate-300 px-2.5 py-1.5 rounded flex items-center gap-1 hover:bg-slate-50 transition-colors"
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-[#C27842]" />
+            <span>{showHelp ? "Hide Guide" : "App Password Guide"}</span>
+          </button>
+          {config.is_configured && (
+            <BtnSecondary
+              onClick={() => setTestModal(true)}
+              className="text-xs px-3 py-1.5"
+              data-testid="send-test-email-btn"
+            >
+              <Send className="w-3.5 h-3.5 inline mr-1" />
+              Send Test Email
+            </BtnSecondary>
+          )}
+        </div>
+      </div>
+
+      {/* Help box */}
+      {showHelp && (
+        <div className="mb-5 p-4 bg-slate-50 border-2 border-slate-200 rounded text-xs space-y-2 text-slate-700">
+          <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            How to generate a 16-character Google App Password (Required for Gmail SMTP):
+          </div>
+          <ol className="list-decimal list-inside space-y-1 text-slate-600 pl-1">
+            <li>Log into your company Google / Gmail account at <a href="https://myaccount.google.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com <ExternalLink className="w-3 h-3 inline" /></a>.</li>
+            <li>Go to <b>Security</b> and ensure <b>2-Step Verification</b> is turned ON.</li>
+            <li>In the search bar at top of Google Account, search for <b>App Passwords</b> (or visit <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com/apppasswords <ExternalLink className="w-3 h-3 inline" /></a>).</li>
+            <li>Enter an App name (e.g. <code>SSK Footcare ERP</code>) and click <b>Create</b>.</li>
+            <li>Google will show a 16-letter password (e.g. <code>abcd efgh ijkl mnop</code>). Paste it into the <b>Google App Password</b> field below and click <b>Save & Verify</b>.</li>
+          </ol>
+          <div className="text-[11px] text-slate-500 pt-1">
+            Note: You do NOT need to give your regular Gmail login password. The 16-character App Password is safer and specifically designed for business ERP applications.
+          </div>
+        </div>
+      )}
+
+      {/* Status Alert Banner */}
+      {statusMsg && (
+        <div
+          className={`mb-4 p-3 rounded text-xs flex items-center justify-between border ${
+            statusMsg.type === "success"
+              ? "bg-green-50 text-green-800 border-green-200"
+              : "bg-red-50 text-red-800 border-red-200"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {statusMsg.type === "success" ? (
+              <CheckCircle2 className="w-4 h-4 text-green-600" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-red-600" />
+            )}
+            <span>{statusMsg.text}</span>
+          </div>
+          <button onClick={() => setStatusMsg(null)} className="text-slate-400 hover:text-slate-600">
+            ×
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Input
+          label="Company Gmail Address"
+          placeholder="e.g. billing@sskfootcare.com or company@gmail.com"
+          value={config.gmail_user}
+          onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
+          testId="email-user-input"
+        />
+
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+            <span>Google App Password (16 characters)</span>
+            {config.has_app_password && !config.gmail_app_password && (
+              <span className="text-[10px] text-green-600 font-semibold lowercase">
+                configured ({config.masked_app_password})
+              </span>
+            )}
+          </div>
+          <div className="relative">
+            <input
+              type={showPassword ? "text" : "password"}
+              placeholder={
+                config.has_app_password
+                  ? "Password configured (leave blank to keep)"
+                  : "e.g. abcd efgh ijkl mnop"
+              }
+              value={config.gmail_app_password}
+              onChange={(e) => setConfig((s) => ({ ...s, gmail_app_password: e.target.value }))}
+              data-testid="email-password-input"
+              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+              title={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        <Input
+          label="Sender Display Name"
+          placeholder="e.g. SSK Footcare Manufacturing"
+          value={config.from_name}
+          onChange={(e) => setConfig((s) => ({ ...s, from_name: e.target.value }))}
+          testId="email-from-name"
+        />
+
+        <Input
+          label="Default CC Email (optional)"
+          placeholder="e.g. accounts@sskfootcare.com"
+          value={config.default_cc}
+          onChange={(e) => setConfig((s) => ({ ...s, default_cc: e.target.value }))}
+          testId="email-default-cc"
+        />
+
+        <Input
+          label="Reply-To Email (optional)"
+          placeholder="e.g. finance@sskfootcare.com"
+          value={config.reply_to}
+          onChange={(e) => setConfig((s) => ({ ...s, reply_to: e.target.value }))}
+          testId="email-reply-to"
+        />
+
+        <div className="grid grid-cols-2 gap-2">
+          <Input
+            label="SMTP Host"
+            value={config.smtp_host}
+            onChange={(e) => setConfig((s) => ({ ...s, smtp_host: e.target.value }))}
+          />
+          <Input
+            label="SMTP Port"
+            value={config.smtp_port}
+            onChange={(e) => setConfig((s) => ({ ...s, smtp_port: e.target.value }))}
+          />
+        </div>
+      </div>
+
+      <div className="mt-5 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+        <div className="text-[11px] text-slate-500">
+          {config.updated_at ? (
+            <span>Last updated: {new Date(config.updated_at).toLocaleString()}</span>
+          ) : config.source === "environment" ? (
+            <span>Loaded from environment variables (.env)</span>
+          ) : (
+            <span>Enter credentials and click Save & Verify Connection</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <BtnSecondary
+            onClick={handleVerifyOnly}
+            disabled={verifying || saving || !config.gmail_user}
+            data-testid="verify-email-btn"
+            className="px-3 py-2 text-xs"
+          >
+            {verifying ? "Testing..." : "Test Connection"}
+          </BtnSecondary>
+          <BtnPrimary
+            onClick={() => handleSave(true)}
+            disabled={saving || verifying || !config.gmail_user}
+            data-testid="save-email-btn"
+            className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] px-4 py-2 text-xs"
+          >
+            {saving ? "Saving & Verifying..." : "Save & Verify Connection"}
+          </BtnPrimary>
+        </div>
+      </div>
+
+      {/* Test Email Modal */}
+      {testModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4">
+          <div className="bg-white w-full max-w-md border-2 border-slate-200 shadow-xl p-5">
+            <h3 className="text-base font-bold text-slate-900 mb-1 flex items-center gap-2">
+              <Mail className="w-4 h-4 text-[#C27842]" /> Send Test Email
+            </h3>
+            <p className="text-xs text-slate-600 mb-4">
+              Send a test advisory message from <b>{config.gmail_user}</b> to verify real email delivery.
+            </p>
+            <div className="space-y-3">
+              <Input
+                label="Recipient Email Address"
+                placeholder="your.email@company.com"
+                value={testRecipient}
+                onChange={(e) => setTestRecipient(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <BtnSecondary onClick={() => setTestModal(false)} disabled={testing}>
+                Cancel
+              </BtnSecondary>
+              <BtnPrimary
+                onClick={handleSendTestEmail}
+                disabled={testing || !testRecipient}
+                className="bg-[#0F172A]"
+              >
+                {testing ? "Sending..." : "Send Test"}
+              </BtnPrimary>
+            </div>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

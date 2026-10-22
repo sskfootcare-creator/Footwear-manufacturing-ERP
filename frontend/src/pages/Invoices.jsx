@@ -9,6 +9,7 @@ import {
   Badge,
   BtnPrimary,
   BtnSecondary,
+  Input,
   PaginationControls,
   usePagination,
 } from "../components/ui-kit";
@@ -40,6 +41,9 @@ import {
   Maximize2,
   Package,
   Printer,
+  Mail,
+  Send,
+  Paperclip,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -72,6 +76,7 @@ export default function Invoices() {
   const [cashAccounts, setCashAccounts] = useState([]);
   const [styles, setStyles] = useState([]);
   const [showDirectModal, setShowDirectModal] = useState(false);
+  const [reminderFor, setReminderFor] = useState(null);
 
   const load = async () => {
     try {
@@ -510,6 +515,15 @@ export default function Invoices() {
                                     : `${r.days_to_due}d to go`}
                                 </span>
                               )}
+                              {r.last_reminder_sent_at && (
+                                <span
+                                  className="inline-flex items-center gap-0.5 text-[9px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-1 py-0.5 rounded"
+                                  title={`Reminder sent ${new Date(r.last_reminder_sent_at).toLocaleDateString()} to ${r.last_reminder_sent_to || 'client'}`}
+                                >
+                                  <Mail className="w-2.5 h-2.5 text-blue-600" />
+                                  {r.reminder_count > 1 ? `${r.reminder_count}x sent` : "Sent"}
+                                </span>
+                              )}
                             </div>
                           </>
                         ) : (
@@ -545,6 +559,24 @@ export default function Invoices() {
                         </a>
                         {r.status !== "paid" && (
                           <>
+                            <button
+                              onClick={() => setReminderFor(r)}
+                              className={`p-1.5 rounded inline-block transition-colors ${
+                                r.last_reminder_sent_at
+                                  ? "text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200"
+                                  : r.status === "overdue"
+                                  ? "text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                                  : "text-slate-600 hover:text-blue-600 hover:bg-slate-100"
+                              }`}
+                              title={
+                                r.last_reminder_sent_at
+                                  ? `Reminder sent ${new Date(r.last_reminder_sent_at).toLocaleDateString()} (Total: ${r.reminder_count || 1}). Click to send another.`
+                                  : "Send Payment Reminder via Gmail"
+                              }
+                              data-testid={`inv-reminder-${r.invoice_no}`}
+                            >
+                              <Mail className="w-4 h-4" />
+                            </button>
                             <button
                               onClick={() => setGrnFor(r)}
                               className={`p-1.5 rounded inline-block ${
@@ -625,7 +657,27 @@ export default function Invoices() {
         </Card>
       </div>
 
-      {view && <InvoiceDetailModal inv={view} styleByCode={styleByCode} onClose={() => setView(null)} />}
+      {view && (
+        <InvoiceDetailModal
+          inv={view}
+          styleByCode={styleByCode}
+          onClose={() => setView(null)}
+          onSendReminder={(inv) => {
+            setView(null);
+            setReminderFor(inv);
+          }}
+        />
+      )}
+      {reminderFor && (
+        <PaymentReminderModal
+          invoiceMeta={reminderFor}
+          onClose={() => setReminderFor(null)}
+          onSent={() => {
+            setReminderFor(null);
+            load();
+          }}
+        />
+      )}
       {grnFor && (
         <GRNDialog
           invoiceMeta={grnFor}
@@ -713,7 +765,7 @@ function Tile({
 }
 
 /* ------------------- INVOICE DETAIL MODAL ------------------- */
-function InvoiceDetailModal({ inv, onClose, styleByCode = {} }) {
+function InvoiceDetailModal({ inv, onClose, styleByCode = {}, onSendReminder }) {
   const [localStyles, setLocalStyles] = useState(styleByCode);
   const [previewImage, setPreviewImage] = useState(null);
 
@@ -738,7 +790,7 @@ function InvoiceDetailModal({ inv, onClose, styleByCode = {} }) {
       data-testid="invoice-modal"
     >
       <div className="bg-white w-full max-w-5xl max-h-[92vh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
-        <div className="bg-[#0F172A] text-white px-6 py-4 flex items-baseline justify-between">
+        <div className="bg-[#0F172A] text-white px-6 py-4 flex items-center justify-between">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold">
               Tax Invoice
@@ -747,9 +799,22 @@ function InvoiceDetailModal({ inv, onClose, styleByCode = {} }) {
               {inv.invoice_no} · {inv.client_name}
             </div>
           </div>
-          <button onClick={onClose} className="hover:bg-white/10 p-1">
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {inv.status !== "paid" && (
+              <button
+                onClick={() => onSendReminder && onSendReminder(inv)}
+                className="px-3 py-1.5 bg-[#C27842] hover:bg-[#A96330] text-white text-xs font-bold uppercase tracking-wider rounded flex items-center gap-1.5 transition-colors shadow-sm"
+                title="Send payment reminder email to client via Gmail"
+                data-testid="detail-send-reminder-btn"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                <span>Send Reminder</span>
+              </button>
+            )}
+            <button onClick={onClose} className="hover:bg-white/10 p-1 text-slate-300 hover:text-white rounded">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
         <div className="p-6 space-y-5">
           {/* Prominent GRN Recording Status Banner */}
@@ -1008,6 +1073,349 @@ function InvoiceDetailModal({ inv, onClose, styleByCode = {} }) {
     </div>
   );
 }
+
+/* -------------------- PAYMENT REMINDER MODAL -------------------- */
+function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState(null);
+
+  // Form fields
+  const [toEmail, setToEmail] = useState("");
+  const [ccEmails, setCcEmails] = useState("");
+  const [subject, setSubject] = useState("");
+  const [customMessage, setCustomMessage] = useState("");
+  const [attachPdf, setAttachPdf] = useState(true);
+  const [includeBankDetails, setIncludeBankDetails] = useState(true);
+  const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    setError(null);
+    http
+      .get(`/invoices/${invoiceMeta.id}/payment-reminder-preview`)
+      .then((res) => {
+        if (!mounted) return;
+        const d = res.data || {};
+        setPreview(d);
+        setToEmail(d.client_email || "");
+        setCcEmails(d.default_cc || "");
+        setSubject(d.default_subject || "");
+        setCustomMessage("");
+        setAttachPdf(Boolean(d.has_pdf));
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        console.error("Failed to load reminder preview", err);
+        setError(err.response?.data?.detail || err.message || "Could not load invoice reminder preview");
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [invoiceMeta.id]);
+
+  const handleSend = async () => {
+    if (!toEmail || !toEmail.includes("@")) {
+      alert("Please provide a valid recipient email address.");
+      return;
+    }
+    setSending(true);
+    try {
+      const payload = {
+        to_email: toEmail.trim(),
+        cc_emails: ccEmails.trim(),
+        subject: subject.trim(),
+        custom_message: customMessage.trim(),
+        attach_pdf: attachPdf,
+        include_bank_details: includeBankDetails,
+      };
+      const { data } = await http.post(`/invoices/${invoiceMeta.id}/send-payment-reminder`, payload);
+      alert(data.message || `Payment reminder sent successfully to ${toEmail}`);
+      onSent();
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message || "Failed to send payment reminder");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const invNo = invoiceMeta.invoice_no || preview?.invoice_no || "Invoice";
+  const clientName = invoiceMeta.client_name || preview?.client_name || "Client";
+  const outstandingAmount = preview ? preview.outstanding : invoiceMeta.outstanding || 0;
+  const isOverdue = preview ? preview.is_overdue : invoiceMeta.status === "overdue";
+  const dueDate = preview?.due_date || invoiceMeta.due_date || "—";
+  const daysOverdue = preview?.days_to_due != null && preview.days_to_due < 0 ? -preview.days_to_due : 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-3 sm:p-4 overflow-y-auto"
+      data-testid="payment-reminder-modal"
+    >
+      <div className="bg-white w-full max-w-2xl border-2 border-slate-200 shadow-2xl my-6 flex flex-col max-h-[92vh]">
+        {/* Header */}
+        <div className="bg-[#0F172A] text-white px-5 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-[#C27842] text-white rounded">
+              <Mail className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold">
+                Direct Email Advisory
+              </div>
+              <div className="text-lg font-bold">
+                Send Payment Reminder · {invNo}
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/10 p-1 rounded transition-colors text-slate-300 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {loading ? (
+            <div className="py-12 text-center text-sm text-slate-500">
+              <div className="animate-spin inline-block w-6 h-6 border-2 border-slate-300 border-t-[#C27842] rounded-full mb-2" />
+              <div>Loading invoice preview & recipient details...</div>
+            </div>
+          ) : error ? (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 text-xs rounded">
+              <b>Error:</b> {error}
+            </div>
+          ) : (
+            <>
+              {/* Gmail Connection Status Banner */}
+              {preview?.email_configured ? (
+                <div className="bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 rounded flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2 text-emerald-800">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    <span>
+                      Company Gmail: <b>{preview.from_email}</b> ({preview.from_name || "SSK Footcare"})
+                    </span>
+                  </div>
+                  <span className="text-[10px] uppercase font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">
+                    Connected
+                  </span>
+                </div>
+              ) : (
+                <div className="bg-amber-50 border-2 border-amber-300 p-3.5 rounded flex items-start justify-between gap-3 text-xs">
+                  <div className="flex items-start gap-2.5 text-amber-900">
+                    <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-bold">Company Gmail is not connected</div>
+                      <div className="text-amber-800 text-[11px] mt-0.5">
+                        To mail reminders directly from the ERP, connect your company Gmail and Google App Password in Settings.
+                      </div>
+                    </div>
+                  </div>
+                  <a
+                    href="/settings"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex-shrink-0 bg-amber-600 hover:bg-amber-700 text-white font-bold px-3 py-1.5 rounded text-xs transition-colors"
+                  >
+                    Open Settings
+                  </a>
+                </div>
+              )}
+
+              {/* Invoice Highlights Card */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-50 border border-slate-200 p-3 rounded text-xs">
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase font-bold">Client</div>
+                  <div className="font-bold text-slate-900 truncate" title={clientName}>
+                    {clientName}
+                  </div>
+                  {preview?.contact_person && (
+                    <div className="text-[10px] text-slate-500">Attn: {preview.contact_person}</div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase font-bold">Due Date</div>
+                  <div className={`font-mono font-bold ${isOverdue ? "text-red-600" : "text-slate-900"}`}>
+                    {dueDate}
+                  </div>
+                  {isOverdue && (
+                    <div className="text-[10px] text-red-600 font-bold">{daysOverdue}d overdue</div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase font-bold">Total Invoiced</div>
+                  <div className="font-mono text-slate-700">{inr(preview?.net_amount || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase font-bold">Outstanding Due</div>
+                  <div className="font-mono font-bold text-red-600 text-sm">
+                    {inr(outstandingAmount)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Form Fields */}
+              <div className="space-y-3 pt-1">
+                <div className="space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 flex items-center justify-between">
+                    <span>Recipient Email (To) *</span>
+                    {!preview?.client_email && (
+                      <span className="text-[10px] text-amber-600 font-normal">
+                        Not in client profile — please enter
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="email"
+                    value={toEmail}
+                    onChange={(e) => setToEmail(e.target.value)}
+                    placeholder="e.g. accounts@client.com or finance@bata.com"
+                    data-testid="reminder-to-email-input"
+                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Input
+                    label="CC Emails (optional)"
+                    value={ccEmails}
+                    onChange={(e) => setCcEmails(e.target.value)}
+                    placeholder="e.g. audit@sskfootcare.com"
+                    testId="reminder-cc-email-input"
+                  />
+                  <Input
+                    label="Subject Line"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    testId="reminder-subject-input"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600">
+                    Custom Message / Note to Client (optional)
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={customMessage}
+                    onChange={(e) => setCustomMessage(e.target.value)}
+                    placeholder={
+                      isOverdue
+                        ? "e.g. Urgent reminder: Kindly expedite the outstanding payment today..."
+                        : "e.g. Friendly reminder regarding your upcoming invoice balance..."
+                    }
+                    data-testid="reminder-custom-message-input"
+                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#2563EB] focus:outline-none leading-relaxed"
+                  />
+                  <div className="text-[10px] text-slate-400">
+                    Leave blank to use the standardized, polite SSK Footcare reminder message.
+                  </div>
+                </div>
+
+                {/* Options Checkboxes */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={attachPdf}
+                      disabled={!preview?.has_pdf}
+                      onChange={(e) => setAttachPdf(e.target.checked)}
+                      className="rounded border-slate-300 text-[#0F172A] focus:ring-0"
+                    />
+                    <span className="flex items-center gap-1">
+                      <Paperclip className="w-3.5 h-3.5 text-slate-500" />
+                      Attach Tax Invoice PDF ({preview?.pdf_filename || `${invNo}.pdf`})
+                    </span>
+                  </label>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={includeBankDetails}
+                      onChange={(e) => setIncludeBankDetails(e.target.checked)}
+                      className="rounded border-slate-300 text-[#0F172A] focus:ring-0"
+                    />
+                    <span>
+                      Include Company Bank Transfer & Remittance Details
+                    </span>
+                  </label>
+                </div>
+
+                {/* Previous Reminder History */}
+                {(preview?.reminder_history?.length > 0 || preview?.last_reminder_sent_at) && (
+                  <div className="pt-2 border-t border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setShowHistory(!showHistory)}
+                      className="text-xs text-slate-600 hover:text-slate-900 flex items-center gap-1 font-semibold"
+                    >
+                      <span>
+                        Previous Reminders Sent ({preview.reminder_history?.length || preview.reminder_count || 1})
+                      </span>
+                      {showHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    </button>
+                    {showHistory && (
+                      <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto bg-slate-50 p-2.5 rounded border border-slate-200 text-[11px]">
+                        {(preview.reminder_history || []).map((h, i) => (
+                          <div key={i} className="flex items-center justify-between border-b border-slate-200 pb-1 last:border-0 last:pb-0">
+                            <div>
+                              <span className="font-bold text-slate-800">{new Date(h.sent_at).toLocaleString()}</span>
+                              <span className="text-slate-500 ml-1.5">to {h.sent_to}</span>
+                            </div>
+                            <span className="text-slate-400">by {h.sent_by}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="bg-slate-50 px-5 py-3.5 border-t border-slate-200 flex items-center justify-between">
+          <div className="text-[11px] text-slate-500">
+            {preview?.email_configured ? (
+              <span>Emails are delivered securely through company Gmail SMTP.</span>
+            ) : (
+              <span className="text-amber-700 font-semibold">Configure Gmail in Settings to enable sending.</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <BtnSecondary onClick={onClose} disabled={sending}>
+              Cancel
+            </BtnSecondary>
+            <BtnPrimary
+              onClick={handleSend}
+              disabled={sending || loading || !toEmail || !preview?.email_configured}
+              data-testid="send-reminder-submit-btn"
+              className="bg-[#C27842] border-[#C27842] hover:bg-[#A96330]"
+            >
+              {sending ? (
+                <>
+                  <div className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1.5 -mt-0.5" />
+                  Sending via Gmail...
+                </>
+              ) : (
+                <>
+                  <Send className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                  Send Reminder
+                </>
+              )}
+            </BtnPrimary>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function DLPair({ label, value, highlight = false }) {
   return (

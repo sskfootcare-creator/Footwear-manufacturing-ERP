@@ -166,7 +166,7 @@ def _reset_link_base() -> str:
 def _send_reset_email(to_email: str, reset_url: str, user_name: str) -> tuple[bool, str]:
     """Return (ok, hint).  ok=False when SMTP isn't configured or send fails."""
     gmail_user = os.environ.get("GMAIL_USER", "").strip()
-    gmail_pass = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    gmail_pass = "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split())
     if not gmail_user or not gmail_pass:
         return (False, "email_not_configured")
 

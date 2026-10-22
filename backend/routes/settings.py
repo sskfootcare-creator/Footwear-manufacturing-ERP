@@ -168,3 +168,204 @@ async def get_export_backup(request: Request):
         backup_data[col_name] = [stringify(d) for d in docs]
     await log_activity_db(db, "database_backup", "settings", f"Full database backup downloaded by {u['email']}", u["email"])
     return backup_data
+
+
+# ---------- GMAIL / EMAIL CONFIGURATION ----------
+
+@settings_router.get("/email")
+async def get_email_settings(request: Request):
+    """Retrieve current email configuration with masked credentials."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import get_email_config
+    cfg = await get_email_config(db)
+    
+    pwd = cfg.get("gmail_app_password", "")
+    masked_pwd = ""
+    if pwd:
+        masked_pwd = "•••• •••• •••• " + (pwd[-4:] if len(pwd) >= 4 else "****")
+
+    return {
+        "gmail_user": cfg.get("gmail_user", ""),
+        "has_app_password": bool(pwd),
+        "masked_app_password": masked_pwd,
+        "from_name": cfg.get("from_name", "SSK Footcare Manufacturing"),
+        "reply_to": cfg.get("reply_to", ""),
+        "default_cc": cfg.get("default_cc", ""),
+        "smtp_host": cfg.get("smtp_host", "smtp.gmail.com"),
+        "smtp_port": cfg.get("smtp_port", 465),
+        "is_configured": cfg.get("is_configured", False),
+        "source": cfg.get("source", "none"),
+        "updated_at": cfg.get("updated_at"),
+    }
+
+
+@settings_router.put("/email")
+async def put_email_settings(payload: dict, request: Request):
+    """Save or update company Gmail SMTP credentials with optional verification."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import (
+        get_email_config,
+        clean_app_password,
+        verify_smtp_credentials,
+    )
+
+    current_cfg = await get_email_config(db)
+
+    gmail_user = (payload.get("gmail_user") or "").strip()
+    new_pwd = clean_app_password(payload.get("gmail_app_password"))
+    # If no new password was submitted, retain current password if already present
+    if not new_pwd and current_cfg.get("gmail_app_password"):
+        new_pwd = current_cfg.get("gmail_app_password")
+
+    from_name = (payload.get("from_name") or "SSK Footcare Manufacturing").strip()
+    reply_to = (payload.get("reply_to") or "").strip()
+    default_cc = (payload.get("default_cc") or "").strip()
+    smtp_host = (payload.get("smtp_host") or "smtp.gmail.com").strip()
+    try:
+        smtp_port = int(payload.get("smtp_port") or 465)
+    except (ValueError, TypeError):
+        smtp_port = 465
+
+    verify_now = payload.get("verify_now", False)
+    verification_result = None
+
+    if verify_now and gmail_user and new_pwd:
+        ok, msg = verify_smtp_credentials(smtp_host, smtp_port, gmail_user, new_pwd)
+        verification_result = {"ok": ok, "message": msg}
+        if not ok:
+            raise HTTPException(400, f"Gmail SMTP verification failed: {msg}")
+
+    update_doc = {
+        "gmail_user": gmail_user,
+        "gmail_app_password": new_pwd,
+        "from_name": from_name,
+        "reply_to": reply_to,
+        "default_cc": default_cc,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "updated_at": now_iso(),
+        "updated_by": u.get("email"),
+    }
+
+    await db.settings.update_one(
+        {"_id": "email_config"},
+        {"$set": update_doc},
+        upsert=True,
+    )
+
+    await log_activity_db(
+        db,
+        "update_email_settings",
+        "settings",
+        f"Updated Gmail SMTP configuration for {gmail_user}",
+        u.get("email"),
+    )
+
+    return {
+        "ok": True,
+        "message": "Gmail settings saved successfully",
+        "verification": verification_result,
+    }
+
+
+@settings_router.post("/email/verify")
+async def verify_email_settings(payload: dict, request: Request):
+    """Test Gmail SMTP authentication credentials without persisting."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import get_email_config, clean_app_password, verify_smtp_credentials
+
+    current_cfg = await get_email_config(db)
+    user = (payload.get("gmail_user") or current_cfg.get("gmail_user") or "").strip()
+    pwd = clean_app_password(payload.get("gmail_app_password")) or current_cfg.get("gmail_app_password") or ""
+    host = (payload.get("smtp_host") or current_cfg.get("smtp_host") or "smtp.gmail.com").strip()
+    port = int(payload.get("smtp_port") or current_cfg.get("smtp_port") or 465)
+
+    if not user or not pwd:
+        raise HTTPException(400, "Both Gmail address and Google App Password are required to test connection.")
+
+    ok, msg = verify_smtp_credentials(host, port, user, pwd)
+    return {"ok": ok, "message": msg}
+
+
+@settings_router.post("/email/test")
+async def send_test_email_route(payload: dict, request: Request):
+    """Send an actual test email via Gmail SMTP to verify end-to-end delivery."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import get_email_config, send_email
+
+    cfg = await get_email_config(db)
+    if not cfg["is_configured"]:
+        raise HTTPException(400, "Gmail is not configured. Please save valid credentials first.")
+
+    recipient = (payload.get("test_recipient") or u.get("email") or "").strip()
+    if not recipient:
+        raise HTTPException(400, "Recipient email is required.")
+
+    subject = "SSK Footcare ERP — Gmail Connection Test"
+    text_body = (
+        f"Hello,\n\n"
+        f"This is a test email confirming that your company Gmail ({cfg['gmail_user']}) "
+        f"has been successfully connected to SSK Footcare Manufacturing ERP.\n\n"
+        f"You can now send automated invoice payment reminders directly from the Invoices tab.\n\n"
+        f"— SSK Footcare ERP System"
+    )
+    html_body = f"""<!doctype html>
+<html>
+<body style="font-family: system-ui, sans-serif; background: #F8FAFC; padding: 24px; color: #1E293B;">
+  <div style="max-width: 520px; margin: 0 auto; background: #FFFFFF; border: 2px solid #0F172A; padding: 28px; box-shadow: 4px 4px 0px #0F172A;">
+    <div style="font-size: 11px; letter-spacing: 2px; color: #64748B; text-transform: uppercase; font-weight: 700;">
+      SSK Footcare ERP
+    </div>
+    <h2 style="font-size: 22px; margin: 8px 0 16px; color: #0F172A;">
+      Gmail Connection Verified
+    </h2>
+    <p style="font-size: 14px; line-height: 1.6; color: #334155;">
+      This test email confirms that your company Gmail (<strong>{cfg['gmail_user']}</strong>) is properly connected and functioning.
+    </p>
+    <div style="background: #F0FDF4; border-left: 4px solid #16A34A; padding: 12px 16px; font-size: 13px; color: #15803D; margin: 16px 0; font-weight: 600;">
+      Status: Ready to send invoice payment reminders
+    </div>
+    <p style="font-size: 12px; color: #64748B;">
+      Dispatched by: {u.get('email')} at {now_iso()}
+    </p>
+  </div>
+</body>
+</html>"""
+
+    ok, msg = send_email(
+        to_emails=recipient,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        config=cfg,
+    )
+
+    if not ok:
+        raise HTTPException(400, f"Failed to send test email: {msg}")
+
+    return {"ok": True, "message": f"Test email sent successfully to {recipient}"}
+
