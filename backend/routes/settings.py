@@ -195,9 +195,24 @@ async def get_email_settings(request: Request):
     if resend_key:
         masked_resend = "re_••••••••" + (resend_key[-4:] if len(resend_key) >= 4 else "****")
 
+    client_secret = cfg.get("gmail_client_secret", "")
+    masked_secret = ""
+    if client_secret:
+        masked_secret = "••••••••" + (client_secret[-4:] if len(client_secret) >= 4 else "****")
+
+    refresh_token = cfg.get("gmail_refresh_token", "")
+    masked_token = ""
+    if refresh_token:
+        masked_token = "1//••••••••" + (refresh_token[-4:] if len(refresh_token) >= 4 else "****")
+
     return {
-        "provider": cfg.get("provider", "smtp"),
+        "provider": cfg.get("provider", "gmail_api"),
         "gmail_user": cfg.get("gmail_user", ""),
+        "gmail_client_id": cfg.get("gmail_client_id", ""),
+        "has_client_secret": bool(client_secret),
+        "masked_client_secret": masked_secret,
+        "has_refresh_token": bool(refresh_token),
+        "masked_refresh_token": masked_token,
         "has_app_password": bool(pwd),
         "masked_app_password": masked_pwd,
         "has_resend_key": bool(resend_key),
@@ -215,7 +230,7 @@ async def get_email_settings(request: Request):
 
 @settings_router.put("/email")
 async def put_email_settings(payload: dict, request: Request):
-    """Save or update company email credentials (SMTP or Resend API) with non-blocking verification."""
+    """Save or update company email credentials (Gmail REST API, SMTP, or Resend) with non-blocking verification."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None)
@@ -223,6 +238,7 @@ async def put_email_settings(payload: dict, request: Request):
         import server
         db = server.db
 
+    import json
     from services.email_service import (
         get_email_config,
         clean_app_password,
@@ -231,10 +247,44 @@ async def put_email_settings(payload: dict, request: Request):
 
     current_cfg = await get_email_config(db)
 
-    provider = (payload.get("provider") or current_cfg.get("provider") or "smtp").strip()
-    gmail_user = (payload.get("gmail_user") or "").strip()
+    provider = (payload.get("provider") or "").strip()
+    if not provider:
+        if payload.get("gmail_client_id") or payload.get("gmail_refresh_token"):
+            provider = "gmail_api"
+        elif payload.get("resend_api_key"):
+            provider = "resend"
+        elif payload.get("gmail_app_password"):
+            provider = "smtp"
+        else:
+            provider = current_cfg.get("provider") or "gmail_api"
+    gmail_user = (payload.get("gmail_user") or current_cfg.get("gmail_user") or "").strip()
+
+    # Parse raw client_secret.json if provided
+    raw_json_str = payload.get("client_secret_json", "").strip()
+    extracted_client_id = ""
+    extracted_client_secret = ""
+    if raw_json_str:
+        try:
+            parsed = json.loads(raw_json_str)
+            sub = parsed.get("installed") or parsed.get("web") or parsed
+            extracted_client_id = sub.get("client_id", "").strip()
+            extracted_client_secret = sub.get("client_secret", "").strip()
+        except Exception as e:
+            raise HTTPException(400, f"Invalid client_secret.json format: {e}")
+
+    client_id = extracted_client_id or (payload.get("gmail_client_id") or "").strip()
+    if not client_id and current_cfg.get("gmail_client_id"):
+        client_id = current_cfg.get("gmail_client_id")
+
+    client_secret = extracted_client_secret or (payload.get("gmail_client_secret") or "").strip()
+    if not client_secret and current_cfg.get("gmail_client_secret"):
+        client_secret = current_cfg.get("gmail_client_secret")
+
+    refresh_token = (payload.get("gmail_refresh_token") or "").strip()
+    if not refresh_token and current_cfg.get("gmail_refresh_token"):
+        refresh_token = current_cfg.get("gmail_refresh_token")
+
     new_pwd = clean_app_password(payload.get("gmail_app_password"))
-    # If no new password was submitted, retain current password if already present
     if not new_pwd and current_cfg.get("gmail_app_password"):
         new_pwd = current_cfg.get("gmail_app_password")
 
@@ -258,6 +308,9 @@ async def put_email_settings(payload: dict, request: Request):
         test_cfg = {
             "provider": provider,
             "gmail_user": gmail_user,
+            "gmail_client_id": client_id,
+            "gmail_client_secret": client_secret,
+            "gmail_refresh_token": refresh_token,
             "gmail_app_password": new_pwd,
             "resend_api_key": resend_api_key,
             "smtp_host": smtp_host,
@@ -271,6 +324,9 @@ async def put_email_settings(payload: dict, request: Request):
     update_doc = {
         "provider": provider,
         "gmail_user": gmail_user,
+        "gmail_client_id": client_id,
+        "gmail_client_secret": client_secret,
+        "gmail_refresh_token": refresh_token,
         "gmail_app_password": new_pwd,
         "resend_api_key": resend_api_key,
         "from_name": from_name,
@@ -316,8 +372,11 @@ async def verify_email_settings(payload: dict, request: Request):
     from services.email_service import get_email_config, clean_app_password, async_verify_email_credentials
 
     current_cfg = await get_email_config(db)
-    provider = (payload.get("provider") or current_cfg.get("provider") or "smtp").strip()
+    provider = (payload.get("provider") or current_cfg.get("provider") or "gmail_api").strip()
     user = (payload.get("gmail_user") or current_cfg.get("gmail_user") or "").strip()
+    client_id = (payload.get("gmail_client_id") or current_cfg.get("gmail_client_id") or "").strip()
+    client_secret = (payload.get("gmail_client_secret") or current_cfg.get("gmail_client_secret") or "").strip()
+    refresh_token = (payload.get("gmail_refresh_token") or current_cfg.get("gmail_refresh_token") or "").strip()
     pwd = clean_app_password(payload.get("gmail_app_password")) or current_cfg.get("gmail_app_password") or ""
     resend_key = (payload.get("resend_api_key") or current_cfg.get("resend_api_key") or "").strip()
     host = (payload.get("smtp_host") or current_cfg.get("smtp_host") or "smtp.gmail.com").strip()
@@ -326,13 +385,21 @@ async def verify_email_settings(payload: dict, request: Request):
     test_cfg = {
         "provider": provider,
         "gmail_user": user,
+        "gmail_client_id": client_id,
+        "gmail_client_secret": client_secret,
+        "gmail_refresh_token": refresh_token,
         "gmail_app_password": pwd,
         "resend_api_key": resend_key,
         "smtp_host": host,
         "smtp_port": port,
     }
 
-    if provider == "resend":
+    if provider == "gmail_api":
+        if not client_id or not client_secret:
+            raise HTTPException(400, "Google OAuth Client ID and Client Secret are required.")
+        if not refresh_token:
+            raise HTTPException(400, "Google OAuth Refresh Token is required. Please authorize your Google account first.")
+    elif provider == "resend":
         if not resend_key:
             raise HTTPException(400, "Resend API key is required to test HTTP connection.")
     else:
@@ -341,6 +408,94 @@ async def verify_email_settings(payload: dict, request: Request):
 
     ok, msg = await async_verify_email_credentials(test_cfg)
     return {"ok": ok, "message": msg}
+
+
+@settings_router.post("/email/oauth/auth-url")
+async def get_google_auth_url_endpoint(payload: dict, request: Request):
+    """Generate the Google OAuth 2.0 consent URL for Gmail REST API authorization."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import get_email_config, generate_google_auth_url
+    cfg = await get_email_config(db)
+    client_id = (payload.get("client_id") or cfg.get("gmail_client_id") or "").strip()
+    redirect_uri = (payload.get("redirect_uri") or "urn:ietf:wg:oauth:2.0:oob").strip()
+
+    if not client_id:
+        raise HTTPException(400, "Google OAuth Client ID is required to generate authorization URL.")
+
+    url = generate_google_auth_url(client_id=client_id, redirect_uri=redirect_uri)
+    return {"ok": True, "auth_url": url}
+
+
+@settings_router.post("/email/oauth/exchange")
+async def exchange_google_oauth_code_endpoint(payload: dict, request: Request):
+    """Exchange an authorization code for permanent Google OAuth refresh token and persist credentials."""
+    u = await _get_user(request)
+    require_roles("admin", "manager")(u)
+    db = getattr(request.app, "mongodb", None)
+    if db is None:
+        import server
+        db = server.db
+
+    from services.email_service import (
+        get_email_config,
+        exchange_google_auth_code,
+        async_verify_email_credentials,
+    )
+
+    cfg = await get_email_config(db)
+    client_id = (payload.get("client_id") or cfg.get("gmail_client_id") or "").strip()
+    client_secret = (payload.get("client_secret") or cfg.get("gmail_client_secret") or "").strip()
+    code = (payload.get("code") or "").strip()
+    redirect_uri = (payload.get("redirect_uri") or "urn:ietf:wg:oauth:2.0:oob").strip()
+
+    if not client_id or not client_secret:
+        raise HTTPException(400, "Both Client ID and Client Secret are required for Google OAuth token exchange.")
+    if not code:
+        raise HTTPException(400, "Authorization code is required.")
+
+    try:
+        token_data = exchange_google_auth_code(client_id, client_secret, code, redirect_uri)
+        refresh_token = token_data.get("refresh_token", "").strip()
+        if not refresh_token:
+            # If Google didn't return a new refresh token (already authorized), fallback to existing if available
+            refresh_token = cfg.get("gmail_refresh_token", "").strip()
+            if not refresh_token:
+                raise HTTPException(400, "Google did not return a refresh_token. Please revoke access at myaccount.google.com/permissions and retry.")
+
+        save_doc = {
+            "provider": "gmail_api",
+            "gmail_client_id": client_id,
+            "gmail_client_secret": client_secret,
+            "gmail_refresh_token": refresh_token,
+            "updated_at": now_iso(),
+            "updated_by": u.get("email"),
+        }
+        if payload.get("gmail_user"):
+            save_doc["gmail_user"] = str(payload.get("gmail_user")).strip()
+
+        test_cfg = {**cfg, **save_doc}
+        ok, vmsg = await async_verify_email_credentials(test_cfg)
+        if not ok:
+            raise HTTPException(400, f"Connected to Google OAuth, but verification failed: {vmsg}")
+
+        await db.settings.update_one({"_id": "email_config"}, {"$set": save_doc}, upsert=True)
+        return {
+            "ok": True,
+            "message": "Successfully authorized with Google and saved Gmail REST API configuration!",
+            "verification": vmsg,
+            "refresh_token_masked": "1//••••••••" + (refresh_token[-4:] if len(refresh_token) >= 4 else "****"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("OAuth exchange failed")
+        raise HTTPException(400, f"Google OAuth exchange failed: {e}")
 
 
 @settings_router.post("/email/test")
@@ -363,8 +518,12 @@ async def send_test_email_route(payload: dict, request: Request):
     if not recipient:
         raise HTTPException(400, "Recipient email is required.")
 
-    sender_display = cfg["resend_api_key"] and cfg.get("provider") == "resend"
-    sender_info = "Resend HTTP API (Port 443)" if sender_display else f"Gmail SMTP ({cfg.get('gmail_user')})"
+    if cfg.get("provider") == "gmail_api":
+        sender_info = f"Gmail REST API HTTPS Port 443 ({cfg.get('gmail_user') or 'Authorized Account'})"
+    elif cfg.get("provider") == "resend":
+        sender_info = "Resend HTTP API (Port 443 HTTPS)"
+    else:
+        sender_info = f"Gmail SMTP ({cfg.get('gmail_user')})"
 
     subject = "SSK Footcare ERP — Email Connection Test"
     text_body = (

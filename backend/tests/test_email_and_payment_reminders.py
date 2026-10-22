@@ -680,3 +680,98 @@ def test_smtp_timeout_diagnostic_message():
         assert "timed out after" in msg
         assert "Resend API" in msg
         assert "Port 443" in msg
+
+
+def test_gmail_api_auth_url_and_exchange_endpoints(test_client, mock_env):
+    """Test generating Google OAuth consent URL and exchanging auth code."""
+    from services.email_service import generate_google_auth_url
+
+    url = generate_google_auth_url("test_client_id_123")
+    assert "https://accounts.google.com/o/oauth2/v2/auth" in url
+    assert "client_id=test_client_id_123" in url
+    assert "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send" in url
+
+    # Test POST /api/settings/email/oauth/auth-url endpoint
+    res = test_client.post("/api/settings/email/oauth/auth-url", json={
+        "client_id": "client_abc_999",
+    })
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert "client_abc_999" in res.json()["auth_url"]
+
+    # Test POST /api/settings/email/oauth/exchange endpoint with mocked exchange and profile
+    with patch("services.email_service.exchange_google_auth_code") as mock_ex, \
+         patch("services.email_service.async_verify_email_credentials", return_value=(True, "Verified successfully")):
+        mock_ex.return_value = {
+            "access_token": "ya29.test_access_token",
+            "refresh_token": "1//test_permanent_refresh_token",
+            "expires_in": 3600,
+        }
+
+        ex_res = test_client.post("/api/settings/email/oauth/exchange", json={
+            "client_id": "client_abc_999",
+            "client_secret": "secret_xyz_888",
+            "code": "4/0AX_mock_auth_code",
+            "gmail_user": "billing@sskfootcare.com",
+        })
+        assert ex_res.status_code == 200
+        data = ex_res.json()
+        assert data["ok"] is True
+        assert "1//" in data["refresh_token_masked"]
+
+        # Confirm saved in database
+        saved = mock_env.settings_store.get("email_config", {})
+        assert saved["provider"] == "gmail_api"
+        assert saved["gmail_client_id"] == "client_abc_999"
+        assert saved["gmail_client_secret"] == "secret_xyz_888"
+        assert saved["gmail_refresh_token"] == "1//test_permanent_refresh_token"
+
+
+def test_gmail_api_verify_and_send():
+    """Verify Gmail REST API credential verification and message dispatch via Google Client."""
+    from services.email_service import verify_email_credentials, send_email
+
+    cfg = {
+        "provider": "gmail_api",
+        "gmail_user": "accounts@sskfootcare.com",
+        "gmail_client_id": "client_123.apps.googleusercontent.com",
+        "gmail_client_secret": "GOCSPX-secret_123",
+        "gmail_refresh_token": "1//refresh_token_abc",
+        "is_configured": True,
+    }
+
+    with patch("google.oauth2.credentials.Credentials") as mock_creds_cls, \
+         patch("googleapiclient.discovery.build") as mock_build:
+        mock_creds = MagicMock()
+        mock_creds_cls.return_value = mock_creds
+
+        mock_service = MagicMock()
+        mock_build.return_value = mock_service
+
+        # Mock profile get
+        mock_profile = MagicMock()
+        mock_profile.execute.return_value = {"emailAddress": "accounts@sskfootcare.com"}
+        mock_service.users().getProfile.return_value = mock_profile
+
+        # Mock messages send
+        mock_messages = MagicMock()
+        mock_messages.send().execute.return_value = {"id": "msg_gmail_api_999"}
+        mock_service.users().messages.return_value = mock_messages
+
+        # Test verify
+        ok, msg = verify_email_credentials(cfg)
+        assert ok is True
+        assert "accounts@sskfootcare.com" in msg
+        assert "Gmail REST API" in msg
+
+        # Test send
+        send_ok, send_msg = send_email(
+            to_emails="customer@client.com",
+            subject="Overdue Statement Test",
+            text_body="Dear Customer, statement attached.",
+            html_body="<p>Dear Customer, statement attached.</p>",
+            config=cfg,
+        )
+        assert send_ok is True
+        assert "msg_gmail_api_999" in send_msg
+        assert "Gmail REST API" in send_msg

@@ -28,6 +28,11 @@ import {
   CheckCircle2,
   HelpCircle,
   ShieldCheck,
+  Key,
+  RefreshCw,
+  FileCode,
+  Lock,
+  Copy,
 } from "lucide-react";
 
 const STAGE_LABEL = {
@@ -579,8 +584,15 @@ function CompanyProfileSection() {
 /* -------------------- GMAIL & EMAIL SETTINGS SECTION -------------------- */
 function GmailSettingsSection() {
   const [config, setConfig] = useState({
-    provider: "smtp",
+    provider: "gmail_api", // "gmail_api" (Port 443 HTTPS), "smtp", or "resend"
     gmail_user: "",
+    gmail_client_id: "",
+    gmail_client_secret: "",
+    gmail_refresh_token: "",
+    has_client_secret: false,
+    masked_client_secret: "",
+    has_refresh_token: false,
+    masked_refresh_token: "",
     gmail_app_password: "",
     resend_api_key: "",
     from_name: "SSK Footcare Manufacturing",
@@ -600,11 +612,22 @@ function GmailSettingsSection() {
   const [verifying, setVerifying] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [showClientSecret, setShowClientSecret] = useState(false);
+  const [showRefreshToken, setShowRefreshToken] = useState(false);
   const [showResendKey, setShowResendKey] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showJsonPaste, setShowJsonPaste] = useState(false);
+  const [jsonPasteVal, setJsonPasteVal] = useState("");
   const [statusMsg, setStatusMsg] = useState(null);
   const [testModal, setTestModal] = useState(false);
   const [testRecipient, setTestRecipient] = useState("");
+
+  // OAuth Modal state
+  const [authModal, setAuthModal] = useState(false);
+  const [authUrl, setAuthUrl] = useState("");
+  const [authCode, setAuthCode] = useState("");
+  const [exchangingAuth, setExchangingAuth] = useState(false);
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
 
   const load = async () => {
     try {
@@ -613,6 +636,8 @@ function GmailSettingsSection() {
       setConfig((prev) => ({
         ...prev,
         ...data,
+        gmail_client_secret: "",
+        gmail_refresh_token: "",
         gmail_app_password: "",
         resend_api_key: "",
       }));
@@ -623,13 +648,146 @@ function GmailSettingsSection() {
     }
   };
 
+  const [usedRedirectUri, setUsedRedirectUri] = useState("");
+
+  const handleAutoExchangeCode = async (code, redirectUri) => {
+    setStatusMsg({ type: "info", text: "Exchanging Google authorization code..." });
+    try {
+      const { data } = await http.post("/settings/email/oauth/exchange", {
+        code: code.trim(),
+        redirect_uri: redirectUri,
+      });
+      setStatusMsg({
+        type: "success",
+        text: data.message || "Authorized with Google successfully! Refresh token saved.",
+      });
+      window.history.replaceState({}, document.title, window.location.pathname);
+      load();
+    } catch (e) {
+      setStatusMsg({
+        type: "error",
+        text: "Google OAuth exchange failed: " + (e.response?.data?.detail || e.message),
+      });
+    }
+  };
+
   useEffect(() => {
     load();
+
+    // Check if redirected back from Google OAuth with ?code=...
+    const urlParams = new URLSearchParams(window.location.search);
+    const codeParam = urlParams.get("code");
+    if (codeParam) {
+      const currentRedirect = window.location.origin + window.location.pathname;
+      handleAutoExchangeCode(codeParam, currentRedirect);
+    }
   }, []);
 
+  const handleJsonPaste = (text) => {
+    setJsonPasteVal(text);
+    if (!text.trim()) return;
+    try {
+      const parsed = JSON.parse(text);
+      const sub = parsed.installed || parsed.web || parsed;
+      if (sub.client_id) {
+        setConfig((s) => ({
+          ...s,
+          gmail_client_id: sub.client_id,
+          gmail_client_secret: sub.client_secret || s.gmail_client_secret,
+        }));
+        setStatusMsg({
+          type: "success",
+          text: "Successfully extracted Client ID and Client Secret from client_secret.json!",
+        });
+        setShowJsonPaste(false);
+      }
+    } catch (e) {
+      // not valid JSON yet
+    }
+  };
+
+  const handleOpenAuth = async (useOob = false) => {
+    if (!config.gmail_client_id) {
+      setStatusMsg({ type: "error", text: "Please enter your Google OAuth Client ID first." });
+      return;
+    }
+    const targetRedirect = useOob
+      ? "urn:ietf:wg:oauth:2.0:oob"
+      : window.location.origin + window.location.pathname;
+    setUsedRedirectUri(targetRedirect);
+
+    try {
+      const { data } = await http.post("/settings/email/oauth/auth-url", {
+        client_id: config.gmail_client_id.trim(),
+        redirect_uri: targetRedirect,
+      });
+      if (data.auth_url) {
+        setAuthUrl(data.auth_url);
+        window.open(data.auth_url, "_blank");
+        setAuthModal(true);
+      }
+    } catch (e) {
+      setStatusMsg({
+        type: "error",
+        text: "Failed to generate Google authorization URL: " + (e.response?.data?.detail || e.message),
+      });
+    }
+  };
+
+  const handleExchangeAuthCode = async () => {
+    let codeVal = (authCode || "").trim();
+    if (!codeVal) {
+      alert("Please paste the authorization code provided by Google (or the callback URL).");
+      return;
+    }
+    // If the user pasted the complete redirected URL (e.g. https://.../settings?code=4/0AX...&scope=...)
+    if (codeVal.includes("code=")) {
+      try {
+        const urlObj = new URL(codeVal);
+        codeVal = urlObj.searchParams.get("code") || codeVal;
+      } catch {
+        const match = codeVal.match(/code=([^&]+)/);
+        if (match) codeVal = decodeURIComponent(match[1]);
+      }
+    }
+    const redirectToSend = usedRedirectUri || (window.location.origin + window.location.pathname);
+    setExchangingAuth(true);
+    try {
+      const { data } = await http.post("/settings/email/oauth/exchange", {
+        client_id: (config.gmail_client_id || "").trim(),
+        client_secret: (config.gmail_client_secret || "").trim(),
+        code: codeVal.trim(),
+        redirect_uri: redirectToSend,
+        gmail_user: (config.gmail_user || "").trim(),
+      });
+      setStatusMsg({
+        type: "success",
+        text: data.message || "Authorized with Google successfully! Refresh token saved.",
+      });
+      setAuthModal(false);
+      setAuthCode("");
+      load();
+    } catch (e) {
+      alert("Authorization exchange failed: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setExchangingAuth(false);
+    }
+  };
+
   const handleSave = async (verifyFirst = false) => {
+    const isGmailApi = config.provider === "gmail_api";
     const isResend = config.provider === "resend";
-    if (isResend) {
+
+    if (isGmailApi) {
+      if (!config.gmail_client_id) {
+        setStatusMsg({ type: "error", text: "Please enter your Google Cloud OAuth Client ID." });
+        return;
+      }
+      if (!config.has_client_secret && !config.gmail_client_secret) {
+        setStatusMsg({ type: "error", text: "Please enter your Google Cloud OAuth Client Secret." });
+        return;
+      }
+    } else if (isResend) {
       if (!config.has_resend_key && !config.resend_api_key) {
         setStatusMsg({
           type: "error",
@@ -655,8 +813,11 @@ function GmailSettingsSection() {
     setStatusMsg(null);
     try {
       const payload = {
-        provider: config.provider || "smtp",
-        gmail_user: config.gmail_user.trim(),
+        provider: config.provider || "gmail_api",
+        gmail_user: (config.gmail_user || "").trim(),
+        gmail_client_id: (config.gmail_client_id || "").trim(),
+        gmail_client_secret: (config.gmail_client_secret || "").trim(),
+        gmail_refresh_token: (config.gmail_refresh_token || "").trim(),
         gmail_app_password: config.gmail_app_password,
         resend_api_key: config.resend_api_key,
         from_name: config.from_name,
@@ -685,8 +846,26 @@ function GmailSettingsSection() {
   };
 
   const handleVerifyOnly = async () => {
+    const isGmailApi = config.provider === "gmail_api";
     const isResend = config.provider === "resend";
-    if (isResend) {
+
+    if (isGmailApi) {
+      if (!config.gmail_client_id) {
+        setStatusMsg({ type: "error", text: "Please enter your Google Cloud OAuth Client ID." });
+        return;
+      }
+      if (!config.has_client_secret && !config.gmail_client_secret) {
+        setStatusMsg({ type: "error", text: "Please enter your Google Cloud OAuth Client Secret." });
+        return;
+      }
+      if (!config.has_refresh_token && !config.gmail_refresh_token) {
+        setStatusMsg({
+          type: "error",
+          text: "Please click 'Authorize with Google' or provide a Refresh Token first.",
+        });
+        return;
+      }
+    } else if (isResend) {
       if (!config.has_resend_key && !config.resend_api_key) {
         setStatusMsg({ type: "error", text: "Please enter your Resend API Key to test." });
         return;
@@ -706,8 +885,11 @@ function GmailSettingsSection() {
     setStatusMsg(null);
     try {
       const { data } = await http.post("/settings/email/verify", {
-        provider: config.provider || "smtp",
-        gmail_user: config.gmail_user.trim(),
+        provider: config.provider || "gmail_api",
+        gmail_user: (config.gmail_user || "").trim(),
+        gmail_client_id: (config.gmail_client_id || "").trim(),
+        gmail_client_secret: (config.gmail_client_secret || "").trim(),
+        gmail_refresh_token: (config.gmail_refresh_token || "").trim(),
         gmail_app_password: config.gmail_app_password,
         resend_api_key: config.resend_api_key,
         smtp_host: config.smtp_host || "smtp.gmail.com",
@@ -748,7 +930,14 @@ function GmailSettingsSection() {
     }
   };
 
+  const isGmailApi = config.provider === "gmail_api";
   const isResend = config.provider === "resend";
+  const isSmtp = config.provider === "smtp";
+
+  const isConfiguredThisProvider =
+    (isGmailApi && (config.has_refresh_token || config.gmail_refresh_token)) ||
+    (isResend && (config.has_resend_key || config.resend_api_key)) ||
+    (isSmtp && (config.has_app_password || config.gmail_app_password));
 
   return (
     <Card className="p-6" data-testid="gmail-settings-section">
@@ -761,7 +950,11 @@ function GmailSettingsSection() {
             {config.is_configured ? (
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                {isResend ? "Resend API Active" : "Gmail SMTP Connected"}
+                {config.provider === "gmail_api"
+                  ? "Gmail REST API Active (Port 443 HTTPS)"
+                  : config.provider === "resend"
+                  ? "Resend API Active"
+                  : "Gmail SMTP Connected"}
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
@@ -771,11 +964,21 @@ function GmailSettingsSection() {
             )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Dispatch automated overdue payment reminders, invoice copies, and dispatch advisories to clients directly from your ERP.
+            Dispatch automated overdue payment statements and invoice notifications directly from your ERP.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!isResend && (
+          {isGmailApi && (
+            <button
+              type="button"
+              onClick={() => setShowHelp(!showHelp)}
+              className="text-xs text-slate-600 hover:text-slate-900 border border-slate-300 px-2.5 py-1.5 rounded flex items-center gap-1 hover:bg-slate-50 transition-colors"
+            >
+              <HelpCircle className="w-3.5 h-3.5 text-[#C27842]" />
+              <span>{showHelp ? "Hide Google Guide" : "Google Cloud Guide"}</span>
+            </button>
+          )}
+          {isSmtp && (
             <button
               type="button"
               onClick={() => setShowHelp(!showHelp)}
@@ -799,12 +1002,27 @@ function GmailSettingsSection() {
       </div>
 
       {/* Provider Switcher Tabs */}
-      <div className="mb-5 flex border-b-2 border-slate-200">
+      <div className="mb-5 flex border-b-2 border-slate-200 overflow-x-auto">
+        <button
+          type="button"
+          onClick={() => setConfig((s) => ({ ...s, provider: "gmail_api" }))}
+          className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+            isGmailApi
+              ? "border-[#C27842] text-[#C27842] bg-orange-50/50"
+              : "border-transparent text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <ShieldCheck className="w-4 h-4 text-emerald-600" />
+          Gmail REST API (Port 443 HTTPS — Render / Cloud Safe)
+          <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 uppercase tracking-normal">
+            Recommended
+          </span>
+        </button>
         <button
           type="button"
           onClick={() => setConfig((s) => ({ ...s, provider: "smtp" }))}
-          className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 ${
-            !isResend
+          className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+            isSmtp
               ? "border-[#C27842] text-[#C27842] bg-orange-50/50"
               : "border-transparent text-slate-500 hover:text-slate-800"
           }`}
@@ -815,34 +1033,46 @@ function GmailSettingsSection() {
         <button
           type="button"
           onClick={() => setConfig((s) => ({ ...s, provider: "resend" }))}
-          className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 ${
+          className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 whitespace-nowrap ${
             isResend
               ? "border-[#C27842] text-[#C27842] bg-orange-50/50"
               : "border-transparent text-slate-500 hover:text-slate-800"
           }`}
         >
-          <ShieldCheck className="w-4 h-4" />
-          Resend HTTP API (Port 443 HTTPS — Cloud VPS Safe)
+          <FileCode className="w-4 h-4" />
+          Resend HTTP API (Custom Domains)
         </button>
       </div>
 
+      {/* Gmail REST API Info Banner */}
+      {isGmailApi && (
+        <div className="mb-4 p-3.5 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-950 leading-relaxed">
+          <div className="font-bold flex items-center gap-1.5 text-emerald-800 mb-1">
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            Cloud Firewall Immune (HTTPS Port 443):
+          </div>
+          Bypasses Render's outbound SMTP restrictions completely. All requests route directly over standard web <b>HTTPS (Port 443)</b>.
+          You can keep your exact <b>@gmail.com</b> address without needing a custom domain, DKIM records, or hosting port unblocking.
+        </div>
+      )}
+
       {/* Cloud Port Blocking Note for SMTP */}
-      {!isResend && (
+      {isSmtp && (
         <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 leading-relaxed">
           <div className="font-bold flex items-center gap-1.5 text-amber-800 mb-1">
             <AlertCircle className="w-4 h-4 text-amber-600" />
             Cloud Firewall Note:
           </div>
-          If you are hosted on Render, AWS EC2, or DigitalOcean and test connection fails with a <b>15-second timeout</b> or <b>[Errno 101] Network is unreachable</b> on both Port 465 and Port 587, your hosting provider completely blocks outbound SMTP traffic.
+          If you are hosted on Render, AWS EC2, or DigitalOcean and test connection fails with a <b>15-second timeout</b> or <b>[Errno 101] Network is unreachable</b> on both Port 465 and Port 587, your hosting provider blocks outbound SMTP ports (25, 465, 587).
           {" "}
           <button
             type="button"
-            onClick={() => setConfig((s) => ({ ...s, provider: "resend" }))}
+            onClick={() => setConfig((s) => ({ ...s, provider: "gmail_api" }))}
             className="font-bold underline text-[#C27842] hover:text-orange-900 ml-1"
           >
-            Switch to Resend HTTP API tab (Port 443)
+            Switch to Gmail REST API tab (Port 443)
           </button>{" "}
-          to deliver emails over standard web HTTPS with zero firewall blocks.
+          to route emails over standard HTTPS with zero firewall blocks.
         </div>
       )}
 
@@ -851,39 +1081,59 @@ function GmailSettingsSection() {
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 leading-relaxed">
           <div className="font-bold flex items-center gap-1.5 text-blue-800 mb-1">
             <ShieldCheck className="w-4 h-4 text-blue-600" />
-            HTTPS Port 443 Delivery (Cloud VPS & Firewall Immune):
+            Custom Domain Delivery (HTTPS Port 443):
           </div>
-          Resend dispatches emails via REST API over HTTPS port 443 (same port as normal website browsing).
-          It will never time out or be blocked by cloud VPS security groups or ISP firewall restrictions.
-          Get a free API key (includes 3,000 emails/month free) at{" "}
-          <a
-            href="https://resend.com/api-keys"
-            target="_blank"
-            rel="noreferrer"
-            className="font-bold underline text-blue-700"
-          >
-            resend.com/api-keys <ExternalLink className="w-3 h-3 inline" />
-          </a>.
+          Resend sends emails via REST API over HTTPS port 443. Third-party APIs like Resend require you to own a custom domain (e.g. <code>@sskfootcare.com</code>). If your sender address ends in <code>@gmail.com</code>, Google's DMARC policy requires using the <b>Gmail REST API</b> tab instead.
+        </div>
+      )}
+
+      {/* Google Cloud Console Setup Guide */}
+      {isGmailApi && showHelp && (
+        <div className="mb-5 p-4 bg-slate-50 border-2 border-slate-200 rounded text-xs space-y-3 text-slate-700">
+          <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            3-Step Google Cloud Console Setup Guide:
+          </div>
+          <ol className="list-decimal list-inside space-y-2 text-slate-600 pl-1 leading-relaxed">
+            <li>
+              <b>Enable the Gmail API:</b> Go to{" "}
+              <a
+                href="https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 underline font-semibold"
+              >
+                Google Cloud Console &gt; Gmail API <ExternalLink className="w-3 h-3 inline" />
+              </a>{" "}
+              and click <b>Enable</b>.
+            </li>
+            <li>
+              <b>Configure OAuth Consent Screen:</b> Go to <i>APIs & Services &gt; OAuth consent screen</i>. Choose <b>External</b>, set App name to <code>SSK Footcare ERP</code>, enter your email, and under <b>Test users</b>, add your company Gmail address (e.g. <code>sskfootcare@gmail.com</code>).
+            </li>
+            <li>
+              <b>Create OAuth Client ID:</b> Go to <i>APIs & Services &gt; Credentials &gt; Create Credentials &gt; OAuth client ID</i>. Application type: select <b>Desktop app</b> (or Web application). Download the credentials JSON or copy the <b>Client ID</b> and <b>Client Secret</b> below.
+            </li>
+          </ol>
+          <div className="text-[11px] text-slate-500 bg-white p-2.5 rounded border border-slate-200">
+            <b>Tip:</b> If you downloaded <code>client_secret.json</code>, click <b>"Paste client_secret.json"</b> below or run <code>python backend/scripts/setup_gmail_api.py</code> in your terminal!
+          </div>
         </div>
       )}
 
       {/* Gmail App Password Help Box */}
-      {!isResend && showHelp && (
+      {isSmtp && showHelp && (
         <div className="mb-5 p-4 bg-slate-50 border-2 border-slate-200 rounded text-xs space-y-2 text-slate-700">
           <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />
             How to generate a 16-character Google App Password (Required for Gmail SMTP):
           </div>
           <ol className="list-decimal list-inside space-y-1 text-slate-600 pl-1">
-            <li>Log into your company Google / Gmail account at <a href="https://myaccount.google.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com <ExternalLink className="w-3 h-3 inline" /></a>.</li>
+            <li>Log into your company Google account at <a href="https://myaccount.google.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com <ExternalLink className="w-3 h-3 inline" /></a>.</li>
             <li>Go to <b>Security</b> and ensure <b>2-Step Verification</b> is turned ON.</li>
-            <li>In the search bar at top of Google Account, search for <b>App Passwords</b> (or visit <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com/apppasswords <ExternalLink className="w-3 h-3 inline" /></a>).</li>
-            <li>Enter an App name (e.g. <code>SSK Footcare ERP</code>) and click <b>Create</b>.</li>
-            <li>Google will show a 16-letter password (e.g. <code>abcd efgh ijkl mnop</code>). Paste it into the <b>Google App Password</b> field below and click <b>Save & Verify</b>.</li>
+            <li>In search bar, search for <b>App Passwords</b> (or visit <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">myaccount.google.com/apppasswords <ExternalLink className="w-3 h-3 inline" /></a>).</li>
+            <li>Enter App name <code>SSK Footcare ERP</code> and click <b>Create</b>.</li>
+            <li>Paste the 16-letter password into the field below and click <b>Save & Verify</b>.</li>
           </ol>
-          <div className="text-[11px] text-slate-500 pt-1">
-            Note: You do NOT need to give your regular Gmail login password. The 16-character App Password is safer and specifically designed for business ERP applications.
-          </div>
         </div>
       )}
 
@@ -910,9 +1160,184 @@ function GmailSettingsSection() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {/* PROVIDER-SPECIFIC CREDENTIALS */}
-        {isResend ? (
+      {/* PROVIDER-SPECIFIC CREDENTIALS */}
+      {isGmailApi ? (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Sender Gmail Address"
+              placeholder="e.g. sskfootcare@gmail.com or billing@client.com"
+              value={config.gmail_user}
+              onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
+              testId="email-user-input"
+            />
+
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+                <span>Google OAuth Client ID</span>
+                <button
+                  type="button"
+                  onClick={() => setShowJsonPaste(!showJsonPaste)}
+                  className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold lowercase flex items-center gap-1"
+                >
+                  <FileCode className="w-3 h-3" />
+                  {showJsonPaste ? "hide JSON paste" : "paste client_secret.json"}
+                </button>
+              </div>
+              <input
+                type="text"
+                placeholder="e.g. 1234567890-xxx.apps.googleusercontent.com"
+                value={config.gmail_client_id}
+                onChange={(e) => setConfig((s) => ({ ...s, gmail_client_id: e.target.value }))}
+                data-testid="gmail-client-id-input"
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono"
+              />
+            </div>
+          </div>
+
+          {/* JSON Paste Box */}
+          {showJsonPaste && (
+            <div className="p-3 bg-slate-50 border-2 border-dashed border-slate-300 rounded text-xs space-y-2">
+              <div className="font-bold text-slate-800 flex items-center justify-between">
+                <span>Paste contents of downloaded client_secret.json:</span>
+                <button
+                  type="button"
+                  onClick={() => setShowJsonPaste(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  ✕
+                </button>
+              </div>
+              <textarea
+                rows={3}
+                placeholder='{"installed": {"client_id": "...", "client_secret": "..."}}'
+                value={jsonPasteVal}
+                onChange={(e) => handleJsonPaste(e.target.value)}
+                className="w-full border border-slate-300 rounded p-2 font-mono text-[11px] focus:outline-none focus:border-blue-500"
+              />
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+                <span>Google OAuth Client Secret</span>
+                {config.has_client_secret && !config.gmail_client_secret && (
+                  <span className="text-[10px] text-green-600 font-semibold lowercase">
+                    configured ({config.masked_client_secret})
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type={showClientSecret ? "text" : "password"}
+                  placeholder={
+                    config.has_client_secret
+                      ? "Client secret configured (leave blank to keep)"
+                      : "e.g. GOCSPX-xxxxxxxxxxxxxxxx"
+                  }
+                  value={config.gmail_client_secret}
+                  onChange={(e) => setConfig((s) => ({ ...s, gmail_client_secret: e.target.value }))}
+                  data-testid="gmail-client-secret-input"
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowClientSecret(!showClientSecret)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                  title={showClientSecret ? "Hide secret" : "Show secret"}
+                >
+                  {showClientSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+                <span>Google Refresh Token</span>
+                {config.has_refresh_token && !config.gmail_refresh_token && (
+                  <span className="text-[10px] text-green-600 font-semibold lowercase">
+                    configured ({config.masked_refresh_token})
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type={showRefreshToken ? "text" : "password"}
+                  placeholder={
+                    config.has_refresh_token
+                      ? "Refresh token configured (leave blank to keep)"
+                      : "Click 'Authorize with Google' or paste token"
+                  }
+                  value={config.gmail_refresh_token}
+                  onChange={(e) => setConfig((s) => ({ ...s, gmail_refresh_token: e.target.value }))}
+                  data-testid="gmail-refresh-token-input"
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowRefreshToken(!showRefreshToken)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                  title={showRefreshToken ? "Hide token" : "Show token"}
+                >
+                  {showRefreshToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Authorized Redirect URI Info Card */}
+          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg text-xs space-y-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="font-bold text-blue-900 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-blue-600" /> Google Authorized Redirect URI
+                </span>
+                <p className="text-[11px] text-blue-700 mt-0.5">
+                  Must be added under <b>Authorized redirect URIs</b> in Google Cloud Console &gt; Credentials &gt; OAuth Client ID.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="bg-white border border-blue-200 px-2 py-1 rounded text-[11px] text-blue-950 font-mono select-all">
+                  {typeof window !== "undefined" ? window.location.origin + window.location.pathname : "/settings"}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (typeof window !== "undefined") {
+                      navigator.clipboard.writeText(window.location.origin + window.location.pathname);
+                      setCopiedRedirect(true);
+                      setTimeout(() => setCopiedRedirect(false), 2500);
+                    }
+                  }}
+                  className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold text-[11px] flex items-center gap-1 transition-colors whitespace-nowrap"
+                  title="Copy Redirect URI to clipboard"
+                >
+                  <Copy className="w-3 h-3" />
+                  {copiedRedirect ? "Copied!" : "Copy URI"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick 1-Click Authorize Bar */}
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="text-xs text-slate-600">
+              <span className="font-bold text-slate-800">Ready to connect?</span> Click the button to grant Gmail sending permission with your Google account.
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenAuth}
+              disabled={!config.gmail_client_id}
+              className="px-3.5 py-1.5 bg-[#C27842] hover:bg-[#A35D2E] disabled:bg-slate-300 text-white rounded font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs"
+            >
+              <Key className="w-3.5 h-3.5" />
+              Authorize with Google (1-Click)
+            </button>
+          </div>
+        </div>
+      ) : isResend ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
               <span>Resend API Key (starts with re_)</span>
@@ -945,51 +1370,54 @@ function GmailSettingsSection() {
               </button>
             </div>
           </div>
-        ) : (
-          <>
-            <Input
-              label="Company Gmail Address"
-              placeholder="e.g. billing@sskfootcare.com or company@gmail.com"
-              value={config.gmail_user}
-              onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
-              testId="email-user-input"
-            />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input
+            label="Company Gmail Address"
+            placeholder="e.g. billing@sskfootcare.com or company@gmail.com"
+            value={config.gmail_user}
+            onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
+            testId="email-user-input"
+          />
 
-            <div>
-              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
-                <span>Google App Password (16 characters)</span>
-                {config.has_app_password && !config.gmail_app_password && (
-                  <span className="text-[10px] text-green-600 font-semibold lowercase">
-                    configured ({config.masked_app_password})
-                  </span>
-                )}
-              </div>
-              <div className="relative">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  placeholder={
-                    config.has_app_password
-                      ? "Password configured (leave blank to keep)"
-                      : "e.g. abcd efgh ijkl mnop"
-                  }
-                  value={config.gmail_app_password}
-                  onChange={(e) => setConfig((s) => ({ ...s, gmail_app_password: e.target.value }))}
-                  data-testid="email-password-input"
-                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
-                  title={showPassword ? "Hide password" : "Show password"}
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+              <span>Google App Password (16 characters)</span>
+              {config.has_app_password && !config.gmail_app_password && (
+                <span className="text-[10px] text-green-600 font-semibold lowercase">
+                  configured ({config.masked_app_password})
+                </span>
+              )}
             </div>
-          </>
-        )}
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                placeholder={
+                  config.has_app_password
+                    ? "Password configured (leave blank to keep)"
+                    : "e.g. abcd efgh ijkl mnop"
+                }
+                value={config.gmail_app_password}
+                onChange={(e) => setConfig((s) => ({ ...s, gmail_app_password: e.target.value }))}
+                data-testid="email-password-input"
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                title={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
+      {/* General Email Settings (Sender name, CC, Reply-to) */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
         <Input
           label="Sender Display Name"
           placeholder="e.g. SSK Footcare Manufacturing"
@@ -1013,41 +1441,42 @@ function GmailSettingsSection() {
           onChange={(e) => setConfig((s) => ({ ...s, reply_to: e.target.value }))}
           testId="email-reply-to"
         />
-
-        {!isResend && (
-          <div>
-            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-              SMTP Port & SSL Mode
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setConfig((s) => ({ ...s, smtp_port: 465 }))}
-                className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
-                  Number(config.smtp_port) === 465
-                    ? "bg-[#0F172A] text-white border-[#0F172A]"
-                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
-                }`}
-              >
-                Port 465 (SSL)
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfig((s) => ({ ...s, smtp_port: 587 }))}
-                className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
-                  Number(config.smtp_port) === 587
-                    ? "bg-[#0F172A] text-white border-[#0F172A]"
-                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
-                }`}
-              >
-                Port 587 (STARTTLS)
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
-      <div className="mt-5 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+      {isSmtp && (
+        <div className="mt-4">
+          <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+            SMTP Port & SSL Mode
+          </div>
+          <div className="flex items-center gap-2 max-w-xs">
+            <button
+              type="button"
+              onClick={() => setConfig((s) => ({ ...s, smtp_port: 465 }))}
+              className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
+                Number(config.smtp_port) === 465
+                  ? "bg-[#0F172A] text-white border-[#0F172A]"
+                  : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+              }`}
+            >
+              Port 465 (SSL)
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfig((s) => ({ ...s, smtp_port: 587 }))}
+              className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
+                Number(config.smtp_port) === 587
+                  ? "bg-[#0F172A] text-white border-[#0F172A]"
+                  : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+              }`}
+            >
+              Port 587 (STARTTLS)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Footer Controls */}
+      <div className="mt-6 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
         <div className="text-[11px] text-slate-500">
           {config.updated_at ? (
             <span>Last updated: {new Date(config.updated_at).toLocaleString()}</span>
@@ -1060,7 +1489,7 @@ function GmailSettingsSection() {
         <div className="flex items-center gap-2">
           <BtnSecondary
             onClick={handleVerifyOnly}
-            disabled={verifying || saving || (!isResend && !config.gmail_user) || (isResend && !config.has_resend_key && !config.resend_api_key)}
+            disabled={verifying || saving || !isConfiguredThisProvider}
             data-testid="verify-email-btn"
             className="px-3 py-2 text-xs"
           >
@@ -1068,7 +1497,7 @@ function GmailSettingsSection() {
           </BtnSecondary>
           <BtnPrimary
             onClick={() => handleSave(true)}
-            disabled={saving || verifying || (!isResend && !config.gmail_user) || (isResend && !config.has_resend_key && !config.resend_api_key)}
+            disabled={saving || verifying || !isConfiguredThisProvider}
             data-testid="save-email-btn"
             className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] px-4 py-2 text-xs"
           >
@@ -1076,6 +1505,66 @@ function GmailSettingsSection() {
           </BtnPrimary>
         </div>
       </div>
+
+      {/* Google OAuth Code Modal */}
+      {authModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs grid place-items-center p-4">
+          <div className="bg-white w-full max-w-lg border border-slate-300 rounded-xl shadow-2xl p-6">
+            <h3 className="text-base font-bold text-slate-900 mb-1 flex items-center gap-2">
+              <Key className="w-5 h-5 text-[#C27842]" /> Connect Google Account
+            </h3>
+            <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+              1. A Google authorization tab was opened. If not,{" "}
+              <a href={authUrl} target="_blank" rel="noreferrer" className="text-blue-600 font-bold underline">
+                click here to open Google Login <ExternalLink className="w-3 h-3 inline" />
+              </a>.<br />
+              2. Sign in with your Google account and grant permission.<br />
+              3. Once redirected, copy the <b>authorization code</b> (or the entire redirected page URL from your address bar) and paste it below.
+            </p>
+
+            {/* Redirect URI Reference Box */}
+            <div className="mb-3 p-2.5 bg-slate-50 border border-slate-200 rounded text-[11px] text-slate-600 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-700">Requested Redirect URI:</span>
+                <span className="font-mono text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
+                  {usedRedirectUri || (typeof window !== "undefined" ? window.location.origin + window.location.pathname : "")}
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-500">
+                If Google displays <b>Error 400: redirect_uri_mismatch</b>, add the exact URI above to <b>Authorized redirect URIs</b> in Google Cloud Console Credentials.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] uppercase font-bold text-slate-700 tracking-wider block mb-1">
+                  Authorization Code or Callback URL
+                </label>
+                <input
+                  type="text"
+                  placeholder="4/0AX4XfWh... or https://...?code=..."
+                  value={authCode}
+                  onChange={(e) => setAuthCode(e.target.value)}
+                  className="w-full border-2 border-slate-300 rounded px-3 py-2 text-sm font-mono focus:border-blue-600 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <BtnSecondary onClick={() => setAuthModal(false)} disabled={exchangingAuth}>
+                Cancel
+              </BtnSecondary>
+              <BtnPrimary
+                onClick={handleExchangeAuthCode}
+                disabled={exchangingAuth || !authCode.trim()}
+                className="bg-[#C27842] border-[#C27842]"
+              >
+                {exchangingAuth ? "Connecting..." : "Complete Connection"}
+              </BtnPrimary>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Test Email Modal */}
       {testModal && (
@@ -1085,7 +1574,15 @@ function GmailSettingsSection() {
               <Mail className="w-4 h-4 text-[#C27842]" /> Send Test Email
             </h3>
             <p className="text-xs text-slate-600 mb-4">
-              Send a test advisory message from <b>{isResend ? "Resend HTTP API" : config.gmail_user}</b> to verify real email delivery.
+              Send a test advisory message from{" "}
+              <b>
+                {isGmailApi
+                  ? "Gmail REST API (Port 443)"
+                  : isResend
+                  ? "Resend HTTP API"
+                  : config.gmail_user}
+              </b>{" "}
+              to verify real email delivery.
             </p>
             <div className="space-y-3">
               <Input

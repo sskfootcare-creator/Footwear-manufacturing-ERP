@@ -8,6 +8,7 @@ and branded Payment Reminders with invoice PDF attachments.
 import os
 import re
 import ssl
+import json
 import base64
 import smtplib
 import socket
@@ -51,11 +52,14 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
 
 
 async def get_email_config(db=None) -> Dict[str, Any]:
-    """Retrieve email configuration from MongoDB settings or fallback to environment variables."""
+    """Retrieve email configuration from MongoDB settings, credentials files, or environment variables."""
     cfg = {
-        "provider": "smtp",  # "smtp" (Gmail) or "resend" (HTTP API Port 443)
+        "provider": "smtp",  # "gmail_api" (Port 443 HTTPS), "smtp" (Gmail Port 465/587), or "resend"
         "gmail_user": "",
         "gmail_app_password": "",
+        "gmail_client_id": "",
+        "gmail_client_secret": "",
+        "gmail_refresh_token": "",
         "resend_api_key": "",
         "from_name": "SSK Footcare Manufacturing",
         "reply_to": "",
@@ -78,6 +82,12 @@ async def get_email_config(db=None) -> Dict[str, Any]:
                     cfg["gmail_user"] = str(doc.get("gmail_user", "")).strip()
                 if doc.get("gmail_app_password"):
                     cfg["gmail_app_password"] = clean_app_password(doc.get("gmail_app_password", ""))
+                if doc.get("gmail_client_id"):
+                    cfg["gmail_client_id"] = str(doc.get("gmail_client_id", "")).strip()
+                if doc.get("gmail_client_secret"):
+                    cfg["gmail_client_secret"] = str(doc.get("gmail_client_secret", "")).strip()
+                if doc.get("gmail_refresh_token"):
+                    cfg["gmail_refresh_token"] = str(doc.get("gmail_refresh_token", "")).strip()
                 if doc.get("resend_api_key"):
                     cfg["resend_api_key"] = str(doc.get("resend_api_key", "")).strip()
                 if doc.get("from_name"):
@@ -94,38 +104,107 @@ async def get_email_config(db=None) -> Dict[str, Any]:
                     except (ValueError, TypeError):
                         cfg["smtp_port"] = 465
                 cfg["updated_at"] = doc.get("updated_at")
-                if (cfg["gmail_user"] and cfg["gmail_app_password"]) or cfg["resend_api_key"]:
+                if (
+                    (cfg["gmail_client_id"] and cfg["gmail_refresh_token"])
+                    or (cfg["gmail_user"] and cfg["gmail_app_password"])
+                    or cfg["resend_api_key"]
+                ):
                     cfg["is_configured"] = True
                     cfg["source"] = "database"
         except Exception as e:
             log.warning("Could not read email_config from db: %s", e)
 
-    # 2. Fall back to environment variables if not configured via database
+    # 2. Check local client_secret.json / token.json credentials files if present
+    for secret_path in [
+        os.path.join(os.getcwd(), "client_secret.json"),
+        os.path.join(os.getcwd(), "backend", "client_secret.json"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "client_secret.json"),
+    ]:
+        if os.path.exists(secret_path):
+            try:
+                with open(secret_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    c = data.get("installed") or data.get("web") or data
+                    if c.get("client_id") and not cfg["gmail_client_id"]:
+                        cfg["gmail_client_id"] = str(c.get("client_id")).strip()
+                    if c.get("client_secret") and not cfg["gmail_client_secret"]:
+                        cfg["gmail_client_secret"] = str(c.get("client_secret")).strip()
+            except Exception as e:
+                log.warning("Could not read client_secret.json at %s: %s", secret_path, e)
+            break
+
+    for token_path in [
+        os.path.join(os.getcwd(), "token.json"),
+        os.path.join(os.getcwd(), "backend", "token.json"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "token.json"),
+    ]:
+        if os.path.exists(token_path):
+            try:
+                with open(token_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("refresh_token") and not cfg["gmail_refresh_token"]:
+                        cfg["gmail_refresh_token"] = str(data.get("refresh_token")).strip()
+                    if data.get("client_id") and not cfg["gmail_client_id"]:
+                        cfg["gmail_client_id"] = str(data.get("client_id")).strip()
+                    if data.get("client_secret") and not cfg["gmail_client_secret"]:
+                        cfg["gmail_client_secret"] = str(data.get("client_secret")).strip()
+            except Exception as e:
+                log.warning("Could not read token.json at %s: %s", token_path, e)
+            break
+
+    # 3. Fall back to environment variables
+    env_client_id = os.environ.get("GMAIL_API_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GMAIL_CLIENT_ID", "")
+    env_client_secret = os.environ.get("GMAIL_API_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GMAIL_CLIENT_SECRET", "")
+    env_refresh_token = os.environ.get("GMAIL_API_REFRESH_TOKEN") or os.environ.get("GOOGLE_REFRESH_TOKEN") or os.environ.get("GMAIL_REFRESH_TOKEN", "")
+    env_resend = os.environ.get("RESEND_API_KEY", "").strip()
+    env_user = os.environ.get("GMAIL_USER", "").strip()
+    env_pass = clean_app_password(os.environ.get("GMAIL_APP_PASSWORD", ""))
+    env_from = os.environ.get("GMAIL_FROM_NAME", "").strip()
+    env_reply_to = os.environ.get("GMAIL_REPLY_TO", "").strip()
+    env_cc = os.environ.get("GMAIL_DEFAULT_CC", "").strip()
+
+    if env_client_id and not cfg["gmail_client_id"]:
+        cfg["gmail_client_id"] = env_client_id.strip()
+    if env_client_secret and not cfg["gmail_client_secret"]:
+        cfg["gmail_client_secret"] = env_client_secret.strip()
+    if env_refresh_token and not cfg["gmail_refresh_token"]:
+        cfg["gmail_refresh_token"] = env_refresh_token.strip()
+
+    if env_resend and not cfg["resend_api_key"]:
+        cfg["resend_api_key"] = env_resend
+    if env_user and not cfg["gmail_user"]:
+        cfg["gmail_user"] = env_user
+    if env_pass and not cfg["gmail_app_password"]:
+        cfg["gmail_app_password"] = env_pass
+    if env_from and not cfg["from_name"]:
+        cfg["from_name"] = env_from
+    if env_reply_to and not cfg["reply_to"]:
+        cfg["reply_to"] = env_reply_to
+    if env_cc and not cfg["default_cc"]:
+        cfg["default_cc"] = env_cc
+
     if not cfg["is_configured"]:
-        env_resend = os.environ.get("RESEND_API_KEY", "").strip()
-        env_user = os.environ.get("GMAIL_USER", "").strip()
-        env_pass = clean_app_password(os.environ.get("GMAIL_APP_PASSWORD", ""))
-        env_from = os.environ.get("GMAIL_FROM_NAME", "").strip()
-        env_reply_to = os.environ.get("GMAIL_REPLY_TO", "").strip()
-        env_cc = os.environ.get("GMAIL_DEFAULT_CC", "").strip()
-
-        if env_resend:
-            cfg["resend_api_key"] = env_resend
-            cfg["provider"] = "resend"
-        if env_user:
-            cfg["gmail_user"] = env_user
-        if env_pass:
-            cfg["gmail_app_password"] = env_pass
-        if env_from:
-            cfg["from_name"] = env_from
-        if env_reply_to:
-            cfg["reply_to"] = env_reply_to
-        if env_cc:
-            cfg["default_cc"] = env_cc
-
-        if (cfg["gmail_user"] and cfg["gmail_app_password"]) or cfg["resend_api_key"]:
+        if cfg["gmail_client_id"] and cfg["gmail_refresh_token"]:
             cfg["is_configured"] = True
+            cfg["provider"] = "gmail_api"
             cfg["source"] = "environment"
+        elif cfg["resend_api_key"]:
+            cfg["is_configured"] = True
+            cfg["provider"] = "resend"
+            cfg["source"] = "environment"
+        elif cfg["gmail_user"] and cfg["gmail_app_password"]:
+            cfg["is_configured"] = True
+            cfg["provider"] = "smtp"
+            cfg["source"] = "environment"
+
+    # Default provider resolution
+    if cfg.get("provider") not in ("gmail_api", "smtp", "resend"):
+        if cfg.get("gmail_client_id") and cfg.get("gmail_refresh_token"):
+            cfg["provider"] = "gmail_api"
+        elif cfg.get("resend_api_key"):
+            cfg["provider"] = "resend"
+        else:
+            cfg["provider"] = "smtp"
 
     return cfg
 
@@ -312,13 +391,93 @@ def _verify_resend_api_key(api_key: str, timeout: int = 10) -> Tuple[bool, str]:
         return (False, f"Resend API connection failed: {e}")
 
 
+def _verify_gmail_api_credentials(config: Dict[str, Any], timeout: int = 15) -> Tuple[bool, str]:
+    """Verify Gmail REST API OAuth credentials over HTTPS (Port 443)."""
+    client_id = (config.get("gmail_client_id") or os.environ.get("GMAIL_API_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+    client_secret = (config.get("gmail_client_secret") or os.environ.get("GMAIL_API_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    refresh_token = (config.get("gmail_refresh_token") or os.environ.get("GMAIL_API_REFRESH_TOKEN") or os.environ.get("GOOGLE_REFRESH_TOKEN") or "").strip()
+
+    if not client_id or not client_secret:
+        return (False, "Google Cloud OAuth Client ID and Client Secret are required for Gmail REST API.")
+    if not refresh_token:
+        return (False, "Google OAuth Refresh Token is required. Please authorize your Google account first.")
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+        from googleapiclient.discovery import build
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"],
+        )
+        creds.refresh(GoogleAuthRequest())
+
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        profile = service.users().getProfile(userId="me").execute()
+        email_addr = profile.get("emailAddress", config.get("gmail_user", ""))
+        return (
+            True,
+            f"Successfully authenticated with Gmail REST API (Port 443 HTTPS) as {email_addr}. "
+            f"Cloud firewall-immune delivery is active.",
+        )
+    except Exception as e:
+        log.warning("Gmail REST API verification failed: %s", e)
+        return (False, f"Gmail REST API verification failed: {e}")
+
+
+def generate_google_auth_url(client_id: str, redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob") -> str:
+    """Generate the Google OAuth 2.0 authorization URL for Gmail API."""
+    from urllib.parse import urlencode
+    params = {
+        "client_id": client_id.strip(),
+        "redirect_uri": redirect_uri.strip(),
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+
+
+def exchange_google_auth_code(
+    client_id: str,
+    client_secret: str,
+    auth_code: str,
+    redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob",
+    timeout: int = 15,
+) -> Dict[str, Any]:
+    """Exchange an authorization code for permanent Google OAuth tokens (access_token + refresh_token)."""
+    import httpx
+    resp = httpx.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": auth_code.strip(),
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+            "redirect_uri": redirect_uri.strip(),
+            "grant_type": "authorization_code",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code != 200:
+        raise ValueError(f"Google OAuth token exchange failed ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
 def verify_email_credentials(
     config: Dict[str, Any],
     timeout: int = 15,
 ) -> Tuple[bool, str]:
-    """Verify credentials for either Gmail SMTP or Resend HTTP API."""
+    """Verify credentials for Gmail REST API (Port 443 HTTPS), Resend HTTP API, or Gmail SMTP."""
     provider = config.get("provider", "smtp")
-    if provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
+    if provider == "gmail_api" or (config.get("gmail_refresh_token") and config.get("gmail_client_id") and not config.get("gmail_app_password")):
+        return _verify_gmail_api_credentials(config, timeout=timeout)
+    elif provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
         api_key = config.get("resend_api_key", "").strip()
         return _verify_resend_api_key(api_key, timeout=timeout)
     else:
@@ -431,6 +590,95 @@ def _send_via_resend_api(
         return (False, f"Resend API request failed: {e}")
 
 
+def _send_via_gmail_api(
+    config: Dict[str, Any],
+    to_list: List[str],
+    subject: str,
+    text_body: str,
+    html_body: Optional[str] = None,
+    cc_list: Optional[List[str]] = None,
+    bcc_list: Optional[List[str]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    timeout: int = 20,
+) -> Tuple[bool, str]:
+    """Dispatch an email via Gmail REST API over standard HTTPS (Port 443)."""
+    client_id = (config.get("gmail_client_id") or os.environ.get("GMAIL_API_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+    client_secret = (config.get("gmail_client_secret") or os.environ.get("GMAIL_API_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    refresh_token = (config.get("gmail_refresh_token") or os.environ.get("GMAIL_API_REFRESH_TOKEN") or os.environ.get("GOOGLE_REFRESH_TOKEN") or "").strip()
+
+    if not client_id or not client_secret or not refresh_token:
+        return (False, "Gmail REST API credentials incomplete. Client ID, Client Secret, and Refresh Token are required.")
+
+    from_name = config.get("from_name") or "SSK Footcare Manufacturing"
+    sender_email = config.get("gmail_user") or ""
+    reply_to = config.get("reply_to") or ""
+
+    # Build root MIME container
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    if sender_email:
+        msg["From"] = f"{from_name} <{sender_email}>"
+    else:
+        msg["From"] = from_name
+    msg["To"] = ", ".join(to_list)
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    msg["Date"] = formatdate(localtime=True)
+
+    alt = MIMEMultipart("alternative")
+    if text_body:
+        alt.attach(MIMEText(text_body, "plain", "utf-8"))
+    if html_body:
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(alt)
+
+    if attachments:
+        for att in attachments:
+            fname = att.get("filename", "attachment.pdf")
+            content = att.get("content")
+            if isinstance(content, str):
+                try:
+                    payload = base64.b64decode(content)
+                except Exception:
+                    payload = content.encode("utf-8")
+            elif isinstance(content, bytes):
+                payload = content
+            else:
+                continue
+            part = MIMEApplication(payload)
+            part.add_header("Content-Disposition", "attachment", filename=fname)
+            msg.attach(part)
+
+    raw_bytes = msg.as_bytes()
+    raw_b64 = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+        from googleapiclient.discovery import build
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/gmail.send"],
+        )
+        creds.refresh(GoogleAuthRequest())
+
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        res = service.users().messages().send(userId="me", body={"raw": raw_b64}).execute()
+        msg_id = res.get("id", "")
+        log.info("Email sent successfully via Gmail REST API (id: %s)", msg_id)
+        return (True, f"Email delivered via Gmail REST API (HTTPS Port 443, ID: {msg_id})")
+    except Exception as e:
+        log.exception("Gmail REST API dispatch error")
+        return (False, f"Gmail REST API dispatch failed: {e}")
+
+
 def send_email(
     to_emails: Union[List[str], str],
     subject: str,
@@ -442,8 +690,13 @@ def send_email(
     config: Optional[Dict[str, Any]] = None,
     timeout: int = 20,
 ) -> Tuple[bool, str]:
-    """Dispatch an email via Gmail SMTP or Resend HTTP API with optional PDF/file attachments."""
-    if not config or (not config.get("is_configured") and not (config.get("gmail_user") and config.get("gmail_app_password")) and not config.get("resend_api_key")):
+    """Dispatch an email via Gmail REST API, Gmail SMTP, or Resend HTTP API with optional attachments."""
+    if not config or (
+        not config.get("is_configured")
+        and not (config.get("gmail_user") and config.get("gmail_app_password"))
+        and not (config.get("gmail_client_id") and config.get("gmail_refresh_token"))
+        and not config.get("resend_api_key")
+    ):
         return (False, "Email is not configured in ERP settings or environment variables.")
 
     # Normalize recipient lists
@@ -469,7 +722,19 @@ def send_email(
             return (False, f"Invalid email format: '{addr}'")
 
     provider = config.get("provider", "smtp")
-    if provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
+    if provider == "gmail_api" or (config.get("gmail_refresh_token") and config.get("gmail_client_id") and not config.get("gmail_app_password")):
+        return _send_via_gmail_api(
+            config=config,
+            to_list=to_list,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            cc_list=cc_list,
+            bcc_list=bcc_list,
+            attachments=attachments,
+            timeout=timeout,
+        )
+    elif provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
         return _send_via_resend_api(
             config=config,
             to_list=to_list,
