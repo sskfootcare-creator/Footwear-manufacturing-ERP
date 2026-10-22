@@ -6,6 +6,7 @@ and branded Payment Reminders with invoice PDF attachments.
 
 import os
 import re
+import ssl
 import base64
 import smtplib
 import socket
@@ -100,12 +101,115 @@ async def get_email_config(db=None) -> Dict[str, Any]:
     return cfg
 
 
+def _connect_smtp_ssl_ipv4(host: str, port: int, timeout: int = 15) -> smtplib.SMTP_SSL:
+    """Connect specifically using IPv4 (AF_INET) and wrap in SSL."""
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    last_err = None
+    for res in infos:
+        af, socktype, proto, canonname, sa = res
+        s = socket.socket(af, socktype, proto)
+        s.settimeout(timeout)
+        try:
+            s.connect(sa)
+            ctx = ssl.create_default_context()
+            wrapped = ctx.wrap_socket(s, server_hostname=host)
+            smtp = smtplib.SMTP_SSL(timeout=timeout)
+            smtp.sock = wrapped
+            smtp.file = wrapped.makefile("rb")
+            code, msg = smtp.getreply()
+            if code != 220:
+                smtp.close()
+                raise smtplib.SMTPConnectError(code, msg)
+            return smtp
+        except OSError as err:
+            last_err = err
+            try:
+                s.close()
+            except Exception:
+                pass
+    raise last_err or OSError(101, f"Network is unreachable (IPv4 {host}:{port})")
+
+
+def _connect_smtp_starttls_ipv4(host: str, port: int, timeout: int = 15) -> smtplib.SMTP:
+    """Connect specifically using IPv4 (AF_INET) and upgrade via STARTTLS."""
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    last_err = None
+    for res in infos:
+        af, socktype, proto, canonname, sa = res
+        s = socket.socket(af, socktype, proto)
+        s.settimeout(timeout)
+        try:
+            s.connect(sa)
+            smtp = smtplib.SMTP(timeout=timeout)
+            smtp._host = host
+            smtp.sock = s
+            smtp.file = s.makefile("rb")
+            code, msg = smtp.getreply()
+            if code != 220:
+                smtp.close()
+                raise smtplib.SMTPConnectError(code, msg)
+            smtp.ehlo()
+            smtp.starttls()
+            return smtp
+        except OSError as err:
+            last_err = err
+            try:
+                s.close()
+            except Exception:
+                pass
+    raise last_err or OSError(101, f"Network is unreachable (IPv4 {host}:{port})")
+
+
+def create_smtp_connection(
+    smtp_host: str = "smtp.gmail.com",
+    smtp_port: int = 465,
+    timeout: int = 15,
+):
+    """
+    Establish an SMTP connection with automatic IPv4 fallback if dual-stack DNS
+    returns [Errno 101] Network is unreachable (common in Linux/Docker/WSL/cloud VPS
+    environments with incomplete IPv6 routing).
+    """
+    host = (smtp_host or "smtp.gmail.com").strip()
+    port = int(smtp_port or 465)
+
+    if port == 465:
+        try:
+            return smtplib.SMTP_SSL(host, port, timeout=timeout)
+        except OSError as e:
+            if getattr(e, "errno", None) in (101, 10051) or "unreachable" in str(e).lower():
+                log.info(
+                    "Standard SMTP_SSL connect to %s:%s failed with %s; falling back to IPv4 socket",
+                    host,
+                    port,
+                    e,
+                )
+                return _connect_smtp_ssl_ipv4(host, port, timeout=timeout)
+            raise
+    else:
+        try:
+            smtp = smtplib.SMTP(host, port, timeout=timeout)
+            smtp.ehlo()
+            smtp.starttls()
+            return smtp
+        except OSError as e:
+            if getattr(e, "errno", None) in (101, 10051) or "unreachable" in str(e).lower():
+                log.info(
+                    "Standard SMTP connect to %s:%s failed with %s; falling back to IPv4 socket",
+                    host,
+                    port,
+                    e,
+                )
+                return _connect_smtp_starttls_ipv4(host, port, timeout=timeout)
+            raise
+
+
 def verify_smtp_credentials(
     smtp_host: str,
     smtp_port: int,
     user: str,
     password: str,
-    timeout: int = 15
+    timeout: int = 15,
 ) -> Tuple[bool, str]:
     """Verify SMTP login credentials against the given host and port."""
     u = (user or "").strip()
@@ -117,28 +221,46 @@ def verify_smtp_credentials(
         return (False, "Both Gmail address and Google App Password are required.")
 
     try:
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=timeout) as smtp:
-                smtp.login(u, p)
-        else:
-            with smtplib.SMTP(host, port, timeout=timeout) as smtp:
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.login(u, p)
+        with create_smtp_connection(host, port, timeout=timeout) as smtp:
+            smtp.login(u, p)
         return (True, f"Successfully authenticated with {host}:{port} as {u}")
     except smtplib.SMTPAuthenticationError as e:
         log.warning("Gmail SMTP authentication failed: %s", e)
         return (
             False,
             "Gmail authentication failed. Please verify that 2-Step Verification is enabled on your "
-            "Google Account and you are using a 16-character Google App Password (not your normal password)."
+            "Google Account and you are using a 16-character Google App Password (not your normal password).",
         )
     except (socket.timeout, TimeoutError):
         log.warning("Gmail SMTP connection timed out connecting to %s:%s", host, port)
-        return (False, f"Connection to {host}:{port} timed out after {timeout} seconds.")
+        alt_port = 587 if port == 465 else 465
+        return (
+            False,
+            f"Connection to {host}:{port} timed out after {timeout} seconds. "
+            f"Port {port} may be blocked by your hosting provider or firewall. Try switching SMTP Port to {alt_port} in Settings.",
+        )
     except smtplib.SMTPConnectError as e:
         log.warning("Gmail SMTP connection error: %s", e)
         return (False, f"Could not establish connection to {host}:{port}: {e}")
+    except OSError as e:
+        err_msg = str(e)
+        if getattr(e, "errno", None) in (101, 10051) or "unreachable" in err_msg.lower():
+            alt_port = 587 if port == 465 else 465
+            log.warning("Network unreachable connecting to %s:%s: %s", host, port, e)
+            alt_hint = f"Try switching SMTP Port to {alt_port} in Settings."
+            # Check if alternate port is reachable
+            try:
+                with create_smtp_connection(host, alt_port, timeout=4):
+                    alt_hint = f"Notice: Port {alt_port} is reachable! Switch your SMTP Port setting from {port} to {alt_port} in Settings."
+            except Exception:
+                pass
+            return (
+                False,
+                f"Connection test failed: [Errno 101] Network is unreachable ({host}:{port}). "
+                f"Outbound SMTP traffic appears blocked by your hosting provider/firewall (common on cloud VPS like AWS/DigitalOcean). {alt_hint}",
+            )
+        log.exception("Unexpected socket error verifying Gmail credentials")
+        return (False, f"Connection test failed: {e}")
     except Exception as e:
         log.exception("Unexpected error verifying Gmail credentials")
         return (False, f"Connection test failed: {e}")
@@ -227,20 +349,25 @@ def send_email(
     all_recipients = list(set(to_list + cc_list + bcc_list))
 
     try:
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout) as smtp:
-                smtp.login(gmail_user, gmail_pass)
-                smtp.sendmail(gmail_user, all_recipients, msg.as_string())
-        else:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as smtp:
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.login(gmail_user, gmail_pass)
-                smtp.sendmail(gmail_user, all_recipients, msg.as_string())
+        with create_smtp_connection(smtp_host, smtp_port, timeout=timeout) as smtp:
+            smtp.login(gmail_user, gmail_pass)
+            smtp.sendmail(gmail_user, all_recipients, msg.as_string())
         return (True, f"Email sent successfully to {', '.join(to_list)}")
     except smtplib.SMTPAuthenticationError:
         log.exception("Gmail SMTP auth failed during send")
         return (False, "Gmail authentication failed. Please check your Google App Password.")
+    except OSError as e:
+        err_msg = str(e)
+        if getattr(e, "errno", None) in (101, 10051) or "unreachable" in err_msg.lower():
+            alt_port = 587 if smtp_port == 465 else 465
+            return (
+                False,
+                f"Network is unreachable on {smtp_host}:{smtp_port} ([Errno 101]). "
+                f"Outbound SMTP port {smtp_port} may be blocked by your hosting provider or firewall. "
+                f"Try switching SMTP Port to {alt_port} in Settings.",
+            )
+        log.exception("Gmail SMTP network error during send")
+        return (False, f"Failed to send email: {e}")
     except Exception as e:
         log.exception("Gmail SMTP send failed")
         return (False, f"Failed to send email: {e}")

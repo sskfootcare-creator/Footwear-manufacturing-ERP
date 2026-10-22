@@ -212,7 +212,13 @@ def _send_reset_email(to_email: str, reset_url: str, user_name: str) -> tuple[bo
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
+        from services.email_service import create_smtp_connection
+        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+        try:
+            smtp_port = int(os.environ.get("SMTP_PORT", 465))
+        except (ValueError, TypeError):
+            smtp_port = 465
+        with create_smtp_connection(smtp_host, smtp_port, timeout=15) as smtp:
             smtp.login(gmail_user, gmail_pass)
             smtp.sendmail(gmail_user, [to_email], msg.as_string())
         return (True, "sent")
