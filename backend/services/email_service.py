@@ -806,3 +806,410 @@ async def send_invoice_payment_reminder(
         "message": f"Payment reminder successfully sent to {to_email}",
         "reminder": reminder_event,
     }
+
+
+def build_multi_invoice_reminder_template(
+    invoices: List[Dict[str, Any]],
+    client: Dict[str, Any],
+    company: Dict[str, Any],
+    custom_message: Optional[str] = None,
+    include_bank_details: bool = True,
+) -> Tuple[str, str, str]:
+    """
+    Generate subject, plaintext body, and modern responsive HTML for a consolidated multi-invoice payment reminder.
+    Returns: (subject, text_body, html_body)
+    """
+    if len(invoices) == 1:
+        return build_payment_reminder_template(
+            invoice=invoices[0],
+            client=client,
+            company=company,
+            custom_message=custom_message,
+            include_bank_details=include_bank_details,
+        )
+
+    client_name = client.get("company_name") or client.get("name") or (invoices[0].get("client_name") if invoices else "Valued Client")
+    contact_person = client.get("contact_person") or ""
+    greeting_name = contact_person or client_name
+
+    company_name = company.get("name") or "SSK FOOTCARE MANUFACTURING LLP"
+    bank_name = company.get("bank_name") or "HDFC BANK"
+    bank_acc = company.get("bank_acc") or ""
+    bank_ifsc = company.get("bank_ifsc") or ""
+    upi_id = company.get("upi_id") or ""
+    company_phone = company.get("phone") or ""
+    company_email = company.get("email") or ""
+
+    inv_count = len(invoices)
+    total_net = sum(float(inv.get("net_amount") or 0) for inv in invoices)
+    total_received = sum(float(inv.get("received_amount") or 0) for inv in invoices)
+    total_outstanding = sum(float(inv.get("outstanding") if inv.get("outstanding") is not None else ((inv.get("net_amount") or 0) - (inv.get("received_amount") or 0))) for inv in invoices)
+
+    subject = f"OVERDUE STATEMENT: {inv_count} Overdue Invoices ({client_name}) - {format_inr(total_outstanding)}"
+
+    if not custom_message:
+        user_msg = (
+            f"We would like to bring to your attention that there are {inv_count} overdue invoices "
+            f"pending on your account with an aggregate outstanding balance of {format_inr(total_outstanding)}. "
+            f"Please review the itemized breakdown below and arrange for payment at your earliest convenience."
+        )
+    else:
+        user_msg = custom_message.strip()
+
+    # Plaintext version
+    text_rows = []
+    for inv in invoices:
+        no = inv.get("invoice_no") or "N/A"
+        due = inv.get("due_date") or "Immediate"
+        po = inv.get("po_number") or "-"
+        bal = format_inr(inv.get("outstanding") or 0)
+        tot = format_inr(inv.get("net_amount") or 0)
+        days = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else ""
+        text_rows.append(f"  • Inv #{no} | Due: {due} ({days}d overdue) | PO: {po} | Total: {tot} | Balance Due: {bal}")
+
+    text_parts = [
+        f"OVERDUE STATEMENT & PAYMENT REMINDER — {company_name.upper()}",
+        "=" * 60,
+        f"\nDear {greeting_name},",
+        f"\n{user_msg}\n",
+        "-" * 60,
+        f"OVERDUE INVOICES BREAKDOWN ({inv_count} INVOICES):",
+        *text_rows,
+        "-" * 60,
+        f"TOTAL INVOICE VALUE   : {format_inr(total_net)}",
+        f"TOTAL RECEIVED TO DATE: {format_inr(total_received)}",
+        f"TOTAL OVERDUE BALANCE : {format_inr(total_outstanding)}",
+        "=" * 60,
+    ]
+
+    if include_bank_details and bank_acc:
+        text_parts.extend([
+            "\nREMITTANCE / BANK TRANSFER DETAILS:",
+            f"  Beneficiary : {company_name}",
+            f"  Bank Name   : {bank_name}",
+            f"  Account No  : {bank_acc}",
+            f"  IFSC Code   : {bank_ifsc}",
+        ])
+        if upi_id:
+            text_parts.append(f"  UPI ID      : {upi_id}")
+        text_parts.append("\nPlease reply with the UTR / transaction reference once payment is initiated.\n")
+
+    text_parts.extend([
+        f"\nWarm regards,",
+        f"Accounts & Finance Team",
+        f"{company_name}",
+        f"Phone: {company_phone}" if company_phone else "",
+        f"Email: {company_email}" if company_email else "",
+    ])
+    text_body = "\n".join([p for p in text_parts if p is not None])
+
+    # HTML Table Rows
+    table_rows_html = []
+    for inv in invoices:
+        no = inv.get("invoice_no") or "N/A"
+        dt = inv.get("invoice_date") or inv.get("date") or "-"
+        due = inv.get("due_date") or "-"
+        po = inv.get("po_number") or "-"
+        bal = format_inr(inv.get("outstanding") or 0)
+        tot = format_inr(inv.get("net_amount") or 0)
+        days = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0
+        table_rows_html.append(f"""
+          <tr style="border-bottom: 1px solid #E2E8F0;">
+            <td style="padding: 8px 10px; font-family: 'Courier New', monospace; font-weight: 700; color: #0F172A;">{no}</td>
+            <td style="padding: 8px 10px; color: #475569;">{dt}</td>
+            <td style="padding: 8px 10px; color: #DC2626; font-weight: 600;">{due} <span style="font-size: 11px; color: #991B1B;">({days}d)</span></td>
+            <td style="padding: 8px 10px; color: #475569;">{po}</td>
+            <td style="padding: 8px 10px; text-align: right; color: #475569; font-family: 'Courier New', monospace;">{tot}</td>
+            <td style="padding: 8px 10px; text-align: right; font-weight: 700; color: #DC2626; font-family: 'Courier New', monospace;">{bal}</td>
+          </tr>
+        """)
+
+    bank_html = ""
+    if include_bank_details and bank_acc:
+        bank_html = f"""
+        <div style="margin-top: 24px; padding: 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-left: 4px solid #0F172A;">
+          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #475569; margin-bottom: 10px;">
+            Bank Remittance Information
+          </div>
+          <table style="width: 100%; font-size: 13px; border-collapse: collapse; line-height: 1.6;">
+            <tr>
+              <td style="color: #64748B; width: 140px; padding: 3px 0;">Beneficiary:</td>
+              <td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{company_name}</td>
+            </tr>
+            <tr>
+              <td style="color: #64748B; padding: 3px 0;">Bank Name:</td>
+              <td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{bank_name}</td>
+            </tr>
+            <tr>
+              <td style="color: #64748B; padding: 3px 0;">Account Number:</td>
+              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_acc}</td>
+            </tr>
+            <tr>
+              <td style="color: #64748B; padding: 3px 0;">IFSC Code:</td>
+              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_ifsc}</td>
+            </tr>
+            {f'<tr><td style="color: #64748B; padding: 3px 0;">UPI ID:</td><td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{upi_id}</td></tr>' if upi_id else ''}
+          </table>
+          <div style="margin-top: 10px; font-size: 11px; color: #64748B;">
+            * Kindly send the UTR / transaction receipt to this email once transferred for prompt ledger credit.
+          </div>
+        </div>
+        """
+
+    html_body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{subject}</title>
+</head>
+<body style="margin: 0; padding: 24px; background-color: #F1F5F9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1E293B;">
+  <div style="max-width: 660px; margin: 0 auto; background: #FFFFFF; border: 2px solid #0F172A; box-shadow: 4px 4px 0px #0F172A;">
+    
+    <!-- Header -->
+    <div style="background: #0F172A; padding: 24px 28px; color: #FFFFFF;">
+      <table style="width: 100%;">
+        <tr>
+          <td>
+            <div style="font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #94A3B8; font-weight: 700;">
+              SSK Footcare ERP · Accounts Department
+            </div>
+            <div style="font-size: 20px; font-weight: 800; letter-spacing: 0.5px; margin-top: 4px;">
+              {company_name}
+            </div>
+          </td>
+          <td style="text-align: right; vertical-align: top;">
+            <span style="display: inline-block; padding: 4px 10px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; border-radius: 2px;">
+              OVERDUE · {inv_count} INVOICES
+            </span>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Body -->
+    <div style="padding: 28px;">
+      <p style="font-size: 15px; margin: 0 0 16px; color: #0F172A;">
+        Dear <strong>{greeting_name}</strong>,
+      </p>
+      
+      <p style="font-size: 14px; line-height: 1.6; margin: 0 0 20px; color: #334155;">
+        {user_msg}
+      </p>
+
+      <!-- Multi-Invoice Table -->
+      <div style="border: 1px solid #CBD5E1; margin-bottom: 20px; overflow-x: auto;">
+        <table style="width: 100%; font-size: 12px; border-collapse: collapse; text-align: left;">
+          <thead>
+            <tr style="background: #F1F5F9; border-bottom: 2px solid #CBD5E1; color: #475569; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">
+              <th style="padding: 10px;">Invoice #</th>
+              <th style="padding: 10px;">Date</th>
+              <th style="padding: 10px;">Due Date</th>
+              <th style="padding: 10px;">PO #</th>
+              <th style="padding: 10px; text-align: right;">Total</th>
+              <th style="padding: 10px; text-align: right;">Due</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(table_rows_html)}
+            <tr style="background: #FEF2F2; border-top: 2px solid #0F172A;">
+              <td colspan="4" style="padding: 12px 10px; font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #0F172A;">
+                Total Overdue Balance Due:
+              </td>
+              <td style="padding: 12px 10px; text-align: right; font-family: 'Courier New', monospace; font-size: 12px; color: #64748B;">
+                {format_inr(total_net)}
+              </td>
+              <td style="padding: 12px 10px; text-align: right; font-family: 'Courier New', monospace; font-size: 16px; font-weight: 800; color: #DC2626;">
+                {format_inr(total_outstanding)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Attachment notice -->
+      <div style="font-size: 12px; color: #64748B; background: #F1F5F9; padding: 10px 14px; border-left: 3px solid #64748B; margin-bottom: 20px;">
+        📎 <strong>Invoice Copies Attached:</strong> Itemized tax invoice PDFs are attached to this email for your accounts team reconciliation.
+      </div>
+
+      {bank_html}
+
+      <div style="margin-top: 28px; border-top: 1px solid #E2E8F0; padding-top: 18px; font-size: 13px; color: #64748B;">
+        <p style="margin: 0 0 4px;">With regards,</p>
+        <p style="margin: 0; font-weight: 700; color: #0F172A;">Finance & Accounts Team</p>
+        <p style="margin: 0; color: #475569;">{company_name}</p>
+        {f'<p style="margin: 4px 0 0; font-size: 12px;">Contact: {company_phone} | {company_email}</p>' if (company_phone or company_email) else ''}
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div style="background: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 14px 28px; text-align: center; font-size: 11px; color: #94A3B8;">
+      This is an automated consolidated overdue payment statement generated by SSK Footcare Manufacturing ERP.
+    </div>
+  </div>
+</body>
+</html>"""
+
+    return (subject, text_body, html_body)
+
+
+async def send_multi_invoice_payment_reminder(
+    db,
+    invoice_ids: List[str],
+    to_email: str,
+    cc_emails: Optional[List[str] | str] = None,
+    subject: Optional[str] = None,
+    custom_message: Optional[str] = None,
+    attach_pdfs: bool = True,
+    include_bank_details: bool = True,
+    user_email: str = "system",
+) -> Dict[str, Any]:
+    """
+    Send a consolidated payment reminder email covering multiple overdue invoices,
+    attaching all available PDFs and updating reminder history on each invoice.
+    """
+    from bson import ObjectId
+    import routes.invoice_packing as ip_routes
+
+    if not invoice_ids:
+        return {"ok": False, "error": "No invoice IDs provided"}
+
+    # 1. Fetch email config
+    cfg = await get_email_config(db)
+    if not cfg["is_configured"]:
+        return {
+            "ok": False,
+            "error": "Gmail connection is not configured in ERP settings. Please navigate to Settings to connect your company Gmail address and App Password."
+        }
+
+    clean_oids = []
+    for x in invoice_ids:
+        try:
+            clean_oids.append(ObjectId(x))
+        except Exception:
+            clean_oids.append(x)
+
+    docs = await db.invoices.find({"_id": {"$in": clean_oids}}).to_list(100)
+    if not docs:
+        return {"ok": False, "error": "No matching invoices found"}
+
+    str_ids = [str(d["_id"]) for d in docs]
+    pay_map = await ip_routes._aggregate_payments_for_invoices(str_ids, db=db)
+    grn_map = await ip_routes._aggregate_grn_adjustments(str_ids, db=db)
+    decorated_invoices = [ip_routes._decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    # Resolve client doc
+    client_name = decorated_invoices[0].get("client_name") or ""
+    client_doc = {}
+    if client_name:
+        client_doc = await db.clients.find_one({
+            "$or": [
+                {"company_name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}},
+                {"name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}},
+            ]
+        }) or {}
+
+    company_profile = await db.settings.find_one({"_id": "company_profile"})
+    if not company_profile:
+        from pdf_docs import COMPANY
+        company_profile = dict(COMPANY)
+
+    # 2. Build template
+    tmpl_subj, tmpl_txt, tmpl_html = build_multi_invoice_reminder_template(
+        invoices=decorated_invoices,
+        client=client_doc,
+        company=company_profile,
+        custom_message=custom_message,
+        include_bank_details=include_bank_details,
+    )
+    final_subject = subject.strip() if subject else tmpl_subj
+
+    # 3. Attachments
+    attachments = []
+    if attach_pdfs:
+        for doc in docs:
+            inv_no = doc.get("invoice_no", "invoice")
+            pdf_raw = None
+            if doc.get("file_b64"):
+                try:
+                    pdf_raw = base64.b64decode(doc["file_b64"])
+                except Exception:
+                    pass
+            if not pdf_raw and doc.get("dispatch_record_id"):
+                try:
+                    dr = await db.dispatch_records.find_one({"_id": ObjectId(doc["dispatch_record_id"])})
+                    if dr and dr.get("invoice_file_b64"):
+                        pdf_raw = base64.b64decode(dr["invoice_file_b64"])
+                except Exception:
+                    pass
+            if pdf_raw:
+                attachments.append({
+                    "filename": f"{inv_no}.pdf",
+                    "content": pdf_raw,
+                    "mime_type": "application/pdf"
+                })
+
+    final_cc = cc_emails or cfg.get("default_cc")
+
+    # 4. Send email
+    ok, msg_or_err = send_email(
+        to_emails=to_email,
+        subject=final_subject,
+        text_body=tmpl_txt,
+        html_body=tmpl_html,
+        cc_emails=final_cc,
+        attachments=attachments,
+        config=cfg,
+    )
+    if not ok:
+        return {"ok": False, "error": msg_or_err}
+
+    # 5. Update reminder history on all invoices
+    total_due = sum(inv.get("outstanding", 0) for inv in decorated_invoices)
+    all_nos = [inv.get("invoice_no") for inv in decorated_invoices if inv.get("invoice_no")]
+    reminder_event = {
+        "sent_at": now_iso(),
+        "sent_to": to_email,
+        "sent_cc": final_cc or "",
+        "sent_by": user_email,
+        "subject": final_subject,
+        "batch_invoices": all_nos,
+        "batch_count": len(decorated_invoices),
+        "total_outstanding_at_send": total_due,
+        "attached_pdfs_count": len(attachments),
+    }
+
+    try:
+        await db.invoices.update_many(
+            {"_id": {"$in": clean_oids}},
+            {
+                "$push": {"reminder_history": reminder_event},
+                "$set": {
+                    "last_reminder_sent_at": reminder_event["sent_at"],
+                    "last_reminder_sent_to": to_email,
+                },
+                "$inc": {"reminder_count": 1},
+            }
+        )
+    except Exception as e:
+        log.warning("Could not persist reminder_history for batch invoices: %s", e)
+
+    # 6. Audit log
+    try:
+        await db.audit_logs.insert_one({
+            "action": "send_multi_invoice_payment_reminder",
+            "category": "invoices",
+            "details": f"Sent consolidated overdue payment reminder for {len(decorated_invoices)} invoices ({', '.join(all_nos)}) to {to_email} (Total Due: ₹{total_due})",
+            "by": user_email,
+            "created_at": now_iso(),
+        })
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "message": f"Consolidated overdue reminder for {len(decorated_invoices)} invoices sent to {to_email}",
+        "invoices_count": len(decorated_invoices),
+        "total_outstanding": total_due,
+        "reminder": reminder_event,
+    }

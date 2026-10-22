@@ -2217,6 +2217,157 @@ async def export_invoices(
     )
 
 
+class BatchClientReminderIn(BaseModel):
+    client_name: str
+    to_email: str
+    invoice_ids: List[str]
+    cc_emails: Optional[str] = None
+    custom_message: Optional[str] = None
+
+
+class BatchRemindersIn(BaseModel):
+    batches: List[BatchClientReminderIn]
+
+
+@invoice_packing_router.get("/invoices/overdue-reminders-summary")
+async def get_overdue_reminders_summary(request: Request):
+    """Group all overdue invoices across clients with aggregated balances for batch reminder action."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    docs = await db.invoices.find({}, {"file_b64": 0}).to_list(1000)
+    if not docs:
+        return {"clients": [], "total_overdue_invoices": 0, "total_overdue_amount": 0}
+
+    inv_ids = [str(d["_id"]) for d in docs]
+    pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
+    grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
+    decorated = [_decorate_invoice(d, pay_map, grn_map) for d in docs]
+
+    overdue_invoices = [
+        inv for inv in decorated
+        if inv.get("status") == "overdue" or (
+            inv.get("days_to_due") is not None and inv.get("days_to_due") < 0 and inv.get("outstanding", 0) > 0.01
+        )
+    ]
+
+    # Pre-fetch clients master
+    clients_docs = await db.clients.find({}).to_list(1000)
+    client_by_name = {}
+    for c in clients_docs:
+        cname = (c.get("company_name") or c.get("name") or "").strip().lower()
+        if cname:
+            client_by_name[cname] = c
+
+    # Group by client
+    grouped = {}
+    for inv in overdue_invoices:
+        cname = (inv.get("client_name") or "Unspecified Client").strip()
+        key = cname.lower()
+        if key not in grouped:
+            c_master = client_by_name.get(key, {})
+            grouped[key] = {
+                "client_name": cname,
+                "client_email": c_master.get("email") or inv.get("client_email") or "",
+                "contact_person": c_master.get("contact_person") or "",
+                "phone": c_master.get("phone") or "",
+                "invoices": [],
+                "total_outstanding": 0.0,
+                "invoice_ids": [],
+                "max_days_overdue": 0,
+                "last_reminder_sent_at": None,
+            }
+        
+        days_od = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0
+        grouped[key]["invoices"].append({
+            "id": inv.get("id"),
+            "invoice_no": inv.get("invoice_no"),
+            "due_date": inv.get("due_date"),
+            "days_overdue": days_od,
+            "net_amount": inv.get("net_amount", 0),
+            "outstanding": inv.get("outstanding", 0),
+            "po_number": inv.get("po_number"),
+        })
+        grouped[key]["invoice_ids"].append(inv.get("id"))
+        grouped[key]["total_outstanding"] = round(grouped[key]["total_outstanding"] + float(inv.get("outstanding") or 0), 2)
+        if days_od > grouped[key]["max_days_overdue"]:
+            grouped[key]["max_days_overdue"] = days_od
+        if inv.get("last_reminder_sent_at"):
+            if not grouped[key]["last_reminder_sent_at"] or inv["last_reminder_sent_at"] > grouped[key]["last_reminder_sent_at"]:
+                grouped[key]["last_reminder_sent_at"] = inv["last_reminder_sent_at"]
+
+    client_list = list(grouped.values())
+    client_list.sort(key=lambda x: x["total_outstanding"], reverse=True)
+
+    return {
+        "ok": True,
+        "clients": client_list,
+        "total_overdue_invoices": len(overdue_invoices),
+        "total_overdue_amount": round(sum(c["total_outstanding"] for c in client_list), 2),
+    }
+
+
+@invoice_packing_router.post("/invoices/send-batch-overdue-reminders")
+async def send_batch_overdue_reminders_route(payload: BatchRemindersIn, request: Request):
+    """Send consolidated overdue reminders across multiple selected clients in one batch."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    from services.email_service import send_multi_invoice_payment_reminder
+
+    results = []
+    sent_count = 0
+    failed_count = 0
+
+    for item in payload.batches:
+        if not item.to_email or not item.invoice_ids:
+            results.append({
+                "client_name": item.client_name,
+                "ok": False,
+                "error": "Missing recipient email or invoice IDs",
+            })
+            failed_count += 1
+            continue
+
+        res = await send_multi_invoice_payment_reminder(
+            db=db,
+            invoice_ids=item.invoice_ids,
+            to_email=item.to_email,
+            cc_emails=item.cc_emails,
+            custom_message=item.custom_message,
+            attach_pdfs=True,
+            include_bank_details=True,
+            user_email=u.get("email", "system"),
+        )
+
+        if res.get("ok"):
+            sent_count += 1
+            results.append({
+                "client_name": item.client_name,
+                "to_email": item.to_email,
+                "ok": True,
+                "invoices_count": len(item.invoice_ids),
+                "total_outstanding": res.get("total_outstanding", 0),
+            })
+        else:
+            failed_count += 1
+            results.append({
+                "client_name": item.client_name,
+                "to_email": item.to_email,
+                "ok": False,
+                "error": res.get("error", "Failed to send"),
+            })
+
+    return {
+        "ok": failed_count == 0,
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "details": results,
+    }
+
+
 @invoice_packing_router.get("/invoices/{iid}")
 async def get_invoice(iid: str, request: Request):
     await _get_user(request)
@@ -2259,11 +2410,12 @@ class PaymentReminderIn(BaseModel):
     custom_message: Optional[str] = None
     attach_pdf: bool = True
     include_bank_details: bool = True
+    invoice_ids: Optional[List[str]] = None
 
 
 @invoice_packing_router.get("/invoices/{iid}/payment-reminder-preview")
 async def get_invoice_payment_reminder_preview(iid: str, request: Request):
-    """Retrieve preview data and suggested recipient/templates for sending an invoice payment reminder."""
+    """Retrieve preview data and suggested recipient/templates for sending an overdue invoice payment reminder."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
     db = _get_db(request)
@@ -2298,7 +2450,7 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
     if not company_profile:
         company_profile = dict(COMPANY)
 
-    # Check if PDF exists
+    # Check if current invoice PDF exists
     has_pdf = bool(doc.get("file_b64"))
     if not has_pdf and doc.get("dispatch_record_id"):
         try:
@@ -2306,6 +2458,56 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
             has_pdf = bool(dr and dr.get("invoice_file_b64"))
         except Exception:
             pass
+
+    is_overdue = inv.get("status") == "overdue" or (
+        inv.get("days_to_due") is not None and inv.get("days_to_due") < 0 and inv.get("outstanding", 0) > 0.01
+    )
+
+    # Check if this client has other overdue invoices
+    other_overdue = []
+    if client_name:
+        try:
+            all_client_docs = await db.invoices.find(
+                {
+                    "client_name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"},
+                    "_id": {"$ne": oid(iid)},
+                },
+                {"file_b64": 0}
+            ).to_list(200)
+
+            if all_client_docs:
+                other_ids = [str(d["_id"]) for d in all_client_docs]
+                other_pays = await _aggregate_payments_for_invoices(other_ids, db=db)
+                other_grns = await _aggregate_grn_adjustments(other_ids, db=db)
+                for od in all_client_docs:
+                    dec = _decorate_invoice(od, other_pays, other_grns)
+                    od_is_overdue = dec.get("status") == "overdue" or (
+                        dec.get("days_to_due") is not None and dec.get("days_to_due") < 0 and dec.get("outstanding", 0) > 0.01
+                    )
+                    if od_is_overdue:
+                        other_overdue.append({
+                            "id": dec.get("id"),
+                            "invoice_no": dec.get("invoice_no"),
+                            "due_date": dec.get("due_date"),
+                            "days_overdue": abs(dec.get("days_to_due", 0)) if (dec.get("days_to_due") is not None and dec.get("days_to_due") < 0) else 0,
+                            "net_amount": dec.get("net_amount", 0),
+                            "outstanding": dec.get("outstanding", 0),
+                            "po_number": dec.get("po_number"),
+                        })
+        except Exception as e:
+            log.warning("Could not query other overdue invoices for %s: %s", client_name, e)
+
+    curr_item = {
+        "id": iid,
+        "invoice_no": inv.get("invoice_no"),
+        "due_date": inv.get("due_date"),
+        "days_overdue": abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0,
+        "net_amount": inv.get("net_amount", 0),
+        "outstanding": inv.get("outstanding", 0),
+        "po_number": inv.get("po_number"),
+    }
+    client_all_overdue = [curr_item] + other_overdue
+    client_total_overdue = round(sum(float(x.get("outstanding") or 0) for x in client_all_overdue), 2)
 
     tmpl_subj, tmpl_txt, tmpl_html = build_payment_reminder_template(
         invoice=inv,
@@ -2329,7 +2531,7 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
         "received_amount": inv.get("received_amount", 0),
         "outstanding": inv.get("outstanding", 0),
         "due_date": inv.get("due_date"),
-        "is_overdue": inv.get("status") == "overdue",
+        "is_overdue": is_overdue,
         "days_to_due": inv.get("days_to_due"),
         "status": inv.get("status"),
         "po_number": inv.get("po_number"),
@@ -2352,29 +2554,49 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
         "last_reminder_sent_at": doc.get("last_reminder_sent_at"),
         "last_reminder_sent_to": doc.get("last_reminder_sent_to"),
         "reminder_count": doc.get("reminder_count", 0),
+        "client_all_overdue": client_all_overdue,
+        "client_overdue_count": len(client_all_overdue),
+        "client_total_overdue": client_total_overdue,
     }
 
 
 @invoice_packing_router.post("/invoices/{iid}/send-payment-reminder")
 async def send_invoice_payment_reminder_route(iid: str, payload: PaymentReminderIn, request: Request):
-    """Directly send payment reminder email via company Gmail to client with attached invoice PDF."""
+    """Directly send payment reminder email via company Gmail to client (supports single or consolidated multi-overdue invoices)."""
     u = await _get_user(request)
     require_roles("admin", "manager", "sales")(u)
     db = _get_db(request)
 
-    from services.email_service import send_invoice_payment_reminder
-
-    res = await send_invoice_payment_reminder(
-        db=db,
-        invoice_id=iid,
-        to_email=payload.to_email,
-        cc_emails=payload.cc_emails,
-        subject=payload.subject,
-        custom_message=payload.custom_message,
-        attach_pdf=payload.attach_pdf,
-        include_bank_details=payload.include_bank_details,
-        user_email=u.get("email", "system"),
+    from services.email_service import (
+        send_invoice_payment_reminder,
+        send_multi_invoice_payment_reminder,
     )
+
+    # If multiple overdue invoices were selected to be consolidated in one email
+    if payload.invoice_ids and len(payload.invoice_ids) > 1:
+        res = await send_multi_invoice_payment_reminder(
+            db=db,
+            invoice_ids=payload.invoice_ids,
+            to_email=payload.to_email,
+            cc_emails=payload.cc_emails,
+            subject=payload.subject,
+            custom_message=payload.custom_message,
+            attach_pdfs=payload.attach_pdf,
+            include_bank_details=payload.include_bank_details,
+            user_email=u.get("email", "system"),
+        )
+    else:
+        res = await send_invoice_payment_reminder(
+            db=db,
+            invoice_id=iid,
+            to_email=payload.to_email,
+            cc_emails=payload.cc_emails,
+            subject=payload.subject,
+            custom_message=payload.custom_message,
+            attach_pdf=payload.attach_pdf,
+            include_bank_details=payload.include_bank_details,
+            user_email=u.get("email", "system"),
+        )
 
     if not res.get("ok"):
         raise HTTPException(400, res.get("error", "Failed to send payment reminder"))

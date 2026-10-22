@@ -12,8 +12,10 @@ from services.email_service import (
     clean_app_password,
     verify_smtp_credentials,
     build_payment_reminder_template,
+    build_multi_invoice_reminder_template,
     send_email,
     send_invoice_payment_reminder,
+    send_multi_invoice_payment_reminder,
 )
 
 
@@ -44,6 +46,7 @@ class MockAppDB:
         self.invoices = MagicMock()
         self.invoices.find_one = AsyncMock(side_effect=self._find_one_invoice)
         self.invoices.update_one = AsyncMock(side_effect=self._update_one_invoice)
+        self.invoices.update_many = AsyncMock(side_effect=self._update_many_invoices)
         self.invoices.find = MagicMock(side_effect=self._find_invoices)
 
         self.clients = MagicMock()
@@ -99,12 +102,42 @@ class MockAppDB:
                 return MagicMock(acknowledged=True)
         return MagicMock(acknowledged=False)
 
+    async def _update_many_invoices(self, query, update, upsert=False):
+        target_ids = []
+        if "_id" in query and isinstance(query["_id"], dict) and "$in" in query["_id"]:
+            target_ids = [str(x) for x in query["_id"]["$in"]]
+        modified = 0
+        for inv in self.invoices_store:
+            if not target_ids or str(inv["_id"]) in target_ids:
+                if "$set" in update:
+                    inv.update(update["$set"])
+                if "$push" in update:
+                    for k, v in update["$push"].items():
+                        inv.setdefault(k, []).append(v)
+                if "$inc" in update:
+                    for k, v in update["$inc"].items():
+                        inv[k] = inv.get(k, 0) + v
+                modified += 1
+        return MagicMock(acknowledged=True, modified_count=modified)
+
     def _find_invoices(self, query=None, projection=None):
         return MockCursor(self.invoices_store)
 
     async def _find_one_client(self, query):
         if not self.clients_store:
             return None
+        if not query:
+            return dict(self.clients_store[0])
+        or_clauses = query.get("$or", [])
+        if or_clauses:
+            for c in self.clients_store:
+                c_name = (c.get("company_name") or c.get("name") or "").lower()
+                for clause in or_clauses:
+                    for k in ("company_name", "name"):
+                        if k in clause:
+                            pat = clause[k].get("$regex") if isinstance(clause[k], dict) else clause[k]
+                            if pat and pat.strip("^$").lower() == c_name:
+                                return dict(c)
         return dict(self.clients_store[0])
 
     async def _insert_audit_log(self, doc):
@@ -311,3 +344,254 @@ def test_invoice_payment_reminder_preview_and_send(test_client, mock_env):
         assert len(inv["reminder_history"]) == 1
         assert inv["reminder_history"][0]["sent_to"] == "accounts@metrobrands.com"
         assert inv["last_reminder_sent_to"] == "accounts@metrobrands.com"
+
+
+def test_build_multi_invoice_reminder_template():
+    invoices = [
+        {
+            "invoice_no": "SSK26-27-001",
+            "invoice_date": "2026-09-01",
+            "due_date": "2026-10-01",
+            "po_number": "PO-100",
+            "net_amount": 60000.0,
+            "received_amount": 10000.0,
+            "outstanding": 50000.0,
+            "days_to_due": -21,
+        },
+        {
+            "invoice_no": "SSK26-27-002",
+            "invoice_date": "2026-09-15",
+            "due_date": "2026-10-15",
+            "po_number": "PO-200",
+            "net_amount": 80000.0,
+            "received_amount": 0.0,
+            "outstanding": 80000.0,
+            "days_to_due": -7,
+        },
+    ]
+    client = {
+        "company_name": "Relaxo Footwears",
+        "contact_person": "Rajesh Kumar",
+        "email": "rajesh@relaxo.com",
+    }
+    company = {
+        "name": "SSK Footcare Manufacturing LLP",
+        "bank_name": "HDFC BANK",
+        "bank_acc": "50200105184765",
+        "bank_ifsc": "HDFC0001452",
+    }
+
+    subj, txt, html = build_multi_invoice_reminder_template(
+        invoices=invoices,
+        client=client,
+        company=company,
+        include_bank_details=True,
+    )
+
+    # 1. Subject checks
+    assert "OVERDUE STATEMENT" in subj
+    assert "2 Overdue Invoices" in subj
+    assert "Relaxo Footwears" in subj
+    assert "₹1,30,000.00" in subj
+
+    # 2. Text breakdown checks
+    assert "Rajesh Kumar" in txt
+    assert "SSK26-27-001" in txt
+    assert "SSK26-27-002" in txt
+    assert "PO-100" in txt
+    assert "PO-200" in txt
+    assert "TOTAL OVERDUE BALANCE : ₹1,30,000.00" in txt
+    assert "50200105184765" in txt
+
+    # 3. HTML table checks
+    assert "SSK26-27-001" in html
+    assert "SSK26-27-002" in html
+    assert "HDFC0001452" in html
+    assert "₹1,30,000.00" in html
+
+
+def test_multi_invoice_consolidated_reminder_send(test_client, mock_env):
+    inv1_id = ObjectId()
+    inv2_id = ObjectId()
+
+    mock_env.invoices_store.extend([
+        {
+            "_id": inv1_id,
+            "invoice_no": "SSK-OVERDUE-01",
+            "client_name": "Woodland Footwear",
+            "net_amount": 50000.0,
+            "grand_total": 50000.0,
+            "received_amount": 0.0,
+            "outstanding": 50000.0,
+            "due_date": "2026-09-01",
+            "status": "overdue",
+            "is_direct_invoice": True,
+        },
+        {
+            "_id": inv2_id,
+            "invoice_no": "SSK-OVERDUE-02",
+            "client_name": "Woodland Footwear",
+            "net_amount": 75000.0,
+            "grand_total": 75000.0,
+            "received_amount": 0.0,
+            "outstanding": 75000.0,
+            "due_date": "2026-09-15",
+            "status": "overdue",
+            "is_direct_invoice": True,
+        },
+    ])
+
+    mock_env.clients_store.append({
+        "company_name": "Woodland Footwear",
+        "name": "Woodland Footwear",
+        "email": "finance@woodland.com",
+        "contact_person": "Vikas Singh",
+    })
+
+    mock_env.settings_store["email_config"] = {
+        "gmail_user": "billing@sskfootcare.com",
+        "gmail_app_password": "abcdefghijklmnop",
+        "from_name": "SSK Accounts",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+    }
+
+    with patch("smtplib.SMTP_SSL") as mock_smtp:
+        mock_instance = MagicMock()
+        mock_smtp.return_value.__enter__.return_value = mock_instance
+
+        # Send consolidated reminder for both invoices
+        send_res = test_client.post(
+            f"/api/invoices/{str(inv1_id)}/send-payment-reminder",
+            json={
+                "invoice_ids": [str(inv1_id), str(inv2_id)],
+                "to_email": "finance@woodland.com",
+                "subject": "OVERDUE STATEMENT: 2 Overdue Invoices (Woodland)",
+                "attach_pdf": False,
+                "include_bank_details": True,
+            }
+        )
+        assert send_res.status_code == 200
+        data = send_res.json()
+        assert data["ok"] is True
+        assert data["invoices_count"] == 2
+        assert data["total_outstanding"] == 125000.0
+        assert mock_instance.sendmail.called
+
+        # Verify BOTH invoices got reminder recorded
+        for target_id in (inv1_id, inv2_id):
+            inv = [i for i in mock_env.invoices_store if i["_id"] == target_id][0]
+            assert inv["reminder_count"] == 1
+            assert len(inv["reminder_history"]) == 1
+            assert inv["reminder_history"][0]["sent_to"] == "finance@woodland.com"
+            assert inv["last_reminder_sent_to"] == "finance@woodland.com"
+
+
+def test_overdue_reminders_summary_and_batch_dispatch(test_client, mock_env):
+    inv_a = ObjectId()
+    inv_b = ObjectId()
+    inv_paid = ObjectId()
+
+    mock_env.invoices_store = [
+        {
+            "_id": inv_a,
+            "invoice_no": "SSK-OD-10",
+            "client_name": "Campus Shoes",
+            "net_amount": 40000.0,
+            "grand_total": 40000.0,
+            "received_amount": 0.0,
+            "outstanding": 40000.0,
+            "due_date": "2026-08-01",
+            "status": "overdue",
+            "is_direct_invoice": True,
+        },
+        {
+            "_id": inv_b,
+            "invoice_no": "SSK-OD-11",
+            "client_name": "Campus Shoes",
+            "net_amount": 60000.0,
+            "grand_total": 60000.0,
+            "received_amount": 0.0,
+            "outstanding": 60000.0,
+            "due_date": "2026-08-15",
+            "status": "overdue",
+            "is_direct_invoice": True,
+        },
+        {
+            "_id": inv_paid,
+            "invoice_no": "SSK-PAID-01",
+            "client_name": "Campus Shoes",
+            "net_amount": 50000.0,
+            "grand_total": 50000.0,
+            "received_amount": 50000.0,
+            "outstanding": 0.0,
+            "due_date": "2026-08-01",
+            "status": "paid",
+            "is_direct_invoice": True,
+        },
+    ]
+
+    mock_env.payments_store = [
+        {
+            "_id": ObjectId(),
+            "invoice_ids": [str(inv_paid)],
+            "amount": 50000.0,
+            "payment_date": "2026-08-01",
+        }
+    ]
+
+    mock_env.clients_store = [
+        {
+            "company_name": "Campus Shoes",
+            "name": "Campus Shoes",
+            "email": "accounts@campusshoes.com",
+            "contact_person": "Alok Gupta",
+        }
+    ]
+
+    mock_env.settings_store["email_config"] = {
+        "gmail_user": "billing@sskfootcare.com",
+        "gmail_app_password": "abcdefghijklmnop",
+        "from_name": "SSK Accounts",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 465,
+    }
+
+    # 1. Test summary aggregation endpoint
+    summary_res = test_client.get("/api/invoices/overdue-reminders-summary")
+    assert summary_res.status_code == 200
+    summary_data = summary_res.json()
+    assert summary_data["ok"] is True
+    assert summary_data["total_overdue_invoices"] == 2
+    assert summary_data["total_overdue_amount"] == 100000.0
+    assert len(summary_data["clients"]) == 1
+
+    client_item = summary_data["clients"][0]
+    assert client_item["client_name"] == "Campus Shoes"
+    assert client_item["client_email"] == "accounts@campusshoes.com"
+    assert client_item["total_outstanding"] == 100000.0
+    assert len(client_item["invoices"]) == 2
+
+    # 2. Test batch reminders dispatch endpoint
+    with patch("smtplib.SMTP_SSL") as mock_smtp:
+        mock_instance = MagicMock()
+        mock_smtp.return_value.__enter__.return_value = mock_instance
+
+        batch_payload = {
+            "batches": [
+                {
+                    "client_name": "Campus Shoes",
+                    "to_email": "accounts@campusshoes.com",
+                    "invoice_ids": [str(inv_a), str(inv_b)],
+                    "cc_emails": "billing-audit@sskfootcare.com",
+                }
+            ]
+        }
+
+        batch_res = test_client.post("/api/invoices/send-batch-overdue-reminders", json=batch_payload)
+        assert batch_res.status_code == 200
+        bdata = batch_res.json()
+        assert bdata["ok"] is True
+        assert bdata["sent_count"] == 1
+        assert bdata["failed_count"] == 0
+        assert mock_instance.sendmail.called

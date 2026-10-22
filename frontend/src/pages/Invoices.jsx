@@ -77,6 +77,7 @@ export default function Invoices() {
   const [styles, setStyles] = useState([]);
   const [showDirectModal, setShowDirectModal] = useState(false);
   const [reminderFor, setReminderFor] = useState(null);
+  const [showBatchReminderModal, setShowBatchReminderModal] = useState(false);
 
   const load = async () => {
     try {
@@ -244,6 +245,15 @@ export default function Invoices() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                data-testid="batch-remind-overdue-banner-btn"
+                onClick={() => setShowBatchReminderModal(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded bg-[#0F172A] text-white hover:bg-slate-800 shadow-sm transition-colors"
+                title="Send consolidated payment reminders for all overdue invoices grouped by client"
+              >
+                <Mail className="w-3.5 h-3.5 text-amber-400" />
+                <span>Remind Overdue ({overdue.length})</span>
+              </button>
               <button
                 data-testid="export-overdue-banner-btn"
                 onClick={() =>
@@ -557,26 +567,26 @@ export default function Invoices() {
 
                           <FileDown className="w-4 h-4" />
                         </a>
+                        {r.status === "overdue" && (
+                          <button
+                            onClick={() => setReminderFor(r)}
+                            className={`p-1.5 rounded inline-block transition-colors ${
+                              r.last_reminder_sent_at
+                                ? "text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200"
+                                : "text-red-600 hover:text-red-700 hover:bg-red-50 border border-red-200"
+                            }`}
+                            title={
+                              r.last_reminder_sent_at
+                                ? `Reminder sent ${new Date(r.last_reminder_sent_at).toLocaleDateString()} (Total: ${r.reminder_count || 1}). Click to send another.`
+                                : "Send Overdue Payment Reminder via Gmail"
+                            }
+                            data-testid={`inv-reminder-${r.invoice_no}`}
+                          >
+                            <Mail className="w-4 h-4 text-red-600" />
+                          </button>
+                        )}
                         {r.status !== "paid" && (
                           <>
-                            <button
-                              onClick={() => setReminderFor(r)}
-                              className={`p-1.5 rounded inline-block transition-colors ${
-                                r.last_reminder_sent_at
-                                  ? "text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200"
-                                  : r.status === "overdue"
-                                  ? "text-amber-600 hover:text-amber-700 hover:bg-amber-50"
-                                  : "text-slate-600 hover:text-blue-600 hover:bg-slate-100"
-                              }`}
-                              title={
-                                r.last_reminder_sent_at
-                                  ? `Reminder sent ${new Date(r.last_reminder_sent_at).toLocaleDateString()} (Total: ${r.reminder_count || 1}). Click to send another.`
-                                  : "Send Payment Reminder via Gmail"
-                              }
-                              data-testid={`inv-reminder-${r.invoice_no}`}
-                            >
-                              <Mail className="w-4 h-4" />
-                            </button>
                             <button
                               onClick={() => setGrnFor(r)}
                               className={`p-1.5 rounded inline-block ${
@@ -674,6 +684,15 @@ export default function Invoices() {
           onClose={() => setReminderFor(null)}
           onSent={() => {
             setReminderFor(null);
+            load();
+          }}
+        />
+      )}
+      {showBatchReminderModal && (
+        <BatchOverdueReminderModal
+          onClose={() => setShowBatchReminderModal(false)}
+          onSent={() => {
+            setShowBatchReminderModal(false);
             load();
           }}
         />
@@ -800,15 +819,15 @@ function InvoiceDetailModal({ inv, onClose, styleByCode = {}, onSendReminder }) 
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {inv.status !== "paid" && (
+            {inv.status === "overdue" && (
               <button
                 onClick={() => onSendReminder && onSendReminder(inv)}
-                className="px-3 py-1.5 bg-[#C27842] hover:bg-[#A96330] text-white text-xs font-bold uppercase tracking-wider rounded flex items-center gap-1.5 transition-colors shadow-sm"
-                title="Send payment reminder email to client via Gmail"
+                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wider rounded flex items-center gap-1.5 transition-colors shadow-sm"
+                title="Send overdue payment reminder email to client via Gmail"
                 data-testid="detail-send-reminder-btn"
               >
                 <Mail className="w-3.5 h-3.5" />
-                <span>Send Reminder</span>
+                <span>Send Overdue Reminder</span>
               </button>
             )}
             <button onClick={onClose} className="hover:bg-white/10 p-1 text-slate-300 hover:text-white rounded">
@@ -1090,6 +1109,10 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
   const [includeBankDetails, setIncludeBankDetails] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
 
+  // Multi-overdue support
+  const [consolidateOverdue, setConsolidateOverdue] = useState(true);
+  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState([]);
+
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -1102,9 +1125,20 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
         setPreview(d);
         setToEmail(d.client_email || "");
         setCcEmails(d.default_cc || "");
-        setSubject(d.default_subject || "");
         setCustomMessage("");
         setAttachPdf(Boolean(d.has_pdf));
+
+        if (d.client_all_overdue && d.client_all_overdue.length > 1) {
+          setSelectedInvoiceIds(d.client_all_overdue.map((x) => x.id));
+          setConsolidateOverdue(true);
+          setSubject(
+            `OVERDUE STATEMENT: ${d.client_overdue_count} Overdue Invoices (${d.client_name || invoiceMeta.client_name}) - ${inr(d.client_total_overdue)}`
+          );
+        } else {
+          setSelectedInvoiceIds([invoiceMeta.id]);
+          setConsolidateOverdue(false);
+          setSubject(d.default_subject || "");
+        }
       })
       .catch((err) => {
         if (!mounted) return;
@@ -1118,7 +1152,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
     return () => {
       mounted = false;
     };
-  }, [invoiceMeta.id]);
+  }, [invoiceMeta.id, invoiceMeta.client_name]);
 
   const handleSend = async () => {
     if (!toEmail || !toEmail.includes("@")) {
@@ -1134,6 +1168,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
         custom_message: customMessage.trim(),
         attach_pdf: attachPdf,
         include_bank_details: includeBankDetails,
+        invoice_ids: consolidateOverdue ? selectedInvoiceIds : [invoiceMeta.id],
       };
       const { data } = await http.post(`/invoices/${invoiceMeta.id}/send-payment-reminder`, payload);
       alert(data.message || `Payment reminder sent successfully to ${toEmail}`);
@@ -1161,15 +1196,15 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
         {/* Header */}
         <div className="bg-[#0F172A] text-white px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-[#C27842] text-white rounded">
+            <div className="p-1.5 bg-red-600 text-white rounded">
               <Mail className="w-4 h-4" />
             </div>
             <div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-[#C27842] font-bold">
-                Direct Email Advisory
+              <div className="text-[10px] uppercase tracking-[0.2em] text-red-400 font-bold">
+                Direct Email Advisory · Overdue
               </div>
               <div className="text-lg font-bold">
-                Send Payment Reminder · {invNo}
+                Send Overdue Reminder · {invNo}
               </div>
             </div>
           </div>
@@ -1182,7 +1217,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
         <div className="p-5 space-y-4 overflow-y-auto flex-1">
           {loading ? (
             <div className="py-12 text-center text-sm text-slate-500">
-              <div className="animate-spin inline-block w-6 h-6 border-2 border-slate-300 border-t-[#C27842] rounded-full mb-2" />
+              <div className="animate-spin inline-block w-6 h-6 border-2 border-slate-300 border-t-red-600 rounded-full mb-2" />
               <div>Loading invoice preview & recipient details...</div>
             </div>
           ) : error ? (
@@ -1223,6 +1258,91 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                   >
                     Open Settings
                   </a>
+                </div>
+              )}
+
+              {/* Multi-Overdue Detection Banner */}
+              {preview?.client_all_overdue?.length > 1 && (
+                <div className="bg-red-50 border-2 border-red-300 p-3 rounded text-xs space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-red-900 font-bold">
+                      <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+                      <span>
+                        Multiple Overdue Invoices: {clientName} has {preview.client_overdue_count} overdue invoices totaling {inr(preview.client_total_overdue)}
+                      </span>
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs font-bold text-red-900 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={consolidateOverdue}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setConsolidateOverdue(checked);
+                          if (checked) {
+                            setSelectedInvoiceIds(preview.client_all_overdue.map((x) => x.id));
+                            setSubject(
+                              `OVERDUE STATEMENT: ${preview.client_overdue_count} Overdue Invoices (${clientName}) - ${inr(preview.client_total_overdue)}`
+                            );
+                          } else {
+                            setSelectedInvoiceIds([invoiceMeta.id]);
+                            setSubject(preview.default_subject || "");
+                          }
+                        }}
+                        className="rounded border-red-300 text-red-600 focus:ring-0"
+                      />
+                      <span>Consolidate in one email</span>
+                    </label>
+                  </div>
+
+                  {consolidateOverdue && (
+                    <div className="bg-white border border-red-200 rounded max-h-36 overflow-y-auto">
+                      <table className="w-full text-[11px] text-left">
+                        <thead className="bg-red-100/60 text-red-900 font-bold border-b border-red-200">
+                          <tr>
+                            <th className="p-1.5 pl-2 w-8"></th>
+                            <th className="p-1.5">Invoice #</th>
+                            <th className="p-1.5">Due Date</th>
+                            <th className="p-1.5">Overdue</th>
+                            <th className="p-1.5 text-right pr-2">Balance Due</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-red-100">
+                          {preview.client_all_overdue.map((od) => {
+                            const isSelected = selectedInvoiceIds.includes(od.id);
+                            return (
+                              <tr key={od.id} className={isSelected ? "bg-red-50/40" : "opacity-50"}>
+                                <td className="p-1.5 pl-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => {
+                                      let updated;
+                                      if (isSelected) {
+                                        if (selectedInvoiceIds.length === 1) return; // Keep at least one
+                                        updated = selectedInvoiceIds.filter((id) => id !== od.id);
+                                      } else {
+                                        updated = [...selectedInvoiceIds, od.id];
+                                      }
+                                      setSelectedInvoiceIds(updated);
+                                      const selItems = preview.client_all_overdue.filter((x) => updated.includes(x.id));
+                                      const selTotal = selItems.reduce((acc, curr) => acc + (curr.outstanding || 0), 0);
+                                      setSubject(
+                                        `OVERDUE STATEMENT: ${selItems.length} Overdue Invoices (${clientName}) - ${inr(selTotal)}`
+                                      );
+                                    }}
+                                  />
+                                </td>
+                                <td className="p-1.5 font-mono font-bold text-slate-800">{od.invoice_no}</td>
+                                <td className="p-1.5 text-slate-600">{od.due_date}</td>
+                                <td className="p-1.5 text-red-600 font-bold">{od.days_overdue}d</td>
+                                <td className="p-1.5 text-right font-mono font-bold text-red-700 pr-2">{inr(od.outstanding)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1303,11 +1423,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                     rows={3}
                     value={customMessage}
                     onChange={(e) => setCustomMessage(e.target.value)}
-                    placeholder={
-                      isOverdue
-                        ? "e.g. Urgent reminder: Kindly expedite the outstanding payment today..."
-                        : "e.g. Friendly reminder regarding your upcoming invoice balance..."
-                    }
+                    placeholder="e.g. Urgent reminder: Kindly expedite the outstanding payment today..."
                     data-testid="reminder-custom-message-input"
                     className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#2563EB] focus:outline-none leading-relaxed"
                   />
@@ -1328,7 +1444,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                     />
                     <span className="flex items-center gap-1">
                       <Paperclip className="w-3.5 h-3.5 text-slate-500" />
-                      Attach Tax Invoice PDF ({preview?.pdf_filename || `${invNo}.pdf`})
+                      Attach Tax Invoice PDF(s)
                     </span>
                   </label>
 
@@ -1395,7 +1511,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
               onClick={handleSend}
               disabled={sending || loading || !toEmail || !preview?.email_configured}
               data-testid="send-reminder-submit-btn"
-              className="bg-[#C27842] border-[#C27842] hover:bg-[#A96330]"
+              className="bg-red-600 border-red-600 hover:bg-red-700"
             >
               {sending ? (
                 <>
@@ -1405,7 +1521,291 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
               ) : (
                 <>
                   <Send className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
-                  Send Reminder
+                  Send Overdue Reminder
+                </>
+              )}
+            </BtnPrimary>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* -------------------- BATCH OVERDUE REMINDER MODAL -------------------- */
+function BatchOverdueReminderModal({ onClose, onSent }) {
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [error, setError] = useState(null);
+  const [selectedClients, setSelectedClients] = useState({});
+  const [clientEmails, setClientEmails] = useState({});
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    setError(null);
+    http
+      .get("/invoices/overdue-reminders-summary")
+      .then((res) => {
+        if (!mounted) return;
+        const data = res.data || { clients: [] };
+        setSummary(data);
+        const sel = {};
+        const emails = {};
+        (data.clients || []).forEach((c) => {
+          sel[c.client_name] = true;
+          emails[c.client_name] = c.client_email || "";
+        });
+        setSelectedClients(sel);
+        setClientEmails(emails);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        console.error("Failed to load overdue summary", err);
+        setError(err.response?.data?.detail || err.message || "Failed to load overdue summary");
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const clients = summary?.clients || [];
+  const selectedCount = Object.values(selectedClients).filter(Boolean).length;
+  const allSelected = clients.length > 0 && selectedCount === clients.length;
+
+  const toggleAll = () => {
+    const nextVal = !allSelected;
+    const sel = {};
+    clients.forEach((c) => {
+      sel[c.client_name] = nextVal;
+    });
+    setSelectedClients(sel);
+  };
+
+  const handleSendBatch = async () => {
+    const batches = [];
+    for (const c of clients) {
+      if (selectedClients[c.client_name]) {
+        const email = (clientEmails[c.client_name] || "").trim();
+        if (!email || !email.includes("@")) {
+          alert(`Please provide a valid email address for client "${c.client_name}".`);
+          return;
+        }
+        batches.push({
+          client_name: c.client_name,
+          to_email: email,
+          invoice_ids: c.invoice_ids,
+        });
+      }
+    }
+
+    if (batches.length === 0) {
+      alert("Please select at least one client to send overdue reminders.");
+      return;
+    }
+
+    setSending(true);
+    try {
+      const { data } = await http.post("/invoices/send-batch-overdue-reminders", { batches });
+      const sent = data.sent_count || 0;
+      const failed = data.failed_count || 0;
+      if (failed === 0) {
+        alert(`Successfully sent overdue payment reminders to ${sent} client(s).`);
+      } else {
+        alert(`Sent ${sent} reminder(s). ${failed} failed to deliver. Check logs for details.`);
+      }
+      onSent();
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message || "Failed to dispatch batch reminders");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-3 sm:p-4 overflow-y-auto"
+      data-testid="batch-overdue-reminder-modal"
+    >
+      <div className="bg-white w-full max-w-3xl border-2 border-slate-200 shadow-2xl my-6 flex flex-col max-h-[92vh]">
+        {/* Header */}
+        <div className="bg-[#0F172A] text-white px-5 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-red-600 text-white rounded">
+              <Mail className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-red-400 font-bold">
+                Batch Collection Automation
+              </div>
+              <div className="text-lg font-bold">
+                Send Overdue Payment Reminders
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose} className="hover:bg-white/10 p-1 rounded transition-colors text-slate-300 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {loading ? (
+            <div className="py-12 text-center text-sm text-slate-500">
+              <div className="animate-spin inline-block w-6 h-6 border-2 border-slate-300 border-t-red-600 rounded-full mb-2" />
+              <div>Scanning overdue invoices across all clients...</div>
+            </div>
+          ) : error ? (
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 text-xs rounded">
+              <b>Error:</b> {error}
+            </div>
+          ) : clients.length === 0 ? (
+            <div className="py-12 text-center text-sm text-slate-500">
+              <CheckCircle2 className="w-8 h-8 text-green-600 mx-auto mb-2" />
+              <div className="font-bold text-slate-800">No overdue invoices found!</div>
+              <div className="text-xs text-slate-500 mt-1">All client payments are currently up to date.</div>
+            </div>
+          ) : (
+            <>
+              {/* Overview Metrics Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-red-50 border-2 border-red-200 p-3.5 rounded text-xs">
+                <div>
+                  <div className="text-[10px] text-red-700 uppercase font-bold">Clients with Overdue</div>
+                  <div className="text-lg font-bold text-red-950">{clients.length} Clients</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-red-700 uppercase font-bold">Total Overdue Invoices</div>
+                  <div className="text-lg font-bold text-red-950">{summary.total_overdue_invoices} Invoices</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-red-700 uppercase font-bold">Total Overdue Balance</div>
+                  <div className="text-lg font-bold text-red-600 font-mono">{inr(summary.total_overdue_amount)}</div>
+                </div>
+              </div>
+
+              {/* Instructions & Select All */}
+              <div className="flex items-center justify-between text-xs pt-1">
+                <span className="text-slate-600">
+                  Select which clients should receive a consolidated statement of their overdue invoices:
+                </span>
+                <button
+                  type="button"
+                  onClick={toggleAll}
+                  className="text-xs font-bold text-slate-800 hover:underline"
+                >
+                  {allSelected ? "Deselect All" : "Select All"}
+                </button>
+              </div>
+
+              {/* Clients List */}
+              <div className="space-y-2.5 max-h-[46vh] overflow-y-auto pr-1">
+                {clients.map((c) => {
+                  const isChecked = Boolean(selectedClients[c.client_name]);
+                  const emailVal = clientEmails[c.client_name] || "";
+                  return (
+                    <div
+                      key={c.client_name}
+                      className={`border-2 p-3 rounded transition-colors ${
+                        isChecked ? "border-slate-800 bg-white shadow-sm" : "border-slate-200 bg-slate-50/60 opacity-60"
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-100">
+                        <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              setSelectedClients((prev) => ({
+                                ...prev,
+                                [c.client_name]: e.target.checked,
+                              }));
+                            }}
+                            className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-0"
+                          />
+                          <div>
+                            <span className="font-bold text-slate-900 text-sm">{c.client_name}</span>
+                            {c.contact_person && (
+                              <span className="text-[11px] text-slate-500 ml-2">Attn: {c.contact_person}</span>
+                            )}
+                          </div>
+                        </label>
+                        <div className="flex items-center gap-2 pl-6 sm:pl-0">
+                          <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-red-100 text-red-800">
+                            {c.invoices.length} Overdue ({c.max_days_overdue}d max)
+                          </span>
+                          <span className="font-mono font-bold text-red-600 text-sm">
+                            {inr(c.total_outstanding)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pl-6 text-xs">
+                        <div>
+                          <div className="text-[10px] text-slate-500 font-bold uppercase mb-0.5">Recipient Email</div>
+                          <input
+                            type="email"
+                            value={emailVal}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setClientEmails((prev) => ({
+                                ...prev,
+                                [c.client_name]: val,
+                              }));
+                            }}
+                            placeholder="accounts@client.com"
+                            className="w-full border border-slate-300 bg-white px-2 py-1 text-xs focus:border-[#2563EB] focus:outline-none font-mono"
+                          />
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500 font-bold uppercase mb-0.5">Invoices Included</div>
+                          <div className="text-[11px] text-slate-700 truncate" title={c.invoices.map((inv) => inv.invoice_no).join(", ")}>
+                            {c.invoices.map((inv) => `${inv.invoice_no} (${inr(inv.outstanding)})`).join(" · ")}
+                          </div>
+                          {c.last_reminder_sent_at && (
+                            <div className="text-[10px] text-blue-600 mt-0.5">
+                              Last sent: {new Date(c.last_reminder_sent_at).toLocaleDateString()}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="bg-slate-50 px-5 py-3.5 border-t border-slate-200 flex items-center justify-between">
+          <div className="text-[11px] text-slate-500">
+            Each selected client receives an itemized statement with all overdue invoices and attached PDFs.
+          </div>
+          <div className="flex items-center gap-2">
+            <BtnSecondary onClick={onClose} disabled={sending}>
+              Cancel
+            </BtnSecondary>
+            <BtnPrimary
+              onClick={handleSendBatch}
+              disabled={sending || loading || selectedCount === 0 || clients.length === 0}
+              data-testid="send-batch-reminders-submit-btn"
+              className="bg-red-600 border-red-600 hover:bg-red-700"
+            >
+              {sending ? (
+                <>
+                  <div className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1.5 -mt-0.5" />
+                  Sending Batch Reminders...
+                </>
+              ) : (
+                <>
+                  <Send className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                  Send to {selectedCount} Client{selectedCount === 1 ? "" : "s"}
                 </>
               )}
             </BtnPrimary>
