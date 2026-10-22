@@ -1,6 +1,7 @@
 """Email service for SSK Footcare ERP.
 
-Handles Gmail SMTP connection, authentication testing, transactional email dispatch,
+Handles Gmail SMTP connection, Resend HTTP API fallback (Port 443 HTTPS),
+authentication testing, non-blocking asynchronous email dispatch,
 and branded Payment Reminders with invoice PDF attachments.
 """
 
@@ -11,11 +12,14 @@ import base64
 import smtplib
 import socket
 import logging
+import asyncio
+from functools import partial
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-from typing import Dict, Any, List, Optional, Tuple
+from email.utils import formatdate
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 log = logging.getLogger("email_service")
 
@@ -31,11 +35,28 @@ def clean_app_password(pwd: Optional[str]) -> str:
     return re.sub(r"\s+", "", pwd.strip())
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely cast value to float, handling None, empty string '', invalid strings, and non-numerics without crashing."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return default
+
+
 async def get_email_config(db=None) -> Dict[str, Any]:
     """Retrieve email configuration from MongoDB settings or fallback to environment variables."""
     cfg = {
+        "provider": "smtp",  # "smtp" (Gmail) or "resend" (HTTP API Port 443)
         "gmail_user": "",
         "gmail_app_password": "",
+        "resend_api_key": "",
         "from_name": "SSK Footcare Manufacturing",
         "reply_to": "",
         "default_cc": "",
@@ -51,10 +72,14 @@ async def get_email_config(db=None) -> Dict[str, Any]:
         try:
             doc = await db.settings.find_one({"_id": "email_config"})
             if doc:
+                if doc.get("provider"):
+                    cfg["provider"] = str(doc.get("provider", "smtp")).strip()
                 if doc.get("gmail_user"):
                     cfg["gmail_user"] = str(doc.get("gmail_user", "")).strip()
                 if doc.get("gmail_app_password"):
                     cfg["gmail_app_password"] = clean_app_password(doc.get("gmail_app_password", ""))
+                if doc.get("resend_api_key"):
+                    cfg["resend_api_key"] = str(doc.get("resend_api_key", "")).strip()
                 if doc.get("from_name"):
                     cfg["from_name"] = str(doc.get("from_name", "")).strip()
                 if doc.get("reply_to"):
@@ -69,7 +94,7 @@ async def get_email_config(db=None) -> Dict[str, Any]:
                     except (ValueError, TypeError):
                         cfg["smtp_port"] = 465
                 cfg["updated_at"] = doc.get("updated_at")
-                if cfg["gmail_user"] and cfg["gmail_app_password"]:
+                if (cfg["gmail_user"] and cfg["gmail_app_password"]) or cfg["resend_api_key"]:
                     cfg["is_configured"] = True
                     cfg["source"] = "database"
         except Exception as e:
@@ -77,12 +102,16 @@ async def get_email_config(db=None) -> Dict[str, Any]:
 
     # 2. Fall back to environment variables if not configured via database
     if not cfg["is_configured"]:
+        env_resend = os.environ.get("RESEND_API_KEY", "").strip()
         env_user = os.environ.get("GMAIL_USER", "").strip()
         env_pass = clean_app_password(os.environ.get("GMAIL_APP_PASSWORD", ""))
         env_from = os.environ.get("GMAIL_FROM_NAME", "").strip()
         env_reply_to = os.environ.get("GMAIL_REPLY_TO", "").strip()
         env_cc = os.environ.get("GMAIL_DEFAULT_CC", "").strip()
 
+        if env_resend:
+            cfg["resend_api_key"] = env_resend
+            cfg["provider"] = "resend"
         if env_user:
             cfg["gmail_user"] = env_user
         if env_pass:
@@ -94,7 +123,7 @@ async def get_email_config(db=None) -> Dict[str, Any]:
         if env_cc:
             cfg["default_cc"] = env_cc
 
-        if cfg["gmail_user"] and cfg["gmail_app_password"]:
+        if (cfg["gmail_user"] and cfg["gmail_app_password"]) or cfg["resend_api_key"]:
             cfg["is_configured"] = True
             cfg["source"] = "environment"
 
@@ -121,7 +150,7 @@ def _connect_smtp_ssl_ipv4(host: str, port: int, timeout: int = 15) -> smtplib.S
                 smtp.close()
                 raise smtplib.SMTPConnectError(code, msg)
             return smtp
-        except OSError as err:
+        except (OSError, socket.timeout, TimeoutError) as err:
             last_err = err
             try:
                 s.close()
@@ -151,7 +180,7 @@ def _connect_smtp_starttls_ipv4(host: str, port: int, timeout: int = 15) -> smtp
             smtp.ehlo()
             smtp.starttls()
             return smtp
-        except OSError as err:
+        except (OSError, socket.timeout, TimeoutError) as err:
             last_err = err
             try:
                 s.close()
@@ -167,8 +196,8 @@ def create_smtp_connection(
 ):
     """
     Establish an SMTP connection with automatic IPv4 fallback if dual-stack DNS
-    returns [Errno 101] Network is unreachable (common in Linux/Docker/WSL/cloud VPS
-    environments with incomplete IPv6 routing).
+    returns [Errno 101] Network is unreachable or IPv6 connection times out (common in
+    Linux/Docker/WSL/cloud VPS environments with incomplete IPv6 routing).
     """
     host = (smtp_host or "smtp.gmail.com").strip()
     port = int(smtp_port or 465)
@@ -176,32 +205,28 @@ def create_smtp_connection(
     if port == 465:
         try:
             return smtplib.SMTP_SSL(host, port, timeout=timeout)
-        except OSError as e:
-            if getattr(e, "errno", None) in (101, 10051) or "unreachable" in str(e).lower():
-                log.info(
-                    "Standard SMTP_SSL connect to %s:%s failed with %s; falling back to IPv4 socket",
-                    host,
-                    port,
-                    e,
-                )
-                return _connect_smtp_ssl_ipv4(host, port, timeout=timeout)
-            raise
+        except (OSError, socket.timeout, TimeoutError) as e:
+            log.info(
+                "Standard SMTP_SSL connect to %s:%s failed with %s; falling back to direct IPv4 socket",
+                host,
+                port,
+                e,
+            )
+            return _connect_smtp_ssl_ipv4(host, port, timeout=timeout)
     else:
         try:
             smtp = smtplib.SMTP(host, port, timeout=timeout)
             smtp.ehlo()
             smtp.starttls()
             return smtp
-        except OSError as e:
-            if getattr(e, "errno", None) in (101, 10051) or "unreachable" in str(e).lower():
-                log.info(
-                    "Standard SMTP connect to %s:%s failed with %s; falling back to IPv4 socket",
-                    host,
-                    port,
-                    e,
-                )
-                return _connect_smtp_starttls_ipv4(host, port, timeout=timeout)
-            raise
+        except (OSError, socket.timeout, TimeoutError) as e:
+            log.info(
+                "Standard SMTP connect to %s:%s failed with %s; falling back to direct IPv4 socket",
+                host,
+                port,
+                e,
+            )
+            return _connect_smtp_starttls_ipv4(host, port, timeout=timeout)
 
 
 def verify_smtp_credentials(
@@ -237,7 +262,9 @@ def verify_smtp_credentials(
         return (
             False,
             f"Connection to {host}:{port} timed out after {timeout} seconds. "
-            f"Port {port} may be blocked by your hosting provider or firewall. Try switching SMTP Port to {alt_port} in Settings.",
+            f"Port {port} may be blocked by your hosting provider or network firewall. "
+            f"If both Port 465 and Port 587 time out, your cloud host (e.g. Render, AWS EC2, DigitalOcean) blocks outbound SMTP ports 25, 465, and 587. "
+            f"Solution: Switch to HTTP Email Delivery (Resend API on HTTPS Port 443) in Settings or request your host to unblock port 587.",
         )
     except smtplib.SMTPConnectError as e:
         log.warning("Gmail SMTP connection error: %s", e)
@@ -266,27 +293,158 @@ def verify_smtp_credentials(
         return (False, f"Connection test failed: {e}")
 
 
-def send_email(
-    to_emails: List[str] | str,
+def _verify_resend_api_key(api_key: str, timeout: int = 10) -> Tuple[bool, str]:
+    """Verify Resend API Key against Resend API via HTTPS (Port 443)."""
+    k = (api_key or "").strip()
+    if not k:
+        return (False, "Resend API key is required.")
+    import httpx
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(
+                "https://api.resend.com/api-keys",
+                headers={"Authorization": f"Bearer {k}"},
+            )
+            if resp.status_code == 200:
+                return (True, "Successfully authenticated with Resend HTTP API (Port 443 HTTPS). Ready to send emails without SMTP port restrictions.")
+            return (False, f"Resend API Key verification failed ({resp.status_code}): {resp.text}")
+    except Exception as e:
+        return (False, f"Resend API connection failed: {e}")
+
+
+def verify_email_credentials(
+    config: Dict[str, Any],
+    timeout: int = 15,
+) -> Tuple[bool, str]:
+    """Verify credentials for either Gmail SMTP or Resend HTTP API."""
+    provider = config.get("provider", "smtp")
+    if provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
+        api_key = config.get("resend_api_key", "").strip()
+        return _verify_resend_api_key(api_key, timeout=timeout)
+    else:
+        return verify_smtp_credentials(
+            smtp_host=config.get("smtp_host", "smtp.gmail.com"),
+            smtp_port=int(config.get("smtp_port") or 465),
+            user=config.get("gmail_user", ""),
+            password=config.get("gmail_app_password", ""),
+            timeout=timeout,
+        )
+
+
+async def async_verify_smtp_credentials(smtp_host: str, smtp_port: int, user: str, password: str, timeout: int = 15) -> Tuple[bool, str]:
+    """Execute synchronous verify_smtp_credentials in a threadpool executor without blocking the asyncio loop."""
+    loop = asyncio.get_running_loop()
+    func = partial(verify_smtp_credentials, smtp_host, smtp_port, user, password, timeout=timeout)
+    return await loop.run_in_executor(None, func)
+
+
+async def async_verify_email_credentials(config: Dict[str, Any], timeout: int = 15) -> Tuple[bool, str]:
+    """Execute synchronous verify_email_credentials in a threadpool executor without blocking the asyncio loop."""
+    loop = asyncio.get_running_loop()
+    func = partial(verify_email_credentials, config, timeout=timeout)
+    return await loop.run_in_executor(None, func)
+
+
+def _send_via_resend_api(
+    config: Dict[str, Any],
+    to_list: List[str],
     subject: str,
     text_body: str,
     html_body: str,
-    cc_emails: Optional[List[str] | str] = None,
-    bcc_emails: Optional[List[str] | str] = None,
+    cc_list: Optional[List[str]] = None,
+    bcc_list: Optional[List[str]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    timeout: int = 20,
+) -> Tuple[bool, str]:
+    """Dispatch an email via Resend HTTP API over standard HTTPS (Port 443)."""
+    api_key = (config.get("resend_api_key") or os.environ.get("RESEND_API_KEY") or "").strip()
+    if not api_key:
+        return (False, "Resend API Key is not configured. Please add your Resend API Key in Settings.")
+
+    from_name = config.get("from_name") or "SSK Footcare"
+    sender_email = config.get("from_email") or config.get("gmail_user") or ""
+    # If not using a custom verified domain on Resend, Resend requires onboarding@resend.dev
+    if not sender_email or "@" not in sender_email or sender_email.endswith("@gmail.com"):
+        from_header = f"{from_name} <onboarding@resend.dev>"
+    else:
+        from_header = f"{from_name} <{sender_email}>"
+
+    payload: Dict[str, Any] = {
+        "from": from_header,
+        "to": to_list,
+        "subject": subject,
+        "html": html_body,
+        "text": text_body,
+    }
+    if cc_list:
+        payload["cc"] = cc_list
+    if bcc_list:
+        payload["bcc"] = bcc_list
+    if config.get("reply_to"):
+        payload["reply_to"] = config["reply_to"]
+    elif config.get("gmail_user"):
+        payload["reply_to"] = config["gmail_user"]
+
+    if attachments:
+        resend_atts = []
+        for att in attachments:
+            fname = att.get("filename", "attachment.pdf")
+            content = att.get("content")
+            if isinstance(content, bytes):
+                b64_content = base64.b64encode(content).decode("utf-8")
+            elif isinstance(content, str):
+                b64_content = content
+            else:
+                continue
+            resend_atts.append({
+                "filename": fname,
+                "content": b64_content,
+            })
+        if resend_atts:
+            payload["attachments"] = resend_atts
+
+    import httpx
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                email_id = data.get("id", "")
+                return (True, f"Email delivered via Resend API (ID: {email_id})")
+            else:
+                err_text = resp.text
+                try:
+                    err_json = resp.json()
+                    err_text = err_json.get("message") or err_text
+                except Exception:
+                    pass
+                return (False, f"Resend API error ({resp.status_code}): {err_text}")
+    except Exception as e:
+        log.exception("Resend API request failed")
+        return (False, f"Resend API request failed: {e}")
+
+
+def send_email(
+    to_emails: Union[List[str], str],
+    subject: str,
+    text_body: str,
+    html_body: Optional[str] = None,
+    cc_emails: Optional[Union[List[str], str]] = None,
+    bcc_emails: Optional[Union[List[str], str]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None,
     timeout: int = 20,
 ) -> Tuple[bool, str]:
-    """Dispatch an email via Gmail SMTP with optional PDF/file attachments."""
-    if not config or not config.get("is_configured"):
-        return (False, "Gmail is not configured in ERP settings or environment variables.")
-
-    gmail_user = config["gmail_user"]
-    gmail_pass = config["gmail_app_password"]
-    from_name = config.get("from_name") or "SSK Footcare Manufacturing"
-    reply_to = config.get("reply_to") or ""
-    smtp_host = config.get("smtp_host") or "smtp.gmail.com"
-    smtp_port = int(config.get("smtp_port") or 465)
+    """Dispatch an email via Gmail SMTP or Resend HTTP API with optional PDF/file attachments."""
+    if not config or (not config.get("is_configured") and not (config.get("gmail_user") and config.get("gmail_app_password")) and not config.get("resend_api_key")):
+        return (False, "Email is not configured in ERP settings or environment variables.")
 
     # Normalize recipient lists
     def _normalize_list(val) -> List[str]:
@@ -310,6 +468,30 @@ def send_email(
         if not email_regex.match(addr):
             return (False, f"Invalid email format: '{addr}'")
 
+    provider = config.get("provider", "smtp")
+    if provider == "resend" or (config.get("resend_api_key") and not config.get("gmail_app_password")):
+        return _send_via_resend_api(
+            config=config,
+            to_list=to_list,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            cc_list=cc_list,
+            bcc_list=bcc_list,
+            attachments=attachments,
+            timeout=timeout,
+        )
+
+    gmail_user = config.get("gmail_user", "")
+    gmail_pass = config.get("gmail_app_password", "")
+    from_name = config.get("from_name") or "SSK Footcare Manufacturing"
+    reply_to = config.get("reply_to") or ""
+    smtp_host = config.get("smtp_host") or "smtp.gmail.com"
+    smtp_port = int(config.get("smtp_port") or 465)
+
+    if not gmail_user or not gmail_pass:
+        return (False, "Gmail address or Google App Password missing.")
+
     # Build root MIME container
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
@@ -319,7 +501,7 @@ def send_email(
         msg["Cc"] = ", ".join(cc_list)
     if reply_to:
         msg["Reply-To"] = reply_to
-    msg["Date"] = smtplib.email.utils.formatdate(localtime=True)
+    msg["Date"] = formatdate(localtime=True)
 
     # Alternative body (plain + HTML)
     alt = MIMEMultipart("alternative")
@@ -356,6 +538,15 @@ def send_email(
     except smtplib.SMTPAuthenticationError:
         log.exception("Gmail SMTP auth failed during send")
         return (False, "Gmail authentication failed. Please check your Google App Password.")
+    except (socket.timeout, TimeoutError):
+        log.warning("Gmail SMTP connection timed out connecting to %s:%s during send", smtp_host, smtp_port)
+        alt_port = 587 if smtp_port == 465 else 465
+        return (
+            False,
+            f"Connection to {smtp_host}:{smtp_port} timed out after {timeout} seconds. "
+            f"If both Port 465 and Port 587 time out, your cloud host (e.g. Render, AWS EC2, DigitalOcean) blocks outbound SMTP ports 25, 465, and 587. "
+            f"Solution: Switch to HTTP Email Delivery (Resend API on HTTPS Port 443) in Settings or request your cloud provider to unblock port 587.",
+        )
     except OSError as e:
         err_msg = str(e)
         if getattr(e, "errno", None) in (101, 10051) or "unreachable" in err_msg.lower():
@@ -373,10 +564,17 @@ def send_email(
         return (False, f"Failed to send email: {e}")
 
 
-def format_inr(amount: float) -> str:
+async def async_send_email(*args, **kwargs) -> Tuple[bool, str]:
+    """Execute synchronous send_email in a threadpool executor without blocking the asyncio loop."""
+    loop = asyncio.get_running_loop()
+    func = partial(send_email, *args, **kwargs)
+    return await loop.run_in_executor(None, func)
+
+
+def format_inr(amount: Any) -> str:
     """Format numeric amount into Indian Rupee style with commas (e.g. ₹1,23,456.00)."""
     try:
-        val = float(amount or 0)
+        val = _safe_float(amount, 0.0)
         s = f"{val:.2f}"
         parts = s.split(".")
         integer_part = parts[0]
@@ -398,6 +596,22 @@ def format_inr(amount: float) -> str:
         return f"₹{amount}"
 
 
+def _format_date_clean(val: Any) -> str:
+    """Format an ISO date string (YYYY-MM-DD) into readable DD-MMM-YYYY or return as string."""
+    if not val:
+        return "—"
+    s = str(val).strip()
+    if not s or s in ("—", "-", "None", "null", "N/A"):
+        return "—"
+    if s == "Immediate":
+        return "Immediate"
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+        return dt.strftime("%d-%b-%Y")
+    except Exception:
+        return s
+
+
 def build_payment_reminder_template(
     invoice: Dict[str, Any],
     client: Dict[str, Any],
@@ -406,18 +620,27 @@ def build_payment_reminder_template(
     include_bank_details: bool = True,
 ) -> Tuple[str, str, str]:
     """
-    Generate subject, plaintext body, and modern responsive HTML for a payment reminder.
+    Generate subject, plaintext body, and modern responsive HTML table of details for an invoice payment reminder.
     Returns: (subject, text_body, html_body)
     """
     inv_no = invoice.get("invoice_no") or "Invoice"
     client_name = client.get("company_name") or client.get("name") or invoice.get("client_name") or "Valued Customer"
     contact_person = client.get("contact_person") or ""
-    po_no = invoice.get("po_number") or "N/A"
-    inv_date = invoice.get("invoice_date") or invoice.get("date") or "N/A"
+    po_no = invoice.get("po_number") or "—"
+    inv_date = invoice.get("invoice_date") or invoice.get("date") or "—"
+    inv_date_clean = _format_date_clean(inv_date)
+    grn_date = invoice.get("grn_date")
+    grn_date_clean = _format_date_clean(grn_date)
     due_date = invoice.get("due_date") or "Immediate"
-    net_amount = float(invoice.get("net_amount") or 0)
-    received_amount = float(invoice.get("received_amount") or 0)
-    outstanding = float(invoice.get("outstanding") if invoice.get("outstanding") is not None else (net_amount - received_amount))
+    due_date_clean = _format_date_clean(due_date)
+
+    net_amount = _safe_float(invoice.get("net_amount"), 0.0)
+    received_amount = _safe_float(invoice.get("received_amount"), 0.0)
+    raw_out = invoice.get("outstanding")
+    if raw_out is not None and str(raw_out).strip() != "":
+        outstanding = _safe_float(raw_out, net_amount - received_amount)
+    else:
+        outstanding = max(0.0, net_amount - received_amount)
 
     # Calculate status & overdue days
     is_overdue = False
@@ -453,33 +676,36 @@ def build_payment_reminder_template(
         if is_overdue:
             user_msg = (
                 f"We would like to bring to your attention that payment for Invoice #{inv_no} is currently "
-                f"overdue by {days_overdue} day(s). Kindly arrange the remittance of the outstanding balance "
-                f"at your earliest convenience."
+                f"overdue by {days_overdue} day(s). Kindly review the itemized particulars below and arrange "
+                f"the remittance of the outstanding balance at your earliest convenience."
             )
         else:
             user_msg = (
-                f"This is a gentle reminder regarding the outstanding balance for Invoice #{inv_no}. "
+                f"This is a gentle reminder regarding the upcoming balance for Invoice #{inv_no}. "
                 f"Kindly review the invoice details below and arrange for payment on or before the due date."
             )
     else:
         user_msg = custom_message.strip()
 
-    # Plaintext version
+    overdue_period_str = f"{days_overdue} Days Overdue" if is_overdue else "Due on schedule"
+
+    # Plaintext version with clean tabular layout
     text_parts = [
-        f"PAYMENT REMINDER — {company_name.upper()}",
-        "=" * 50,
+        f"PAYMENT REMINDER & STATEMENT — {company_name.upper()}",
+        "=" * 70,
         f"\nDear {greeting_name},",
         f"\n{user_msg}\n",
-        "-" * 50,
-        "INVOICE SUMMARY:",
-        f"  Invoice Number  : {inv_no}",
-        f"  Invoice Date    : {inv_date}",
-        f"  Due Date        : {due_date} {'(OVERDUE by ' + str(days_overdue) + ' days)' if is_overdue else ''}",
-        f"  Purchase Order  : {po_no}",
-        f"  Total Amount    : {format_inr(net_amount)}",
-        f"  Amount Received : {format_inr(received_amount)}",
-        f"  OUTSTANDING DUE : {format_inr(outstanding)}",
-        "-" * 50,
+        "-" * 70,
+        "INVOICE PARTICULARS & BALANCE DETAILS:",
+        f"  • Invoice Number  : {inv_no}",
+        f"  • Invoice Date    : {inv_date_clean}",
+        f"  • GRN Date        : {grn_date_clean}",
+        f"  • PO Number       : {po_no}",
+        f"  • Total Amount    : {format_inr(net_amount)}",
+        f"  • Due Date        : {due_date_clean}",
+        f"  • Overdue Period  : {overdue_period_str}",
+        f"  • OUTSTANDING DUE : {format_inr(outstanding)}",
+        "-" * 70,
     ]
 
     if include_bank_details and bank_acc:
@@ -507,19 +733,31 @@ def build_payment_reminder_template(
     badge_bg = "#FEE2E2" if is_overdue else "#FEF3C7"
     badge_color = "#991B1B" if is_overdue else "#92400E"
     badge_border = "#FCA5A5" if is_overdue else "#FCD34D"
-    badge_text = f"OVERDUE · {days_overdue} DAYS" if is_overdue else "PAYMENT DUE"
+    badge_text = f"OVERDUE · {days_overdue} DAYS" if is_overdue else "PAYMENT SCHEDULED"
+
+    grn_badge = (
+        f'<span style="display: inline-block; padding: 2px 7px; background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; border-radius: 4px; font-size: 11px; font-weight: 600;">{grn_date_clean}</span>'
+        if grn_date
+        else '<span style="color: #94A3B8; font-size: 11px;">Not Recorded</span>'
+    )
+
+    overdue_badge = (
+        f'<span style="display: inline-block; padding: 3px 8px; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; border-radius: 12px; font-weight: 700; font-size: 11px;">{days_overdue}d Overdue</span>'
+        if is_overdue
+        else '<span style="display: inline-block; padding: 3px 8px; background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; border-radius: 12px; font-weight: 600; font-size: 11px;">Current</span>'
+    )
 
     bank_html = ""
     if include_bank_details and bank_acc:
         bank_html = f"""
-        <div style="margin-top: 24px; padding: 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-left: 4px solid #0F172A;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #475569; margin-bottom: 10px;">
-            Bank Remittance Information
+        <div style="margin-top: 24px; padding: 18px 20px; background: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #0F172A; border-radius: 6px;">
+          <div style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #0F172A; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
+            🏦 Bank Remittance & Settlement Details
           </div>
-          <table style="width: 100%; font-size: 13px; border-collapse: collapse; line-height: 1.6;">
+          <table style="width: 100%; font-size: 13px; border-collapse: collapse; line-height: 1.7;">
             <tr>
               <td style="color: #64748B; width: 140px; padding: 3px 0;">Beneficiary:</td>
-              <td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{company_name}</td>
+              <td style="color: #0F172A; font-weight: 700; padding: 3px 0;">{company_name}</td>
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">Bank Name:</td>
@@ -527,16 +765,16 @@ def build_payment_reminder_template(
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">Account Number:</td>
-              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_acc}</td>
+              <td style="color: #0F172A; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_acc}</td>
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">IFSC Code:</td>
-              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_ifsc}</td>
+              <td style="color: #0F172A; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_ifsc}</td>
             </tr>
             {f'<tr><td style="color: #64748B; padding: 3px 0;">UPI ID:</td><td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{upi_id}</td></tr>' if upi_id else ''}
           </table>
-          <div style="margin-top: 10px; font-size: 11px; color: #64748B;">
-            * Kindly send the UTR / transaction receipt to this email once transferred for prompt ledger credit.
+          <div style="margin-top: 10px; font-size: 11px; color: #64748B; border-top: 1px dashed #CBD5E1; padding-top: 8px;">
+            * Kindly reply to this email with the UTR / transaction receipt once transferred for instant ledger credit.
           </div>
         </div>
         """
@@ -549,22 +787,25 @@ def build_payment_reminder_template(
   <title>{subject}</title>
 </head>
 <body style="margin: 0; padding: 24px; background-color: #F1F5F9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1E293B;">
-  <div style="max-width: 620px; margin: 0 auto; background: #FFFFFF; border: 2px solid #0F172A; box-shadow: 4px 4px 0px #0F172A;">
+  <div style="max-width: 680px; margin: 0 auto; background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);">
     
+    <!-- Top Accent Bar -->
+    <div style="height: 4px; background: #C27842;"></div>
+
     <!-- Header -->
-    <div style="background: #0F172A; padding: 24px 28px; color: #FFFFFF;">
-      <table style="width: 100%;">
+    <div style="background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%); padding: 24px 28px; color: #FFFFFF;">
+      <table style="width: 100%; border-collapse: collapse;">
         <tr>
           <td>
             <div style="font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #94A3B8; font-weight: 700;">
-              SSK Footcare ERP · Accounts Department
+              SSK Footcare ERP · Accounts & Receivables
             </div>
-            <div style="font-size: 20px; font-weight: 800; letter-spacing: 0.5px; margin-top: 4px;">
+            <div style="font-size: 20px; font-weight: 800; letter-spacing: 0.5px; margin-top: 4px; color: #FFFFFF;">
               {company_name}
             </div>
           </td>
           <td style="text-align: right; vertical-align: top;">
-            <span style="display: inline-block; padding: 4px 10px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; background: {badge_bg}; color: {badge_color}; border: 1px solid {badge_border}; border-radius: 2px;">
+            <span style="display: inline-block; padding: 5px 12px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; background: {badge_bg}; color: {badge_color}; border: 1px solid {badge_border}; border-radius: 20px;">
               {badge_text}
             </span>
           </td>
@@ -574,7 +815,9 @@ def build_payment_reminder_template(
 
     <!-- Body -->
     <div style="padding: 28px;">
-      <p style="font-size: 15px; margin: 0 0 16px; color: #0F172A;">
+      
+      <!-- Greeting -->
+      <p style="font-size: 15px; margin: 0 0 14px; color: #0F172A;">
         Dear <strong>{greeting_name}</strong>,
       </p>
       
@@ -582,56 +825,73 @@ def build_payment_reminder_template(
         {user_msg}
       </p>
 
-      <!-- Invoice Breakdown Card -->
-      <div style="background: #F8FAFC; border: 1px solid #E2E8F0; padding: 16px 20px; margin-bottom: 20px;">
-        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #64748B; margin-bottom: 12px; border-bottom: 1px solid #E2E8F0; padding-bottom: 6px;">
-          Invoice Details & Balance Breakdown
+      <!-- Executive KPI Cards -->
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 22px;">
+        <tr>
+          <td style="width: 50%; padding-right: 6px;">
+            <div style="background: #FEF2F2; border: 1px solid #FECACA; border-radius: 6px; padding: 14px 16px;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #991B1B;">
+                Outstanding Balance Due
+              </div>
+              <div style="font-size: 22px; font-weight: 800; color: #DC2626; font-family: 'Consolas', 'Courier New', monospace; margin-top: 4px;">
+                {format_inr(outstanding)}
+              </div>
+            </div>
+          </td>
+          <td style="width: 50%; padding-left: 6px;">
+            <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 14px 16px;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #64748B;">
+                Invoice Status
+              </div>
+              <div style="font-size: 16px; font-weight: 700; color: #0F172A; margin-top: 6px;">
+                {f'<span style="color: #DC2626;">{days_overdue} Days Overdue</span>' if is_overdue else '<span style="color: #16A34A;">Payment Pending</span>'}
+              </div>
+            </div>
+          </td>
+        </tr>
+      </table>
+
+      <!-- TABLE OF DETAILS (Hero Element) -->
+      <div style="border: 1px solid #CBD5E1; border-radius: 6px; overflow: hidden; margin-bottom: 20px;">
+        <div style="background: #F8FAFC; border-bottom: 1px solid #CBD5E1; padding: 10px 14px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #475569;">
+          Itemized Invoice & Delivery Particulars
         </div>
-        <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
-          <tr>
-            <td style="padding: 5px 0; color: #64748B;">Invoice Number:</td>
-            <td style="padding: 5px 0; font-family: 'Courier New', monospace; font-weight: 700; text-align: right; color: #0F172A;">{inv_no}</td>
-          </tr>
-          <tr>
-            <td style="padding: 5px 0; color: #64748B;">Invoice Date:</td>
-            <td style="padding: 5px 0; font-weight: 600; text-align: right; color: #0F172A;">{inv_date}</td>
-          </tr>
-          <tr>
-            <td style="padding: 5px 0; color: #64748B;">Due Date:</td>
-            <td style="padding: 5px 0; font-weight: 700; text-align: right; color: {'#DC2626' if is_overdue else '#0F172A'};">
-              {due_date} {f'({days_overdue} days overdue)' if is_overdue else ''}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 5px 0; color: #64748B;">Purchase Order (PO):</td>
-            <td style="padding: 5px 0; text-align: right; color: #0F172A;">{po_no}</td>
-          </tr>
-          <tr style="border-top: 1px dashed #CBD5E1;">
-            <td style="padding: 8px 0 4px; color: #64748B;">Total Invoice Amount:</td>
-            <td style="padding: 8px 0 4px; font-family: 'Courier New', monospace; text-align: right; color: #0F172A;">{format_inr(net_amount)}</td>
-          </tr>
-          <tr>
-            <td style="padding: 4px 0; color: #64748B;">Amount Received:</td>
-            <td style="padding: 4px 0; font-family: 'Courier New', monospace; text-align: right; color: #16A34A;">{format_inr(received_amount)}</td>
-          </tr>
-          <tr style="border-top: 2px solid #0F172A;">
-            <td style="padding: 10px 0 4px; font-size: 14px; font-weight: 800; color: #0F172A; text-transform: uppercase; letter-spacing: 0.5px;">
-              Outstanding Balance Due:
-            </td>
-            <td style="padding: 10px 0 4px; font-family: 'Courier New', monospace; font-size: 18px; font-weight: 800; text-align: right; color: #DC2626;">
-              {format_inr(outstanding)}
-            </td>
-          </tr>
+        <table style="width: 100%; font-size: 12px; border-collapse: collapse; text-align: left;">
+          <thead>
+            <tr style="background: #F1F5F9; border-bottom: 2px solid #CBD5E1; color: #334155; font-size: 11px; font-weight: 700; text-transform: uppercase;">
+              <th style="padding: 10px 12px;">Invoice #</th>
+              <th style="padding: 10px 8px;">Invoice Date</th>
+              <th style="padding: 10px 8px;">GRN Date</th>
+              <th style="padding: 10px 8px;">PO #</th>
+              <th style="padding: 10px 8px; text-align: right;">Amount</th>
+              <th style="padding: 10px 8px;">Due Date</th>
+              <th style="padding: 10px 8px; text-align: center;">Overdue Period</th>
+              <th style="padding: 10px 12px; text-align: right;">Balance Due</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background: #FFFFFF;">
+              <td style="padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-weight: 700; color: #0F172A;">{inv_no}</td>
+              <td style="padding: 12px 8px; color: #475569;">{inv_date_clean}</td>
+              <td style="padding: 12px 8px;">{grn_badge}</td>
+              <td style="padding: 12px 8px; color: #475569;">{po_no}</td>
+              <td style="padding: 12px 8px; text-align: right; font-family: 'Consolas', 'Courier New', monospace; color: #475569;">{format_inr(net_amount)}</td>
+              <td style="padding: 12px 8px; color: {'#DC2626' if is_overdue else '#0F172A'}; font-weight: 600;">{due_date_clean}</td>
+              <td style="padding: 12px 8px; text-align: center;">{overdue_badge}</td>
+              <td style="padding: 12px; text-align: right; font-family: 'Consolas', 'Courier New', monospace; font-weight: 800; color: #DC2626;">{format_inr(outstanding)}</td>
+            </tr>
+          </tbody>
         </table>
       </div>
 
-      <!-- Attachment notice -->
-      <div style="font-size: 12px; color: #64748B; background: #F1F5F9; padding: 10px 14px; border-left: 3px solid #64748B; margin-bottom: 20px;">
-        📎 <strong>Invoice Copy Attached:</strong> The complete tax invoice PDF (<b>{inv_no}.pdf</b>) is attached to this email for your accounts reconciliation.
+      <!-- Statement Notice (No PDF Required) -->
+      <div style="font-size: 12px; color: #475569; background: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #C27842; padding: 12px 16px; margin-bottom: 22px; border-radius: 4px; line-height: 1.5;">
+        📋 <strong>Statement Notice:</strong> All invoice numbers, GRN delivery records, PO references, and overdue terms are itemized directly in the table above for immediate reconciliation. No file downloads required.
       </div>
 
       {bank_html}
 
+      <!-- Signoff -->
       <div style="margin-top: 28px; border-top: 1px solid #E2E8F0; padding-top: 18px; font-size: 13px; color: #64748B;">
         <p style="margin: 0 0 4px;">With regards,</p>
         <p style="margin: 0; font-weight: 700; color: #0F172A;">Finance & Accounts Team</p>
@@ -642,7 +902,7 @@ def build_payment_reminder_template(
 
     <!-- Footer -->
     <div style="background: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 14px 28px; text-align: center; font-size: 11px; color: #94A3B8;">
-      This is an automated payment advisory generated by SSK Footcare Manufacturing ERP.
+      This is an automated payment advisory and statement generated by SSK Footcare Manufacturing ERP.
     </div>
   </div>
 </body>
@@ -655,10 +915,10 @@ async def send_invoice_payment_reminder(
     db,
     invoice_id: str,
     to_email: str,
-    cc_emails: Optional[List[str] | str] = None,
+    cc_emails: Optional[Union[List[str], str]] = None,
     subject: Optional[str] = None,
     custom_message: Optional[str] = None,
-    attach_pdf: bool = True,
+    attach_pdf: bool = False,
     include_bank_details: bool = True,
     user_email: str = "system",
 ) -> Dict[str, Any]:
@@ -683,7 +943,7 @@ async def send_invoice_payment_reminder(
     if not cfg["is_configured"]:
         return {
             "ok": False,
-            "error": "Gmail connection is not configured in ERP settings. Please navigate to Settings to connect your company Gmail address and App Password."
+            "error": "Email is not configured in ERP settings. Please navigate to Settings to connect your company Gmail address or Resend API Key."
         }
 
     # 3. Lookup client master for name/person
@@ -749,8 +1009,8 @@ async def send_invoice_payment_reminder(
     if not final_cc and cfg.get("default_cc"):
         final_cc = cfg["default_cc"]
 
-    # 7. Send email
-    ok, msg_or_err = send_email(
+    # 7. Send email in background thread executor to prevent blocking the async loop
+    ok, msg_or_err = await async_send_email(
         to_emails=to_email,
         subject=final_subject,
         text_body=tmpl_txt,
@@ -841,9 +1101,14 @@ def build_multi_invoice_reminder_template(
     company_email = company.get("email") or ""
 
     inv_count = len(invoices)
-    total_net = sum(float(inv.get("net_amount") or 0) for inv in invoices)
-    total_received = sum(float(inv.get("received_amount") or 0) for inv in invoices)
-    total_outstanding = sum(float(inv.get("outstanding") if inv.get("outstanding") is not None else ((inv.get("net_amount") or 0) - (inv.get("received_amount") or 0))) for inv in invoices)
+    total_net = sum(_safe_float(inv.get("net_amount")) for inv in invoices)
+    total_received = sum(_safe_float(inv.get("received_amount")) for inv in invoices)
+    total_outstanding = sum(
+        _safe_float(inv.get("outstanding"))
+        if (inv.get("outstanding") is not None and str(inv.get("outstanding")).strip() != "")
+        else (_safe_float(inv.get("net_amount")) - _safe_float(inv.get("received_amount")))
+        for inv in invoices
+    )
 
     subject = f"OVERDUE STATEMENT: {inv_count} Overdue Invoices ({client_name}) - {format_inr(total_outstanding)}"
 
@@ -856,30 +1121,37 @@ def build_multi_invoice_reminder_template(
     else:
         user_msg = custom_message.strip()
 
-    # Plaintext version
+    # Plaintext version with clean tabular layout
     text_rows = []
     for inv in invoices:
         no = inv.get("invoice_no") or "N/A"
-        due = inv.get("due_date") or "Immediate"
+        dt = _format_date_clean(inv.get("invoice_date") or inv.get("date"))
+        grn_d = _format_date_clean(inv.get("grn_date"))
+        due = _format_date_clean(inv.get("due_date") or "Immediate")
         po = inv.get("po_number") or "-"
-        bal = format_inr(inv.get("outstanding") or 0)
-        tot = format_inr(inv.get("net_amount") or 0)
-        days = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else ""
-        text_rows.append(f"  • Inv #{no} | Due: {due} ({days}d overdue) | PO: {po} | Total: {tot} | Balance Due: {bal}")
+        net_val = _safe_float(inv.get("net_amount"))
+        rec_val = _safe_float(inv.get("received_amount"))
+        raw_out = inv.get("outstanding")
+        out_val = _safe_float(raw_out, net_val - rec_val) if (raw_out is not None and str(raw_out).strip() != "") else (net_val - rec_val)
+        bal = format_inr(out_val)
+        tot = format_inr(net_val)
+        days = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0
+        od_str = f"{days}d overdue" if days > 0 else "current"
+        text_rows.append(f"  • Inv #{no} | Inv Date: {dt} | GRN: {grn_d} | Due: {due} ({od_str}) | PO: {po} | Total: {tot} | Balance Due: {bal}")
 
     text_parts = [
         f"OVERDUE STATEMENT & PAYMENT REMINDER — {company_name.upper()}",
-        "=" * 60,
+        "=" * 70,
         f"\nDear {greeting_name},",
         f"\n{user_msg}\n",
-        "-" * 60,
-        f"OVERDUE INVOICES BREAKDOWN ({inv_count} INVOICES):",
+        "-" * 70,
+        f"OVERDUE INVOICES ITEMIZED BREAKDOWN ({inv_count} INVOICES):",
         *text_rows,
-        "-" * 60,
+        "-" * 70,
         f"TOTAL INVOICE VALUE   : {format_inr(total_net)}",
         f"TOTAL RECEIVED TO DATE: {format_inr(total_received)}",
         f"TOTAL OVERDUE BALANCE : {format_inr(total_outstanding)}",
-        "=" * 60,
+        "=" * 70,
     ]
 
     if include_bank_details and bank_acc:
@@ -905,36 +1177,61 @@ def build_multi_invoice_reminder_template(
 
     # HTML Table Rows
     table_rows_html = []
-    for inv in invoices:
+    max_days_od = 0
+    for idx, inv in enumerate(invoices):
         no = inv.get("invoice_no") or "N/A"
-        dt = inv.get("invoice_date") or inv.get("date") or "-"
-        due = inv.get("due_date") or "-"
-        po = inv.get("po_number") or "-"
-        bal = format_inr(inv.get("outstanding") or 0)
-        tot = format_inr(inv.get("net_amount") or 0)
+        dt = _format_date_clean(inv.get("invoice_date") or inv.get("date"))
+        grn_d = _format_date_clean(inv.get("grn_date"))
+        due = _format_date_clean(inv.get("due_date") or "Immediate")
+        po = inv.get("po_number") or "—"
+        net_val = _safe_float(inv.get("net_amount"))
+        rec_val = _safe_float(inv.get("received_amount"))
+        raw_out = inv.get("outstanding")
+        out_val = _safe_float(raw_out, net_val - rec_val) if (raw_out is not None and str(raw_out).strip() != "") else (net_val - rec_val)
+        bal = format_inr(out_val)
+        tot = format_inr(net_val)
         days = abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0
+        if days > max_days_od:
+            max_days_od = days
+
+        grn_badge = (
+            f'<span style="display: inline-block; padding: 2px 7px; background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; border-radius: 4px; font-size: 11px; font-weight: 600;">{grn_d}</span>'
+            if inv.get("grn_date")
+            else '<span style="color: #94A3B8; font-size: 11px;">Not Recorded</span>'
+        )
+
+        overdue_badge = (
+            f'<span style="display: inline-block; padding: 3px 8px; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; border-radius: 12px; font-weight: 700; font-size: 11px;">{days}d Overdue</span>'
+            if days > 0
+            else '<span style="display: inline-block; padding: 3px 8px; background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; border-radius: 12px; font-weight: 600; font-size: 11px;">Current</span>'
+        )
+
+        row_bg = "#FFFFFF" if idx % 2 == 0 else "#F8FAFC"
+
         table_rows_html.append(f"""
-          <tr style="border-bottom: 1px solid #E2E8F0;">
-            <td style="padding: 8px 10px; font-family: 'Courier New', monospace; font-weight: 700; color: #0F172A;">{no}</td>
-            <td style="padding: 8px 10px; color: #475569;">{dt}</td>
-            <td style="padding: 8px 10px; color: #DC2626; font-weight: 600;">{due} <span style="font-size: 11px; color: #991B1B;">({days}d)</span></td>
-            <td style="padding: 8px 10px; color: #475569;">{po}</td>
-            <td style="padding: 8px 10px; text-align: right; color: #475569; font-family: 'Courier New', monospace;">{tot}</td>
-            <td style="padding: 8px 10px; text-align: right; font-weight: 700; color: #DC2626; font-family: 'Courier New', monospace;">{bal}</td>
+          <tr style="background: {row_bg}; border-bottom: 1px solid #E2E8F0;">
+            <td style="padding: 10px 12px; font-family: 'Consolas', 'Courier New', monospace; font-weight: 700; color: #0F172A;">{no}</td>
+            <td style="padding: 10px 8px; color: #475569;">{dt}</td>
+            <td style="padding: 10px 8px;">{grn_badge}</td>
+            <td style="padding: 10px 8px; color: #475569;">{po}</td>
+            <td style="padding: 10px 8px; text-align: right; color: #475569; font-family: 'Consolas', 'Courier New', monospace;">{tot}</td>
+            <td style="padding: 10px 8px; color: #0F172A; font-weight: 600;">{due}</td>
+            <td style="padding: 10px 8px; text-align: center;">{overdue_badge}</td>
+            <td style="padding: 10px 12px; text-align: right; font-weight: 800; color: #DC2626; font-family: 'Consolas', 'Courier New', monospace;">{bal}</td>
           </tr>
         """)
 
     bank_html = ""
     if include_bank_details and bank_acc:
         bank_html = f"""
-        <div style="margin-top: 24px; padding: 18px; background: #F8FAFC; border: 1px solid #CBD5E1; border-left: 4px solid #0F172A;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #475569; margin-bottom: 10px;">
-            Bank Remittance Information
+        <div style="margin-top: 24px; padding: 18px 20px; background: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #0F172A; border-radius: 6px;">
+          <div style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #0F172A; margin-bottom: 12px;">
+            🏦 Bank Remittance & Settlement Details
           </div>
-          <table style="width: 100%; font-size: 13px; border-collapse: collapse; line-height: 1.6;">
+          <table style="width: 100%; font-size: 13px; border-collapse: collapse; line-height: 1.7;">
             <tr>
               <td style="color: #64748B; width: 140px; padding: 3px 0;">Beneficiary:</td>
-              <td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{company_name}</td>
+              <td style="color: #0F172A; font-weight: 700; padding: 3px 0;">{company_name}</td>
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">Bank Name:</td>
@@ -942,16 +1239,16 @@ def build_multi_invoice_reminder_template(
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">Account Number:</td>
-              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_acc}</td>
+              <td style="color: #0F172A; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_acc}</td>
             </tr>
             <tr>
               <td style="color: #64748B; padding: 3px 0;">IFSC Code:</td>
-              <td style="color: #0F172A; font-family: 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_ifsc}</td>
+              <td style="color: #0F172A; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; font-weight: 700; padding: 3px 0;">{bank_ifsc}</td>
             </tr>
             {f'<tr><td style="color: #64748B; padding: 3px 0;">UPI ID:</td><td style="color: #0F172A; font-weight: 600; padding: 3px 0;">{upi_id}</td></tr>' if upi_id else ''}
           </table>
-          <div style="margin-top: 10px; font-size: 11px; color: #64748B;">
-            * Kindly send the UTR / transaction receipt to this email once transferred for prompt ledger credit.
+          <div style="margin-top: 10px; font-size: 11px; color: #64748B; border-top: 1px dashed #CBD5E1; padding-top: 8px;">
+            * Kindly reply to this email with the UTR / transaction receipt once transferred for instant ledger credit.
           </div>
         </div>
         """
@@ -964,22 +1261,25 @@ def build_multi_invoice_reminder_template(
   <title>{subject}</title>
 </head>
 <body style="margin: 0; padding: 24px; background-color: #F1F5F9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1E293B;">
-  <div style="max-width: 660px; margin: 0 auto; background: #FFFFFF; border: 2px solid #0F172A; box-shadow: 4px 4px 0px #0F172A;">
+  <div style="max-width: 720px; margin: 0 auto; background: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);">
     
+    <!-- Top Accent Bar -->
+    <div style="height: 4px; background: #C27842;"></div>
+
     <!-- Header -->
-    <div style="background: #0F172A; padding: 24px 28px; color: #FFFFFF;">
-      <table style="width: 100%;">
+    <div style="background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%); padding: 24px 28px; color: #FFFFFF;">
+      <table style="width: 100%; border-collapse: collapse;">
         <tr>
           <td>
             <div style="font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #94A3B8; font-weight: 700;">
-              SSK Footcare ERP · Accounts Department
+              SSK Footcare ERP · Accounts & Receivables
             </div>
-            <div style="font-size: 20px; font-weight: 800; letter-spacing: 0.5px; margin-top: 4px;">
+            <div style="font-size: 20px; font-weight: 800; letter-spacing: 0.5px; margin-top: 4px; color: #FFFFFF;">
               {company_name}
             </div>
           </td>
           <td style="text-align: right; vertical-align: top;">
-            <span style="display: inline-block; padding: 4px 10px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; border-radius: 2px;">
+            <span style="display: inline-block; padding: 5px 12px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; border-radius: 20px;">
               OVERDUE · {inv_count} INVOICES
             </span>
           </td>
@@ -989,7 +1289,9 @@ def build_multi_invoice_reminder_template(
 
     <!-- Body -->
     <div style="padding: 28px;">
-      <p style="font-size: 15px; margin: 0 0 16px; color: #0F172A;">
+      
+      <!-- Greeting -->
+      <p style="font-size: 15px; margin: 0 0 14px; color: #0F172A;">
         Dear <strong>{greeting_name}</strong>,
       </p>
       
@@ -997,29 +1299,61 @@ def build_multi_invoice_reminder_template(
         {user_msg}
       </p>
 
-      <!-- Multi-Invoice Table -->
-      <div style="border: 1px solid #CBD5E1; margin-bottom: 20px; overflow-x: auto;">
+      <!-- Executive KPI Cards -->
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 22px;">
+        <tr>
+          <td style="width: 50%; padding-right: 6px;">
+            <div style="background: #FEF2F2; border: 1px solid #FECACA; border-radius: 6px; padding: 14px 16px;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #991B1B;">
+                Total Overdue Balance Due
+              </div>
+              <div style="font-size: 22px; font-weight: 800; color: #DC2626; font-family: 'Consolas', 'Courier New', monospace; margin-top: 4px;">
+                {format_inr(total_outstanding)}
+              </div>
+            </div>
+          </td>
+          <td style="width: 50%; padding-left: 6px;">
+            <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 14px 16px;">
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #64748B;">
+                Aging Summary
+              </div>
+              <div style="font-size: 15px; font-weight: 700; color: #0F172A; margin-top: 6px;">
+                <span style="color: #DC2626;">{inv_count} Invoices Overdue</span> · Up to {max_days_od}d
+              </div>
+            </div>
+          </td>
+        </tr>
+      </table>
+
+      <!-- TABLE OF DETAILS (Hero Element) -->
+      <div style="border: 1px solid #CBD5E1; border-radius: 6px; overflow: hidden; margin-bottom: 20px;">
+        <div style="background: #F8FAFC; border-bottom: 1px solid #CBD5E1; padding: 10px 14px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #475569;">
+          Itemized Overdue Invoices Breakdown
+        </div>
         <table style="width: 100%; font-size: 12px; border-collapse: collapse; text-align: left;">
           <thead>
-            <tr style="background: #F1F5F9; border-bottom: 2px solid #CBD5E1; color: #475569; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">
-              <th style="padding: 10px;">Invoice #</th>
-              <th style="padding: 10px;">Date</th>
-              <th style="padding: 10px;">Due Date</th>
-              <th style="padding: 10px;">PO #</th>
-              <th style="padding: 10px; text-align: right;">Total</th>
-              <th style="padding: 10px; text-align: right;">Due</th>
+            <tr style="background: #F1F5F9; border-bottom: 2px solid #CBD5E1; color: #334155; font-size: 11px; font-weight: 700; text-transform: uppercase;">
+              <th style="padding: 10px 12px;">Invoice #</th>
+              <th style="padding: 10px 8px;">Invoice Date</th>
+              <th style="padding: 10px 8px;">GRN Date</th>
+              <th style="padding: 10px 8px;">PO #</th>
+              <th style="padding: 10px 8px; text-align: right;">Amount</th>
+              <th style="padding: 10px 8px;">Due Date</th>
+              <th style="padding: 10px 8px; text-align: center;">Overdue Period</th>
+              <th style="padding: 10px 12px; text-align: right;">Balance Due</th>
             </tr>
           </thead>
           <tbody>
             {''.join(table_rows_html)}
             <tr style="background: #FEF2F2; border-top: 2px solid #0F172A;">
-              <td colspan="4" style="padding: 12px 10px; font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #0F172A;">
-                Total Overdue Balance Due:
+              <td colspan="4" style="padding: 12px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #0F172A;">
+                Consolidated Balance Due:
               </td>
-              <td style="padding: 12px 10px; text-align: right; font-family: 'Courier New', monospace; font-size: 12px; color: #64748B;">
+              <td style="padding: 12px 8px; text-align: right; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; color: #64748B; font-weight: 600;">
                 {format_inr(total_net)}
               </td>
-              <td style="padding: 12px 10px; text-align: right; font-family: 'Courier New', monospace; font-size: 16px; font-weight: 800; color: #DC2626;">
+              <td colspan="2"></td>
+              <td style="padding: 12px; text-align: right; font-family: 'Consolas', 'Courier New', monospace; font-size: 17px; font-weight: 800; color: #DC2626;">
                 {format_inr(total_outstanding)}
               </td>
             </tr>
@@ -1027,13 +1361,14 @@ def build_multi_invoice_reminder_template(
         </table>
       </div>
 
-      <!-- Attachment notice -->
-      <div style="font-size: 12px; color: #64748B; background: #F1F5F9; padding: 10px 14px; border-left: 3px solid #64748B; margin-bottom: 20px;">
-        📎 <strong>Invoice Copies Attached:</strong> Itemized tax invoice PDFs are attached to this email for your accounts team reconciliation.
+      <!-- Statement Notice (No PDF Required) -->
+      <div style="font-size: 12px; color: #475569; background: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #C27842; padding: 12px 16px; margin-bottom: 22px; border-radius: 4px; line-height: 1.5;">
+        📋 <strong>Consolidated Account Statement:</strong> All invoice particulars, delivery GRN receipts, PO references, and overdue terms are itemized directly in the breakdown table above for direct settlement without downloading attachments.
       </div>
 
       {bank_html}
 
+      <!-- Signoff -->
       <div style="margin-top: 28px; border-top: 1px solid #E2E8F0; padding-top: 18px; font-size: 13px; color: #64748B;">
         <p style="margin: 0 0 4px;">With regards,</p>
         <p style="margin: 0; font-weight: 700; color: #0F172A;">Finance & Accounts Team</p>
@@ -1057,10 +1392,10 @@ async def send_multi_invoice_payment_reminder(
     db,
     invoice_ids: List[str],
     to_email: str,
-    cc_emails: Optional[List[str] | str] = None,
+    cc_emails: Optional[Union[List[str], str]] = None,
     subject: Optional[str] = None,
     custom_message: Optional[str] = None,
-    attach_pdfs: bool = True,
+    attach_pdfs: bool = False,
     include_bank_details: bool = True,
     user_email: str = "system",
 ) -> Dict[str, Any]:
@@ -1151,8 +1486,8 @@ async def send_multi_invoice_payment_reminder(
 
     final_cc = cc_emails or cfg.get("default_cc")
 
-    # 4. Send email
-    ok, msg_or_err = send_email(
+    # 4. Send email in threadpool executor without blocking the asyncio loop
+    ok, msg_or_err = await async_send_email(
         to_emails=to_email,
         subject=final_subject,
         text_body=tmpl_txt,

@@ -2283,11 +2283,13 @@ async def get_overdue_reminders_summary(request: Request):
         grouped[key]["invoices"].append({
             "id": inv.get("id"),
             "invoice_no": inv.get("invoice_no"),
+            "invoice_date": inv.get("invoice_date") or inv.get("date") or "—",
+            "grn_date": inv.get("grn_date"),
             "due_date": inv.get("due_date"),
             "days_overdue": days_od,
             "net_amount": inv.get("net_amount", 0),
             "outstanding": inv.get("outstanding", 0),
-            "po_number": inv.get("po_number"),
+            "po_number": inv.get("po_number") or "—",
         })
         grouped[key]["invoice_ids"].append(inv.get("id"))
         grouped[key]["total_outstanding"] = round(grouped[key]["total_outstanding"] + float(inv.get("outstanding") or 0), 2)
@@ -2337,7 +2339,7 @@ async def send_batch_overdue_reminders_route(payload: BatchRemindersIn, request:
             to_email=item.to_email,
             cc_emails=item.cc_emails,
             custom_message=item.custom_message,
-            attach_pdfs=True,
+            attach_pdfs=False,
             include_bank_details=True,
             user_email=u.get("email", "system"),
         )
@@ -2408,7 +2410,7 @@ class PaymentReminderIn(BaseModel):
     cc_emails: Optional[str] = None
     subject: Optional[str] = None
     custom_message: Optional[str] = None
-    attach_pdf: bool = True
+    attach_pdf: bool = False
     include_bank_details: bool = True
     invoice_ids: Optional[List[str]] = None
 
@@ -2488,11 +2490,13 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
                         other_overdue.append({
                             "id": dec.get("id"),
                             "invoice_no": dec.get("invoice_no"),
+                            "invoice_date": dec.get("invoice_date") or dec.get("date") or "—",
+                            "grn_date": dec.get("grn_date"),
                             "due_date": dec.get("due_date"),
                             "days_overdue": abs(dec.get("days_to_due", 0)) if (dec.get("days_to_due") is not None and dec.get("days_to_due") < 0) else 0,
                             "net_amount": dec.get("net_amount", 0),
                             "outstanding": dec.get("outstanding", 0),
-                            "po_number": dec.get("po_number"),
+                            "po_number": dec.get("po_number") or "—",
                         })
         except Exception as e:
             log.warning("Could not query other overdue invoices for %s: %s", client_name, e)
@@ -2500,11 +2504,13 @@ async def get_invoice_payment_reminder_preview(iid: str, request: Request):
     curr_item = {
         "id": iid,
         "invoice_no": inv.get("invoice_no"),
+        "invoice_date": inv.get("invoice_date") or inv.get("date") or "—",
+        "grn_date": inv.get("grn_date"),
         "due_date": inv.get("due_date"),
         "days_overdue": abs(inv.get("days_to_due", 0)) if (inv.get("days_to_due") is not None and inv.get("days_to_due") < 0) else 0,
         "net_amount": inv.get("net_amount", 0),
         "outstanding": inv.get("outstanding", 0),
-        "po_number": inv.get("po_number"),
+        "po_number": inv.get("po_number") or "—",
     }
     client_all_overdue = [curr_item] + other_overdue
     client_total_overdue = round(sum(float(x.get("outstanding") or 0) for x in client_all_overdue), 2)

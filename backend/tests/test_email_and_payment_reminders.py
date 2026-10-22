@@ -177,6 +177,7 @@ def test_build_payment_reminder_template():
     invoice = {
         "invoice_no": "SSK26-27-099",
         "invoice_date": "2026-10-15",
+        "grn_date": "2026-10-18",
         "due_date": "2026-10-20",
         "po_number": "PO-9999",
         "net_amount": 50000.0,
@@ -210,6 +211,11 @@ def test_build_payment_reminder_template():
     assert "HDFC0001452" in txt
     assert "SSK Footcare ERP" in html
     assert "₹40,000.00" in html
+    assert "GRN Date" in html
+    assert "18-Oct-2026" in html
+    assert "15-Oct-2026" in html
+    assert "Invoice #" in html
+    assert "GRN Date" in txt
 
 
 def test_email_settings_endpoints(test_client, mock_env):
@@ -351,6 +357,7 @@ def test_build_multi_invoice_reminder_template():
         {
             "invoice_no": "SSK26-27-001",
             "invoice_date": "2026-09-01",
+            "grn_date": "2026-09-06",
             "due_date": "2026-10-01",
             "po_number": "PO-100",
             "net_amount": 60000.0,
@@ -402,12 +409,17 @@ def test_build_multi_invoice_reminder_template():
     assert "PO-200" in txt
     assert "TOTAL OVERDUE BALANCE : ₹1,30,000.00" in txt
     assert "50200105184765" in txt
+    assert "GRN: 06-Sep-2026" in txt
 
     # 3. HTML table checks
     assert "SSK26-27-001" in html
     assert "SSK26-27-002" in html
     assert "HDFC0001452" in html
     assert "₹1,30,000.00" in html
+    assert "GRN Date" in html
+    assert "06-Sep-2026" in html
+    assert "01-Sep-2026" in html
+    assert "Overdue Period" in html
 
 
 def test_multi_invoice_consolidated_reminder_send(test_client, mock_env):
@@ -595,3 +607,76 @@ def test_overdue_reminders_summary_and_batch_dispatch(test_client, mock_env):
         assert bdata["sent_count"] == 1
         assert bdata["failed_count"] == 0
         assert mock_instance.sendmail.called
+
+
+def test_safe_float_and_template_robustness():
+    """Verify templates do not crash on empty strings or corrupt float values."""
+    from services.email_service import _safe_float
+
+    assert _safe_float("") == 0.0
+    assert _safe_float("   ") == 0.0
+    assert _safe_float(None) == 0.0
+    assert _safe_float("invalid-123") == 0.0
+    assert _safe_float("12500.50") == 12500.5
+    assert _safe_float(45000) == 45000.0
+
+    invoice = {
+        "invoice_no": "SSK-EMPTY-01",
+        "net_amount": "",
+        "received_amount": None,
+        "outstanding": "",
+        "due_date": "2026-07-01",
+    }
+    client = {"company_name": "Test Client"}
+    company = {"name": "SSK Footcare"}
+
+    subj, txt, html = build_payment_reminder_template(invoice, client, company)
+    assert "SSK-EMPTY-01" in subj
+    assert "₹0.00" in txt
+    assert "₹0.00" in html
+
+    multi_subj, multi_txt, multi_html = build_multi_invoice_reminder_template([invoice], client, company)
+    assert "SSK-EMPTY-01" in multi_txt
+    assert "₹0.00" in multi_html
+
+
+@pytest.mark.anyio
+async def test_async_send_email_and_date_header():
+    """Verify async_send_email runs non-blockingly and formats Date header properly."""
+    from services.email_service import async_send_email
+    import smtplib
+
+    with patch("smtplib.SMTP_SSL") as mock_ssl:
+        mock_instance = MagicMock()
+        mock_ssl.return_value.__enter__.return_value = mock_instance
+
+        ok, msg = await async_send_email(
+            to_emails="customer@example.com",
+            subject="Test Date and Async",
+            text_body="Hello world",
+            config={
+                "gmail_user": "billing@sskfootcare.com",
+                "gmail_app_password": "apppassword1234",
+                "smtp_host": "smtp.gmail.com",
+                "smtp_port": 465,
+            },
+        )
+
+        assert ok is True
+        assert mock_instance.sendmail.called
+        call_args = mock_instance.sendmail.call_args[0]
+        raw_email = call_args[2]
+        assert "Date:" in raw_email
+
+
+def test_smtp_timeout_diagnostic_message():
+    """Verify timeout diagnostics point out cloud hosting port blocking and Resend API solution."""
+    from services.email_service import verify_smtp_credentials
+    import socket
+
+    with patch("services.email_service.create_smtp_connection", side_effect=socket.timeout("Timed out")):
+        ok, msg = verify_smtp_credentials("smtp.gmail.com", 587, "test@gmail.com", "pass1234", timeout=1)
+        assert ok is False
+        assert "timed out after" in msg
+        assert "Resend API" in msg
+        assert "Port 443" in msg

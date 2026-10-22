@@ -579,8 +579,10 @@ function CompanyProfileSection() {
 /* -------------------- GMAIL & EMAIL SETTINGS SECTION -------------------- */
 function GmailSettingsSection() {
   const [config, setConfig] = useState({
+    provider: "smtp",
     gmail_user: "",
     gmail_app_password: "",
+    resend_api_key: "",
     from_name: "SSK Footcare Manufacturing",
     reply_to: "",
     default_cc: "",
@@ -589,6 +591,8 @@ function GmailSettingsSection() {
     is_configured: false,
     has_app_password: false,
     masked_app_password: "",
+    has_resend_key: false,
+    masked_resend_key: "",
     source: "none",
   });
   const [loading, setLoading] = useState(true);
@@ -596,6 +600,7 @@ function GmailSettingsSection() {
   const [verifying, setVerifying] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [showResendKey, setShowResendKey] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
   const [testModal, setTestModal] = useState(false);
@@ -609,6 +614,7 @@ function GmailSettingsSection() {
         ...prev,
         ...data,
         gmail_app_password: "",
+        resend_api_key: "",
       }));
     } catch (err) {
       console.error("Failed to load email settings", err);
@@ -622,23 +628,37 @@ function GmailSettingsSection() {
   }, []);
 
   const handleSave = async (verifyFirst = false) => {
-    if (!config.gmail_user) {
-      setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
-      return;
+    const isResend = config.provider === "resend";
+    if (isResend) {
+      if (!config.has_resend_key && !config.resend_api_key) {
+        setStatusMsg({
+          type: "error",
+          text: "Please enter your Resend API Key (starts with re_).",
+        });
+        return;
+      }
+    } else {
+      if (!config.gmail_user) {
+        setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
+        return;
+      }
+      if (!config.has_app_password && !config.gmail_app_password) {
+        setStatusMsg({
+          type: "error",
+          text: "Please enter the 16-character Google App Password (generated in Google Account Security).",
+        });
+        return;
+      }
     }
-    if (!config.has_app_password && !config.gmail_app_password) {
-      setStatusMsg({
-        type: "error",
-        text: "Please enter the 16-character Google App Password (generated in Google Account Security).",
-      });
-      return;
-    }
+
     setSaving(true);
     setStatusMsg(null);
     try {
       const payload = {
+        provider: config.provider || "smtp",
         gmail_user: config.gmail_user.trim(),
         gmail_app_password: config.gmail_app_password,
+        resend_api_key: config.resend_api_key,
         from_name: config.from_name,
         reply_to: config.reply_to,
         default_cc: config.default_cc,
@@ -650,8 +670,8 @@ function GmailSettingsSection() {
       setStatusMsg({
         type: "success",
         text: verifyFirst
-          ? "Gmail connection verified and settings saved successfully!"
-          : "Gmail settings saved successfully!",
+          ? "Email connection verified and settings saved successfully!"
+          : "Email settings saved successfully!",
       });
       load();
     } catch (e) {
@@ -665,20 +685,33 @@ function GmailSettingsSection() {
   };
 
   const handleVerifyOnly = async () => {
-    if (!config.gmail_user) {
-      setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
-      return;
+    const isResend = config.provider === "resend";
+    if (isResend) {
+      if (!config.has_resend_key && !config.resend_api_key) {
+        setStatusMsg({ type: "error", text: "Please enter your Resend API Key to test." });
+        return;
+      }
+    } else {
+      if (!config.gmail_user) {
+        setStatusMsg({ type: "error", text: "Please enter your company Gmail address." });
+        return;
+      }
+      if (!config.has_app_password && !config.gmail_app_password) {
+        setStatusMsg({ type: "error", text: "Please enter the Google App Password to test." });
+        return;
+      }
     }
-    if (!config.has_app_password && !config.gmail_app_password) {
-      setStatusMsg({ type: "error", text: "Please enter the Google App Password to test." });
-      return;
-    }
+
     setVerifying(true);
     setStatusMsg(null);
     try {
       const { data } = await http.post("/settings/email/verify", {
+        provider: config.provider || "smtp",
         gmail_user: config.gmail_user.trim(),
         gmail_app_password: config.gmail_app_password,
+        resend_api_key: config.resend_api_key,
+        smtp_host: config.smtp_host || "smtp.gmail.com",
+        smtp_port: Number(config.smtp_port) || 465,
       });
       if (data.ok) {
         setStatusMsg({ type: "success", text: "Verification Succeeded! " + data.message });
@@ -715,18 +748,20 @@ function GmailSettingsSection() {
     }
   };
 
+  const isResend = config.provider === "resend";
+
   return (
     <Card className="p-6" data-testid="gmail-settings-section">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-xl font-bold flex items-center gap-2">
-              <Mail className="w-5 h-5 text-[#C27842]" /> Company Gmail & Email Integration
+              <Mail className="w-5 h-5 text-[#C27842]" /> Email Delivery & Payment Reminders
             </h2>
             {config.is_configured ? (
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-green-100 text-green-800 border border-green-300">
                 <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                Gmail Connected
+                {isResend ? "Resend API Active" : "Gmail SMTP Connected"}
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
@@ -736,18 +771,20 @@ function GmailSettingsSection() {
             )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Connect your company Google/Gmail account to directly email Invoice Payment Reminders, statements, and dispatch advisories to clients.
+            Dispatch automated overdue payment reminders, invoice copies, and dispatch advisories to clients directly from your ERP.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowHelp(!showHelp)}
-            className="text-xs text-slate-600 hover:text-slate-900 border border-slate-300 px-2.5 py-1.5 rounded flex items-center gap-1 hover:bg-slate-50 transition-colors"
-          >
-            <HelpCircle className="w-3.5 h-3.5 text-[#C27842]" />
-            <span>{showHelp ? "Hide Guide" : "App Password Guide"}</span>
-          </button>
+          {!isResend && (
+            <button
+              type="button"
+              onClick={() => setShowHelp(!showHelp)}
+              className="text-xs text-slate-600 hover:text-slate-900 border border-slate-300 px-2.5 py-1.5 rounded flex items-center gap-1 hover:bg-slate-50 transition-colors"
+            >
+              <HelpCircle className="w-3.5 h-3.5 text-[#C27842]" />
+              <span>{showHelp ? "Hide Guide" : "App Password Guide"}</span>
+            </button>
+          )}
           {config.is_configured && (
             <BtnSecondary
               onClick={() => setTestModal(true)}
@@ -761,8 +798,77 @@ function GmailSettingsSection() {
         </div>
       </div>
 
-      {/* Help box */}
-      {showHelp && (
+      {/* Provider Switcher Tabs */}
+      <div className="mb-5 flex border-b-2 border-slate-200">
+        <button
+          type="button"
+          onClick={() => setConfig((s) => ({ ...s, provider: "smtp" }))}
+          className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 ${
+            !isResend
+              ? "border-[#C27842] text-[#C27842] bg-orange-50/50"
+              : "border-transparent text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <Mail className="w-4 h-4" />
+          Gmail SMTP (Port 465 / 587)
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfig((s) => ({ ...s, provider: "resend" }))}
+          className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 -mb-[2px] transition-colors flex items-center gap-1.5 ${
+            isResend
+              ? "border-[#C27842] text-[#C27842] bg-orange-50/50"
+              : "border-transparent text-slate-500 hover:text-slate-800"
+          }`}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          Resend HTTP API (Port 443 HTTPS — Cloud VPS Safe)
+        </button>
+      </div>
+
+      {/* Cloud Port Blocking Note for SMTP */}
+      {!isResend && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900 leading-relaxed">
+          <div className="font-bold flex items-center gap-1.5 text-amber-800 mb-1">
+            <AlertCircle className="w-4 h-4 text-amber-600" />
+            Cloud Firewall Note:
+          </div>
+          If you are hosted on Render, AWS EC2, or DigitalOcean and test connection fails with a <b>15-second timeout</b> or <b>[Errno 101] Network is unreachable</b> on both Port 465 and Port 587, your hosting provider completely blocks outbound SMTP traffic.
+          {" "}
+          <button
+            type="button"
+            onClick={() => setConfig((s) => ({ ...s, provider: "resend" }))}
+            className="font-bold underline text-[#C27842] hover:text-orange-900 ml-1"
+          >
+            Switch to Resend HTTP API tab (Port 443)
+          </button>{" "}
+          to deliver emails over standard web HTTPS with zero firewall blocks.
+        </div>
+      )}
+
+      {/* Resend API Info Banner */}
+      {isResend && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900 leading-relaxed">
+          <div className="font-bold flex items-center gap-1.5 text-blue-800 mb-1">
+            <ShieldCheck className="w-4 h-4 text-blue-600" />
+            HTTPS Port 443 Delivery (Cloud VPS & Firewall Immune):
+          </div>
+          Resend dispatches emails via REST API over HTTPS port 443 (same port as normal website browsing).
+          It will never time out or be blocked by cloud VPS security groups or ISP firewall restrictions.
+          Get a free API key (includes 3,000 emails/month free) at{" "}
+          <a
+            href="https://resend.com/api-keys"
+            target="_blank"
+            rel="noreferrer"
+            className="font-bold underline text-blue-700"
+          >
+            resend.com/api-keys <ExternalLink className="w-3 h-3 inline" />
+          </a>.
+        </div>
+      )}
+
+      {/* Gmail App Password Help Box */}
+      {!isResend && showHelp && (
         <div className="mb-5 p-4 bg-slate-50 border-2 border-slate-200 rounded text-xs space-y-2 text-slate-700">
           <div className="font-bold text-slate-900 flex items-center gap-1.5 text-sm">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />
@@ -805,46 +911,84 @@ function GmailSettingsSection() {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Input
-          label="Company Gmail Address"
-          placeholder="e.g. billing@sskfootcare.com or company@gmail.com"
-          value={config.gmail_user}
-          onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
-          testId="email-user-input"
-        />
-
-        <div>
-          <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
-            <span>Google App Password (16 characters)</span>
-            {config.has_app_password && !config.gmail_app_password && (
-              <span className="text-[10px] text-green-600 font-semibold lowercase">
-                configured ({config.masked_app_password})
-              </span>
-            )}
+        {/* PROVIDER-SPECIFIC CREDENTIALS */}
+        {isResend ? (
+          <div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+              <span>Resend API Key (starts with re_)</span>
+              {config.has_resend_key && !config.resend_api_key && (
+                <span className="text-[10px] text-green-600 font-semibold lowercase">
+                  configured ({config.masked_resend_key})
+                </span>
+              )}
+            </div>
+            <div className="relative">
+              <input
+                type={showResendKey ? "text" : "password"}
+                placeholder={
+                  config.has_resend_key
+                    ? "API key configured (leave blank to keep)"
+                    : "e.g. re_1234567890abcdef..."
+                }
+                value={config.resend_api_key}
+                onChange={(e) => setConfig((s) => ({ ...s, resend_api_key: e.target.value }))}
+                data-testid="resend-api-key-input"
+                className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+              />
+              <button
+                type="button"
+                onClick={() => setShowResendKey(!showResendKey)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                title={showResendKey ? "Hide API Key" : "Show API Key"}
+              >
+                {showResendKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
-          <div className="relative">
-            <input
-              type={showPassword ? "text" : "password"}
-              placeholder={
-                config.has_app_password
-                  ? "Password configured (leave blank to keep)"
-                  : "e.g. abcd efgh ijkl mnop"
-              }
-              value={config.gmail_app_password}
-              onChange={(e) => setConfig((s) => ({ ...s, gmail_app_password: e.target.value }))}
-              data-testid="email-password-input"
-              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+        ) : (
+          <>
+            <Input
+              label="Company Gmail Address"
+              placeholder="e.g. billing@sskfootcare.com or company@gmail.com"
+              value={config.gmail_user}
+              onChange={(e) => setConfig((s) => ({ ...s, gmail_user: e.target.value }))}
+              testId="email-user-input"
             />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
-              title={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
+
+            <div>
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1 flex items-center justify-between">
+                <span>Google App Password (16 characters)</span>
+                {config.has_app_password && !config.gmail_app_password && (
+                  <span className="text-[10px] text-green-600 font-semibold lowercase">
+                    configured ({config.masked_app_password})
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  placeholder={
+                    config.has_app_password
+                      ? "Password configured (leave blank to keep)"
+                      : "e.g. abcd efgh ijkl mnop"
+                  }
+                  value={config.gmail_app_password}
+                  onChange={(e) => setConfig((s) => ({ ...s, gmail_app_password: e.target.value }))}
+                  data-testid="email-password-input"
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#2563EB] focus:outline-none font-mono pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                  title={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
 
         <Input
           label="Sender Display Name"
@@ -870,18 +1014,37 @@ function GmailSettingsSection() {
           testId="email-reply-to"
         />
 
-        <div className="grid grid-cols-2 gap-2">
-          <Input
-            label="SMTP Host"
-            value={config.smtp_host}
-            onChange={(e) => setConfig((s) => ({ ...s, smtp_host: e.target.value }))}
-          />
-          <Input
-            label="SMTP Port"
-            value={config.smtp_port}
-            onChange={(e) => setConfig((s) => ({ ...s, smtp_port: e.target.value }))}
-          />
-        </div>
+        {!isResend && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+              SMTP Port & SSL Mode
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setConfig((s) => ({ ...s, smtp_port: 465 }))}
+                className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
+                  Number(config.smtp_port) === 465
+                    ? "bg-[#0F172A] text-white border-[#0F172A]"
+                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                Port 465 (SSL)
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfig((s) => ({ ...s, smtp_port: 587 }))}
+                className={`flex-1 py-2 px-3 text-xs font-bold rounded border transition-colors ${
+                  Number(config.smtp_port) === 587
+                    ? "bg-[#0F172A] text-white border-[#0F172A]"
+                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                Port 587 (STARTTLS)
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mt-5 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
@@ -897,7 +1060,7 @@ function GmailSettingsSection() {
         <div className="flex items-center gap-2">
           <BtnSecondary
             onClick={handleVerifyOnly}
-            disabled={verifying || saving || !config.gmail_user}
+            disabled={verifying || saving || (!isResend && !config.gmail_user) || (isResend && !config.has_resend_key && !config.resend_api_key)}
             data-testid="verify-email-btn"
             className="px-3 py-2 text-xs"
           >
@@ -905,7 +1068,7 @@ function GmailSettingsSection() {
           </BtnSecondary>
           <BtnPrimary
             onClick={() => handleSave(true)}
-            disabled={saving || verifying || !config.gmail_user}
+            disabled={saving || verifying || (!isResend && !config.gmail_user) || (isResend && !config.has_resend_key && !config.resend_api_key)}
             data-testid="save-email-btn"
             className="bg-[#16A34A] border-[#16A34A] hover:bg-[#0F7A36] px-4 py-2 text-xs"
           >
@@ -922,7 +1085,7 @@ function GmailSettingsSection() {
               <Mail className="w-4 h-4 text-[#C27842]" /> Send Test Email
             </h3>
             <p className="text-xs text-slate-600 mb-4">
-              Send a test advisory message from <b>{config.gmail_user}</b> to verify real email delivery.
+              Send a test advisory message from <b>{isResend ? "Resend HTTP API" : config.gmail_user}</b> to verify real email delivery.
             </p>
             <div className="space-y-3">
               <Input

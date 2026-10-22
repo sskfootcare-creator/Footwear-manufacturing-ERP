@@ -1105,7 +1105,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
   const [ccEmails, setCcEmails] = useState("");
   const [subject, setSubject] = useState("");
   const [customMessage, setCustomMessage] = useState("");
-  const [attachPdf, setAttachPdf] = useState(true);
+  const [attachPdf, setAttachPdf] = useState(false);
   const [includeBankDetails, setIncludeBankDetails] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
 
@@ -1126,7 +1126,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
         setToEmail(d.client_email || "");
         setCcEmails(d.default_cc || "");
         setCustomMessage("");
-        setAttachPdf(Boolean(d.has_pdf));
+        setAttachPdf(false);
 
         if (d.client_all_overdue && d.client_all_overdue.length > 1) {
           setSelectedInvoiceIds(d.client_all_overdue.map((x) => x.id));
@@ -1295,12 +1295,14 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                   </div>
 
                   {consolidateOverdue && (
-                    <div className="bg-white border border-red-200 rounded max-h-36 overflow-y-auto">
+                    <div className="bg-white border border-red-200 rounded max-h-40 overflow-y-auto">
                       <table className="w-full text-[11px] text-left">
                         <thead className="bg-red-100/60 text-red-900 font-bold border-b border-red-200">
                           <tr>
                             <th className="p-1.5 pl-2 w-8"></th>
                             <th className="p-1.5">Invoice #</th>
+                            <th className="p-1.5">Invoice Date</th>
+                            <th className="p-1.5">GRN Date</th>
                             <th className="p-1.5">Due Date</th>
                             <th className="p-1.5">Overdue</th>
                             <th className="p-1.5 text-right pr-2">Balance Due</th>
@@ -1333,6 +1335,16 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                                   />
                                 </td>
                                 <td className="p-1.5 font-mono font-bold text-slate-800">{od.invoice_no}</td>
+                                <td className="p-1.5 text-slate-600">{od.invoice_date || "—"}</td>
+                                <td className="p-1.5">
+                                  {od.grn_date ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium text-[10px]">
+                                      {od.grn_date}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400">—</span>
+                                  )}
+                                </td>
                                 <td className="p-1.5 text-slate-600">{od.due_date}</td>
                                 <td className="p-1.5 text-red-600 font-bold">{od.days_overdue}d</td>
                                 <td className="p-1.5 text-right font-mono font-bold text-red-700 pr-2">{inr(od.outstanding)}</td>
@@ -1432,23 +1444,14 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                   </div>
                 </div>
 
-                {/* Options Checkboxes */}
+                {/* Options and Statement Details Notice */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
-                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={attachPdf}
-                      disabled={!preview?.has_pdf}
-                      onChange={(e) => setAttachPdf(e.target.checked)}
-                      className="rounded border-slate-300 text-[#0F172A] focus:ring-0"
-                    />
-                    <span className="flex items-center gap-1">
-                      <Paperclip className="w-3.5 h-3.5 text-slate-500" />
-                      Attach Tax Invoice PDF(s)
-                    </span>
-                  </label>
+                  <div className="flex items-center gap-2 text-xs text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 rounded">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    <span>Table of details (Invoice #, Date, GRN Date, Due Date, Overdue days) itemized in email body</span>
+                  </div>
 
-                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                  <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none px-3 py-2">
                     <input
                       type="checkbox"
                       checked={includeBankDetails}
@@ -1456,7 +1459,7 @@ function PaymentReminderModal({ invoiceMeta, onClose, onSent }) {
                       className="rounded border-slate-300 text-[#0F172A] focus:ring-0"
                     />
                     <span>
-                      Include Company Bank Transfer & Remittance Details
+                      Include Company Bank Remittance Details
                     </span>
                   </label>
                 </div>
@@ -1542,6 +1545,8 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
   const [selectedClients, setSelectedClients] = useState({});
   const [clientEmails, setClientEmails] = useState({});
 
+  const [expandedClients, setExpandedClients] = useState({});
+
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -1554,12 +1559,15 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
         setSummary(data);
         const sel = {};
         const emails = {};
-        (data.clients || []).forEach((c) => {
+        const exp = {};
+        (data.clients || []).forEach((c, idx) => {
           sel[c.client_name] = true;
           emails[c.client_name] = c.client_email || "";
+          exp[c.client_name] = idx === 0; // expand first client by default
         });
         setSelectedClients(sel);
         setClientEmails(emails);
+        setExpandedClients(exp);
       })
       .catch((err) => {
         if (!mounted) return;
@@ -1586,6 +1594,13 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
       sel[c.client_name] = nextVal;
     });
     setSelectedClients(sel);
+  };
+
+  const toggleExpand = (cName) => {
+    setExpandedClients((prev) => ({
+      ...prev,
+      [cName]: !prev[cName],
+    }));
   };
 
   const handleSendBatch = async () => {
@@ -1630,93 +1645,124 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-3 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs grid place-items-center p-3 sm:p-4 overflow-y-auto"
       data-testid="batch-overdue-reminder-modal"
     >
-      <div className="bg-white w-full max-w-3xl border-2 border-slate-200 shadow-2xl my-6 flex flex-col max-h-[92vh]">
+      <div className="bg-white w-full max-w-4xl border border-slate-300 rounded-xl shadow-2xl my-6 flex flex-col max-h-[92vh] overflow-hidden">
         {/* Header */}
-        <div className="bg-[#0F172A] text-white px-5 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-red-600 text-white rounded">
-              <Mail className="w-4 h-4" />
+        <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white px-6 py-4 flex items-center justify-between border-b border-slate-700">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-[#C27842] text-white flex items-center justify-center shadow-inner">
+              <Mail className="w-5 h-5" />
             </div>
             <div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-red-400 font-bold">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-orange-400 font-bold">
                 Batch Collection Automation
               </div>
-              <div className="text-lg font-bold">
-                Send Overdue Payment Reminders
+              <div className="text-lg font-extrabold tracking-tight">
+                Send Overdue Payment Statements
               </div>
             </div>
           </div>
-          <button onClick={onClose} className="hover:bg-white/10 p-1 rounded transition-colors text-slate-300 hover:text-white">
+          <button
+            onClick={onClose}
+            className="hover:bg-white/10 p-1.5 rounded-lg transition-colors text-slate-400 hover:text-white"
+            title="Close"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+        <div className="p-6 space-y-5 overflow-y-auto flex-1 bg-slate-50/50">
           {loading ? (
-            <div className="py-12 text-center text-sm text-slate-500">
-              <div className="animate-spin inline-block w-6 h-6 border-2 border-slate-300 border-t-red-600 rounded-full mb-2" />
-              <div>Scanning overdue invoices across all clients...</div>
+            <div className="py-16 text-center text-sm text-slate-500">
+              <div className="animate-spin inline-block w-8 h-8 border-3 border-slate-300 border-t-[#C27842] rounded-full mb-3" />
+              <div className="font-medium">Scanning overdue invoices and reconciliation dates...</div>
             </div>
           ) : error ? (
-            <div className="p-4 bg-red-50 border border-red-200 text-red-700 text-xs rounded">
-              <b>Error:</b> {error}
+            <div className="p-4 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+              <b>Error loading summary:</b> {error}
             </div>
           ) : clients.length === 0 ? (
-            <div className="py-12 text-center text-sm text-slate-500">
-              <CheckCircle2 className="w-8 h-8 text-green-600 mx-auto mb-2" />
-              <div className="font-bold text-slate-800">No overdue invoices found!</div>
-              <div className="text-xs text-slate-500 mt-1">All client payments are currently up to date.</div>
+            <div className="py-16 text-center text-sm text-slate-500 bg-white rounded-xl border border-slate-200">
+              <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-2" />
+              <div className="font-bold text-slate-900 text-base">All Client Accounts Are Up to Date!</div>
+              <div className="text-xs text-slate-500 mt-1">
+                No overdue invoices pending payment across your active client database.
+              </div>
             </div>
           ) : (
             <>
-              {/* Overview Metrics Bar */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-red-50 border-2 border-red-200 p-3.5 rounded text-xs">
-                <div>
-                  <div className="text-[10px] text-red-700 uppercase font-bold">Clients with Overdue</div>
-                  <div className="text-lg font-bold text-red-950">{clients.length} Clients</div>
+              {/* Executive Metrics Overview */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-orange-100 text-[#C27842] flex items-center justify-center font-bold">
+                    <Building2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Clients with Overdue</div>
+                    <div className="text-lg font-extrabold text-slate-900">{clients.length} Accounts</div>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-[10px] text-red-700 uppercase font-bold">Total Overdue Invoices</div>
-                  <div className="text-lg font-bold text-red-950">{summary.total_overdue_invoices} Invoices</div>
+
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-red-100 text-red-600 flex items-center justify-center font-bold">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Total Overdue Invoices</div>
+                    <div className="text-lg font-extrabold text-slate-900">{summary.total_overdue_invoices} Invoices</div>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-[10px] text-red-700 uppercase font-bold">Total Overdue Balance</div>
-                  <div className="text-lg font-bold text-red-600 font-mono">{inr(summary.total_overdue_amount)}</div>
+
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                    <IndianRupee className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Total Overdue Balance</div>
+                    <div className="text-lg font-extrabold font-mono text-red-600">{inr(summary.total_overdue_amount)}</div>
+                  </div>
                 </div>
               </div>
 
-              {/* Instructions & Select All */}
-              <div className="flex items-center justify-between text-xs pt-1">
-                <span className="text-slate-600">
-                  Select which clients should receive a consolidated statement of their overdue invoices:
-                </span>
+              {/* Instructions Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs px-1">
+                <div className="text-slate-600 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#C27842]" />
+                  <span>
+                    Select accounts below. Each client will receive an itemized table with <b>Invoice #, Dates, GRN Date, Due Date, and Overdue aging</b>.
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={toggleAll}
-                  className="text-xs font-bold text-slate-800 hover:underline"
+                  className="text-xs font-bold text-[#C27842] hover:text-[#9A5B2E] self-start sm:self-auto hover:underline"
                 >
                   {allSelected ? "Deselect All" : "Select All"}
                 </button>
               </div>
 
-              {/* Clients List */}
-              <div className="space-y-2.5 max-h-[46vh] overflow-y-auto pr-1">
+              {/* Client Cards List */}
+              <div className="space-y-3.5 max-h-[50vh] overflow-y-auto pr-1">
                 {clients.map((c) => {
                   const isChecked = Boolean(selectedClients[c.client_name]);
                   const emailVal = clientEmails[c.client_name] || "";
+                  const isExpanded = Boolean(expandedClients[c.client_name]);
+
                   return (
                     <div
                       key={c.client_name}
-                      className={`border-2 p-3 rounded transition-colors ${
-                        isChecked ? "border-slate-800 bg-white shadow-sm" : "border-slate-200 bg-slate-50/60 opacity-60"
+                      className={`border rounded-xl transition-all duration-150 overflow-hidden ${
+                        isChecked
+                          ? "border-slate-300 bg-white shadow-sm ring-1 ring-slate-900/5"
+                          : "border-slate-200 bg-slate-50/70 opacity-60"
                       }`}
                     >
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-100">
-                        <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      {/* Client Header Row */}
+                      <div className="p-3.5 sm:p-4 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100">
+                        <label className="flex items-start sm:items-center gap-3 cursor-pointer select-none flex-1">
                           <input
                             type="checkbox"
                             checked={isChecked}
@@ -1726,53 +1772,147 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
                                 [c.client_name]: e.target.checked,
                               }));
                             }}
-                            className="w-4 h-4 rounded border-slate-300 text-slate-900 focus:ring-0"
+                            className="w-4 h-4 rounded border-slate-300 text-[#C27842] focus:ring-0 mt-0.5 sm:mt-0"
                           />
                           <div>
-                            <span className="font-bold text-slate-900 text-sm">{c.client_name}</span>
-                            {c.contact_person && (
-                              <span className="text-[11px] text-slate-500 ml-2">Attn: {c.contact_person}</span>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-extrabold text-slate-900 text-sm tracking-tight">
+                                {c.client_name}
+                              </span>
+                              {c.contact_person && (
+                                <span className="text-[11px] font-medium text-slate-600 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">
+                                  Attn: {c.contact_person}
+                                </span>
+                              )}
+                            </div>
+                            {c.last_reminder_sent_at && (
+                              <div className="text-[10px] text-blue-600 font-medium mt-0.5">
+                                Last reminder sent: {new Date(c.last_reminder_sent_at).toLocaleDateString()}
+                              </div>
                             )}
                           </div>
                         </label>
-                        <div className="flex items-center gap-2 pl-6 sm:pl-0">
-                          <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-red-100 text-red-800">
+
+                        <div className="flex items-center justify-between sm:justify-end gap-3 pl-7 sm:pl-0">
+                          <span className="text-[11px] uppercase font-bold px-2.5 py-1 rounded-full bg-red-100 text-red-800 border border-red-200">
                             {c.invoices.length} Overdue ({c.max_days_overdue}d max)
                           </span>
-                          <span className="font-mono font-bold text-red-600 text-sm">
+                          <span className="font-mono font-extrabold text-red-600 text-base">
                             {inr(c.total_outstanding)}
                           </span>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pl-6 text-xs">
-                        <div>
-                          <div className="text-[10px] text-slate-500 font-bold uppercase mb-0.5">Recipient Email</div>
-                          <input
-                            type="email"
-                            value={emailVal}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setClientEmails((prev) => ({
-                                ...prev,
-                                [c.client_name]: val,
-                              }));
-                            }}
-                            placeholder="accounts@client.com"
-                            className="w-full border border-slate-300 bg-white px-2 py-1 text-xs focus:border-[#2563EB] focus:outline-none font-mono"
-                          />
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-slate-500 font-bold uppercase mb-0.5">Invoices Included</div>
-                          <div className="text-[11px] text-slate-700 truncate" title={c.invoices.map((inv) => inv.invoice_no).join(", ")}>
-                            {c.invoices.map((inv) => `${inv.invoice_no} (${inr(inv.outstanding)})`).join(" · ")}
-                          </div>
-                          {c.last_reminder_sent_at && (
-                            <div className="text-[10px] text-blue-600 mt-0.5">
-                              Last sent: {new Date(c.last_reminder_sent_at).toLocaleDateString()}
+                      {/* Recipient Input and Table Toggle */}
+                      <div className="p-3.5 sm:p-4 bg-slate-50/70 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex-1 max-w-md">
+                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1 flex items-center gap-1">
+                              <span>Recipient Email Address</span>
+                              {!c.client_email && (
+                                <span className="text-amber-600 font-normal lowercase">(not in master)</span>
+                              )}
                             </div>
-                          )}
+                            <div className="relative">
+                              <Mail className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                              <input
+                                type="email"
+                                value={emailVal}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setClientEmails((prev) => ({
+                                    ...prev,
+                                    [c.client_name]: val,
+                                  }));
+                                }}
+                                placeholder="e.g. accounts@client.com"
+                                className="w-full border border-slate-300 bg-white pl-8 pr-3 py-1.5 text-xs rounded-lg focus:border-[#C27842] focus:outline-none font-mono"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Table Expand / Collapse Action */}
+                          <button
+                            type="button"
+                            onClick={() => toggleExpand(c.client_name)}
+                            className="flex items-center gap-1 text-xs font-bold text-[#C27842] hover:text-[#9A5B2E] transition-colors self-start sm:self-end py-1.5"
+                          >
+                            <span>
+                              {isExpanded
+                                ? "Hide Itemized Breakdown"
+                                : `Inspect ${c.invoices.length} Invoices Table`}
+                            </span>
+                            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          </button>
                         </div>
+
+                        {/* EXPANDED INVOICE DETAILS TABLE */}
+                        {isExpanded ? (
+                          <div className="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-xs">
+                            <div className="bg-slate-100/70 px-3 py-2 border-b border-slate-200 text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center justify-between">
+                              <span>Itemized Table Sent in Email</span>
+                              <span className="text-slate-400">Directly embedded in email body</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-[11px]">
+                                <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                                  <tr>
+                                    <th className="py-2 px-3">Invoice #</th>
+                                    <th className="py-2 px-2.5">Inv Date</th>
+                                    <th className="py-2 px-2.5">GRN Date</th>
+                                    <th className="py-2 px-2">PO #</th>
+                                    <th className="py-2 px-2.5 text-right">Amount</th>
+                                    <th className="py-2 px-2.5">Due Date</th>
+                                    <th className="py-2 px-2.5 text-center">Overdue</th>
+                                    <th className="py-2 px-3 text-right">Balance Due</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {c.invoices.map((inv) => (
+                                    <tr key={inv.id || inv.invoice_no} className="hover:bg-slate-50/80 transition-colors">
+                                      <td className="py-2 px-3 font-mono font-bold text-slate-900">{inv.invoice_no}</td>
+                                      <td className="py-2 px-2.5 text-slate-600">{inv.invoice_date || "—"}</td>
+                                      <td className="py-2 px-2.5">
+                                        {inv.grn_date ? (
+                                          <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium text-[10px] border border-blue-200/80">
+                                            {inv.grn_date}
+                                          </span>
+                                        ) : (
+                                          <span className="text-slate-400">—</span>
+                                        )}
+                                      </td>
+                                      <td className="py-2 px-2 text-slate-600">{inv.po_number || "—"}</td>
+                                      <td className="py-2 px-2.5 text-right font-mono text-slate-700">{inr(inv.net_amount)}</td>
+                                      <td className="py-2 px-2.5 font-medium text-slate-800">{inv.due_date || "—"}</td>
+                                      <td className="py-2 px-2.5 text-center">
+                                        <span className="px-2 py-0.5 rounded-full font-bold text-[10px] bg-red-100 text-red-800 border border-red-200">
+                                          {inv.days_overdue}d overdue
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-mono font-bold text-red-600">
+                                        {inr(inv.outstanding)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        ) : (
+                          /* COLLAPSED QUICK PILLS */
+                          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                            {c.invoices.map((inv) => (
+                              <span
+                                key={inv.invoice_no}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border border-slate-200 text-[11px] font-mono text-slate-800 shadow-2xs"
+                              >
+                                <span className="font-bold">{inv.invoice_no}</span>
+                                <span className="text-slate-300">|</span>
+                                <span className="text-red-600 font-bold">{inr(inv.outstanding)}</span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -1783,11 +1923,14 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
         </div>
 
         {/* Footer */}
-        <div className="bg-slate-50 px-5 py-3.5 border-t border-slate-200 flex items-center justify-between">
-          <div className="text-[11px] text-slate-500">
-            Each selected client receives an itemized statement with all overdue invoices and attached PDFs.
+        <div className="bg-slate-100/80 px-6 py-4 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-[11px] text-slate-600 flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            <span>
+              Executive statements with full itemized details (Invoice #, Dates, GRN Date, Due Date, Overdue aging) are dispatched directly in the email body.
+            </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5 self-end sm:self-auto">
             <BtnSecondary onClick={onClose} disabled={sending}>
               Cancel
             </BtnSecondary>
@@ -1795,16 +1938,16 @@ function BatchOverdueReminderModal({ onClose, onSent }) {
               onClick={handleSendBatch}
               disabled={sending || loading || selectedCount === 0 || clients.length === 0}
               data-testid="send-batch-reminders-submit-btn"
-              className="bg-red-600 border-red-600 hover:bg-red-700"
+              className="bg-[#C27842] border-[#C27842] hover:bg-[#A35D2E] text-white px-5 py-2 font-bold shadow-sm"
             >
               {sending ? (
                 <>
-                  <div className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full mr-1.5 -mt-0.5" />
-                  Sending Batch Reminders...
+                  <div className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full mr-1.5 -mt-0.5" />
+                  Dispatching Statements...
                 </>
               ) : (
                 <>
-                  <Send className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                  <Send className="w-3.5 h-3.5 inline mr-1.5 -mt-0.5" />
                   Send to {selectedCount} Client{selectedCount === 1 ? "" : "s"}
                 </>
               )}

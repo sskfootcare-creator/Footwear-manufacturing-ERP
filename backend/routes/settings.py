@@ -190,10 +190,18 @@ async def get_email_settings(request: Request):
     if pwd:
         masked_pwd = "•••• •••• •••• " + (pwd[-4:] if len(pwd) >= 4 else "****")
 
+    resend_key = cfg.get("resend_api_key", "")
+    masked_resend = ""
+    if resend_key:
+        masked_resend = "re_••••••••" + (resend_key[-4:] if len(resend_key) >= 4 else "****")
+
     return {
+        "provider": cfg.get("provider", "smtp"),
         "gmail_user": cfg.get("gmail_user", ""),
         "has_app_password": bool(pwd),
         "masked_app_password": masked_pwd,
+        "has_resend_key": bool(resend_key),
+        "masked_resend_key": masked_resend,
         "from_name": cfg.get("from_name", "SSK Footcare Manufacturing"),
         "reply_to": cfg.get("reply_to", ""),
         "default_cc": cfg.get("default_cc", ""),
@@ -207,7 +215,7 @@ async def get_email_settings(request: Request):
 
 @settings_router.put("/email")
 async def put_email_settings(payload: dict, request: Request):
-    """Save or update company Gmail SMTP credentials with optional verification."""
+    """Save or update company email credentials (SMTP or Resend API) with non-blocking verification."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None)
@@ -218,16 +226,21 @@ async def put_email_settings(payload: dict, request: Request):
     from services.email_service import (
         get_email_config,
         clean_app_password,
-        verify_smtp_credentials,
+        async_verify_email_credentials,
     )
 
     current_cfg = await get_email_config(db)
 
+    provider = (payload.get("provider") or current_cfg.get("provider") or "smtp").strip()
     gmail_user = (payload.get("gmail_user") or "").strip()
     new_pwd = clean_app_password(payload.get("gmail_app_password"))
     # If no new password was submitted, retain current password if already present
     if not new_pwd and current_cfg.get("gmail_app_password"):
         new_pwd = current_cfg.get("gmail_app_password")
+
+    resend_api_key = (payload.get("resend_api_key") or "").strip()
+    if not resend_api_key and current_cfg.get("resend_api_key"):
+        resend_api_key = current_cfg.get("resend_api_key")
 
     from_name = (payload.get("from_name") or "SSK Footcare Manufacturing").strip()
     reply_to = (payload.get("reply_to") or "").strip()
@@ -241,15 +254,25 @@ async def put_email_settings(payload: dict, request: Request):
     verify_now = payload.get("verify_now", False)
     verification_result = None
 
-    if verify_now and gmail_user and new_pwd:
-        ok, msg = verify_smtp_credentials(smtp_host, smtp_port, gmail_user, new_pwd)
+    if verify_now:
+        test_cfg = {
+            "provider": provider,
+            "gmail_user": gmail_user,
+            "gmail_app_password": new_pwd,
+            "resend_api_key": resend_api_key,
+            "smtp_host": smtp_host,
+            "smtp_port": smtp_port,
+        }
+        ok, msg = await async_verify_email_credentials(test_cfg)
         verification_result = {"ok": ok, "message": msg}
         if not ok:
-            raise HTTPException(400, f"Gmail SMTP verification failed: {msg}")
+            raise HTTPException(400, f"Email verification failed: {msg}")
 
     update_doc = {
+        "provider": provider,
         "gmail_user": gmail_user,
         "gmail_app_password": new_pwd,
+        "resend_api_key": resend_api_key,
         "from_name": from_name,
         "reply_to": reply_to,
         "default_cc": default_cc,
@@ -269,20 +292,20 @@ async def put_email_settings(payload: dict, request: Request):
         db,
         "update_email_settings",
         "settings",
-        f"Updated Gmail SMTP configuration for {gmail_user}",
+        f"Updated email configuration (provider: {provider})",
         u.get("email"),
     )
 
     return {
         "ok": True,
-        "message": "Gmail settings saved successfully",
+        "message": "Email settings saved successfully",
         "verification": verification_result,
     }
 
 
 @settings_router.post("/email/verify")
 async def verify_email_settings(payload: dict, request: Request):
-    """Test Gmail SMTP authentication credentials without persisting."""
+    """Test email authentication credentials without persisting (non-blocking)."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None)
@@ -290,24 +313,39 @@ async def verify_email_settings(payload: dict, request: Request):
         import server
         db = server.db
 
-    from services.email_service import get_email_config, clean_app_password, verify_smtp_credentials
+    from services.email_service import get_email_config, clean_app_password, async_verify_email_credentials
 
     current_cfg = await get_email_config(db)
+    provider = (payload.get("provider") or current_cfg.get("provider") or "smtp").strip()
     user = (payload.get("gmail_user") or current_cfg.get("gmail_user") or "").strip()
     pwd = clean_app_password(payload.get("gmail_app_password")) or current_cfg.get("gmail_app_password") or ""
+    resend_key = (payload.get("resend_api_key") or current_cfg.get("resend_api_key") or "").strip()
     host = (payload.get("smtp_host") or current_cfg.get("smtp_host") or "smtp.gmail.com").strip()
     port = int(payload.get("smtp_port") or current_cfg.get("smtp_port") or 465)
 
-    if not user or not pwd:
-        raise HTTPException(400, "Both Gmail address and Google App Password are required to test connection.")
+    test_cfg = {
+        "provider": provider,
+        "gmail_user": user,
+        "gmail_app_password": pwd,
+        "resend_api_key": resend_key,
+        "smtp_host": host,
+        "smtp_port": port,
+    }
 
-    ok, msg = verify_smtp_credentials(host, port, user, pwd)
+    if provider == "resend":
+        if not resend_key:
+            raise HTTPException(400, "Resend API key is required to test HTTP connection.")
+    else:
+        if not user or not pwd:
+            raise HTTPException(400, "Both Gmail address and Google App Password are required to test connection.")
+
+    ok, msg = await async_verify_email_credentials(test_cfg)
     return {"ok": ok, "message": msg}
 
 
 @settings_router.post("/email/test")
 async def send_test_email_route(payload: dict, request: Request):
-    """Send an actual test email via Gmail SMTP to verify end-to-end delivery."""
+    """Send an actual test email non-blockingly to verify end-to-end delivery."""
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
     db = getattr(request.app, "mongodb", None)
@@ -315,20 +353,23 @@ async def send_test_email_route(payload: dict, request: Request):
         import server
         db = server.db
 
-    from services.email_service import get_email_config, send_email
+    from services.email_service import get_email_config, async_send_email
 
     cfg = await get_email_config(db)
     if not cfg["is_configured"]:
-        raise HTTPException(400, "Gmail is not configured. Please save valid credentials first.")
+        raise HTTPException(400, "Email delivery is not configured. Please save valid credentials first.")
 
     recipient = (payload.get("test_recipient") or u.get("email") or "").strip()
     if not recipient:
         raise HTTPException(400, "Recipient email is required.")
 
-    subject = "SSK Footcare ERP — Gmail Connection Test"
+    sender_display = cfg["resend_api_key"] and cfg.get("provider") == "resend"
+    sender_info = "Resend HTTP API (Port 443)" if sender_display else f"Gmail SMTP ({cfg.get('gmail_user')})"
+
+    subject = "SSK Footcare ERP — Email Connection Test"
     text_body = (
         f"Hello,\n\n"
-        f"This is a test email confirming that your company Gmail ({cfg['gmail_user']}) "
+        f"This is a test email confirming that your email service ({sender_info}) "
         f"has been successfully connected to SSK Footcare Manufacturing ERP.\n\n"
         f"You can now send automated invoice payment reminders directly from the Invoices tab.\n\n"
         f"— SSK Footcare ERP System"
@@ -341,10 +382,10 @@ async def send_test_email_route(payload: dict, request: Request):
       SSK Footcare ERP
     </div>
     <h2 style="font-size: 22px; margin: 8px 0 16px; color: #0F172A;">
-      Gmail Connection Verified
+      Email Connection Verified
     </h2>
     <p style="font-size: 14px; line-height: 1.6; color: #334155;">
-      This test email confirms that your company Gmail (<strong>{cfg['gmail_user']}</strong>) is properly connected and functioning.
+      This test email confirms that your company email service (<strong>{sender_info}</strong>) is properly connected and functioning.
     </p>
     <div style="background: #F0FDF4; border-left: 4px solid #16A34A; padding: 12px 16px; font-size: 13px; color: #15803D; margin: 16px 0; font-weight: 600;">
       Status: Ready to send invoice payment reminders
@@ -356,7 +397,7 @@ async def send_test_email_route(payload: dict, request: Request):
 </body>
 </html>"""
 
-    ok, msg = send_email(
+    ok, msg = await async_send_email(
         to_emails=recipient,
         subject=subject,
         text_body=text_body,

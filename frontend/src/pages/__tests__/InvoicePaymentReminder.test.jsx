@@ -156,7 +156,7 @@ describe("Invoices Tab Payment Reminder Flow", () => {
         "/invoices/inv_123/send-payment-reminder",
         expect.objectContaining({
           to_email: "accounts@bata.com",
-          attach_pdf: true,
+          attach_pdf: false,
           include_bank_details: true,
         })
       );
