@@ -263,6 +263,75 @@ async def sync_bank_account_balance(db, bank_account_id: str) -> float:
         return 0.0
 
 
+async def sync_cash_account_balance(db, cash_account_id: str) -> float:
+    """
+    Computes and persists the latest current_balance to db.cash_accounts document.
+    """
+    if not cash_account_id or not hasattr(db, "cash_accounts") or db.cash_accounts is None:
+        return 0.0
+    cid_str = str(cash_account_id)
+    try:
+        ca = None
+        if _oid(cid_str):
+            ca = await db.cash_accounts.find_one({"_id": _oid(cid_str)})
+        if not ca:
+            ca = await db.cash_accounts.find_one({"_id": cid_str})
+        if not ca:
+            ca = await db.cash_accounts.find_one({"source_bank_account_id": cid_str})
+        if not ca:
+            return 0.0
+
+        ca_id = str(ca.get("_id") or ca.get("id"))
+        src_bank_id = str(ca.get("source_bank_account_id") or "")
+
+        # Fetch cash_ledger
+        cls = []
+        if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+            b_ids = [src_bank_id]
+            if _oid(src_bank_id):
+                b_ids.append(_oid(src_bank_id))
+            cl_cur = db.cash_ledger.find({"bank_account_id": {"$in": b_ids}})
+            cls = await cl_cur.to_list(10000) if hasattr(cl_cur, "to_list") else list(cl_cur)
+
+        curr_cl_bal = sum(float(c.get("remaining_balance") or 0.0) for c in cls)
+
+        # Fetch payments
+        linked_payments = []
+        if hasattr(db, "payments") and db.payments is not None:
+            p_q_or = [
+                {"cash_account_id": ca_id},
+                {"account_type": "cash", "bank_account_id": src_bank_id},
+            ]
+            if _oid(ca_id):
+                p_q_or.append({"cash_account_id": _oid(ca_id)})
+            if _oid(src_bank_id):
+                p_q_or.append({"account_type": "cash", "bank_account_id": _oid(src_bank_id)})
+            p_cur = db.payments.find({"$or": p_q_or})
+            linked_payments = await p_cur.to_list(10000) if hasattr(p_cur, "to_list") else list(p_cur)
+
+        client_payments = [
+            p for p in linked_payments
+            if p.get("type") != "vendor_payment" and not p.get("vendor_id")
+        ]
+        vendor_payments = [
+            p for p in linked_payments
+            if p.get("type") == "vendor_payment" or p.get("vendor_id")
+        ]
+
+        tot_received = sum(float(p.get("amount") or 0.0) for p in client_payments)
+        uncovered_vendor = sum(float(p.get("direct_cash_deduction") or 0.0) for p in vendor_payments)
+        curr_bal = max(0.0, round(curr_cl_bal + tot_received - uncovered_vendor, 2))
+
+        await db.cash_accounts.update_one(
+            {"_id": ca["_id"]},
+            {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
+        )
+        return curr_bal
+    except Exception as e:
+        log.warning(f"Failed to sync cash account balance for {cid_str}: {e}")
+        return 0.0
+
+
 @banking_router.get("/banking/accounts")
 @banking_router.get("/bank-accounts")
 async def list_bank_accounts(
@@ -2771,11 +2840,29 @@ async def list_cash_accounts(request: Request):
                (str(p.get("account_type") or "") == "cash" and str(p.get("bank_account_id") or "") == src_bank_id)
         ]
 
+        client_payments = [
+            p for p in linked_payments
+            if p.get("type") != "vendor_payment" and not p.get("vendor_id")
+        ]
+        vendor_payments = [
+            p for p in linked_payments
+            if p.get("type") == "vendor_payment" or p.get("vendor_id")
+        ]
+
         curr_cl_bal = sum(float(c.get("remaining_balance") or 0.0) for c in linked_cls)
         tot_withdrawn = sum(float(c.get("amount") or 0.0) for c in linked_cls)
-        tot_received = sum(float(p.get("amount") or 0.0) for p in linked_payments)
-        tot_spent = tot_withdrawn - curr_cl_bal
-        curr_bal = curr_cl_bal + tot_received
+        tot_received = sum(float(p.get("amount") or 0.0) for p in client_payments)
+        uncovered_vendor = sum(float(p.get("direct_cash_deduction") or 0.0) for p in vendor_payments)
+        tot_spent = round((tot_withdrawn - curr_cl_bal) + uncovered_vendor, 2)
+        curr_bal = max(0.0, round(curr_cl_bal + tot_received - uncovered_vendor, 2))
+
+        try:
+            await db.cash_accounts.update_one(
+                {"_id": ca["_id"]},
+                {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
+            )
+        except Exception:
+            pass
 
         bank_doc = bank_map.get(src_bank_id, {})
         bank_name = bank_doc.get("name") or bank_doc.get("bank_name") or ""
@@ -3001,6 +3088,8 @@ async def get_cash_account_transactions(
 
     # 1b. Money IN (Client Invoice Payments into Cash Account)
     for cp in client_payments:
+        if cp.get("type") == "vendor_payment" or cp.get("vendor_id"):
+            continue
         cp_id_str = str(cp.get("_id") or cp.get("id"))
         inv_refs = []
         if cp.get("allocations") and isinstance(cp.get("allocations"), dict):
@@ -3105,6 +3194,39 @@ async def get_cash_account_transactions(
             "ref": "advance",
             "ref_text": f"Advance #{adv_id_str[:8]}",
             "notes": a.get("notes") or "",
+        })
+
+    # 5. Money OUT (Vendor Payments)
+    for vp in client_payments:
+        if not (vp.get("type") == "vendor_payment" or vp.get("vendor_id")):
+            continue
+        vp_id_str = str(vp.get("_id") or vp.get("id"))
+        v_name = vp.get("vendor_name") or "Vendor"
+        v_po_no = vp.get("vendor_po_number") or ""
+        ref_text = f"PO {v_po_no}" if v_po_no else (f"Payment {vp.get('payment_no', '')}" if vp.get("payment_no") else "Vendor Payment")
+        if vp.get("reference"):
+            ref_text += f" ({vp.get('reference')})"
+        transactions.append({
+            "id": f"out_vp_{vp_id_str}",
+            "source_id": vp_id_str,
+            "direction": "out",
+            "type": "vendor_payment",
+            "type_label": "Vendor Payment",
+            "category": "Vendor Payment",
+            "date": (vp.get("payment_date") or vp.get("created_at", ""))[:10],
+            "created_at": vp.get("created_at") or "",
+            "title": f"Payment to {v_name}",
+            "payee": v_name,
+            "party": v_name,
+            "vendor_name": v_name,
+            "description": vp.get("notes") or f"Payment to {v_name}{f' for PO {v_po_no}' if v_po_no else ''}",
+            "amount": float(vp.get("amount") or 0.0),
+            "ref": vp.get("reference") or vp.get("payment_no") or "payment",
+            "ref_text": ref_text,
+            "payment_no": vp.get("payment_no"),
+            "vendor_po_id": vp.get("vendor_po_id"),
+            "vendor_po_number": v_po_no,
+            "notes": vp.get("notes") or "",
         })
 
     # Sort strictly chronologically ASCENDING to calculate running balance accurately

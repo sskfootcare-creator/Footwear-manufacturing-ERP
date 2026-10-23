@@ -531,6 +531,83 @@ async def export_vendor_ledger(
     )
 
 
+async def recompute_vendor_po_financials(db, po_id_or_doc) -> dict:
+    """
+    Recalculates total_amount, paid_amount, balance_due, and payment_status
+    for a Vendor PO by querying linked payments, and persists the results to MongoDB.
+    """
+    if not po_id_or_doc or not hasattr(db, "vendor_purchase_orders") or db.vendor_purchase_orders is None:
+        return {}
+    if isinstance(po_id_or_doc, dict):
+        po = po_id_or_doc
+    else:
+        pid_str = str(po_id_or_doc)
+        po = None
+        if ObjectId.is_valid(pid_str):
+            po = await db.vendor_purchase_orders.find_one({"_id": oid(pid_str)})
+        if not po:
+            po = await db.vendor_purchase_orders.find_one({"_id": pid_str})
+        if not po:
+            po = await db.vendor_purchase_orders.find_one({"po_number": pid_str})
+    if not po:
+        return {}
+
+    p_id = str(po["_id"])
+    p_no = po.get("po_number", "")
+
+    p_q_or = [
+        {"vendor_po_id": p_id},
+        {"allocations.po_id": p_id},
+    ]
+    if ObjectId.is_valid(p_id):
+        p_q_or.append({"vendor_po_id": oid(p_id)})
+        p_q_or.append({"allocations.po_id": oid(p_id)})
+    if p_no:
+        p_q_or.append({"vendor_po_number": p_no})
+        p_q_or.append({"allocations.po_number": p_no})
+
+    pay_docs = []
+    if hasattr(db, "payments") and db.payments is not None:
+        cur = db.payments.find({"$or": p_q_or})
+        pay_docs = await cur.to_list(1000) if hasattr(cur, "to_list") else list(cur)
+
+    # Sum paid amounts per payment without double-counting
+    payment_map = {}
+    for p in pay_docs:
+        pid = str(p.get("_id"))
+        allocs = p.get("allocations") or []
+        if allocs and isinstance(allocs, list):
+            for a in allocs:
+                if str(a.get("po_id") or "") in (p_id, str(po["_id"])) or str(a.get("po_number") or "") == p_no:
+                    payment_map[pid] = float(a.get("amount") or 0.0)
+                    break
+        else:
+            payment_map[pid] = float(p.get("amount") or 0.0)
+
+    total_paid = round(sum(payment_map.values()), 2)
+    total_amt = float(po.get("total_amount") or 0.0)
+    if total_amt <= 0 and po.get("line_items"):
+        total_amt = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in po.get("line_items", []))
+    total_amt = round(total_amt, 2)
+
+    balance_due = max(0.0, round(total_amt - total_paid, 2))
+    if total_amt > 0 and total_paid >= total_amt:
+        payment_status = "paid"
+    elif total_paid > 0:
+        payment_status = "partially_paid"
+    else:
+        payment_status = "unpaid"
+
+    updates = {
+        "paid_amount": total_paid,
+        "balance_due": balance_due,
+        "payment_status": payment_status,
+        "updated_at": now_iso()
+    }
+    await db.vendor_purchase_orders.update_one({"_id": po["_id"]}, {"$set": updates})
+    return updates
+
+
 @vendors_router.post("/vendors/{vid}/payments", status_code=201)
 async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
     u = await _get_user(request)
@@ -542,19 +619,59 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
     if not vendor:
         raise HTTPException(404, "Vendor not found")
 
+    po = None
     vendor_po_id = payload.vendor_po_id or ""
     vendor_po_number = ""
     if vendor_po_id:
         try:
-            po = await db.vendor_purchase_orders.find_one({"_id": oid(vendor_po_id)})
+            if ObjectId.is_valid(vendor_po_id):
+                po = await db.vendor_purchase_orders.find_one({"_id": oid(vendor_po_id)})
+            if not po:
+                po = await db.vendor_purchase_orders.find_one({"_id": vendor_po_id})
+            if not po:
+                po = await db.vendor_purchase_orders.find_one({"po_number": vendor_po_id})
             if po:
                 vendor_po_number = po.get("po_number", "")
-                await db.vendor_purchase_orders.update_one(
-                    {"_id": po["_id"]},
-                    {"$set": {"updated_at": now_iso()}}
-                )
         except Exception:
             pass
+
+    allocated_pos = []
+    if not vendor_po_id:
+        try:
+            # Find open / partially paid POs for this vendor in FIFO order
+            open_pos_cur = db.vendor_purchase_orders.find({
+                "vendor_id": str(vendor["_id"]),
+                "status": {"$ne": "cancelled"},
+                "payment_status": {"$ne": "paid"}
+            }).sort("created_at", 1)
+            open_pos = await open_pos_cur.to_list(100) if hasattr(open_pos_cur, "to_list") else list(open_pos_cur)
+
+            rem_pay = round(float(payload.amount), 2)
+            for opo in open_pos:
+                if rem_pay <= 0:
+                    break
+                opo_tot = float(opo.get("total_amount") or 0.0)
+                if opo_tot <= 0 and opo.get("line_items"):
+                    opo_tot = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in opo.get("line_items", []))
+                opo_tot = round(opo_tot, 2)
+                opo_paid = float(opo.get("paid_amount") or 0.0)
+                opo_bal = float(opo.get("balance_due") if opo.get("balance_due") is not None else max(0.0, opo_tot - opo_paid))
+                if opo_bal <= 0:
+                    continue
+                alloc_amt = min(rem_pay, opo_bal)
+                allocated_pos.append({
+                    "po_id": str(opo["_id"]),
+                    "po_number": opo.get("po_number", ""),
+                    "amount": round(alloc_amt, 2)
+                })
+                rem_pay = round(rem_pay - alloc_amt, 2)
+
+            if len(allocated_pos) == 1:
+                vendor_po_id = allocated_pos[0]["po_id"]
+                vendor_po_number = allocated_pos[0]["po_number"]
+                po = await db.vendor_purchase_orders.find_one({"_id": oid(vendor_po_id)})
+        except Exception as e:
+            log.warning(f"Error auto-allocating vendor payment to open POs: {e}")
 
     bank_account_id = payload.bank_account_id or ""
     cash_account_id = getattr(payload, "cash_account_id", None) or ""
@@ -574,46 +691,59 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
         except Exception:
             pass
 
-    # 2. If cash_account_id provided, lookup cash account & deduct from cash ledger pool
-    if account_type == "cash" and cash_account_id and hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+    # 2. If cash_account_id provided or mode is Cash, lookup cash account & deduct from cash ledger pool
+    deducted_from_cl = 0.0
+    direct_cash_deduction = 0.0
+    resolved_cash_acc_id = cash_account_id
+    if account_type == "cash":
         try:
             src_bank_id = None
+            ca_doc = None
             if hasattr(db, "cash_accounts") and db.cash_accounts is not None:
-                ca_doc = None
-                if ObjectId.is_valid(cash_account_id):
-                    ca_doc = await db.cash_accounts.find_one({"_id": oid(cash_account_id)})
+                if cash_account_id:
+                    if ObjectId.is_valid(cash_account_id):
+                        ca_doc = await db.cash_accounts.find_one({"_id": oid(cash_account_id)})
+                    if not ca_doc:
+                        ca_doc = await db.cash_accounts.find_one({"_id": cash_account_id})
+                    if not ca_doc:
+                        ca_doc = await db.cash_accounts.find_one({"source_bank_account_id": cash_account_id})
                 if not ca_doc:
-                    ca_doc = await db.cash_accounts.find_one({"_id": cash_account_id})
-                if not ca_doc:
-                    ca_doc = await db.cash_accounts.find_one({"source_bank_account_id": cash_account_id})
+                    ca_doc = await db.cash_accounts.find_one({})
+
                 if ca_doc:
+                    resolved_cash_acc_id = str(ca_doc.get("_id") or ca_doc.get("id"))
                     src_bank_id = str(ca_doc.get("source_bank_account_id") or "")
                     if not bank_name:
                         bank_name = ca_doc.get("name") or "Cash Account"
 
-            q_ids = [cash_account_id]
+            q_ids = []
+            if resolved_cash_acc_id:
+                q_ids.append(resolved_cash_acc_id)
             if src_bank_id:
                 q_ids.append(src_bank_id)
                 if ObjectId.is_valid(src_bank_id):
                     q_ids.append(oid(src_bank_id))
 
-            cur = db.cash_ledger.find({"bank_account_id": {"$in": q_ids}, "remaining_balance": {"$gt": 0}}).sort("date", 1)
-            cl_entries = await cur.to_list(1000) if hasattr(cur, "to_list") else list(cur)
             to_deduct = round(float(payload.amount), 2)
-            for entry in cl_entries:
-                rem = float(entry.get("remaining_balance") or 0.0)
-                if rem <= 0:
-                    continue
-                deduct = min(rem, to_deduct)
-                await db.cash_ledger.update_one(
-                    {"_id": entry["_id"], "remaining_balance": {"$gte": round(deduct, 2)}},
-                    {"$inc": {"remaining_balance": -round(deduct, 2)}}
-                )
-                to_deduct = round(to_deduct - deduct, 2)
-                if to_deduct <= 0:
-                    break
-        except Exception:
-            pass
+            if q_ids and hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+                cur = db.cash_ledger.find({"bank_account_id": {"$in": q_ids}, "remaining_balance": {"$gt": 0}}).sort("date", 1)
+                cl_entries = await cur.to_list(1000) if hasattr(cur, "to_list") else list(cur)
+                for entry in cl_entries:
+                    rem = float(entry.get("remaining_balance") or 0.0)
+                    if rem <= 0:
+                        continue
+                    deduct = min(rem, to_deduct)
+                    await db.cash_ledger.update_one(
+                        {"_id": entry["_id"], "remaining_balance": {"$gte": round(deduct, 2)}},
+                        {"$inc": {"remaining_balance": -round(deduct, 2)}}
+                    )
+                    to_deduct = round(to_deduct - deduct, 2)
+                    deducted_from_cl = round(deducted_from_cl + deduct, 2)
+                    if to_deduct <= 0:
+                        break
+            direct_cash_deduction = to_deduct
+        except Exception as ce:
+            log.warning(f"Error deducting from cash ledger: {ce}")
 
     payment_no = await next_payment_no(db)
     doc = {
@@ -625,26 +755,48 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
         "bank": bank_name,
         "bank_account_id": bank_account_id,
         "account_type": account_type,
-        "cash_account_id": cash_account_id,
+        "cash_account_id": resolved_cash_acc_id,
+        "deducted_from_cash_ledger": deducted_from_cl,
+        "direct_cash_deduction": direct_cash_deduction,
         "notes": payload.notes or "",
         "type": "vendor_payment",
         "vendor_id": str(vendor["_id"]),
         "vendor_name": vendor.get("name"),
         "vendor_po_id": vendor_po_id,
         "vendor_po_number": vendor_po_number,
+        "allocations": allocated_pos if allocated_pos else None,
         "by": u.get("email") or u.get("name", ""),
         "created_at": now_iso(),
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
 
-    # 3. Synchronize live bank account balance if paying from bank
+    # 3. Synchronize live bank account or cash account balance
     if bank_account_id:
         try:
             from routes.banking import sync_bank_account_balance
             await sync_bank_account_balance(db, bank_account_id)
         except Exception:
             pass
+    if account_type == "cash" and resolved_cash_acc_id:
+        try:
+            from routes.banking import sync_cash_account_balance
+            await sync_cash_account_balance(db, resolved_cash_acc_id)
+        except Exception:
+            pass
+
+    # 4. Recompute and persist updated financials on the linked Vendor PO(s)
+    if po:
+        try:
+            await recompute_vendor_po_financials(db, po["_id"])
+        except Exception as pe:
+            log.warning(f"Error updating vendor PO financials: {pe}")
+    elif allocated_pos:
+        for a in allocated_pos:
+            try:
+                await recompute_vendor_po_financials(db, a["po_id"])
+            except Exception:
+                pass
 
     # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
     try:
@@ -686,7 +838,6 @@ async def create_vendor_payment(vid: str, payload: PaymentIn, request: Request):
             await record_supabase_sync_failure(db, "payments", str(res.inserted_id), str(se))
         except Exception:
             pass
-
 
     detail_msg = f"Created Vendor Payment '{payment_no}' of ₹{payload.amount} for {vendor.get('name')}"
     if vendor_po_number:
@@ -776,20 +927,39 @@ async def list_vendor_pos(request: Request, vendor_id: Optional[str] = None, sta
         pay_or = []
         if po_ids:
             pay_or.append({"vendor_po_id": {"$in": po_ids}})
+            oid_list = [oid(x) for x in po_ids if ObjectId.is_valid(x)]
+            if oid_list:
+                pay_or.append({"vendor_po_id": {"$in": oid_list}})
+            pay_or.append({"allocations.po_id": {"$in": po_ids}})
         if po_numbers:
             pay_or.append({"vendor_po_number": {"$in": po_numbers}})
+            pay_or.append({"allocations.po_number": {"$in": po_numbers}})
         pay_docs = await db.payments.find({"$or": pay_or}).to_list(5000)
 
-    # Group paid amounts by PO ID and PO Number without double counting
-    paid_by_po = defaultdict(float)
+    # Map payments per PO without double counting
+    po_payments_map = defaultdict(dict)
     for p in pay_docs:
+        p_id = str(p.get("_id"))
+        p_po_id = str(p.get("vendor_po_id") or "")
+        p_po_no = str(p.get("vendor_po_number") or "")
         amt = float(p.get("amount", 0) or 0)
-        v_po_id = str(p.get("vendor_po_id") or "")
-        v_po_no = str(p.get("vendor_po_number") or "")
-        key = v_po_id or v_po_no
-        if key:
-            paid_by_po[key] += amt
-    
+
+        allocs = p.get("allocations") or []
+        if allocs and isinstance(allocs, list):
+            for a in allocs:
+                target_id = str(a.get("po_id") or a.get("vendor_po_id") or "")
+                target_no = str(a.get("po_number") or a.get("vendor_po_number") or "")
+                a_amt = float(a.get("amount") or 0)
+                if target_id:
+                    po_payments_map[target_id][p_id] = a_amt
+                if target_no:
+                    po_payments_map[target_no][p_id] = a_amt
+        else:
+            if p_po_id:
+                po_payments_map[p_po_id][p_id] = amt
+            if p_po_no:
+                po_payments_map[p_po_no][p_id] = amt
+
     out = []
     for d in docs:
         d = stringify(d)
@@ -808,7 +978,15 @@ async def list_vendor_pos(request: Request, vendor_id: Optional[str] = None, sta
         total_amt = round(total_amt, 2)
         d["total_amount"] = total_amt
 
-        paid_amt = round(paid_by_po.get(d_id, 0.0) or paid_by_po.get(d_po_no, 0.0), 2)
+        matched = {}
+        if d_id in po_payments_map:
+            matched.update(po_payments_map[d_id])
+        if d_po_no in po_payments_map:
+            matched.update(po_payments_map[d_po_no])
+
+        paid_amt = round(sum(matched.values()), 2)
+        if paid_amt == 0.0 and d.get("paid_amount") is not None:
+            paid_amt = float(d.get("paid_amount") or 0.0)
         d["paid_amount"] = paid_amt
 
         balance_due = max(0.0, round(total_amt - paid_amt, 2))
@@ -1015,18 +1193,37 @@ async def export_vendor_pos(
         pay_or = []
         if po_ids:
             pay_or.append({"vendor_po_id": {"$in": po_ids}})
+            oid_list = [oid(x) for x in po_ids if ObjectId.is_valid(x)]
+            if oid_list:
+                pay_or.append({"vendor_po_id": {"$in": oid_list}})
+            pay_or.append({"allocations.po_id": {"$in": po_ids}})
         if po_numbers:
             pay_or.append({"vendor_po_number": {"$in": po_numbers}})
+            pay_or.append({"allocations.po_number": {"$in": po_numbers}})
         pay_docs = await db.payments.find({"$or": pay_or}).to_list(5000)
 
-    paid_by_po = defaultdict(float)
+    po_payments_map = defaultdict(dict)
     for p in pay_docs:
+        p_id = str(p.get("_id"))
+        p_po_id = str(p.get("vendor_po_id") or "")
+        p_po_no = str(p.get("vendor_po_number") or "")
         amt = float(p.get("amount", 0) or 0)
-        v_po_id = str(p.get("vendor_po_id") or "")
-        v_po_no = str(p.get("vendor_po_number") or "")
-        key = v_po_id or v_po_no
-        if key:
-            paid_by_po[key] += amt
+
+        allocs = p.get("allocations") or []
+        if allocs and isinstance(allocs, list):
+            for a in allocs:
+                target_id = str(a.get("po_id") or a.get("vendor_po_id") or "")
+                target_no = str(a.get("po_number") or a.get("vendor_po_number") or "")
+                a_amt = float(a.get("amount") or 0)
+                if target_id:
+                    po_payments_map[target_id][p_id] = a_amt
+                if target_no:
+                    po_payments_map[target_no][p_id] = a_amt
+        else:
+            if p_po_id:
+                po_payments_map[p_po_id][p_id] = amt
+            if p_po_no:
+                po_payments_map[p_po_no][p_id] = amt
 
     records = []
     for d in docs:
@@ -1040,7 +1237,16 @@ async def export_vendor_pos(
         if total_amt <= 0 and d.get("line_items"):
             total_amt = sum(round(float(li.get("quantity", 0)) * float(li.get("rate", 0)), 2) for li in d.get("line_items", []))
         total_amt = round(total_amt, 2)
-        paid_amt = round(paid_by_po.get(d_id, 0.0) or paid_by_po.get(d_po_no, 0.0), 2)
+
+        matched = {}
+        if d_id in po_payments_map:
+            matched.update(po_payments_map[d_id])
+        if d_po_no in po_payments_map:
+            matched.update(po_payments_map[d_po_no])
+
+        paid_amt = round(sum(matched.values()), 2)
+        if paid_amt == 0.0 and d.get("paid_amount") is not None:
+            paid_amt = float(d.get("paid_amount") or 0.0)
         bal_due = max(0.0, round(total_amt - paid_amt, 2))
 
         pay_st = "paid" if (total_amt > 0 and paid_amt >= total_amt) else ("partially_paid" if paid_amt > 0 else "unpaid")
@@ -1128,12 +1334,18 @@ async def get_vendor_po(id: str, request: Request):
 
     po_id = str(doc["_id"])
     po_no = doc.get("po_number", "")
-    matching_payments = await db.payments.find({
-        "$or": [
-            {"vendor_po_id": po_id},
-            {"vendor_po_number": po_no}
-        ]
-    }).to_list(500)
+    p_q_or = [
+        {"vendor_po_id": po_id},
+        {"allocations.po_id": po_id},
+    ]
+    if ObjectId.is_valid(po_id):
+        p_q_or.append({"vendor_po_id": oid(po_id)})
+        p_q_or.append({"allocations.po_id": oid(po_id)})
+    if po_no:
+        p_q_or.append({"vendor_po_number": po_no})
+        p_q_or.append({"allocations.po_number": po_no})
+
+    matching_payments = await db.payments.find({"$or": p_q_or}).to_list(500)
     matching_payments.sort(key=lambda p: (p.get("payment_date", ""), p.get("created_at", "")), reverse=True)
 
     total_amt = float(out.get("total_amount") or 0)
@@ -1142,7 +1354,21 @@ async def get_vendor_po(id: str, request: Request):
     total_amt = round(total_amt, 2)
     out["total_amount"] = total_amt
 
-    paid_amt = round(sum(float(p.get("amount", 0) or 0) for p in matching_payments), 2)
+    payment_map = {}
+    for p in matching_payments:
+        pid = str(p.get("_id"))
+        allocs = p.get("allocations") or []
+        if allocs and isinstance(allocs, list):
+            for a in allocs:
+                if str(a.get("po_id") or "") in (po_id, str(doc["_id"])) or str(a.get("po_number") or "") == po_no:
+                    payment_map[pid] = float(a.get("amount") or 0.0)
+                    break
+        else:
+            payment_map[pid] = float(p.get("amount", 0) or 0)
+
+    paid_amt = round(sum(payment_map.values()), 2)
+    if paid_amt == 0.0 and out.get("paid_amount") is not None:
+        paid_amt = float(out.get("paid_amount") or 0.0)
     out["paid_amount"] = paid_amt
     balance_due = max(0.0, round(total_amt - paid_amt, 2))
     out["balance_due"] = balance_due

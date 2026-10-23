@@ -514,6 +514,7 @@ export default function VendorPOs() {
     setSaving(true);
     setError("");
     try {
+      const targetPoId = paymentModal.po ? (paymentModal.po.id || paymentModal.po._id) : null;
       const payload = {
         amount: amt,
         payment_date: paymentForm.payment_date,
@@ -523,12 +524,13 @@ export default function VendorPOs() {
         bank_account_id: paymentForm.bank_account_id || undefined,
         account_type: paymentForm.account_type || undefined,
         cash_account_id: paymentForm.cash_account_id || undefined,
+        vendor_po_id: targetPoId || undefined,
         notes: paymentForm.notes,
       };
 
-      if (paymentModal.po?.id) {
+      if (targetPoId) {
         // Record against specific PO
-        await http.post(`/vendor-pos/${paymentModal.po.id}/payments`, payload);
+        await http.post(`/vendor-pos/${targetPoId}/payments`, payload);
       } else {
         // Record directly against vendor
         await http.post(`/vendors/${paymentModal.vendor_id}/payments`, payload);
@@ -543,6 +545,10 @@ export default function VendorPOs() {
       if (ledgerDrawer && ledgerDrawer.vendor_id === paymentModal.vendor_id) {
         await loadLedger(paymentModal.vendor_id);
       }
+      try {
+        broadcastSync("banking", { action: "payment_recorded" });
+        broadcastSync("vendors", { action: "payment_recorded" });
+      } catch (_) {}
 
       setPaymentModal(null);
     } catch (e) {
