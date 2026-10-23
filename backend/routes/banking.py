@@ -39,7 +39,7 @@ def _get_db(request: Request):
 
 async def _get_user(request: Request) -> dict:
     user = getattr(request.state, "user", None)
-    if user:
+    if user and isinstance(user, dict):
         return user
     getter = getattr(request.app, "get_current_user", None)
     if not getter:
@@ -126,6 +126,7 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
                 acc_doc = None
 
     op = float((acc_doc or {}).get("opening_balance") or 0.0)
+    op_date = str((acc_doc or {}).get("opening_balance_date") or "").strip()[:10]
 
     # 1. Payments (Client Inflows & Vendor Outflows)
     client_inflow = 0.0
@@ -143,6 +144,9 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
             else:
                 pays = []
             for p in pays:
+                p_date = str(p.get("payment_date") or p.get("created_at") or "")[:10]
+                if op_date and p_date and p_date < op_date:
+                    continue
                 amt = float(p.get("amount") or 0.0)
                 if p.get("account_type") == "cash":
                     continue
@@ -166,6 +170,8 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
                 settles = list(s_cur)
             else:
                 settles = []
+            if op_date:
+                settles = [s for s in settles if not (s.get("settlement_date") or s.get("created_at")) or str(s.get("settlement_date") or s.get("created_at") or "")[:10] >= op_date]
             settle_inflow = sum(float(s.get("net_payout") or s.get("settlement_amount") or 0.0) for s in settles)
         except Exception:
             settle_inflow = 0.0
@@ -183,6 +189,8 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
                 cls = list(c_cur)
             else:
                 cls = []
+            if op_date:
+                cls = [c for c in cls if not (c.get("date") or c.get("created_at")) or str(c.get("date") or c.get("created_at") or "")[:10] >= op_date]
             cash_outflow = sum(float(c.get("amount") or 0.0) for c in cls)
             cl_count = len(cls)
         except Exception:
@@ -204,6 +212,8 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
                 exps = list(e_cur)
             else:
                 exps = []
+            if op_date:
+                exps = [e for e in exps if not (e.get("date") or e.get("created_at")) or str(e.get("date") or e.get("created_at") or "")[:10] >= op_date]
             exp_outflow = sum(float(e.get("amount") or 0.0) for e in exps)
             exp_count = len(exps)
         except Exception:
@@ -216,9 +226,13 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
         try:
             t_in_cur = db.inter_account_transfers.find({"to_account_id": {"$in": b_ids}})
             t_in = await t_in_cur.to_list(1000) if hasattr(t_in_cur, "to_list") else list(t_in_cur)
+            if op_date:
+                t_in = [t for t in t_in if not (t.get("date") or t.get("created_at")) or str(t.get("date") or t.get("created_at") or "")[:10] >= op_date]
             transfer_in = sum(float(t.get("amount") or 0.0) for t in t_in)
             t_out_cur = db.inter_account_transfers.find({"from_account_id": {"$in": b_ids}})
             t_out = await t_out_cur.to_list(1000) if hasattr(t_out_cur, "to_list") else list(t_out_cur)
+            if op_date:
+                t_out = [t for t in t_out if not (t.get("date") or t.get("created_at")) or str(t.get("date") or t.get("created_at") or "")[:10] >= op_date]
             transfer_out = sum(float(t.get("amount") or 0.0) for t in t_out)
         except Exception:
             pass
@@ -500,6 +514,11 @@ async def update_bank_account(id: str, payload: BankAccountUpdate, request: Requ
     if res.matched_count == 0:
         raise HTTPException(404, "Bank account not found")
 
+    try:
+        await sync_bank_account_balance(db, str(id))
+    except Exception:
+        pass
+
     updated = await db.bank_accounts.find_one({"_id": _oid(id)})
     try:
         from services.supabase_banking_service import upsert_supabase_bank_account
@@ -609,6 +628,11 @@ async def correct_account_opening_balance(id: str, payload: BalanceCorrectionIn,
     )
 
     log.info(f"Opening balance for account {acc_id_str} corrected from {old_value} to {new_value} by {user_email}. Reason: {reason}")
+
+    try:
+        await sync_bank_account_balance(db, acc_id_str)
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -3043,14 +3067,10 @@ async def get_cash_account_transactions(
     expenses = []
     advances = []
 
-    wp_q_or = []
-    if cl_ids_all:
-        wp_q_or.append({"cash_ledger_id": {"$in": cl_ids_all}})
-    if ca_ids:
-        wp_q_or.append({"cash_account_id": {"$in": ca_ids}})
-    if wp_q_or and hasattr(db, "wage_payments") and db.wage_payments is not None:
+    wage_payments = []
+    if cl_ids_all and hasattr(db, "wage_payments") and db.wage_payments is not None:
         try:
-            wp_cur = db.wage_payments.find({"$or": wp_q_or})
+            wp_cur = db.wage_payments.find({"cash_ledger_id": {"$in": cl_ids_all}})
             if hasattr(wp_cur, "to_list"):
                 res = wp_cur.to_list(5000)
                 wage_payments = await res if hasattr(res, "__await__") else (res if isinstance(res, list) else [])
@@ -3075,14 +3095,10 @@ async def get_cash_account_transactions(
         except Exception:
             expenses = []
 
-    adv_q_or = []
-    if cl_ids_all:
-        adv_q_or.append({"cash_ledger_id": {"$in": cl_ids_all}})
-    if ca_ids:
-        adv_q_or.append({"cash_account_id": {"$in": ca_ids}})
-    if adv_q_or and hasattr(db, "advances") and db.advances is not None:
+    advances = []
+    if cl_ids_all and hasattr(db, "advances") and db.advances is not None:
         try:
-            adv_cur = db.advances.find({"$or": adv_q_or})
+            adv_cur = db.advances.find({"cash_ledger_id": {"$in": cl_ids_all}})
             if hasattr(adv_cur, "to_list"):
                 res = adv_cur.to_list(5000)
                 advances = await res if hasattr(res, "__await__") else (res if isinstance(res, list) else [])
