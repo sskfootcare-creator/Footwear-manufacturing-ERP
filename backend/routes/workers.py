@@ -67,6 +67,14 @@ def oid(id_str: str) -> ObjectId:
         raise HTTPException(400, "Invalid object ID format")
 
 
+def _get_db(request: Request):
+    db = getattr(request.app, "mongodb", None)
+    if db is not None:
+        return db
+    import server
+    return getattr(server, "db", None)
+
+
 async def _get_user(request: Request):
     user = getattr(request.state, "user", None)
     if user:
@@ -75,7 +83,7 @@ async def _get_user(request: Request):
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
     from auth import get_current_user_factory
-    db = getattr(request.app, "mongodb", None) or getattr(server, "db", None)
+    db = _get_db(request)
     fn = await get_current_user_factory(db)
     return await fn(request)
 
@@ -897,7 +905,7 @@ async def list_advances(request: Request, worker_id: Optional[str] = None):
 async def create_advance(payload: AdvanceIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     worker = await db.workers.find_one({"_id": oid(payload.worker_id)})
     if not worker:
         raise HTTPException(404, "Worker not found")
@@ -989,14 +997,35 @@ async def create_advance(payload: AdvanceIn, request: Request):
                     {"_id": oid(payload.cash_ledger_id)},
                     {"$inc": {"remaining_balance": round(amount, 2)}}
                 )
+                from routes.banking import sync_cash_account_balance
+                await sync_cash_account_balance(db, str(payload.cash_ledger_id))
             except Exception:
                 pass
         if linked_expense_id and hasattr(db, "expenses") and db.expenses is not None:
             try:
                 await db.expenses.delete_one({"_id": oid(linked_expense_id)})
+                if payload.bank_account_id:
+                    from routes.banking import sync_bank_account_balance
+                    await sync_bank_account_balance(db, str(payload.bank_account_id))
             except Exception:
                 pass
         raise e
+
+    # Synchronize balance for bank or cash account
+    if paid_via == "cash" and payload.cash_ledger_id:
+        try:
+            from routes.banking import sync_cash_account_balance
+            cash_ent = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+            src_b_id = str(cash_ent.get("bank_account_id") or "") if cash_ent else None
+            await sync_cash_account_balance(db, src_b_id or str(payload.cash_ledger_id))
+        except Exception:
+            pass
+    elif paid_via in ("bank_transfer", "upi") and payload.bank_account_id:
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(payload.bank_account_id))
+        except Exception:
+            pass
 
     doc.pop("_id", None)
     doc["id"] = str(res.inserted_id)
@@ -1008,7 +1037,7 @@ async def worker_ledger(wid: str, request: Request,
                         from_date: Optional[str] = None, to_date: Optional[str] = None):
     """Per-worker chronological ledger of earnings (credit) and payments/advances (debit) with opening balance carry-forward."""
     await _get_user(request)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     w = await db.workers.find_one({"_id": oid(wid)})
     if not w:
         raise HTTPException(404, "Worker not found")
@@ -1252,7 +1281,7 @@ async def worker_ledger(wid: str, request: Request,
             "balance": opening_balance,
         })
 
-    bal = opening_balance if from_date else 0.0
+    bal = opening_balance
     for e in entries:
         if e.get("id") == "opening-balance":
             e["balance"] = bal
@@ -1284,16 +1313,58 @@ async def worker_ledger(wid: str, request: Request,
 async def update_advance(aid: str, payload: dict, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
+    adv = await db.advances.find_one({"_id": oid(aid)})
+    if not adv:
+        raise HTTPException(404, "Advance transaction not found")
+
+    old_amount = float(adv.get("amount") or 0.0)
     update = {}
+    delta = 0.0
     if "settled" in payload:
         update["settled"] = bool(payload["settled"])
         update["settled_at"] = now_iso() if payload["settled"] else None
     if "amount" in payload:
-        update["amount"] = float(payload["amount"])
+        new_amt = float(payload["amount"])
+        update["amount"] = new_amt
+        delta = round(new_amt - old_amount, 2)
+        if delta != 0:
+            if adv.get("paid_via") == "cash" and adv.get("cash_ledger_id"):
+                try:
+                    await db.cash_ledger.update_one(
+                        {"_id": oid(adv["cash_ledger_id"])},
+                        {"$inc": {"remaining_balance": -delta}}
+                    )
+                except Exception:
+                    pass
+            elif adv.get("linked_expense_id") and hasattr(db, "expenses") and db.expenses is not None:
+                try:
+                    await db.expenses.update_one(
+                        {"_id": oid(adv["linked_expense_id"])},
+                        {"$set": {"amount": new_amt}}
+                    )
+                except Exception:
+                    pass
     if "notes" in payload:
         update["notes"] = payload["notes"]
-    await db.advances.update_one({"_id": oid(aid)}, {"$set": update})
+    if update:
+        await db.advances.update_one({"_id": oid(aid)}, {"$set": update})
+
+    # Synchronize balances if amount changed
+    if "amount" in payload and delta != 0:
+        if adv.get("paid_via") == "cash" and adv.get("cash_ledger_id"):
+            try:
+                from routes.banking import sync_cash_account_balance
+                await sync_cash_account_balance(db, str(adv["cash_ledger_id"]))
+            except Exception:
+                pass
+        elif adv.get("bank_account_id"):
+            try:
+                from routes.banking import sync_bank_account_balance
+                await sync_bank_account_balance(db, str(adv["bank_account_id"]))
+            except Exception:
+                pass
+
     return stringify(await db.advances.find_one({"_id": oid(aid)}))
 
 
@@ -1301,7 +1372,7 @@ async def update_advance(aid: str, payload: dict, request: Request):
 async def delete_advance(aid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     adv = await db.advances.find_one({"_id": oid(aid)})
     if not adv:
         raise HTTPException(404, "Advance transaction not found")
@@ -1323,6 +1394,21 @@ async def delete_advance(aid: str, request: Request):
             pass
 
     await db.advances.delete_one({"_id": oid(aid)})
+
+    # Synchronize balance after deletion
+    if adv.get("paid_via") == "cash" and adv.get("cash_ledger_id"):
+        try:
+            from routes.banking import sync_cash_account_balance
+            await sync_cash_account_balance(db, str(adv["cash_ledger_id"]))
+        except Exception:
+            pass
+    elif adv.get("bank_account_id"):
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(adv["bank_account_id"]))
+        except Exception:
+            pass
+
     return {"ok": True}
 
 
@@ -1338,7 +1424,7 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
     """
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     worker = await db.workers.find_one({"_id": oid(wid)})
     if not worker:
@@ -1523,6 +1609,22 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                 except Exception:
                     pass
 
+            # Synchronize live balance for bank account or cash account
+            if payload.paid_via == "cash" and payload.cash_ledger_id:
+                try:
+                    from routes.banking import sync_cash_account_balance
+                    cash_ent = await db.cash_ledger.find_one({"_id": oid(payload.cash_ledger_id)})
+                    src_b_id = str(cash_ent.get("bank_account_id") or "") if cash_ent else None
+                    await sync_cash_account_balance(db, src_b_id or str(payload.cash_ledger_id))
+                except Exception:
+                    pass
+            elif payload.paid_via in ("bank_transfer", "upi") and payload.bank_account_id:
+                try:
+                    from routes.banking import sync_bank_account_balance
+                    await sync_bank_account_balance(db, str(payload.bank_account_id))
+                except Exception:
+                    pass
+
         except Exception as e:
             if payload.paid_via == "cash" and payload.cash_ledger_id:
                 try:
@@ -1530,11 +1632,16 @@ async def create_wage_payment(wid: str, payload: WagePaymentIn, request: Request
                         {"_id": oid(payload.cash_ledger_id)},
                         {"$inc": {"remaining_balance": round(payload.amount, 2)}}
                     )
+                    from routes.banking import sync_cash_account_balance
+                    await sync_cash_account_balance(db, str(payload.cash_ledger_id))
                 except Exception:
                     pass
             if linked_expense_id and hasattr(db, "expenses") and db.expenses is not None:
                 try:
                     await db.expenses.delete_one({"_id": oid(linked_expense_id)})
+                    if payload.bank_account_id:
+                        from routes.banking import sync_bank_account_balance
+                        await sync_bank_account_balance(db, str(payload.bank_account_id))
                 except Exception:
                     pass
             raise e
@@ -1553,7 +1660,7 @@ async def list_worker_wage_payments(
     """List wage payment records for a given worker."""
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     q: dict = {"worker_id": str(wid)}
     if from_date or to_date:

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { http, inr, formatApiError } from "../lib/api";
+import { useCrossTabSync } from "../lib/sync";
 import { PageHeader, Card, Badge, BtnPrimary, BtnSecondary, Input, Select, PaginationControls } from "../components/ui-kit";
 import {
   Landmark,
@@ -240,6 +241,11 @@ export default function BankReconciliation() {
       console.error("Failed to load cash accounts", e);
     }
   }, []);
+
+  useCrossTabSync(["banking", "expenses", "payroll"], () => {
+    fetchAccounts();
+    fetchCashAccounts();
+  });
 
   const fetchCashAccountTransactions = useCallback(async (cashAccId) => {
     if (!cashAccId) return;

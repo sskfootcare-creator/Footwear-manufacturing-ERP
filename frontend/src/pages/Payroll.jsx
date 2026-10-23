@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { http, API, inr } from "../lib/api";
+import { broadcastSync, useCrossTabSync } from "../lib/sync";
 import { triggerApiExport } from "../lib/exportUtils";
 import {
   PageHeader,
@@ -106,6 +107,11 @@ export default function Payroll() {
     load();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useCrossTabSync(["payroll", "workers", "banking"], () => {
+    load();
+    loadAdvances();
+  });
+
   const openAdvancesDrawer = async () => {
     await loadAdvances();
     setShowAdvances(true);
@@ -178,6 +184,7 @@ export default function Payroll() {
 
       await http.post("/advances", payload);
       setAdvForm(null);
+      broadcastSync("banking", { action: "advance_recorded" });
       await Promise.all([loadAdvances(), load()]);
       if (ledgerFor) openLedger(ledgerFor.row);
     } catch (e) {
@@ -186,6 +193,7 @@ export default function Payroll() {
   };
   const toggleSettled = async (adv) => {
     await http.patch(`/advances/${adv.id}`, { settled: !adv.settled });
+    broadcastSync("banking", { action: "advance_updated" });
     await loadAdvances();
     load();
   };
@@ -196,6 +204,7 @@ export default function Payroll() {
       onConfirm: async () => {
         await http.delete(`/advances/${adv.id}`);
         setConfirm(null);
+        broadcastSync("banking", { action: "advance_deleted" });
         await loadAdvances();
         load();
         if (ledgerFor) openLedger(ledgerFor.row);

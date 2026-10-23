@@ -30,10 +30,17 @@ banking_router = APIRouter(prefix="/api", tags=["banking"])
 
 
 def _get_db(request: Request):
-    return getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = getattr(request.app, "mongodb", None)
+    if db is not None:
+        return db
+    import server
+    return getattr(server, "db", None)
 
 
 async def _get_user(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
     getter = getattr(request.app, "get_current_user", None)
     if not getter:
         from server import get_current_user as getter
@@ -124,9 +131,10 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
     client_inflow = 0.0
     vp_outflow = 0.0
     payment_count = 0
+    b_ids = [aid_str] + ([_oid(aid_str)] if _oid(aid_str) else [])
     if hasattr(db, "payments") and db.payments is not None:
         try:
-            p_cur = db.payments.find({"bank_account_id": aid_str})
+            p_cur = db.payments.find({"bank_account_id": {"$in": b_ids}})
             if hasattr(p_cur, "to_list"):
                 res = p_cur.to_list(10000)
                 pays = await res if hasattr(res, "__await__") else res
@@ -150,7 +158,7 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
     settle_inflow = 0.0
     if hasattr(db, "settlements") and db.settlements is not None:
         try:
-            s_cur = db.settlements.find({"bank_account_id": aid_str})
+            s_cur = db.settlements.find({"bank_account_id": {"$in": b_ids}})
             if hasattr(s_cur, "to_list"):
                 res = s_cur.to_list(5000)
                 settles = await res if hasattr(res, "__await__") else res
@@ -167,7 +175,7 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
     cl_count = 0
     if hasattr(db, "cash_ledger") and db.cash_ledger is not None:
         try:
-            c_cur = db.cash_ledger.find({"bank_account_id": aid_str})
+            c_cur = db.cash_ledger.find({"bank_account_id": {"$in": b_ids}})
             if hasattr(c_cur, "to_list"):
                 res = c_cur.to_list(5000)
                 cls = await res if hasattr(res, "__await__") else res
@@ -186,7 +194,7 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
     if hasattr(db, "expenses") and db.expenses is not None:
         try:
             e_cur = db.expenses.find({
-                "bank_account_id": aid_str,
+                "bank_account_id": {"$in": b_ids},
                 "status": {"$nin": ["rejected", "cancelled"]}
             })
             if hasattr(e_cur, "to_list"):
@@ -206,10 +214,10 @@ async def compute_bank_account_balance(db, bank_account_id: str, acc_doc: Option
     transfer_out = 0.0
     if hasattr(db, "inter_account_transfers") and db.inter_account_transfers is not None:
         try:
-            t_in_cur = db.inter_account_transfers.find({"to_account_id": aid_str})
+            t_in_cur = db.inter_account_transfers.find({"to_account_id": {"$in": b_ids}})
             t_in = await t_in_cur.to_list(1000) if hasattr(t_in_cur, "to_list") else list(t_in_cur)
             transfer_in = sum(float(t.get("amount") or 0.0) for t in t_in)
-            t_out_cur = db.inter_account_transfers.find({"from_account_id": aid_str})
+            t_out_cur = db.inter_account_transfers.find({"from_account_id": {"$in": b_ids}})
             t_out = await t_out_cur.to_list(1000) if hasattr(t_out_cur, "to_list") else list(t_out_cur)
             transfer_out = sum(float(t.get("amount") or 0.0) for t in t_out)
         except Exception:
@@ -248,15 +256,19 @@ async def sync_bank_account_balance(db, bank_account_id: str) -> float:
         stats = await compute_bank_account_balance(db, aid_str)
         curr_bal = stats["current_balance"]
         try:
-            await db.bank_accounts.update_one(
+            up_res = db.bank_accounts.update_one(
                 {"_id": _oid(aid_str)},
                 {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
             )
+            if hasattr(up_res, "__await__"):
+                await up_res
         except Exception:
-            await db.bank_accounts.update_one(
+            up_res = db.bank_accounts.update_one(
                 {"_id": aid_str},
                 {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
             )
+            if hasattr(up_res, "__await__"):
+                await up_res
         return curr_bal
     except Exception as e:
         log.warning(f"Failed to sync bank account balance for {aid_str}: {e}")
@@ -278,6 +290,18 @@ async def sync_cash_account_balance(db, cash_account_id: str) -> float:
             ca = await db.cash_accounts.find_one({"_id": cid_str})
         if not ca:
             ca = await db.cash_accounts.find_one({"source_bank_account_id": cid_str})
+        # If cid_str was a cash_ledger_id, locate parent cash_account via cash_ledger.bank_account_id
+        if not ca and hasattr(db, "cash_ledger") and db.cash_ledger is not None:
+            cl_entry = await db.cash_ledger.find_one({"_id": _oid(cid_str)}) if _oid(cid_str) else None
+            if not cl_entry:
+                cl_entry = await db.cash_ledger.find_one({"_id": cid_str})
+            if cl_entry and cl_entry.get("bank_account_id"):
+                b_acc_id = str(cl_entry["bank_account_id"])
+                ca = await db.cash_accounts.find_one({"source_bank_account_id": b_acc_id})
+                if not ca and _oid(b_acc_id):
+                    ca = await db.cash_accounts.find_one({"source_bank_account_id": _oid(b_acc_id)})
+        if not ca:
+            ca = await db.cash_accounts.find_one({})
         if not ca:
             return 0.0
 
@@ -306,6 +330,8 @@ async def sync_cash_account_balance(db, cash_account_id: str) -> float:
                 p_q_or.append({"cash_account_id": _oid(ca_id)})
             if _oid(src_bank_id):
                 p_q_or.append({"account_type": "cash", "bank_account_id": _oid(src_bank_id)})
+            if ca.get("is_default") or not src_bank_id:
+                p_q_or.append({"account_type": "cash", "cash_account_id": {"$in": [None, ""]}})
             p_cur = db.payments.find({"$or": p_q_or})
             linked_payments = await p_cur.to_list(10000) if hasattr(p_cur, "to_list") else list(p_cur)
 
@@ -320,12 +346,31 @@ async def sync_cash_account_balance(db, cash_account_id: str) -> float:
 
         tot_received = sum(float(p.get("amount") or 0.0) for p in client_payments)
         uncovered_vendor = sum(float(p.get("direct_cash_deduction") or 0.0) for p in vendor_payments)
-        curr_bal = max(0.0, round(curr_cl_bal + tot_received - uncovered_vendor, 2))
 
-        await db.cash_accounts.update_one(
+        # Check for unlinked cash expenses (not drawn down from cash_ledger)
+        unlinked_expenses = 0.0
+        if hasattr(db, "expenses") and db.expenses is not None:
+            try:
+                ca_ids = [ca_id] + ([_oid(ca_id)] if _oid(ca_id) else [])
+                e_cur = db.expenses.find({
+                    "paid_via": "cash",
+                    "status": {"$nin": ["rejected", "cancelled"]},
+                    "cash_account_id": {"$in": ca_ids},
+                    "cash_ledger_id": {"$in": [None, ""]}
+                })
+                e_list = await e_cur.to_list(5000) if hasattr(e_cur, "to_list") else list(e_cur)
+                unlinked_expenses = sum(float(e.get("amount") or 0.0) for e in e_list)
+            except Exception:
+                unlinked_expenses = 0.0
+
+        curr_bal = max(0.0, round(curr_cl_bal + tot_received - uncovered_vendor - unlinked_expenses, 2))
+
+        up_res = db.cash_accounts.update_one(
             {"_id": ca["_id"]},
             {"$set": {"current_balance": curr_bal, "balance": curr_bal, "updated_at": _now_iso()}}
         )
+        if hasattr(up_res, "__await__"):
+            await up_res
         return curr_bal
     except Exception as e:
         log.warning(f"Failed to sync cash account balance for {cid_str}: {e}")
@@ -2387,6 +2432,12 @@ async def create_deposit_entry(payload: DepositCreateIn, request: Request):
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
 
+    # Sync live bank account balance
+    try:
+        await sync_bank_account_balance(db, str(payload.bank_account_id))
+    except Exception as be:
+        log.warning("Could not sync live bank balance for deposit %s: %s", res.inserted_id, be)
+
     return {
         "ok": True,
         "message": "Deposit recorded successfully.",
@@ -2837,7 +2888,8 @@ async def list_cash_accounts(request: Request):
         linked_payments = [
             p for p in all_cash_payments
             if str(p.get("cash_account_id") or "") == ca_id or
-               (str(p.get("account_type") or "") == "cash" and str(p.get("bank_account_id") or "") == src_bank_id)
+               (str(p.get("account_type") or "") == "cash" and str(p.get("bank_account_id") or "") == src_bank_id) or
+               (str(p.get("account_type") or "") == "cash" and not p.get("cash_account_id") and (ca.get("is_default") or len(cash_accounts) == 1))
         ]
 
         client_payments = [
@@ -2983,54 +3035,61 @@ async def get_cash_account_transactions(
                 cash_docs = []
 
     cl_ids = [str(c.get("_id")) for c in cash_docs if c.get("_id")]
+    cl_ids_all = cl_ids + [_oid(x) for x in cl_ids if _oid(x)]
+    ca_ids = [ca_id] + ([_oid(ca_id)] if _oid(ca_id) else [])
 
     # Query linked disbursements (wage_payments, expenses, advances)
     wage_payments = []
     expenses = []
     advances = []
 
-    if cl_ids:
-        if hasattr(db, "wage_payments") and db.wage_payments is not None:
-            try:
-                wp_cur = db.wage_payments.find({"cash_ledger_id": {"$in": cl_ids}})
-                if hasattr(wp_cur, "to_list"):
-                    res = wp_cur.to_list(5000)
-                    if hasattr(res, "__await__"):
-                        wage_payments = await res
-                    elif isinstance(res, list):
-                        wage_payments = res
-            except Exception:
-                wage_payments = []
+    wp_q_or = []
+    if cl_ids_all:
+        wp_q_or.append({"cash_ledger_id": {"$in": cl_ids_all}})
+    if ca_ids:
+        wp_q_or.append({"cash_account_id": {"$in": ca_ids}})
+    if wp_q_or and hasattr(db, "wage_payments") and db.wage_payments is not None:
+        try:
+            wp_cur = db.wage_payments.find({"$or": wp_q_or})
+            if hasattr(wp_cur, "to_list"):
+                res = wp_cur.to_list(5000)
+                wage_payments = await res if hasattr(res, "__await__") else (res if isinstance(res, list) else [])
+            elif hasattr(wp_cur, "__iter__"):
+                wage_payments = list(wp_cur)
+        except Exception:
+            wage_payments = []
 
-        if hasattr(db, "expenses") and db.expenses is not None:
-            try:
-                exp_q_or = [
-                    {"cash_account_id": ca_id},
-                    {"cash_ledger_id": {"$in": cl_ids}},
-                ]
-                if _oid(ca_id):
-                    exp_q_or.append({"cash_account_id": _oid(ca_id)})
-                exp_cur = db.expenses.find({"$or": exp_q_or})
-                if hasattr(exp_cur, "to_list"):
-                    res = exp_cur.to_list(5000)
-                    if hasattr(res, "__await__"):
-                        expenses = await res
-                    elif isinstance(res, list):
-                        expenses = res
-            except Exception:
-                expenses = []
+    exp_q_or = []
+    if cl_ids_all:
+        exp_q_or.append({"cash_ledger_id": {"$in": cl_ids_all}})
+    if ca_ids:
+        exp_q_or.append({"cash_account_id": {"$in": ca_ids}})
+    if exp_q_or and hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            exp_cur = db.expenses.find({"$or": exp_q_or, "status": {"$nin": ["rejected", "cancelled"]}})
+            if hasattr(exp_cur, "to_list"):
+                res = exp_cur.to_list(5000)
+                expenses = await res if hasattr(res, "__await__") else (res if isinstance(res, list) else [])
+            elif hasattr(exp_cur, "__iter__"):
+                expenses = list(exp_cur)
+        except Exception:
+            expenses = []
 
-        if hasattr(db, "advances") and db.advances is not None:
-            try:
-                adv_cur = db.advances.find({"cash_ledger_id": {"$in": cl_ids}})
-                if hasattr(adv_cur, "to_list"):
-                    res = adv_cur.to_list(5000)
-                    if hasattr(res, "__await__"):
-                        advances = await res
-                    elif isinstance(res, list):
-                        advances = res
-            except Exception:
-                advances = []
+    adv_q_or = []
+    if cl_ids_all:
+        adv_q_or.append({"cash_ledger_id": {"$in": cl_ids_all}})
+    if ca_ids:
+        adv_q_or.append({"cash_account_id": {"$in": ca_ids}})
+    if adv_q_or and hasattr(db, "advances") and db.advances is not None:
+        try:
+            adv_cur = db.advances.find({"$or": adv_q_or})
+            if hasattr(adv_cur, "to_list"):
+                res = adv_cur.to_list(5000)
+                advances = await res if hasattr(res, "__await__") else (res if isinstance(res, list) else [])
+            elif hasattr(adv_cur, "__iter__"):
+                advances = list(adv_cur)
+        except Exception:
+            advances = []
 
     # Query client payments received into this cash account
     client_payments = []
@@ -3043,6 +3102,8 @@ async def get_cash_account_transactions(
             p_q_or.append({"cash_account_id": _oid(ca_id)})
         if _oid(src_bank_id):
             p_q_or.append({"account_type": "cash", "bank_account_id": _oid(src_bank_id)})
+        if ca.get("is_default") or not src_bank_id:
+            p_q_or.append({"account_type": "cash", "cash_account_id": {"$in": [None, ""]}})
         try:
             p_cur = db.payments.find({"$or": p_q_or})
             if hasattr(p_cur, "to_list"):

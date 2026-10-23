@@ -601,6 +601,7 @@ async def recompute_vendor_po_financials(db, po_id_or_doc) -> dict:
     updates = {
         "paid_amount": total_paid,
         "balance_due": balance_due,
+        "balance_amount": balance_due,
         "payment_status": payment_status,
         "updated_at": now_iso()
     }

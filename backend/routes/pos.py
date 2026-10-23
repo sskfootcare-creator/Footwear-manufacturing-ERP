@@ -2252,6 +2252,7 @@ async def create_payment(payload: PaymentIn, request: Request):
         if not vendor:
             raise HTTPException(404, "Vendor not found")
         payment_no = await next_payment_no(db=db)
+        account_type = payload.account_type or ("cash" if payload.mode == "Cash" else "bank")
         doc = {
             "payment_no": payment_no,
             "payment_date": payload.payment_date,
@@ -2260,6 +2261,8 @@ async def create_payment(payload: PaymentIn, request: Request):
             "reference": payload.reference,
             "bank": payload.bank,
             "bank_account_id": payload.bank_account_id,
+            "cash_account_id": payload.cash_account_id,
+            "account_type": account_type,
             "notes": payload.notes,
             "type": "vendor_payment",
             "vendor_id": str(vendor["_id"]),
@@ -2270,6 +2273,27 @@ async def create_payment(payload: PaymentIn, request: Request):
         }
         res = await db.payments.insert_one(doc)
         doc["_id"] = res.inserted_id
+
+        # Live balance synchronization
+        if payload.bank_account_id and account_type != "cash":
+            try:
+                from routes.banking import sync_bank_account_balance
+                await sync_bank_account_balance(db, str(payload.bank_account_id))
+            except Exception:
+                pass
+        if account_type == "cash" or payload.cash_account_id:
+            try:
+                from routes.banking import sync_cash_account_balance
+                await sync_cash_account_balance(db, str(payload.cash_account_id or payload.bank_account_id))
+            except Exception:
+                pass
+
+        if payload.vendor_po_id:
+            try:
+                from routes.vendors import recompute_vendor_po_financials
+                await recompute_vendor_po_financials(db, payload.vendor_po_id)
+            except Exception:
+                pass
 
         # >>> SYNC VENDOR PAYMENT TO SUPABASE FINANCIAL CORE <<<
         try:
@@ -2374,6 +2398,13 @@ async def create_payment(payload: PaymentIn, request: Request):
                 except Exception:
                     pass
 
+        # Fallback to default/first cash account if none resolved yet
+        if not ca_doc and hasattr(db, "cash_accounts") and db.cash_accounts is not None:
+            try:
+                ca_doc = await db.cash_accounts.find_one({})
+            except Exception:
+                pass
+
         if ca_doc:
             cash_account_id = str(ca_doc.get("_id") or ca_doc.get("id"))
             if not bank_account_id:
@@ -2413,6 +2444,21 @@ async def create_payment(payload: PaymentIn, request: Request):
     }
     res = await db.payments.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Live balance synchronization
+    if bank_account_id and account_type != "cash":
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(bank_account_id))
+        except Exception as be:
+            log.warning("Could not sync live bank balance for payment %s: %s", res.inserted_id, be)
+
+    if account_type == "cash" or cash_account_id:
+        try:
+            from routes.banking import sync_cash_account_balance
+            await sync_cash_account_balance(db, str(cash_account_id or bank_account_id))
+        except Exception as ce:
+            log.warning("Could not sync live cash balance for payment %s: %s", res.inserted_id, ce)
 
     # >>> Outbox pattern for Supabase Financial Core sync <<<
     try:
@@ -2520,6 +2566,40 @@ async def delete_payment(pid: str, request: Request):
     r = await db.payments.delete_one({"_id": oid(pid)})
     if not r.deleted_count:
         raise HTTPException(404, "Payment not found")
+
+    # Reverse live balance and recompute
+    b_acc_id = pay.get("bank_account_id")
+    c_acc_id = pay.get("cash_account_id")
+    acc_type = pay.get("account_type")
+
+    if b_acc_id and acc_type != "cash":
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(b_acc_id))
+        except Exception as be:
+            log.warning("Could not sync live bank balance on payment deletion %s: %s", pid, be)
+
+    if acc_type == "cash" or c_acc_id:
+        try:
+            from routes.banking import sync_cash_account_balance
+            await sync_cash_account_balance(db, str(c_acc_id or b_acc_id))
+        except Exception as ce:
+            log.warning("Could not sync live cash balance on payment deletion %s: %s", pid, ce)
+
+    if pay.get("vendor_po_id"):
+        try:
+            from routes.vendors import recompute_vendor_po_financials
+            await recompute_vendor_po_financials(db, pay["vendor_po_id"])
+        except Exception:
+            pass
+    elif pay.get("allocations") and isinstance(pay["allocations"], list):
+        for a in pay["allocations"]:
+            if isinstance(a, dict) and a.get("po_id"):
+                try:
+                    from routes.vendors import recompute_vendor_po_financials
+                    await recompute_vendor_po_financials(db, a["po_id"])
+                except Exception:
+                    pass
 
     # Queue payment reversal into outbox and attempt immediate Supabase update
     now = now_iso()

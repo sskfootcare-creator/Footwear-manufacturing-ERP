@@ -46,12 +46,23 @@ def oid(id_str: str) -> ObjectId:
         raise HTTPException(400, "Invalid object ID format")
 
 
+def _get_db(request: Request):
+    db = getattr(request.app, "mongodb", None)
+    if db is not None:
+        return db
+    import server
+    return getattr(server, "db", None)
+
+
 async def _get_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
     import server
     if getattr(server, "get_current_user", None) is not None:
         return await server.get_current_user(request)
     from auth import get_current_user_factory
-    db = getattr(request.app, "mongodb", None) or server.db
+    db = _get_db(request)
     fn = await get_current_user_factory(db)
     return await fn(request)
 
@@ -182,7 +193,7 @@ async def queue_expense_sync(db, expense_doc: dict, event_type: str = "expense_c
 async def create_expense(payload: ExpenseIn, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
 
     amount = float(payload.amount)
     if amount <= 0:
@@ -326,6 +337,22 @@ async def create_expense(payload: ExpenseIn, request: Request):
     }
     res = await db.expenses.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Synchronize live balance for bank account or cash account
+    if payload.paid_via == "bank" and bank_account_id:
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(bank_account_id))
+        except Exception:
+            pass
+    elif payload.paid_via == "cash":
+        try:
+            from routes.banking import sync_cash_account_balance
+            sync_id = cash_account_id or (src_bank_id if "src_bank_id" in locals() else None) or cash_ledger_id
+            if sync_id:
+                await sync_cash_account_balance(db, str(sync_id))
+        except Exception:
+            pass
 
     # Queue expense sync for Supabase financial ledger
     await queue_expense_sync(db, doc, "expense_created")
@@ -835,7 +862,7 @@ async def get_simple_pnl(request: Request, from_date: Optional[str] = None, to_d
 async def confirm_expense(eid: str, request: Request, payload: Optional[dict] = None):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     doc = await db.expenses.find_one({"_id": oid(eid)})
     if not doc:
         raise HTTPException(404, "Expense not found")
@@ -865,6 +892,36 @@ async def confirm_expense(eid: str, request: Request, payload: Optional[dict] = 
 
     await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_fields})
     doc = await db.expenses.find_one({"_id": oid(eid)})
+
+    # Synchronize balance for confirmed expense
+    paid_via = doc.get("paid_via") or "bank"
+    b_id = doc.get("bank_account_id")
+    c_acc_id = doc.get("cash_account_id")
+    c_led_id = doc.get("cash_ledger_id")
+
+    if paid_via == "cash":
+        to_deduct = round(float(doc.get("amount") or 0.0), 2)
+        if c_led_id and hasattr(db, "cash_ledger"):
+            try:
+                await db.cash_ledger.update_one(
+                    {"_id": oid(c_led_id), "remaining_balance": {"$gte": to_deduct}},
+                    {"$inc": {"remaining_balance": -to_deduct}}
+                )
+            except Exception:
+                pass
+        try:
+            from routes.banking import sync_cash_account_balance
+            sync_id = c_acc_id or c_led_id
+            if sync_id:
+                await sync_cash_account_balance(db, str(sync_id))
+        except Exception:
+            pass
+    elif paid_via == "bank" and b_id:
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(b_id))
+        except Exception:
+            pass
 
     # Queue sync on confirmation
     await queue_expense_sync(db, doc, "expense_confirmed")
@@ -903,11 +960,35 @@ async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
     if not doc:
         raise HTTPException(404, "Expense not found")
     
+    old_b_id = doc.get("bank_account_id")
     update_data = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     if update_data:
         update_data["updated_at"] = now_iso()
         await db.expenses.update_one({"_id": oid(eid)}, {"$set": update_data})
         doc.update(update_data)
+
+        # Synchronize balances if amount or payment account changed
+        new_b_id = doc.get("bank_account_id")
+        if old_b_id:
+            try:
+                from routes.banking import sync_bank_account_balance
+                await sync_bank_account_balance(db, str(old_b_id))
+            except Exception:
+                pass
+        if new_b_id and new_b_id != old_b_id:
+            try:
+                from routes.banking import sync_bank_account_balance
+                await sync_bank_account_balance(db, str(new_b_id))
+            except Exception:
+                pass
+        if doc.get("paid_via") == "cash":
+            try:
+                from routes.banking import sync_cash_account_balance
+                sync_id = doc.get("cash_account_id") or doc.get("cash_ledger_id")
+                if sync_id:
+                    await sync_cash_account_balance(db, str(sync_id))
+            except Exception:
+                pass
 
         # Queue re-sync on update
         await queue_expense_sync(db, doc, "expense_created")
@@ -920,7 +1001,7 @@ async def update_expense(eid: str, payload: ExpenseUpdate, request: Request):
 async def delete_expense(eid: str, request: Request):
     u = await _get_user(request)
     require_roles("admin", "manager")(u)
-    db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
+    db = _get_db(request)
     try:
         doc = await db.expenses.find_one({"_id": oid(eid)})
     except Exception:
@@ -948,6 +1029,23 @@ async def delete_expense(eid: str, request: Request):
     await queue_expense_sync(db, {"_id": eid, "by": u.get("email"), "reason": f"Deleted expense id={eid}"}, "expense_voided")
 
     await db.expenses.delete_one({"_id": oid(eid)})
+
+    # Synchronize live balance after deletion
+    if doc.get("paid_via") == "bank" and doc.get("bank_account_id"):
+        try:
+            from routes.banking import sync_bank_account_balance
+            await sync_bank_account_balance(db, str(doc["bank_account_id"]))
+        except Exception:
+            pass
+    elif doc.get("paid_via") == "cash":
+        try:
+            from routes.banking import sync_cash_account_balance
+            sync_id = doc.get("cash_account_id") or doc.get("cash_ledger_id")
+            if sync_id:
+                await sync_cash_account_balance(db, str(sync_id))
+        except Exception:
+            pass
+
     await log_activity_db(
         db,
         "DELETE", "expenses",
