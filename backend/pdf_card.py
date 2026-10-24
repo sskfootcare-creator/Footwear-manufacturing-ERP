@@ -315,7 +315,7 @@ def _build_card_elements(job_group: dict, style: dict | None, with_rates: bool =
             w_disp = "____" if compact else "________"
             r_disp = "___" if compact else "____"
         else:
-            asgn = assigns.get(k) or (assigns.get(extra) if extra else None) or (assigns.get(parent) if parent else None)
+            asgn = assigns.get(k) or (assigns.get(extra) if extra else None)
             w = asgn.get("worker_name") if asgn else ""
             r = asgn.get("rate_per_pair") if asgn else None
             w_disp = (w[:14] if compact else w) if w else ("____" if compact else "________")

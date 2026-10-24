@@ -33,23 +33,23 @@ const COMPONENT_LAYERS = {
 // Process sub-tasks specific to each parallel component that can be assigned to other workers
 const COMPONENT_SUBTASK_ROLES = {
   upper: [
-    { key: "upper.cutting", fallbackKey: "upper", label: "Cutting", icon: "✂" },
-    { key: "upper.stitching", fallbackKey: "stitching", label: "Stitching", icon: "🧵" },
-    { key: "upper.folding", fallbackKey: null, label: "Folding", icon: "📐" },
-    { key: "upper.attachment", fallbackKey: null, label: "Attachment", icon: "🔧" },
+    { key: "upper.cutting", label: "Cutting", icon: "✂" },
+    { key: "upper.stitching", label: "Stitching", icon: "🧵" },
+    { key: "upper.folding", label: "Folding", icon: "📐" },
+    { key: "upper.attachment", label: "Attachment", icon: "🔧" },
   ],
   bottom: [
-    { key: "bottom.cutting", fallbackKey: "bottom", label: "Cutting", icon: "✂" },
-    { key: "bottom.stitching", fallbackKey: null, label: "Stitching", icon: "🧵" },
-    { key: "bottom.stamping", fallbackKey: null, label: "Stamping / Brand Marking", icon: "🏷️" },
-    { key: "bottom.assembly", fallbackKey: null, label: "Assembly", icon: "🔧" },
+    { key: "bottom.cutting", label: "Cutting", icon: "✂" },
+    { key: "bottom.stitching", label: "Stitching", icon: "🧵" },
+    { key: "bottom.stamping", label: "Stamping / Brand Marking", icon: "🏷️" },
+    { key: "bottom.assembly", label: "Assembly", icon: "🔧" },
   ],
   sole: [
-    { key: "sole.prep", fallbackKey: "sole", label: "Sole Prep", icon: "👟" },
+    { key: "sole.prep", label: "Sole Prep", icon: "👟" },
   ],
   heel_gola: [
-    { key: "heel_gola.cutting", fallbackKey: "heel_gola", label: "Cover Cutting", icon: "✂" },
-    { key: "heel_gola.assembly", fallbackKey: null, label: "Assembly", icon: "🔧" },
+    { key: "heel_gola.cutting", label: "Cover Cutting", icon: "✂" },
+    { key: "heel_gola.assembly", label: "Assembly", icon: "🔧" },
   ],
 };
 
@@ -717,21 +717,15 @@ export default function Production() {
           }
         }
       } else if (["upper", "bottom", "sole", "heel_gola"].includes(role)) {
-        // Component-level assignment: bulk-assigns all unassigned subtasks under this component
+        // Component-level assignment: assigns the component lead ONLY (no auto-assignment to subtasks)
         if (workerId) {
           await Promise.all(group.rows.map(j =>
-            http.post(`/production/jobs/${j.id}/components/${role}/bulk-assign`, {
+            http.patch(`/production/jobs/${j.id}/assignment`, {
+              role,
               worker_id: workerId,
               rate_per_pair: rateNum,
-              overwrite: Boolean(overwrite),
-              job_ids: [j.id],
             })
           ));
-          const compStages = group.component_specs?.components?.[role]?.stages || (
-            role === "upper" ? ["cutting", "stitching", "folding", "attachment"] :
-            role === "bottom" ? ["cutting", "stitching", "stamping"] :
-            []
-          );
           group.rows.forEach(r => {
             r.assignments = r.assignments || {};
             r.assignments[role] = {
@@ -740,17 +734,6 @@ export default function Production() {
               rate_per_pair: effectiveRate,
               assigned_at: new Date().toISOString(),
             };
-            compStages.forEach(st => {
-              const stKey = `${role}.${st}`;
-              if (overwrite || !r.assignments[stKey]?.worker_id) {
-                r.assignments[stKey] = {
-                  worker_id: workerId,
-                  worker_name: workerName,
-                  rate_per_pair: effectiveRate,
-                  assigned_at: new Date().toISOString(),
-                };
-              }
-            });
           });
           if (group.assignments) {
             group.assignments[role] = {
@@ -759,17 +742,6 @@ export default function Production() {
               rate_per_pair: effectiveRate,
               assigned_at: new Date().toISOString(),
             };
-            compStages.forEach(st => {
-              const stKey = `${role}.${st}`;
-              if (overwrite || !group.assignments[stKey]?.worker_id) {
-                group.assignments[stKey] = {
-                  worker_id: workerId,
-                  worker_name: workerName,
-                  rate_per_pair: effectiveRate,
-                  assigned_at: new Date().toISOString(),
-                };
-              }
-            });
           }
         } else {
           // Unassign main component
@@ -1918,7 +1890,6 @@ function ColorGroupCard(props) {
         return {
           key: `${compKey}.${st}`,
           substage: st,
-          fallbackKey: predefined?.fallbackKey || null,
           label: predefined?.label || formatLabel(st),
           icon: predefined?.icon || (st.includes("cut") ? "✂" : st.includes("stitch") ? "🧵" : st.includes("stamp") || st.includes("brand") ? "🏷️" : st.includes("fold") ? "📐" : "🔧"),
         };
@@ -2896,8 +2867,6 @@ function ParallelComponentCard({
                         }`}>
                           {isDirectlyAssigned
                             ? stDirect.worker_name
-                            : assignment?.worker_name
-                            ? "Lead Karigar"
                             : "+ Assign"}
                         </span>
                       </div>
@@ -2906,9 +2875,7 @@ function ParallelComponentCard({
                           ₹{stDirect.rate_per_pair}
                         </span>
                       ) : (
-                        <span className="text-[8px] text-slate-400 flex-shrink-0">
-                          {isDirectlyAssigned ? "" : "+"}
-                        </span>
+                        <span className="text-[8px] text-slate-400 flex-shrink-0">+</span>
                       )}
                     </button>
                   );
@@ -3102,9 +3069,44 @@ function ComponentKarigarPanel({
 
         {/* SECTION 2: PROCESS SUB-TASKS */}
         <div>
-          <div className="text-[9.5px] uppercase tracking-wider font-black text-slate-700 mb-1 flex items-center gap-1">
-            <span>⚡</span>
-            <span>2. Process Sub-tasks</span>
+          <div className="text-[9.5px] uppercase tracking-wider font-black text-slate-700 mb-1 flex items-center justify-between">
+            <div className="flex items-center gap-1">
+              <span>⚡</span>
+              <span>2. Process Sub-tasks</span>
+            </div>
+            {canEdit && subtasks.some(st => assignments[st.key]?.worker_id) && (
+              <button
+                type="button"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (!window.confirm(`Clear all assigned workers and rates from ${label} sub-tasks?`)) return;
+                  await Promise.all(subtasks.filter(st => assignments[st.key]?.worker_id).map(st => {
+                    const [comp, substage] = st.key.split(".");
+                    return Promise.all(group.rows.map(j =>
+                      http.patch(`/production/jobs/${j.id}/sub-task-assignment`, {
+                        component: comp,
+                        substage,
+                        worker_id: null,
+                        rate_per_pair: null,
+                        job_ids: [j.id],
+                      })
+                    ));
+                  }));
+                  group.rows.forEach(r => {
+                    if (r.assignments) {
+                      subtasks.forEach(st => delete r.assignments[st.key]);
+                    }
+                  });
+                  if (group.assignments) {
+                    subtasks.forEach(st => delete group.assignments[st.key]);
+                  }
+                }}
+                className="text-[9px] font-bold text-red-600 hover:text-red-800 hover:underline cursor-pointer"
+                title="Clear all sub-task assignments for this component"
+              >
+                Clear Sub-task Assignments
+              </button>
+            )}
           </div>
 
           {isReadySole ? (
@@ -3127,8 +3129,8 @@ function ComponentKarigarPanel({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {subtasks.map((st) => {
-                const asgn = assignments[st.key] || (st.fallbackKey ? assignments[st.fallbackKey] : null);
-                const isDirectlyAssigned = !!assignments[st.key]?.worker_name;
+                const asgn = assignments[st.key];
+                const isDirectlyAssigned = !!asgn?.worker_name;
                 return (
                   <button
                     key={st.key}
@@ -3137,7 +3139,7 @@ function ComponentKarigarPanel({
                     onClick={(e) => { e.stopPropagation(); onOpenAssign(st.key); }}
                     data-testid={`assign-${groupKey}-${st.key}`}
                     className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-all group ${
-                      asgn?.worker_name
+                      isDirectlyAssigned
                         ? "bg-white border-[#C27842]/40 hover:border-[#C27842] shadow-xs"
                         : "bg-white/70 border-dashed border-slate-300 hover:border-[#C27842] hover:bg-white"
                     } ${!canEdit ? "opacity-60 cursor-not-allowed" : ""}`}
@@ -3148,21 +3150,16 @@ function ComponentKarigarPanel({
                         {st.label}
                       </div>
                       <div className={`text-[11px] font-bold truncate ${
-                        asgn?.worker_name ? "text-slate-900" : "text-slate-400 italic"
+                        isDirectlyAssigned ? "text-slate-900" : "text-slate-400 italic"
                       }`}>
-                        {asgn?.worker_name ? (
-                          <span>
-                            {asgn.worker_name}
-                            {!isDirectlyAssigned && (
-                              <span className="ml-1 text-[8.5px] text-slate-400 font-normal">(Component Lead)</span>
-                            )}
-                          </span>
+                        {isDirectlyAssigned ? (
+                          asgn.worker_name
                         ) : (
-                          "+ Assign other worker"
+                          "+ Assign worker"
                         )}
                       </div>
                     </div>
-                    {asgn?.rate_per_pair != null ? (
+                    {isDirectlyAssigned && asgn?.rate_per_pair != null ? (
                       <span className="text-[10px] font-mono font-bold text-[#C27842] flex-shrink-0">
                         ₹{asgn.rate_per_pair}/pr
                       </span>
@@ -3399,7 +3396,6 @@ function ComponentCell({ label, done, layers = [], onToggle, disabled }) {
 function AssignDialog({ group, role, workers, current, onSave, onClose, styleByCode = {} }) {
   const [selectedWid, setSelectedWid] = useState(current?.worker_id || "");
   const [rate, setRate] = useState(current?.rate_per_pair ?? "");
-  const [overwriteSubtasks, setOverwriteSubtasks] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const selectedWorker = workers.find(w => w.id === selectedWid);
 
@@ -3571,7 +3567,7 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
             <div className="space-y-1.5">
               {(!searchQuery || "unassign".includes(searchQuery.toLowerCase())) && (
                 <button
-                  onClick={() => onSave(null, null, overwriteSubtasks)}
+                  onClick={() => onSave(null, null)}
                   data-testid="assign-clear"
                   className="w-full text-left px-3 py-3 border border-slate-200 hover:border-red-500 hover:text-red-700 text-xs font-bold uppercase tracking-wider min-h-[44px] touch-manipulation"
                 >
@@ -3655,19 +3651,12 @@ function AssignDialog({ group, role, workers, current, onSave, onClose, styleByC
               </div>
             </div>
             {isComponentRole && (
-              <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-700 bg-amber-50/60 p-2.5 rounded border border-amber-200" data-testid="assign-overwrite-container">
-                <input
-                  type="checkbox"
-                  checked={overwriteSubtasks}
-                  onChange={(e) => setOverwriteSubtasks(e.target.checked)}
-                  className="rounded text-[#C27842] focus:ring-[#C27842] w-4 h-4"
-                  data-testid="assign-overwrite-checkbox"
-                />
-                <span>Overwrite already-assigned sub-tasks</span>
-              </label>
+              <div className="text-[11px] text-slate-600 bg-slate-100 p-2 rounded border border-slate-200" data-testid="assign-component-note">
+                ℹ️ Assigns the overall component track person. Sub-tasks remain separate and unassigned.
+              </div>
             )}
             <div className="flex gap-2">
-              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate, overwriteSubtasks)} className="min-h-[44px]" data-testid="assign-save">
+              <BtnPrimary onClick={() => onSave(selectedWid, rate === "" ? null : rate)} className="min-h-[44px]" data-testid="assign-save">
                 <Check className="w-3.5 h-3.5 inline -mt-0.5 mr-1" /> Assign at ₹{rate || selectedWorker?.rate_per_pair || 0}/pair
               </BtnPrimary>
               <BtnSecondary onClick={onClose} className="min-h-[44px]">Cancel</BtnSecondary>

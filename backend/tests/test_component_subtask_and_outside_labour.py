@@ -92,7 +92,7 @@ async def test_subtask_bulk_assignment_and_outside_labour_flow():
         # 6. Bulk-assign Upper to Suresh Master (w1_id)
         bulk_res = await client.post(
             f"/api/production/jobs/{job_id}/components/upper/bulk-assign",
-            json={"worker_id": w1_id, "overwrite": False},
+            json={"worker_id": w1_id, "overwrite": False, "apply_to_subtasks": True},
             headers=headers
         )
         assert bulk_res.status_code == 200

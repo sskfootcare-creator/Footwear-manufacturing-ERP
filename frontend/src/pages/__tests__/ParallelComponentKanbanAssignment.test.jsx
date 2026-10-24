@@ -163,7 +163,7 @@ describe("Parallel Component Production & Karigar Assignment on Kanban Card", ()
   });
 
   test("clicking Karigar slot opens Assign Karigar modal pre-scoped to that component role", async () => {
-    http.post.mockResolvedValueOnce({ data: { message: "Updated" } });
+    http.patch.mockResolvedValueOnce({ data: { message: "Updated" } });
 
     render(
       <MemoryRouter>
@@ -189,12 +189,12 @@ describe("Parallel Component Production & Karigar Assignment on Kanban Card", ()
     fireEvent.click(saveBtn);
 
     await waitFor(() => {
-      expect(http.post).toHaveBeenCalledWith(
-        "/production/jobs/job-flat-101/components/sole/bulk-assign",
+      expect(http.patch).toHaveBeenCalledWith(
+        "/production/jobs/job-flat-101/assignment",
         expect.objectContaining({
+          role: "sole",
           worker_id: "w-4",
           rate_per_pair: 8,
-          overwrite: false,
         })
       );
     });

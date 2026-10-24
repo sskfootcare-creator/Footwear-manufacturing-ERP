@@ -1988,12 +1988,6 @@ async def allocate_po_karigar(pid: str, payload: dict, request: Request):
         worker_name = worker.get("name", "")
         effective_rate = float(rate_per_pair if rate_per_pair is not None else worker.get("rate_per_pair", 0) or 0)
 
-    comp_stages_map = {
-        "upper": ["cutting", "stitching", "folding", "attachment"],
-        "bottom": ["cutting", "stitching", "stamping"],
-        "sole": ["prep"],
-    }
-
     for j in jobs:
         assignments = j.get("assignments") or {}
         if worker_id:
@@ -2003,21 +1997,8 @@ async def allocate_po_karigar(pid: str, payload: dict, request: Request):
                 "rate_per_pair": effective_rate,
                 "assigned_at": now_iso(),
             }
-            # Also populate subtasks if component track
-            if role in comp_stages_map:
-                for sub in comp_stages_map[role]:
-                    sub_key = f"{role}.{sub}"
-                    assignments[sub_key] = {
-                        "worker_id": str(worker_id),
-                        "worker_name": worker_name,
-                        "rate_per_pair": effective_rate,
-                        "assigned_at": now_iso(),
-                    }
         else:
             assignments.pop(role, None)
-            if role in comp_stages_map:
-                for sub in comp_stages_map[role]:
-                    assignments.pop(f"{role}.{sub}", None)
 
         await db.production_jobs.update_one(
             {"_id": j["_id"]},
@@ -4587,19 +4568,20 @@ async def bulk_assign_component(jid: str, component: str, payload: ComponentBulk
         else:
             stages_list = []
 
-        for st in stages_list:
-            role_key = f"{component}.{st}"
-            prev_asgn = assignments.get(role_key) or {}
-            if payload.overwrite or not prev_asgn.get("worker_id"):
-                assignments[role_key] = {
-                    "worker_id": str(payload.worker_id),
-                    "worker_name": worker_name,
-                    "rate_per_pair": worker_rate,
-                    "assigned_at": now_iso(),
-                    "completed_qty": prev_asgn.get("completed_qty"),
-                    "completed_by": prev_asgn.get("completed_by"),
-                    "completed_at": prev_asgn.get("completed_at"),
-                }
+        if getattr(payload, "apply_to_subtasks", False):
+            for st in stages_list:
+                role_key = f"{component}.{st}"
+                prev_asgn = assignments.get(role_key) or {}
+                if payload.overwrite or not prev_asgn.get("worker_id"):
+                    assignments[role_key] = {
+                        "worker_id": str(payload.worker_id),
+                        "worker_name": worker_name,
+                        "rate_per_pair": worker_rate,
+                        "assigned_at": now_iso(),
+                        "completed_qty": prev_asgn.get("completed_qty"),
+                        "completed_by": prev_asgn.get("completed_by"),
+                        "completed_at": prev_asgn.get("completed_at"),
+                    }
 
         history_entry = {
             "stage": component,
