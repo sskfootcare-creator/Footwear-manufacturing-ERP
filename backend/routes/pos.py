@@ -267,7 +267,8 @@ async def _attach_po_profitability(po_docs: list, db=None):
     codes = set()
     ids = set()
     for d in po_docs:
-        for item in d.get("line_items", []):
+        d_items = d.get("line_items") or d.get("items") or []
+        for item in d_items:
             if item.get("style_code"):
                 codes.add(item["style_code"].strip())
             if item.get("style_id"):
@@ -398,7 +399,8 @@ async def _attach_po_profitability(po_docs: list, db=None):
                             "rate_per_pair": float(r_v.get("rate_per_pair") or 0),
                         }
 
-        for item in d.get("line_items", []):
+        d_items = d.get("line_items") or d.get("items") or []
+        for item in d_items:
             code = (item.get("style_code") or "").strip()
             sid = str(item.get("style_id") or "")
             style_doc = styles_map.get(code) or styles_map.get(sid)
@@ -496,7 +498,7 @@ async def _attach_po_profitability(po_docs: list, db=None):
         has_est = False
         has_act = False
 
-        for item in d.get("line_items", []):
+        for item in d_items:
             qty = int(item.get("quantity") or 0)
             tot_qty += qty
             prof = item.get("profitability") or {}
@@ -510,7 +512,7 @@ async def _attach_po_profitability(po_docs: list, db=None):
                 has_act = True
 
         tot_production_budget = round(tot_bom + tot_labor + tot_packing + tot_outside, 2)
-        subtotal = float(d.get("subtotal") or sum(float(it.get("amount") or (float(it.get("unit_price") or 0) * int(it.get("quantity") or 0))) for it in d.get("line_items", [])))
+        subtotal = float(d.get("subtotal") or sum(float(it.get("amount") or (float(it.get("unit_price") or it.get("pair_price") or 0) * int(it.get("quantity") or 0))) for it in d_items))
         tot_profit = round(subtotal - tot_production_budget, 2)
         tot_profit_pct = round((tot_profit / subtotal * 100), 1) if subtotal > 0 else 0.0
 
@@ -656,6 +658,30 @@ async def _attach_po_status(po_docs: list, db=None):
             d["status"] = "completed"
         elif not d.get("status") or d.get("status") == "completed":
             d["status"] = "active"
+
+        # Determine manufacturing stage and eligibility for new PO funding
+        job_stages = [str(j.get("stage") or "planning").lower() for j in po_jobs if j.get("stage")]
+        is_dispatched = bool(
+            is_completed
+            or has_invoice_or_dispatch
+            or any(j.get("stage") in ("dispatched", "completed") for j in po_jobs)
+            or any(j.get("status") in ("dispatched", "completed") for j in po_jobs)
+        )
+        d["is_dispatched"] = is_dispatched
+
+        if not has_jobs or not job_stages or all(s == "planning" for s in job_stages):
+            po_stage = "planning"
+        elif any(s == "procurement" for s in job_stages) and all(s in ("planning", "procurement") for s in job_stages):
+            po_stage = "procurement"
+        elif is_dispatched:
+            po_stage = "dispatched" if not is_completed else "completed"
+        else:
+            po_stage = "in_production"
+
+        d["production_stage"] = po_stage
+        d["production_stages"] = list(set(job_stages)) if job_stages else ["planning"]
+        # Only POs strictly in planning or procurement that are not dispatched or completed are eligible for advance funding
+        d["is_fundable_stage"] = bool(po_stage in ("planning", "procurement") and not is_dispatched and not is_completed)
 
 
 async def validate_po_styles(payload: POIn, db=None):
@@ -1679,7 +1705,11 @@ async def get_b2b_profitability(
 # ── Purchase Orders Endpoints ────────────────────────────────────────────────
 
 @pos_router.get("/pos")
-async def list_pos(request: Request, status: Optional[str] = Query(None)):
+async def list_pos(
+    request: Request,
+    status: Optional[str] = Query(None),
+    fundable_only: Optional[bool] = Query(None),
+):
     u = await _get_user(request)
     require_roles("admin", "manager", "sales", "production")(u)
     db = get_db()
@@ -1690,6 +1720,8 @@ async def list_pos(request: Request, status: Optional[str] = Query(None)):
         docs = [d for d in docs if d.get("is_completed")]
     elif status == "active":
         docs = [d for d in docs if not d.get("is_completed")]
+    if fundable_only:
+        docs = [d for d in docs if d.get("is_fundable_stage")]
     return [stringify(d) for d in docs]
 
 

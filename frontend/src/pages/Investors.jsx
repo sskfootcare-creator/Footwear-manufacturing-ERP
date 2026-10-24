@@ -84,6 +84,9 @@ export default function Investors() {
   const [submittingAdvance, setSubmittingAdvance] = useState(false);
   const [batchPreview, setBatchPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
+  const [advanceDate, setAdvanceDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [showExecutedPOs, setShowExecutedPOs] = useState(false);
+  const [customAmountOverride, setCustomAmountOverride] = useState("");
 
   // Repay / Reinvest Form state (Single or Bulk & Banking Outflow)
   const [advancesToSettle, setAdvancesToSettle] = useState([]);
@@ -242,6 +245,37 @@ export default function Investors() {
     return advances.filter((a) => a.status === "active");
   }, [advances]);
 
+  // Filter POs fundable in advance modal: Only Planning & Procurement by default
+  const filteredPosToFund = useMemo(() => {
+    return posList.filter((p) => {
+      const isDispatchedOrDone = Boolean(
+        p.is_dispatched ||
+        p.is_completed ||
+        p.status === "completed" ||
+        p.status === "dispatched" ||
+        p.production_stage === "dispatched" ||
+        p.production_stage === "completed"
+      );
+      const isPlanningOrProcurement = Boolean(
+        p.is_fundable_stage ||
+        p.production_stage === "planning" ||
+        p.production_stage === "procurement" ||
+        (!p.production_stage && !isDispatchedOrDone && p.status !== "in_production")
+      );
+
+      if (!showExecutedPOs && !isPlanningOrProcurement) {
+        return false;
+      }
+
+      if (!poFilterQuery) return true;
+      const q = poFilterQuery.toLowerCase();
+      return (
+        (p.po_number && p.po_number.toLowerCase().includes(q)) ||
+        (p.client_name && p.client_name.toLowerCase().includes(q))
+      );
+    });
+  }, [posList, showExecutedPOs, poFilterQuery]);
+
   // Selected advances for bulk actions
   const selectedAdvancesObjects = useMemo(() => {
     return advances.filter((a) => selectedAdvanceIds.includes(a._id || a.id));
@@ -377,6 +411,8 @@ export default function Investors() {
       const payload = {
         include_opex: includeOpex,
         margin_per_pair: marginOverride ? parseFloat(marginOverride) : undefined,
+        advance_date: advanceDate || undefined,
+        amount_override: customAmountOverride ? parseFloat(customAmountOverride) : undefined,
         bank_account_id: selectedBankAccountId || undefined,
         payment_mode: paymentMode || "Bank Transfer",
         reference: paymentReference || "",
@@ -401,6 +437,9 @@ export default function Investors() {
       setIncludeOpex(false);
       setMarginOverride("");
       setAdvanceNotes("");
+      setAdvanceDate(new Date().toISOString().slice(0, 10));
+      setShowExecutedPOs(false);
+      setCustomAmountOverride("");
       loadData();
     } catch (err) {
       const rawDetail = err?.response?.data?.detail;
@@ -1634,7 +1673,19 @@ export default function Investors() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                      Advance / Inflow Date <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={advanceDate}
+                      onChange={(e) => setAdvanceDate(e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                    />
+                  </div>
                   <div>
                     <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
                       Payment Inflow Mode
@@ -1668,35 +1719,47 @@ export default function Investors() {
 
               {/* Multi-PO Selection Box */}
               <div className="space-y-2 border-2 border-slate-200 p-3 bg-slate-50">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700">
-                    Select Purchase Orders to Fund ({selectedPoIds.length} selected) <span className="text-red-500">*</span>
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const matching = posList
-                          .filter((p) =>
-                            !poFilterQuery ||
-                            p.po_number?.toLowerCase().includes(poFilterQuery.toLowerCase()) ||
-                            p.client_name?.toLowerCase().includes(poFilterQuery.toLowerCase())
-                          )
-                          .map((p) => p.id || p._id);
-                        setSelectedPoIds(matching);
-                      }}
-                      className="text-[10px] text-blue-600 font-bold uppercase hover:underline"
-                    >
-                      Select All Filtered
-                    </button>
-                    <span>·</span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedPoIds([])}
-                      className="text-[10px] text-slate-500 font-bold uppercase hover:underline"
-                    >
-                      Clear
-                    </button>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700">
+                      Select Purchase Orders to Fund ({selectedPoIds.length} selected) <span className="text-red-500">*</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const matching = filteredPosToFund.map((p) => p.id || p._id);
+                          setSelectedPoIds(matching);
+                        }}
+                        className="text-[10px] text-blue-600 font-bold uppercase hover:underline"
+                      >
+                        Select All Filtered
+                      </button>
+                      <span>·</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPoIds([])}
+                        className="text-[10px] text-slate-500 font-bold uppercase hover:underline"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Toggle to show executed / dispatched POs for historical funding */}
+                  <div className="flex items-center justify-between bg-white border border-slate-200 px-2.5 py-1.5 rounded">
+                    <label className="flex items-center gap-2 cursor-pointer select-none text-slate-700 font-bold text-[11px]">
+                      <input
+                        type="checkbox"
+                        checked={showExecutedPOs}
+                        onChange={(e) => setShowExecutedPOs(e.target.checked)}
+                        className="w-3.5 h-3.5 text-[#C27842] border-slate-300 rounded focus:ring-0"
+                      />
+                      <span>Include Executed / Dispatched POs (Historical / Past Investments)</span>
+                    </label>
+                    <span className="text-[10px] font-mono text-slate-500 font-semibold">
+                      {showExecutedPOs ? "All POs Visible" : "Planning & Procurement Only"}
+                    </span>
                   </div>
                 </div>
 
@@ -1711,19 +1774,16 @@ export default function Investors() {
                   />
                 </div>
 
-                <div className="max-h-48 overflow-y-auto divide-y divide-slate-200 border border-slate-200 bg-white">
-                  {posList
-                    .filter((p) => {
-                      if (!poFilterQuery) return true;
-                      const q = poFilterQuery.toLowerCase();
-                      return (
-                        (p.po_number && p.po_number.toLowerCase().includes(q)) ||
-                        (p.client_name && p.client_name.toLowerCase().includes(q))
-                      );
-                    })
-                    .map((p) => {
+                <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 border border-slate-200 bg-white">
+                  {filteredPosToFund.length === 0 ? (
+                    <div className="p-4 text-center text-slate-400 text-xs italic">
+                      No purchase orders matching criteria in Planning or Procurement stages.
+                    </div>
+                  ) : (
+                    filteredPosToFund.map((p) => {
                       const poId = p.id || p._id;
                       const isChecked = selectedPoIds.includes(poId);
+                      const isDispatched = p.is_dispatched || p.is_completed || p.production_stage === "dispatched" || p.production_stage === "completed";
                       return (
                         <label
                           key={poId}
@@ -1746,22 +1806,43 @@ export default function Investors() {
                               className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0 cursor-pointer"
                             />
                             <div>
-                              <span className="font-mono text-slate-900">{p.po_number}</span>
-                              <span className="text-slate-500 font-normal ml-2">
-                                ({p.client_name || "Client"})
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-slate-900 font-bold">{p.po_number}</span>
+                                {isDispatched ? (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 uppercase">
+                                    Executed / Dispatched
+                                  </span>
+                                ) : p.production_stage === "procurement" ? (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-slate-200 text-slate-800 border border-slate-300 uppercase">
+                                    Procurement
+                                  </span>
+                                ) : (
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800 border border-purple-200 uppercase">
+                                    Planning
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-slate-500 font-normal text-[10px]">
+                                {p.client_name || "Client"}
                               </span>
                             </div>
                           </div>
-                          <div className="text-right font-mono text-slate-600 text-[11px]">
-                            {(p.total_quantity || p.quantity || 0).toLocaleString("en-IN")} pairs
+                          <div className="text-right">
+                            <div className="font-mono font-bold text-slate-900 text-[11px]">
+                              {p.production_budget?.total_budget != null ? inr(p.production_budget.total_budget) : inr(p.subtotal || 0)}
+                            </div>
+                            <div className="font-mono text-slate-500 text-[10px]">
+                              {(p.total_quantity || p.quantity || 0).toLocaleString("en-IN")} prs
+                            </div>
                           </div>
                         </label>
                       );
-                    })}
+                    })
+                  )}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
                     Negotiated Margin Override / Pair (₹)
@@ -1771,9 +1852,24 @@ export default function Investors() {
                     step="0.5"
                     value={marginOverride}
                     onChange={(e) => setMarginOverride(e.target.value)}
-                    placeholder="e.g. 12.0"
+                    placeholder="e.g. 10.0"
                     className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                    Custom Capital Override (₹)
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    value={customAmountOverride}
+                    onChange={(e) => setCustomAmountOverride(e.target.value)}
+                    placeholder="Optional lumpsum override"
+                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
+                  />
+                  <p className="text-[9px] text-slate-500 mt-0.5">Leave blank to use exact PO Budget.</p>
                 </div>
 
                 <div className="p-3 bg-slate-50 border-2 border-slate-200">
@@ -1784,10 +1880,10 @@ export default function Investors() {
                       onChange={(e) => setIncludeOpex(e.target.checked)}
                       className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0"
                     />
-                    <span>Include Investor Opex Templates Once</span>
+                    <span>Include Investor Opex Once</span>
                   </label>
                   <p className="text-[10px] text-slate-500 mt-1 pl-6">
-                    Applied once across the batch. Never multiplied.
+                    Applied once across batch.
                   </p>
                 </div>
               </div>
@@ -1821,21 +1917,31 @@ export default function Investors() {
                             Total Capital to Fund
                           </span>
                           <span className="font-mono font-black text-slate-950 text-sm">
-                            {inr(batchPreview.total_funding_required)}
+                            {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
                           </span>
                         </div>
                       </div>
 
                       {/* Itemized per-PO list */}
-                      <div className="max-h-32 overflow-y-auto border border-slate-200 bg-white text-[11px] divide-y divide-slate-100">
+                      <div className="max-h-36 overflow-y-auto border border-slate-200 bg-white text-[11px] divide-y divide-slate-100">
                         {batchPreview.items?.map((item) => (
                           <div key={item.po_id} className="p-2 flex justify-between items-center">
                             <div>
-                              <span className="font-bold text-slate-900 font-mono">{item.po_number}</span>
-                              <span className="text-slate-500 ml-2">({item.pairs} prs)</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-slate-900 font-mono">{item.po_number}</span>
+                                <span className="text-slate-500">({item.pairs} prs)</span>
+                              </div>
+                              {item.breakdown && (
+                                <div className="text-[9.5px] text-slate-500 mt-0.5 font-mono">
+                                  BOM: {inr(item.breakdown.bom_cost || 0)} · Labour: {inr(item.breakdown.labor_cost || item.breakdown.labour_cost || 0)} · Packing: {inr(item.breakdown.packing_cost || 0)}{item.breakdown.outside_cost ? ` · Outside: ${inr(item.breakdown.outside_cost)}` : ""}
+                                </div>
+                              )}
                             </div>
-                            <div className="font-mono font-bold text-slate-900">
-                              {inr(item.funding_required)}
+                            <div className="text-right">
+                              <div className="font-mono font-bold text-slate-900">
+                                {inr(item.base_po_budget || item.funding_required)}
+                              </div>
+                              <span className="text-[9px] text-slate-400 uppercase font-semibold">PO Budget</span>
                             </div>
                           </div>
                         ))}
@@ -1844,10 +1950,10 @@ export default function Investors() {
                       <div className="bg-slate-900 text-white p-3 flex justify-between items-center">
                         <div>
                           <span className="text-[9px] uppercase tracking-wider text-slate-300 block font-bold">
-                            Combined Advance Total
+                            Combined Advance Total {customAmountOverride ? "(Custom Override)" : ""}
                           </span>
                           <span className="font-mono text-base font-black">
-                            {inr(batchPreview.total_funding_required)}
+                            {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
                           </span>
                         </div>
                         <div className="text-right">

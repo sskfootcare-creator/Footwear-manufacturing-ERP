@@ -489,7 +489,8 @@ async def _create_batch_advances_internal(
     payment_mode: Optional[str],
     reference: Optional[str],
     user: Dict[str, Any],
-    db: Any
+    db: Any,
+    amount_override: Optional[float] = None,
 ):
     investor = await db.investors.find_one({"_id": oid(iid)})
     if not investor:
@@ -528,6 +529,8 @@ async def _create_batch_advances_internal(
 
         pairs = int(funding.get("pairs", 0))
         amt = round(float(funding["total_funding_required"]), 2)
+        if amount_override and amount_override > 0 and len(po_ids) == 1:
+            amt = round(float(amount_override), 2)
         total_funding += amt
         total_pairs += pairs
 
@@ -548,6 +551,9 @@ async def _create_batch_advances_internal(
                 "bom_cost": funding["breakdown"]["bom_cost"],
                 "labour_cost": funding["breakdown"]["labour_cost"],
                 "labor_cost": funding["breakdown"]["labor_cost"],
+                "packing_cost": funding["breakdown"].get("packing_cost", 0.0),
+                "outside_cost": funding["breakdown"].get("outside_cost", 0.0),
+                "base_po_budget": funding["breakdown"].get("base_po_budget", funding["breakdown"]["bom_cost"] + funding["breakdown"]["labor_cost"]),
                 "opex_cost": funding["breakdown"]["opex_cost"],
                 "opex_included": apply_opex,
             },
@@ -629,6 +635,7 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
             include_opex=payload.include_opex,
             margin_per_pair=payload.margin_per_pair,
             advance_date=payload.advance_date,
+            amount_override=payload.amount_override,
             notes=payload.notes,
             bank_account_id=payload.bank_account_id,
             payment_mode=payload.payment_mode,
@@ -666,7 +673,7 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
         if not bank_doc:
             bank_doc = await db.bank_accounts.find_one({"_id": str(payload.bank_account_id)})
 
-    amt = round(float(funding["total_funding_required"]), 2)
+    amt = round(float(payload.amount_override), 2) if (payload.amount_override and payload.amount_override > 0) else round(float(funding["total_funding_required"]), 2)
     adv_date = payload.advance_date or datetime.now(timezone.utc).date().isoformat()
 
     adv_doc = {
@@ -685,6 +692,9 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
             "bom_cost": funding["breakdown"]["bom_cost"],
             "labour_cost": funding["breakdown"]["labour_cost"],
             "labor_cost": funding["breakdown"]["labor_cost"],
+            "packing_cost": funding["breakdown"].get("packing_cost", 0.0),
+            "outside_cost": funding["breakdown"].get("outside_cost", 0.0),
+            "base_po_budget": funding["breakdown"].get("base_po_budget", funding["breakdown"]["bom_cost"] + funding["breakdown"]["labor_cost"]),
             "opex_cost": funding["breakdown"]["opex_cost"],
             "opex_included": bool(payload.include_opex),
         },
@@ -743,6 +753,7 @@ async def create_investor_batch_advances(iid: str, payload: InvestorBatchAdvance
         include_opex=payload.include_opex,
         margin_per_pair=payload.margin_per_pair,
         advance_date=payload.advance_date,
+        amount_override=payload.amount_override,
         notes=payload.notes,
         bank_account_id=payload.bank_account_id,
         payment_mode=payload.payment_mode,
@@ -836,13 +847,16 @@ async def preview_batch_advance_calculation(
             "po_id": str(funding["po_id"]),
             "po_number": funding.get("po_number", ""),
             "pairs": pairs,
+            "base_po_budget": funding.get("base_po_budget", amt),
             "funding_required": amt,
             "breakdown": funding.get("breakdown", {}),
         })
 
+    total_base = sum(float(it.get("base_po_budget") or it.get("funding_required") or 0.0) for it in items)
     return stringify({
         "items": items,
         "total_funding_required": round(total_funding, 2),
+        "total_base_budget": round(total_base, 2),
         "total_pairs": total_pairs,
         "count": len(items)
     })

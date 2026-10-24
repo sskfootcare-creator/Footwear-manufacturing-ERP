@@ -52,54 +52,29 @@ async def compute_investor_funding_required(
     if not po_doc:
         raise HTTPException(404, f"Purchase order '{po_id}' not found")
 
-    from routes.pos import compute_po_profitability
+    from routes.pos import _attach_po_profitability
 
-    line_items = po_doc.get("line_items") or po_doc.get("items") or []
-    if not line_items and (po_doc.get("style_code") or po_doc.get("style_id")):
-        line_items = [{
-            "style_code": po_doc.get("style_code"),
-            "style_id": po_doc.get("style_id"),
-            "color": po_doc.get("color"),
-            "unit_price": po_doc.get("unit_price", 0),
-            "quantity": po_doc.get("total_quantity") or po_doc.get("quantity") or 0,
-        }]
+    # Attach official PO profitability & production budget rollup (exact same calculation as PO tab)
+    po_copy = dict(po_doc)
+    if not po_copy.get("line_items"):
+        if po_copy.get("items"):
+            po_copy["line_items"] = po_copy["items"]
+        elif po_copy.get("style_code") or po_copy.get("style_id"):
+            po_copy["line_items"] = [{
+                "style_code": po_copy.get("style_code"),
+                "style_id": po_copy.get("style_id"),
+                "color": po_copy.get("color"),
+                "unit_price": po_copy.get("unit_price") or po_copy.get("pair_price") or 0,
+                "quantity": po_copy.get("total_quantity") or po_copy.get("quantity") or 0,
+            }]
+    await _attach_po_profitability([po_copy], db)
+    prod_budget = po_copy.get("production_budget") or po_copy.get("profitability") or {}
 
-    total_bom_cost = 0.0
-    total_labor_cost = 0.0
-    total_pairs = 0
-
-    for item in line_items:
-        qty = float(item.get("quantity") or 0.0)
-        total_pairs += int(qty)
-
-        # Retrieve style object
-        style_doc = None
-        style_code = (item.get("style_code") or "").strip()
-        style_id_val = item.get("style_id")
-
-        q_or = []
-        if style_code:
-            q_or.append({"code": style_code})
-        if style_id_val:
-            try:
-                q_or.append({"_id": oid(style_id_val)})
-            except Exception:
-                q_or.append({"_id": str(style_id_val)})
-
-        if q_or:
-            query = {"$or": q_or} if len(q_or) > 1 else q_or[0]
-            style_doc = await db.styles.find_one(query)
-
-        # Call compute_po_profitability to reuse exact BOM and Labor costing
-        prof = await compute_po_profitability(item, style_doc or {}, db=db)
-        bom_unit = float(prof.get("bom_cost") or 0.0)
-        labor_unit = float(prof.get("labor_cost") or 0.0)
-
-        total_bom_cost += (bom_unit * qty)
-        total_labor_cost += (labor_unit * qty)
-
-    if total_pairs == 0:
-        total_pairs = int(po_doc.get("total_quantity") or po_doc.get("quantity") or 0)
+    total_bom_cost = float(prod_budget.get("total_bom_cost") or 0.0)
+    total_labor_cost = float(prod_budget.get("total_labor_cost") or 0.0)
+    total_packing_cost = float(prod_budget.get("total_packing_cost") or 0.0)
+    total_outside_cost = float(prod_budget.get("total_outside_cost") or 0.0)
+    total_pairs = int(prod_budget.get("total_quantity") or po_doc.get("total_quantity") or po_doc.get("quantity") or 0)
 
     # 2. Opex calculation
     opex_cost = 0.0
@@ -113,7 +88,12 @@ async def compute_investor_funding_required(
 
     total_bom_cost = round(total_bom_cost, 2)
     total_labor_cost = round(total_labor_cost, 2)
-    total_funding_required = round(total_bom_cost + total_labor_cost + opex_cost, 2)
+    total_packing_cost = round(total_packing_cost, 2)
+    total_outside_cost = round(total_outside_cost, 2)
+
+    # Base production budget matches the PO Tab exactly: BOM + Labour + Packing + Outside Labour
+    base_po_budget = round(total_bom_cost + total_labor_cost + total_packing_cost + total_outside_cost, 2)
+    total_funding_required = round(base_po_budget + opex_cost, 2)
 
     return {
         "po_id": str(po_doc["_id"]),
@@ -121,6 +101,10 @@ async def compute_investor_funding_required(
         "pairs": total_pairs,
         "bom_cost": total_bom_cost,
         "labor_cost": total_labor_cost,
+        "labour_cost": total_labor_cost,
+        "packing_cost": total_packing_cost,
+        "outside_cost": total_outside_cost,
+        "base_po_budget": base_po_budget,
         "opex_cost": opex_cost,
         "opex_included": bool(include_opex),
         "total_funding_required": total_funding_required,
@@ -129,6 +113,9 @@ async def compute_investor_funding_required(
             "bom_cost": total_bom_cost,
             "labour_cost": total_labor_cost,
             "labor_cost": total_labor_cost,
+            "packing_cost": total_packing_cost,
+            "outside_cost": total_outside_cost,
+            "base_po_budget": base_po_budget,
             "opex_cost": opex_cost,
             "opex_included": bool(include_opex),
         }
