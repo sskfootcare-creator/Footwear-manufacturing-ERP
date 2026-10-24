@@ -1012,16 +1012,16 @@ async def _build_client_ledger(cid_or_name: str, db=None) -> dict:
         })
 
     for g in grns:
-        prices = price_idx.get(g.get("invoice_id", ""), {})
+        iid = str(g.get("invoice_id") or "")
         short_value = 0.0
-        for ln in g.get("line_items", []):
-            short = max(0, int(ln.get("dispatched_qty", 0)) - int(ln.get("accepted_qty", 0)))
-            unit = prices.get((ln.get("style_code"), ln.get("color"), str(ln.get("size") or ""))) or 0
-            short_value += short * unit
-        if short_value == 0.0:
-            iid = g.get("invoice_id", "")
-            if iid and iid in grn_map:
-                short_value = float(grn_map[iid].get("adjustment") or 0.0)
+        if iid and iid in grn_map and float(grn_map[iid].get("adjustment") or 0.0) > 0:
+            short_value = float(grn_map[iid]["adjustment"])
+        else:
+            prices = price_idx.get(iid, {})
+            for ln in g.get("line_items", []):
+                short = max(0, int(ln.get("dispatched_qty", 0)) - int(ln.get("accepted_qty", 0)))
+                unit = prices.get((ln.get("style_code"), ln.get("color"), str(ln.get("size") or ""))) or 0
+                short_value += short * unit
         if short_value > 0:
             short_pcs = g.get("total_dispatched", 0) - g.get("total_accepted", 0)
             entries.append({
@@ -2428,10 +2428,33 @@ async def create_grn(payload: GRNIn, request: Request):
     db = get_db()
     from routes.invoice_packing import _aggregate_grn_adjustments, _due_iso
 
-    inv = await db.invoices.find_one({"_id": oid(payload.invoice_id)})
+    inv_id_raw = str(payload.invoice_id or "").strip()
+    inv_queries = []
+    if ObjectId.is_valid(inv_id_raw):
+        try:
+            inv_queries.append({"_id": oid(inv_id_raw)})
+        except Exception:
+            pass
+    inv_queries.extend([{"_id": inv_id_raw}, {"invoice_no": inv_id_raw}])
+    inv = await db.invoices.find_one({"$or": inv_queries})
     if not inv:
         raise HTTPException(404, "Invoice not found")
-    grn_no = await next_grn_no(db=db)
+
+    inv_id_str = str(inv["_id"])
+    inv_no_str = inv.get("invoice_no") or ""
+
+    existing_grn = await db.grns.find_one({
+        "$or": [
+            {"invoice_id": inv_id_str},
+            {"invoice_id": inv_id_raw},
+            {"invoice_no": inv_no_str}
+        ]
+    })
+    if existing_grn and existing_grn.get("grn_no"):
+        grn_no = existing_grn["grn_no"]
+    else:
+        grn_no = await next_grn_no(db=db)
+
     lines = []
     total_disp = total_recv = total_acc = total_rej = 0
     for idx, li in enumerate(payload.line_items, 1):
@@ -2466,23 +2489,36 @@ async def create_grn(payload: GRNIn, request: Request):
         total_disp += disp; total_recv += recv; total_acc += acc; total_rej += rej
 
     doc = {
-        "grn_no": grn_no, "grn_date": payload.grn_date,
+        "grn_no": grn_no,
+        "grn_date": payload.grn_date,
         "received_date": payload.received_date or payload.grn_date,
-        "invoice_id": payload.invoice_id, "invoice_no": inv.get("invoice_no"),
-        "po_id": inv.get("po_id"), "po_number": inv.get("po_number"),
+        "invoice_id": inv_id_str,
+        "invoice_no": inv_no_str,
+        "po_id": inv.get("po_id"),
+        "po_number": inv.get("po_number"),
         "client_name": inv.get("client_name"),
         "client_reference": payload.client_reference,
         "notes": payload.notes,
         "line_items": lines,
-        "total_dispatched": total_disp, "total_received": total_recv,
-        "total_accepted": total_acc, "total_rejected": total_rej,
-        "by": u["email"], "created_at": now_iso(),
+        "total_dispatched": total_disp,
+        "total_received": total_recv,
+        "total_accepted": total_acc,
+        "total_rejected": total_rej,
+        "by": u["email"],
+        "updated_at": now_iso(),
     }
-    res = await db.grns.insert_one(doc)
-    doc["_id"] = res.inserted_id
 
-    grn_map = await _aggregate_grn_adjustments([str(inv["_id"])], db=db)
-    grn_entry = grn_map.get(str(inv["_id"]), {})
+    if existing_grn:
+        doc["created_at"] = existing_grn.get("created_at") or now_iso()
+        await db.grns.update_one({"_id": existing_grn["_id"]}, {"$set": doc})
+        doc["_id"] = existing_grn["_id"]
+    else:
+        doc["created_at"] = now_iso()
+        res = await db.grns.insert_one(doc)
+        doc["_id"] = res.inserted_id
+
+    grn_map = await _aggregate_grn_adjustments([inv_id_str], db=db)
+    grn_entry = grn_map.get(inv_id_str, {})
     grn_adj = round(float(grn_entry.get("adjustment", 0)), 2)
     grand = float(inv.get("grand_total") or 0)
     net_amount = max(0.0, round(grand - grn_adj, 2))

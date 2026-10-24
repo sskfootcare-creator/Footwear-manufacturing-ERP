@@ -492,33 +492,148 @@ async def _aggregate_payments_for_invoices(invoice_ids: list[str], db=None) -> d
 
 
 async def _aggregate_grn_adjustments(invoice_ids: list[str], db=None) -> dict[str, dict]:
-    """Returns invoice_id -> {adjustment: float, grn_date: str, grn_no: str} across all GRNs."""
+    """Returns invoice_id -> {adjustment: float, base_adjustment: float, tax_adjustment: float, grn_date: str, grn_no: str, short_pcs: int} across all GRNs.
+    Adjustment is gross (inclusive of GST) so that:
+        net_amount = grand_total - adjustment
+    exactly matches the payment received for accepted quantity without leaving any GST discrepancy.
+    """
     if not invoice_ids:
         return {}
     if db is None:
         db = getattr(__import__("server"), "db")
-    grns = await db.grns.find({"invoice_id": {"$in": invoice_ids}}).sort("grn_date", 1).to_list(5000)
-    out: dict[str, dict] = {iid: {"adjustment": 0.0, "grn_date": None, "grn_no": None} for iid in invoice_ids}
-    invoices = await db.invoices.find({"_id": {"$in": [oid(i) for i in invoice_ids]}}).to_list(5000)
-    inv_by_id = {str(d["_id"]): d for d in invoices}
+
+    str_ids = [str(i) for i in invoice_ids if i]
+    query_oids = []
+    for i in str_ids:
+        if ObjectId.is_valid(i):
+            try:
+                query_oids.append(oid(i))
+            except Exception:
+                pass
+        query_oids.append(i)
+
+    invoices = await db.invoices.find({"_id": {"$in": query_oids}}).to_list(5000)
+    inv_by_id: dict[str, dict] = {}
+    inv_nos_map: dict[str, str] = {}
+    for d in invoices:
+        sid = str(d["_id"])
+        inv_by_id[sid] = d
+        if d.get("invoice_no"):
+            inv_nos_map[d["invoice_no"]] = sid
+
+    grn_search_ids = list(inv_by_id.keys()) + list(inv_nos_map.keys()) + str_ids
+    grn_or = [{"invoice_id": {"$in": grn_search_ids}}]
+    if inv_nos_map:
+        grn_or.append({"invoice_no": {"$in": list(inv_nos_map.keys())}})
+
+    grns = await db.grns.find({"$or": grn_or}).sort("created_at", 1).to_list(5000)
+
+    # Retain the most recent GRN per normalized invoice id to avoid duplicate accumulation
+    latest_grn_by_iid: dict[str, dict] = {}
     for g in grns:
-        iid = g.get("invoice_id")
+        raw_iid = str(g.get("invoice_id") or "")
+        inv_no = g.get("invoice_no")
+        norm_iid = raw_iid if raw_iid in inv_by_id else inv_nos_map.get(inv_no, raw_iid)
+        latest_grn_by_iid[norm_iid] = g
+
+    out: dict[str, dict] = {
+        iid: {
+            "adjustment": 0.0,
+            "base_adjustment": 0.0,
+            "tax_adjustment": 0.0,
+            "grn_date": None,
+            "grn_no": None,
+            "short_pcs": 0,
+        }
+        for iid in str_ids
+    }
+
+    for iid, g in latest_grn_by_iid.items():
         if iid in out:
             if g.get("grn_date"):
                 out[iid]["grn_date"] = g.get("grn_date")
             if g.get("grn_no"):
                 out[iid]["grn_no"] = g.get("grn_no")
+
         inv = inv_by_id.get(iid)
         if not inv:
             continue
-        prices = {(li.get("style_code"), li.get("color"), str(li.get("size") or "")):
-                  float(li.get("unit_price") or 0) for li in (inv.get("line_items_snapshot") or [])}
-        for ln in g.get("line_items", []):
-            short = max(0, int(ln.get("dispatched_qty", 0)) - int(ln.get("accepted_qty", 0)))
-            key = (ln.get("style_code"), ln.get("color"), str(ln.get("size") or ""))
-            unit = prices.get(key) or 0
-            if iid in out:
-                out[iid]["adjustment"] += short * unit
+
+        inv_subtotal = float(inv.get("subtotal") or 0.0)
+        inv_grand = float(inv.get("grand_total") or 0.0)
+        inv_tax_ratio = (inv_grand / inv_subtotal) if (inv_subtotal > 0 and inv_grand > 0) else 1.0
+
+        inv_tax_pct = float(inv.get("cgst_rate") or 0.0) + float(inv.get("sgst_rate") or 0.0) + float(inv.get("igst_rate") or 0.0)
+        if inv_tax_pct > 0:
+            inv_tax_mult = 1.0 + (inv_tax_pct / 100.0)
+        else:
+            inv_tax_mult = inv_tax_ratio
+
+        snapshot = inv.get("line_items_snapshot") or inv.get("line_items") or []
+        by_exact: dict[tuple, dict] = {}
+        by_sc_color: dict[tuple, dict] = {}
+        by_sc: dict[str, dict] = {}
+
+        for li in snapshot:
+            sc = str(li.get("style_code") or "").strip().upper()
+            color = str(li.get("color") or "").strip().upper()
+            size = str(li.get("size") or "").strip()
+
+            if sc and color and size:
+                by_exact[(sc, color, size)] = li
+            if sc and color:
+                by_sc_color[(sc, color)] = li
+            if sc:
+                by_sc[sc] = li
+
+        total_short_base = 0.0
+        total_short_gross = 0.0
+        total_short_pcs = 0
+
+        for idx, ln in enumerate(g.get("line_items", [])):
+            disp = int(ln.get("dispatched_qty", 0) or 0)
+            recv = int(ln.get("received_qty") if ln.get("received_qty") is not None else disp)
+            rej = int(ln.get("rejected_qty", 0) or 0)
+            acc = int(ln.get("accepted_qty") if ln.get("accepted_qty") is not None else (recv - rej))
+            short = max(0, disp - acc)
+
+            if short <= 0:
+                continue
+
+            total_short_pcs += short
+
+            sc = str(ln.get("style_code") or "").strip().upper()
+            color = str(ln.get("color") or "").strip().upper()
+            size = str(ln.get("size") or "").strip()
+
+            matched_li = by_exact.get((sc, color, size)) or by_sc_color.get((sc, color)) or by_sc.get(sc)
+            if not matched_li and idx < len(snapshot):
+                matched_li = snapshot[idx]
+
+            unit_price = float((matched_li or {}).get("unit_price") or (matched_li or {}).get("rate") or 0.0)
+
+            li_tax_pct = (
+                float((matched_li or {}).get("cgst_rate") or 0.0)
+                + float((matched_li or {}).get("sgst_rate") or 0.0)
+                + float((matched_li or {}).get("igst_rate") or 0.0)
+            )
+            if li_tax_pct > 0:
+                tax_mult = 1.0 + (li_tax_pct / 100.0)
+            else:
+                tax_mult = inv_tax_mult
+
+            line_base_short = short * unit_price
+            line_gross_short = line_base_short * tax_mult
+
+            total_short_base += line_base_short
+            total_short_gross += line_gross_short
+
+        if iid in out:
+            out[iid]["base_adjustment"] = round(total_short_base, 2)
+            out[iid]["adjustment"] = round(total_short_gross, 2)
+            out[iid]["tax_adjustment"] = round(total_short_gross - total_short_base, 2)
+            out[iid]["short_pcs"] = total_short_pcs
+
     return out
 
 
@@ -2374,15 +2489,35 @@ async def send_batch_overdue_reminders_route(payload: BatchRemindersIn, request:
 async def get_invoice(iid: str, request: Request):
     await _get_user(request)
     db = _get_db(request)
-    doc = await db.invoices.find_one({"_id": oid(iid)})
+    inv_queries = []
+    if ObjectId.is_valid(iid):
+        try:
+            inv_queries.append({"_id": oid(iid)})
+        except Exception:
+            pass
+    inv_queries.extend([{"_id": iid}, {"invoice_no": iid}])
+    doc = await db.invoices.find_one({"$or": inv_queries})
     if not doc:
         raise HTTPException(404, "Invoice not found")
-    pay_map = await _aggregate_payments_for_invoices([iid], db=db)
-    grn_map = await _aggregate_grn_adjustments([iid], db=db)
+    inv_id_str = str(doc["_id"])
+    inv_no_str = doc.get("invoice_no") or ""
+    lookup_keys = list(dict.fromkeys([inv_id_str, iid, inv_no_str]))
+    pay_map = await _aggregate_payments_for_invoices(lookup_keys, db=db)
+    grn_map = await _aggregate_grn_adjustments(lookup_keys, db=db)
     inv = _decorate_invoice(doc, pay_map, grn_map)
     inv.pop("file_b64", None)
-    payments = await db.payments.find({"invoice_ids": iid}).sort("payment_date", -1).to_list(200)
-    grns = await db.grns.find({"invoice_id": iid}).sort("grn_date", -1).to_list(200)
+    payments = await db.payments.find({
+        "$or": [
+            {"invoice_ids": {"$in": lookup_keys}},
+            {"invoice_no": inv_no_str}
+        ]
+    }).sort("payment_date", -1).to_list(200)
+    grns = await db.grns.find({
+        "$or": [
+            {"invoice_id": {"$in": lookup_keys}},
+            {"invoice_no": inv_no_str}
+        ]
+    }).sort("grn_date", -1).to_list(200)
     inv["payments"] = [stringify(p) for p in payments]
     inv["grns"] = [stringify(g) for g in grns]
     return inv

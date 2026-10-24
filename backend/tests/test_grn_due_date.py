@@ -26,7 +26,12 @@ def match_filter(doc, filter_dict):
     if not filter_dict:
         return True
     if "_id" in filter_dict:
-        if str(doc.get("_id")) != str(filter_dict["_id"]):
+        v = filter_dict["_id"]
+        if isinstance(v, dict) and "$in" in v:
+            target_list = [str(x) for x in v["$in"]]
+            if str(doc.get("_id")) not in target_list:
+                return False
+        elif str(doc.get("_id")) != str(v):
             return False
     if "$or" in filter_dict:
         if not any(match_filter(doc, sub) for sub in filter_dict["$or"]):
@@ -314,3 +319,186 @@ async def test_cash_forecast_endpoint(mock_db, mock_user_override, async_client)
     assert data["by_date"][0]["date"] == "2026-09-24"
     assert data["by_date"][0]["total_amount"] == 125000.0
     assert len(data["weeks"]) > 0
+
+
+@pytest.mark.anyio
+async def test_grn_upsert_and_fetch_by_id(mock_db, mock_user_override, async_client):
+    """Verify GRN creation, upserting without duplicates, and retrieving saved lines via GET /api/invoices/{id}."""
+    inv_id = str(ObjectId())
+    await mock_db.invoices.insert_one({
+        "_id": oid(inv_id),
+        "invoice_no": "SSK26-27-041",
+        "client_name": "SIYARAM SILK MILLS LTD",
+        "payment_terms_days": 60,
+        "subtotal": 100000.0,
+        "grand_total": 112000.0,
+        "cgst_rate": 6.0,
+        "sgst_rate": 6.0,
+        "line_items_snapshot": [
+            {
+                "style_code": "5ZE0926MFFLT",
+                "color": "BLACK",
+                "size": "4-8",
+                "quantity": 100,
+                "unit_price": 1000.0,
+            }
+        ],
+    })
+
+    # 1. Post initial GRN with 90 received, 0 rejected (10 short)
+    grn_payload = {
+        "invoice_id": inv_id,
+        "grn_date": "2026-10-24",
+        "client_reference": "SIYARAM/GRN/2026/123",
+        "notes": "First check",
+        "line_items": [
+            {
+                "style_code": "5ZE0926MFFLT",
+                "color": "BLACK",
+                "size": "4-8",
+                "dispatched_qty": 100,
+                "received_qty": 90,
+                "rejected_qty": 0,
+                "accepted_qty": 90,
+                "rejection_reason": "",
+            }
+        ],
+    }
+    r = await async_client.post("/api/grns", json=grn_payload)
+    assert r.status_code == 200, f"Error: {r.text}"
+    grn_res = r.json()
+    first_grn_no = grn_res.get("grn_no")
+    assert first_grn_no is not None
+
+    # Fetch invoice: verify grn_adjustment is 10 short * 1000 * 1.12 = 11,200
+    r_inv = await async_client.get(f"/api/invoices/{inv_id}")
+    assert r_inv.status_code == 200
+    inv_data = r_inv.json()
+    assert len(inv_data["grns"]) == 1
+    assert inv_data["grn_adjustment"] == 11200.0
+    assert inv_data["net_amount"] == 100800.0
+    assert inv_data["outstanding"] == 100800.0
+    assert inv_data["grns"][0]["client_reference"] == "SIYARAM/GRN/2026/123"
+
+    # 2. Update/edit the GRN (e.g. 95 received, 5 rejected -> accepted 90)
+    update_payload = {
+        "invoice_id": inv_id,
+        "grn_date": "2026-10-25",
+        "client_reference": "SIYARAM/GRN/2026/123-REV",
+        "notes": "Updated note",
+        "line_items": [
+            {
+                "style_code": "5ZE0926MFFLT",
+                "color": "BLACK",
+                "size": "4-8",
+                "dispatched_qty": 100,
+                "received_qty": 95,
+                "rejected_qty": 5,
+                "accepted_qty": 90,
+                "rejection_reason": "Stitching defect on 5 pcs",
+            }
+        ],
+    }
+    r_upd = await async_client.post("/api/grns", json=update_payload)
+    assert r_upd.status_code == 200
+    upd_res = r_upd.json()
+    assert upd_res["grn_no"] == first_grn_no  # Same GRN number preserved, no duplicates!
+    assert len(mock_db.grns.docs) == 1  # Exactly one document in DB
+
+    # Verify GET /api/invoices/{id} loads the updated values
+    r_inv2 = await async_client.get(f"/api/invoices/{inv_id}")
+    assert r_inv2.status_code == 200
+    inv_data2 = r_inv2.json()
+    assert len(inv_data2["grns"]) == 1
+    saved_grn = inv_data2["grns"][0]
+    assert saved_grn["client_reference"] == "SIYARAM/GRN/2026/123-REV"
+    assert saved_grn["line_items"][0]["received_qty"] == 95
+    assert saved_grn["line_items"][0]["rejected_qty"] == 5
+    assert saved_grn["line_items"][0]["rejection_reason"] == "Stitching defect on 5 pcs"
+    assert inv_data2["grn_adjustment"] == 11200.0
+    assert inv_data2["net_amount"] == 100800.0
+
+
+@pytest.mark.anyio
+async def test_grn_shortage_deduction_ledger_exact_settlement(mock_db, mock_user_override, async_client):
+    """Verify that tax-inclusive shortage deduction ensures payment matches net invoice with 0 discrepancy and balances client ledger."""
+    from routes.pos import _build_client_ledger
+
+    inv_id = str(ObjectId())
+    await mock_db.invoices.insert_one({
+        "_id": oid(inv_id),
+        "invoice_no": "SSK26-27-042",
+        "client_name": "SIYARAM SILK MILLS LTD",
+        "subtotal": 100000.0,
+        "grand_total": 112000.0,
+        "cgst_rate": 6.0,
+        "sgst_rate": 6.0,
+        "payment_terms_days": 45,
+        "line_items_snapshot": [
+            {
+                "style_code": "5ZE0926MFFLT",
+                "color": "BLACK",
+                "size": "4-8",
+                "quantity": 100,
+                "unit_price": 1000.0,
+            }
+        ],
+    })
+
+    # Record GRN with 90 accepted out of 100 dispatched (10 short)
+    await async_client.post("/api/grns", json={
+        "invoice_id": inv_id,
+        "grn_date": "2026-10-24",
+        "client_reference": "SIYARAM/GRN/2026/456",
+        "line_items": [
+            {
+                "style_code": "5ZE0926MFFLT",
+                "color": "BLACK",
+                "size": "4-8",
+                "dispatched_qty": 100,
+                "received_qty": 90,
+                "rejected_qty": 0,
+                "accepted_qty": 90,
+            }
+        ],
+    })
+
+    # Client receives 90 accepted pairs @ 1000 = 90,000 + 12% GST = 100,800 and transfers 100,800
+    await mock_db.payments.insert_one({
+        "invoice_ids": [inv_id],
+        "amount": 100800.0,
+        "payment_date": "2026-10-26",
+        "client_name": "SIYARAM SILK MILLS LTD",
+        "mode": "NEFT",
+    })
+
+    # 1. Invoice status and outstanding check
+    r_inv = await async_client.get(f"/api/invoices/{inv_id}")
+    inv_data = r_inv.json()
+    assert inv_data["net_amount"] == 100800.0
+    assert inv_data["received_amount"] == 100800.0
+    assert inv_data["outstanding"] == 0.0
+    assert inv_data["status"] == "paid"
+
+    # 2. Client ledger check: verify closing balance is exactly 0.00
+    ledger = await _build_client_ledger("SIYARAM SILK MILLS LTD", db=mock_db)
+    assert ledger["total_invoiced"] == 100800.0
+    assert ledger["total_received"] == 100800.0
+    assert ledger["outstanding"] == 0.0
+    assert ledger["closing_balance"] == 0.0
+
+    # Verify ledger entries contain the invoice debit, GRN credit adjustment, and payment credit
+    vch_types = [e["vch_type"] for e in ledger["entries"]]
+    assert "Invoice" in vch_types
+    assert "GR Adj" in vch_types
+    assert "Payment" in vch_types
+
+    gr_entry = next(e for e in ledger["entries"] if e["vch_type"] == "GR Adj")
+    assert gr_entry["credit"] == 11200.0  # Exactly base shortage 10,000 + GST 1,200
+
+    pay_entry = next(e for e in ledger["entries"] if e["vch_type"] == "Payment")
+    assert pay_entry["credit"] == 100800.0
+
+    last_entry = ledger["entries"][-1]
+    assert last_entry["balance"] == 0.0
+

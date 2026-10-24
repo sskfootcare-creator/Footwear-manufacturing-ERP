@@ -2007,6 +2007,7 @@ function Section({ title, children }) {
 /* ------------------- GRN DIALOG ------------------- */
 function GRNDialog({ invoiceMeta, onClose, onSaved }) {
   const [inv, setInv] = useState(null);
+  const [existingGrnInfo, setExistingGrnInfo] = useState(null);
   const [form, setForm] = useState({
     grn_date: new Date().toISOString().slice(0, 10),
     client_reference: "",
@@ -2016,27 +2017,84 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    http.get(`/invoices/${invoiceMeta.id}`).then(({ data }) => {
+    const invId = invoiceMeta?.id || invoiceMeta?._id;
+    if (!invId) return;
+
+    http.get(`/invoices/${invId}`).then(({ data }) => {
       setInv(data);
-      setForm((f) => ({
-        ...f,
-        lines: (data.line_items_snapshot || []).map((li) => {
-          const q = Number(li.quantity ?? li.qty ?? 0);
-          return {
-            style_code: li.style_code,
-            description: li.description || "",
-            color: li.color,
-            size: li.size,
-            dispatched_qty: q,
-            received_qty: q,
-            accepted_qty: q,
-            rejected_qty: 0,
-            rejection_reason: "",
-          };
-        }),
-      }));
+
+      const existingGrn = Array.isArray(data.grns) && data.grns.length > 0 ? data.grns[0] : null;
+      const existingLines = existingGrn?.line_items || [];
+
+      const rawLines = data.line_items_snapshot || data.line_items || [];
+      const lines = rawLines.map((li, idx) => {
+        const disp = Number(li.quantity ?? li.qty ?? 0);
+        const sc = String(li.style_code || "").trim().toUpperCase();
+        const col = String(li.color || "").trim().toUpperCase();
+        const sz = String(li.size || "").trim();
+
+        // 1. Match by exact style + color + size
+        let matched = existingLines.find(
+          (el) =>
+            String(el.style_code || "").trim().toUpperCase() === sc &&
+            String(el.color || "").trim().toUpperCase() === col &&
+            String(el.size || "").trim() === sz
+        );
+        // 2. Match by style + color
+        if (!matched) {
+          matched = existingLines.find(
+            (el) =>
+              String(el.style_code || "").trim().toUpperCase() === sc &&
+              String(el.color || "").trim().toUpperCase() === col
+          );
+        }
+        // 3. Match by index if style matches
+        if (!matched && existingLines[idx] && String(existingLines[idx].style_code || "").trim().toUpperCase() === sc) {
+          matched = existingLines[idx];
+        }
+
+        const recv = matched != null && matched.received_qty != null ? Number(matched.received_qty) : disp;
+        const rej = matched != null && matched.rejected_qty != null ? Number(matched.rejected_qty) : 0;
+        const acc = matched != null && matched.accepted_qty != null ? Number(matched.accepted_qty) : Math.max(0, recv - rej);
+        const reason = matched != null ? (matched.rejection_reason || "") : "";
+
+        return {
+          style_code: li.style_code || "",
+          description: li.description || "",
+          color: li.color || "",
+          size: li.size || "",
+          unit_price: Number(li.unit_price ?? li.rate ?? 0),
+          dispatched_qty: disp,
+          received_qty: recv,
+          accepted_qty: acc,
+          rejected_qty: rej,
+          rejection_reason: reason,
+        };
+      });
+
+      if (existingGrn) {
+        setForm({
+          grn_date: existingGrn.grn_date || new Date().toISOString().slice(0, 10),
+          client_reference: existingGrn.client_reference || "",
+          notes: existingGrn.notes || "",
+          lines,
+        });
+        setExistingGrnInfo({
+          grn_no: existingGrn.grn_no,
+          grn_date: existingGrn.grn_date,
+          updated_at: existingGrn.updated_at || existingGrn.created_at,
+        });
+      } else {
+        setForm({
+          grn_date: new Date().toISOString().slice(0, 10),
+          client_reference: "",
+          notes: "",
+          lines,
+        });
+        setExistingGrnInfo(null);
+      }
     });
-  }, [invoiceMeta.id]);
+  }, [invoiceMeta?.id, invoiceMeta?._id]);
 
   const updLine = (i, k, v) =>
     setForm((f) => {
@@ -2076,8 +2134,9 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
 
     setSaving(true);
     try {
+      const invId = invoiceMeta.id || invoiceMeta._id || inv?.id || inv?._id;
       await http.post("/grns", {
-        invoice_id: invoiceMeta.id,
+        invoice_id: invId,
         grn_date: form.grn_date,
         client_reference: form.client_reference,
         notes: form.notes,
@@ -2098,14 +2157,52 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
   };
 
   if (!inv) return null;
-  const tot = form.lines.reduce((s, l) => s + Number(l.accepted_qty || 0), 0);
-  const totDisp = form.lines.reduce(
-    (s, l) => s + Number(l.dispatched_qty || 0),
+
+  const grandTotal = Number(inv.grand_total || 0);
+  const subTotal = Number(inv.subtotal || 0);
+  const taxPct =
+    Number(inv.cgst_rate || 0) +
+    Number(inv.sgst_rate || 0) +
+    Number(inv.igst_rate || 0);
+  const taxMultiplier =
+    taxPct > 0
+      ? 1 + taxPct / 100
+      : subTotal > 0 && grandTotal > 0
+      ? grandTotal / subTotal
+      : 1.0;
+
+  let totDisp = 0;
+  let totRecv = 0;
+  let totRej = 0;
+  let totAccepted = 0;
+  let totalShortBase = 0;
+  let totalShortGross = 0;
+
+  form.lines.forEach((l) => {
+    const disp = Number(l.dispatched_qty || 0);
+    const recv = Number(l.received_qty || 0);
+    const rej = Number(l.rejected_qty || 0);
+    const acc = Number(l.accepted_qty || 0);
+    const short = Math.max(0, disp - acc);
+
+    totDisp += disp;
+    totRecv += recv;
+    totRej += rej;
+    totAccepted += acc;
+
+    const unitPrice =
+      Number(l.unit_price || 0) ||
+      (totDisp > 0 && subTotal > 0 ? subTotal / totDisp : 0);
+    const lineBaseShort = short * unitPrice;
+    totalShortBase += lineBaseShort;
+    totalShortGross += lineBaseShort * taxMultiplier;
+  });
+
+  const totShort = Math.max(0, totDisp - totAccepted);
+  const grnAdjustment = Math.round(totalShortGross * 100) / 100;
+  const netExpectedPayable = Math.max(
     0,
-  );
-  const totRej = form.lines.reduce(
-    (s, l) => s + Number(l.rejected_qty || 0),
-    0,
+    Math.round((grandTotal - grnAdjustment) * 100) / 100,
   );
 
   return (
@@ -2116,8 +2213,15 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
       <div className="bg-white w-full max-w-5xl max-h-[92vh] overflow-y-auto border-2 border-slate-200 shadow-2xl">
         <div className="bg-[#7C3AED] text-white px-6 py-4 flex items-baseline justify-between">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">
-              Goods Receipt Note
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-90">
+                Goods Receipt Note
+              </span>
+              {existingGrnInfo?.grn_no && (
+                <span className="bg-purple-900/60 text-purple-100 border border-purple-300/40 text-[10px] px-2 py-0.5 rounded font-mono font-bold">
+                  {existingGrnInfo.grn_no}
+                </span>
+              )}
             </div>
             <div className="text-xl font-bold">
               {invoiceMeta.invoice_no} · {invoiceMeta.client_name}
@@ -2128,11 +2232,27 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
           </button>
         </div>
         <div className="p-6 space-y-4">
+          {existingGrnInfo && (
+            <div className="bg-emerald-50 border border-emerald-300 px-3 py-2 text-xs text-emerald-900 rounded flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                <span>
+                  <b>Existing GRN Loaded:</b> Record{" "}
+                  <span className="font-mono font-bold">{existingGrnInfo.grn_no}</span> (Date:{" "}
+                  <span className="font-mono">{existingGrnInfo.grn_date}</span>) is preloaded below. Saving will update this note.
+                </span>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded">
+                Active Record
+              </span>
+            </div>
+          )}
+
           <div className="bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-slate-700">
             Update the <b>Received qty</b> and <b>Rejected qty</b> per line as
             per the client's confirmation email.{" "}
             <b>Accepted = Received − Rejected</b>. Short / rejected pcs
-            auto-reduce the receivable in the ledger.
+            auto-reduce the invoice receivable in the ledger (including applicable GST) so payment received matches exactly.
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -2312,33 +2432,90 @@ function GRNDialog({ invoiceMeta, onClose, onSaved }) {
                   Totals
                 </td>
                 <td className="px-2 py-2 text-right font-mono">{totDisp}</td>
-                <td className="px-2 py-2 text-right font-mono">
-                  {form.lines.reduce(
-                    (s, l) => s + Number(l.received_qty || 0),
-                    0,
-                  )}
-                </td>
-                <td className="px-2 py-2 text-right font-mono text-red-300">
-                  {totRej}
-                </td>
-                <td className="px-2 py-2 text-right font-mono font-bold">
-                  {tot}
+                <td className="px-2 py-2 text-right font-mono">{totRecv}</td>
+                <td className="px-2 py-2 text-right font-mono text-red-300">{totRej}</td>
+                <td className="px-2 py-2 text-right font-mono font-bold text-emerald-400">
+                  {totAccepted}
                 </td>
                 <td className="px-2 py-2 text-right text-[10px] uppercase tracking-wider text-slate-300">
-                  Short: <b className="text-red-300">{totDisp - tot}</b>
+                  Short: <b className="text-red-300 font-mono text-xs">{totShort}</b>
                 </td>
               </tr>
             </tfoot>
           </table>
 
-          <div className="flex gap-2 pt-3 border-t border-slate-200">
+          {/* Real-time Shortage & Receivable Impact Summary */}
+          <div className="bg-slate-50 border border-slate-200 p-3 rounded space-y-2">
+            <div className="flex items-center justify-between text-xs border-b border-slate-200 pb-2">
+              <span className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">
+                Financial Settlement Breakdown
+              </span>
+              <span className="text-[11px] text-slate-500 font-mono">
+                {taxPct > 0 ? `GST Rate: ${taxPct}%` : "GST Included"}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+              <div className="bg-white border border-slate-200 p-2.5 rounded">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
+                  Original Invoice Total
+                </div>
+                <div className="text-base font-bold font-mono text-slate-800 mt-0.5">
+                  {inr(grandTotal)}
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  {totDisp} pairs dispatched
+                </div>
+              </div>
+
+              <div className={`p-2.5 rounded border ${
+                grnAdjustment > 0
+                  ? "bg-amber-50/70 border-amber-300 text-amber-900"
+                  : "bg-white border-slate-200 text-slate-700"
+              }`}>
+                <div className="text-[10px] uppercase tracking-wider font-bold flex items-center justify-between">
+                  <span>GRN Shortage Deduction</span>
+                  {totShort > 0 && (
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-200 text-amber-800 font-mono">
+                      -{totShort} pcs
+                    </span>
+                  )}
+                </div>
+                <div className={`text-base font-bold font-mono mt-0.5 ${
+                  grnAdjustment > 0 ? "text-amber-700" : "text-slate-800"
+                }`}>
+                  {grnAdjustment > 0 ? `- ${inr(grnAdjustment)}` : inr(0)}
+                </div>
+                <div className="text-[10px] opacity-80">
+                  {grnAdjustment > 0
+                    ? `Base: -${inr(totalShortBase)} | GST: -${inr(grnAdjustment - totalShortBase)}`
+                    : "No shortage recorded"}
+                </div>
+              </div>
+
+              <div className="bg-emerald-50 border border-emerald-300 p-2.5 rounded text-emerald-900">
+                <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-800">
+                  Expected Net Receivable
+                </div>
+                <div className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+                  {inr(netExpectedPayable)}
+                </div>
+                <div className="text-[10px] text-emerald-700/80">
+                  {totShort > 0
+                    ? `Matches ${totAccepted} accepted pairs (receivable & ledger balance)`
+                    : "Full shipment accepted"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-2 pt-2 border-t border-slate-200">
             <BtnPrimary
               onClick={submit}
               disabled={saving}
               data-testid="grn-submit"
               className="bg-[#7C3AED] border-[#7C3AED] hover:bg-[#5B21B6]"
             >
-              {saving ? "Saving…" : "Save GRN"}
+              {saving ? "Saving…" : existingGrnInfo ? "Update GRN" : "Save GRN"}
             </BtnPrimary>
             <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
           </div>
