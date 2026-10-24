@@ -685,6 +685,7 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "assigned_roles": c.get("assigned_roles") or [],
         "outside_cost": round(outside_cost, 2),
         "outside_source": outside_source,
         "is_outside_estimated": outside_source == "estimated",

@@ -217,6 +217,7 @@ async def compute_po_profitability(po_line: dict, style_obj: dict, db=None) -> d
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "assigned_roles": c.get("assigned_roles") or [],
         "outside_cost": round(outside_cost, 2),
         "outside_source": outside_source,
         "is_outside_estimated": outside_source == "estimated",
@@ -249,6 +250,7 @@ def _format_po_line_profitability(po_line: dict, style_obj: dict, costing: dict)
         "labor_cost": round(labor_cost, 2),
         "labor_source": labor_source,
         "is_estimated": labor_source == "estimated",
+        "assigned_roles": costing.get("assigned_roles") or [],
         "outside_cost": round(outside_cost, 2),
         "outside_source": outside_source,
         "is_outside_estimated": outside_source == "estimated",
@@ -303,56 +305,48 @@ async def _attach_po_profitability(po_docs: list, db=None):
 
     jobs_by_style_id = defaultdict(list)
     jobs_by_style_code = defaultdict(list)
-
-    # 2. Run ONE query: db.production_jobs.find({"$or": [{"style_id": {"$in": [...]}}, {"style_code": {"$in": [...]}}]})
-    if style_ids or style_codes:
-        job_or = []
-        if style_ids:
-            job_or.append({"style_id": {"$in": style_ids}})
-        if style_codes:
-            job_or.append({"style_code": {"$in": style_codes}})
-        job_query = {"$or": job_or} if len(job_or) > 1 else job_or[0]
-        all_jobs = await db.production_jobs.find(job_query).to_list(50000)
-
-        # 3. Group the results into a dict keyed by style_id/style_code in memory
-        for job in all_jobs:
-            jid = job.get("style_id")
-            if jid:
-                jobs_by_style_id[str(jid)].append(job)
-            jcode = job.get("style_code")
-            if jcode:
-                jobs_by_style_code[jcode].append(job)
-
-    # 4. Also fetch jobs specifically linked to the POs in po_docs (by po_id or po_number)
     po_jobs_by_poid = defaultdict(list)
     po_jobs_by_ponum = defaultdict(list)
-    po_job_or = []
+
+    combined_job_or = []
+    if style_ids:
+        combined_job_or.append({"style_id": {"$in": style_ids}})
+    if style_codes:
+        combined_job_or.append({"style_code": {"$in": style_codes}})
+
     for d in po_docs:
         d_id = str(d.get("_id") or d.get("id") or "")
         d_num = str(d.get("po_number") or "")
         if d_id:
-            po_job_or.append({"po_id": d_id})
+            combined_job_or.append({"po_id": d_id})
             if ObjectId.is_valid(d_id):
                 try:
-                    po_job_or.append({"po_id": oid(d_id)})
+                    combined_job_or.append({"po_id": oid(d_id)})
                 except Exception:
                     pass
         if d_num:
-            po_job_or.append({"po_number": d_num})
+            combined_job_or.append({"po_number": d_num})
 
-    if po_job_or and hasattr(db, "production_jobs"):
+    if combined_job_or and hasattr(db, "production_jobs"):
         try:
-            pj_query = {"$or": po_job_or} if len(po_job_or) > 1 else po_job_or[0]
-            po_specific_jobs = await db.production_jobs.find(pj_query).to_list(10000)
-            for j in po_specific_jobs:
-                p_id_val = str(j.get("po_id") or "")
-                p_num_val = str(j.get("po_number") or "")
+            job_query = {"$or": combined_job_or} if len(combined_job_or) > 1 else combined_job_or[0]
+            all_jobs = await db.production_jobs.find(job_query).to_list(50000)
+
+            for job in all_jobs:
+                jid = job.get("style_id")
+                if jid:
+                    jobs_by_style_id[str(jid)].append(job)
+                jcode = job.get("style_code")
+                if jcode:
+                    jobs_by_style_code[jcode].append(job)
+                p_id_val = str(job.get("po_id") or "")
+                p_num_val = str(job.get("po_number") or "")
                 if p_id_val:
-                    po_jobs_by_poid[p_id_val].append(j)
+                    po_jobs_by_poid[p_id_val].append(job)
                 if p_num_val:
-                    po_jobs_by_ponum[p_num_val].append(j)
+                    po_jobs_by_ponum[p_num_val].append(job)
         except Exception as e:
-            log.warning(f"Error fetching PO-specific production jobs in _attach_po_profitability: {e}")
+            log.warning(f"Error fetching production jobs in _attach_po_profitability: {e}")
 
     # Precompute costing per unique style
     from routes.styles import compute_style_costing_from_jobs
@@ -1467,6 +1461,7 @@ async def get_b2b_profitability(
                 "total_cost": total_cost_val,
                 "profit": profit_val,
                 "profit_pct": profit_pct_val,
+                "assigned_roles": costing.get("assigned_roles") or [],
             }
         else:
             u_price = float(it.get("unit_price") or it.get("price") or it.get("rate") or 0)
@@ -1483,6 +1478,7 @@ async def get_b2b_profitability(
                 "total_cost": 0.0,
                 "profit": u_price,
                 "profit_pct": 100.0 if u_price > 0 else 0.0,
+                "assigned_roles": [],
             }
 
         unit_price = float(prof.get("unit_price", 0))

@@ -107,6 +107,8 @@ def test_compute_po_profitability_actual_job_assignments():
     assert result["profit"] == 50.0
     # profit_pct = (50 / 200) * 100 = 25.0%
     assert result["profit_pct"] == 25.0
+    assert len(result.get("assigned_roles", [])) == 2
+    assert {r["role"] for r in result["assigned_roles"]} == {"cutting", "stitching"}
 
 def test_compute_style_costing_with_outside_labour():
     style = {
