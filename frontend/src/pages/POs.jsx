@@ -31,6 +31,14 @@ import {
   ReceiptIndianRupee,
   ExternalLink,
   ArrowRight,
+  Calculator,
+  AlertCircle,
+  CheckCircle2,
+  HardHat,
+  UserCheck,
+  RefreshCw,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
 import PackingListPreviewModal from "../components/PackingListPreviewModal";
@@ -95,6 +103,11 @@ export default function POs() {
   const [docActiveTab, setDocActiveTab] = useState("all");
   const [viewDocuments, setViewDocuments] = useState(null);
   const [loadingViewDocs, setLoadingViewDocs] = useState(false);
+  const [planningData, setPlanningData] = useState(null);
+  const [loadingPlanning, setLoadingPlanning] = useState(false);
+  const [showPlanningSection, setShowPlanningSection] = useState(true);
+  const [assignModal, setAssignModal] = useState(null);
+  const [allocatingKarigar, setAllocatingKarigar] = useState(false);
 
   const openPoDocuments = async (po, defaultTab = "all") => {
     setSelectedPoForInvoices(po);
@@ -164,10 +177,25 @@ export default function POs() {
     return new Set(styles.map((s) => s.code.trim().toUpperCase()));
   }, [styles]);
 
+  const loadPlanningData = async (poId) => {
+    if (!poId) return;
+    setLoadingPlanning(true);
+    try {
+      const { data } = await http.get(`/pos/${poId}/planning-jobs`);
+      setPlanningData(data);
+    } catch (err) {
+      console.error("Failed to load PO planning jobs:", err);
+    } finally {
+      setLoadingPlanning(false);
+    }
+  };
+
   const openView = async (p) => {
     setView(p);
     setLoadingViewDocs(true);
     setViewDocuments(null);
+    setPlanningData(null);
+    loadPlanningData(p.id);
     try {
       const [res, docRes] = await Promise.all([
         http.get(`/pos/${p.id}`).catch(() => ({ data: p })),
@@ -181,6 +209,77 @@ export default function POs() {
       setLoadingViewDocs(false);
     }
   };
+
+  const handleAllocateWorker = async (role, workerId, rate) => {
+    if (!view?.id || !role) return;
+    setAllocatingKarigar(true);
+    try {
+      const { data: updatedPo } = await http.post(`/pos/${view.id}/allocate-karigar`, {
+        role,
+        worker_id: workerId || null,
+        rate_per_pair: rate !== "" && rate != null ? Number(rate) : null,
+      });
+      setView(updatedPo);
+      await loadPlanningData(view.id);
+      setAssignModal(null);
+      load(); // refresh main PO list
+    } catch (err) {
+      console.error("Failed to allocate worker:", err);
+      alert("Failed to allocate karigar: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setAllocatingKarigar(false);
+    }
+  };
+
+  const poBudget = useMemo(() => {
+    if (!view || !view.line_items) return null;
+    const pb = view.production_budget || view.profitability || {};
+    let totalBom = pb.total_bom_cost != null ? pb.total_bom_cost : 0;
+    let totalLabor = pb.total_labor_cost != null ? pb.total_labor_cost : 0;
+    let totalPacking = pb.total_packing_cost != null ? pb.total_packing_cost : 0;
+    let totalOutside = pb.total_outside_cost != null ? pb.total_outside_cost : 0;
+    let hasActual = false;
+    let hasEstimated = false;
+
+    if (pb.total_bom_cost == null) {
+      totalBom = 0;
+      totalLabor = 0;
+      totalPacking = 0;
+      totalOutside = 0;
+      view.line_items.forEach((li) => {
+        const q = Number(li.quantity || 0);
+        const pr = li.profitability || {};
+        totalBom += Number(pr.bom_cost || 0) * q;
+        totalLabor += Number(pr.labor_cost || 0) * q;
+        totalPacking += Number(pr.packing_cost || 0) * q;
+        totalOutside += Number(pr.outside_cost || 0) * q;
+        if (pr.is_estimated) hasEstimated = true;
+        else if (Number(pr.labor_cost || 0) > 0) hasActual = true;
+      });
+    } else {
+      hasEstimated = pb.is_estimated ?? false;
+      hasActual = pb.labor_source === "actual";
+    }
+
+    const totalCost = Number(pb.total_cost || pb.total_budget || (totalBom + totalLabor + totalPacking + totalOutside));
+    const subtotal = Number(view.subtotal || pb.total_revenue || 0);
+    const profit = pb.total_profit != null ? pb.total_profit : (subtotal - totalCost);
+    const profitPct = pb.profit_pct != null ? pb.profit_pct : (subtotal > 0 ? ((profit / subtotal) * 100).toFixed(1) : "0.0");
+
+    return {
+      totalBom,
+      totalLabor,
+      totalPacking,
+      totalOutside,
+      totalCost,
+      subtotal,
+      profit,
+      profitPct,
+      isLaborEstimated: hasEstimated || (pb.is_estimated ?? false),
+      isActual: hasActual || pb.labor_source === "actual",
+      isFullyAllocated: pb.is_fully_allocated ?? (!hasEstimated && hasActual),
+    };
+  }, [view]);
 
   const startNew = () => {
     setEditId(null);
@@ -1055,6 +1154,135 @@ export default function POs() {
               <Field label="Shipping" value={view.shipping_address} />
             </div>
 
+            {/* ── PLANNING STAGE: KARIGAR & WORKER ALLOCATION SECTION ── */}
+            <div className="border-2 border-violet-200 bg-gradient-to-br from-violet-50/80 to-indigo-50/80 rounded-xl p-3.5 space-y-3" data-testid="po-planning-stage-section">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-violet-600 text-white">
+                    <HardHat className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-violet-950">
+                        Planning Stage · Karigar Allocation
+                      </h3>
+                      {planningData && (
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          planningData.is_fully_allocated
+                            ? "bg-emerald-100 text-emerald-900 border-emerald-300"
+                            : "bg-amber-100 text-amber-900 border-amber-300"
+                        }`} data-testid="po-allocation-progress-badge">
+                          {planningData.allocated_count} / {planningData.total_roles} Allocated
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-violet-700">
+                      Allocate karigars to determine actual labour cost &amp; manufacturing budget
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => navigate("/production")}
+                    className="text-xs font-bold text-violet-700 hover:text-violet-900 hover:underline inline-flex items-center gap-1"
+                    title="Open in Kanban Production board"
+                  >
+                    Kanban Planning <ArrowRight className="w-3 h-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowPlanningSection(!showPlanningSection)}
+                    className="p-1 rounded text-violet-600 hover:bg-violet-100 transition-colors"
+                    title={showPlanningSection ? "Collapse Karigar Allocation" : "Expand Karigar Allocation"}
+                  >
+                    {showPlanningSection ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {showPlanningSection && (
+                <div>
+                  {loadingPlanning ? (
+                    <div className="py-4 text-center text-xs text-violet-600 flex items-center justify-center gap-1.5">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Loading planning roles &amp; karigars...
+                    </div>
+                  ) : planningData?.roles?.length ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+                      {planningData.roles.map((r) => (
+                        <div
+                          key={r.key}
+                          className={`p-2.5 rounded-lg border text-xs transition-all ${
+                            r.is_allocated
+                              ? "bg-white border-violet-200 shadow-xs"
+                              : "bg-violet-100/40 border-dashed border-violet-300 hover:border-violet-400"
+                          }`}
+                          data-testid={`karigar-role-${r.key}`}
+                        >
+                          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                            <span className="truncate">{r.label}</span>
+                            <span className="text-[9px] px-1 py-0.2 rounded bg-slate-100 text-slate-600 font-mono">
+                              {r.category}
+                            </span>
+                          </div>
+                          {r.is_allocated ? (
+                            <div className="flex items-center justify-between gap-1 pt-0.5">
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-900 truncate flex items-center gap-1">
+                                  <UserCheck className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                                  <span className="truncate">{r.worker_name}</span>
+                                </div>
+                                <div className="text-[11px] font-mono font-semibold text-[#C27842]">
+                                  {inr(r.rate_per_pair)} <span className="text-[9px] text-slate-400 font-normal">/ pair</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAssignModal({
+                                    role: r.key,
+                                    roleLabel: r.label,
+                                    workerId: r.worker_id,
+                                    rate: r.rate_per_pair,
+                                    currentWorkerId: r.worker_id,
+                                  })
+                                }
+                                className="px-2 py-1 text-[10px] font-bold text-violet-700 hover:bg-violet-50 rounded border border-violet-200 flex-shrink-0"
+                                data-testid={`edit-role-${r.key}`}
+                              >
+                                Change
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAssignModal({
+                                  role: r.key,
+                                  roleLabel: r.label,
+                                  workerId: "",
+                                  rate: "",
+                                  currentWorkerId: null,
+                                })
+                              }
+                              className="w-full mt-1 py-1.5 px-2 text-[11px] font-bold text-violet-700 bg-white hover:bg-violet-50 border border-violet-300 rounded shadow-xs flex items-center justify-center gap-1 transition-colors"
+                              data-testid={`allocate-btn-${r.key}`}
+                            >
+                              <Plus className="w-3 h-3 text-violet-600" /> Allocate Karigar
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-2 text-xs text-slate-500">
+                      No manufacturing roles available for allocation.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="pt-2">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
@@ -1221,6 +1449,125 @@ export default function POs() {
                     {inr(view.grand_total)}
                   </span>
                 </span>
+              </div>
+            </div>
+
+            {/* ── PRODUCTION BUDGET & COST TO COMPLETE SECTION ── */}
+            <div className="rounded-xl border-2 border-amber-500/30 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 shadow-lg space-y-3" data-testid="po-production-budget-card">
+              <div className="flex items-center justify-between pb-2.5 border-b border-slate-700">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-[#C27842]/20 border border-[#C27842]/40 text-[#C27842]">
+                    <Calculator className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Production Budget (Cost to Complete)
+                    </h4>
+                    <p className="text-[10px] text-slate-400">
+                      Estimated funds required to complete manufacturing for {view.total_quantity || 0} pairs
+                    </p>
+                  </div>
+                </div>
+                <div>
+                  {poBudget?.isLaborEstimated ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40" title="One or more karigar roles not yet allocated; using estimated style planned labor.">
+                      <AlertCircle className="w-3 h-3 text-amber-400" />
+                      Estimated Labor Rates
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" title="Computed from real allocated karigar piece rates.">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      Actual Allocated Karigar Rates
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 4 Cost Breakdown KPI Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {/* Total BOM */}
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-2.5" data-testid="budget-total-bom">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total BOM Cost
+                  </div>
+                  <div className="text-base font-black font-mono text-white mt-0.5">
+                    {inr(poBudget?.totalBom)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    Raw materials &amp; soles
+                  </div>
+                </div>
+
+                {/* Total Labour */}
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-2.5" data-testid="budget-total-labor">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total Labour Cost
+                  </div>
+                  <div className="text-base font-black font-mono text-amber-400 mt-0.5">
+                    {inr(poBudget?.totalLabor)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5 flex items-center justify-between">
+                    <span>Karigar piece wages</span>
+                    {!poBudget?.isLaborEstimated ? (
+                      <span className="text-[9px] text-emerald-400 font-bold">Allocated</span>
+                    ) : (
+                      <span className="text-[9px] text-amber-400 font-bold">Planned</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Total Packing */}
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-2.5" data-testid="budget-total-packing">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total Packing Cost
+                  </div>
+                  <div className="text-base font-black font-mono text-cyan-400 mt-0.5">
+                    {inr(poBudget?.totalPacking)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    Cartons, boxes &amp; labels
+                  </div>
+                </div>
+
+                {/* Total Production Budget */}
+                <div className="bg-[#C27842]/20 border border-[#C27842]/50 rounded-lg p-2.5" data-testid="budget-total-production">
+                  <div className="text-[10px] uppercase font-bold text-amber-200 tracking-wider">
+                    Production Budget
+                  </div>
+                  <div className="text-base font-black font-mono text-[#F59E0B] mt-0.5">
+                    {inr(poBudget?.totalCost)}
+                  </div>
+                  <div className="text-[10px] text-amber-200/80 mt-0.5 font-semibold">
+                    Cost to Complete
+                  </div>
+                </div>
+              </div>
+
+              {/* Commercial Comparison: Revenue vs Budget vs Expected Profit */}
+              <div className="pt-2.5 border-t border-slate-700/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">PO Subtotal (Revenue)</span>
+                    <span className="font-mono font-bold text-white text-sm">{inr(view.subtotal)}</span>
+                  </div>
+                  <span className="text-slate-500 font-mono text-base hidden sm:inline">−</span>
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">Total Budget (Cost)</span>
+                    <span className="font-mono font-bold text-amber-400 text-sm">{inr(poBudget?.totalCost)}</span>
+                  </div>
+                  <span className="text-slate-500 font-mono text-base hidden sm:inline">=</span>
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">Projected Margin</span>
+                    <span className={`font-mono font-bold text-sm ${poBudget?.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      {poBudget?.profit >= 0 ? "+" : ""}{inr(poBudget?.profit)} ({poBudget?.profitPct}%)
+                    </span>
+                  </div>
+                </div>
+                {Number(poBudget?.totalOutside || 0) > 0 && (
+                  <div className="text-[11px] text-purple-300 font-mono">
+                    Outside Labour: <b>{inr(poBudget.totalOutside)}</b>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1647,6 +1994,106 @@ export default function POs() {
           </div>
         </Drawer>
       )}
+
+      {/* ── ALLOCATE KARIGAR MODAL DIALOG IN PO TAB ── */}
+      {assignModal && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4" data-testid="po-assign-karigar-modal">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-[#C27842] font-bold">Planning Stage · Allocate Karigar</div>
+                <div className="font-bold text-base text-white">{assignModal.roleLabel}</div>
+              </div>
+              <button
+                onClick={() => setAssignModal(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1.5">
+                  Select Worker / Karigar <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={assignModal.workerId || ""}
+                  onChange={(e) => {
+                    const wid = e.target.value;
+                    const wObj = (planningData?.workers || []).find((w) => String(w.id) === String(wid));
+                    setAssignModal({
+                      ...assignModal,
+                      workerId: wid,
+                      rate: wObj?.rate_per_pair != null ? wObj.rate_per_pair : assignModal.rate,
+                    });
+                  }}
+                  className="w-full text-xs border border-slate-300 rounded-lg p-2.5 bg-white focus:ring-2 focus:ring-[#C27842] focus:border-[#C27842] outline-none"
+                  data-testid="select-karigar-dropdown"
+                >
+                  <option value="">-- Choose Karigar from Master List --</option>
+                  {(planningData?.workers || []).map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name} {w.skill ? `(${w.skill})` : ""} {w.rate_per_pair ? `— ₹${w.rate_per_pair}/pr` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1.5">
+                  Karigar Wage Rate / Pair (₹) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={assignModal.rate}
+                  onChange={(e) => setAssignModal({ ...assignModal, rate: e.target.value })}
+                  placeholder="e.g. 15.00"
+                  className="w-full text-xs font-mono font-bold border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-[#C27842] focus:border-[#C27842] outline-none"
+                  data-testid="input-karigar-rate"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  This piece rate directly determines the actual labour budget to complete this PO.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+                {assignModal.currentWorkerId && (
+                  <button
+                    type="button"
+                    disabled={allocatingKarigar}
+                    onClick={() => handleAllocateWorker(assignModal.role, null, null)}
+                    className="px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg mr-auto border border-rose-200"
+                    data-testid="unassign-karigar-btn"
+                  >
+                    Unassign
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAssignModal(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg border border-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={allocatingKarigar || !assignModal.workerId}
+                  onClick={() => handleAllocateWorker(assignModal.role, assignModal.workerId, assignModal.rate)}
+                  className="px-4 py-2 text-xs font-bold text-white bg-[#C27842] hover:bg-[#a86535] rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                  data-testid="save-allocated-karigar-btn"
+                >
+                  {allocatingKarigar ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  Confirm Allocation
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConfirmDialog
         open={!!confirm}
         title={confirm?.title}

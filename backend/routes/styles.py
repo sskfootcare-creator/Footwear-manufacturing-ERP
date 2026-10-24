@@ -543,10 +543,21 @@ def compute_style_costing_from_jobs(style: dict, jobs: list, color: Optional[str
             if isinstance(assignments, dict) and assignments:
                 total_job_rate = 0.0
                 has_valid = False
+                parent_roles = {"upper", "bottom", "sole", "heel_gola"}
+                active_parents = {
+                    p for p in parent_roles
+                    if isinstance(assignments.get(p), dict) and float(assignments[p].get("rate_per_pair") or 0) > 0
+                }
                 for role, asgn in assignments.items():
                     if isinstance(asgn, dict):
                         rate = float(asgn.get("rate_per_pair") or 0)
                         if rate > 0:
+                            if "." in role:
+                                parent = role.split(".")[0]
+                                if parent in active_parents:
+                                    p_asgn = assignments[parent]
+                                    if p_asgn.get("worker_id") == asgn.get("worker_id") and float(p_asgn.get("rate_per_pair") or 0) == rate:
+                                        continue
                             total_job_rate += rate
                             has_valid = True
                             if role not in assigned_roles_map:

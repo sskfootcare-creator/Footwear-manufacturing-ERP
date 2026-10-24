@@ -323,6 +323,37 @@ async def _attach_po_profitability(po_docs: list, db=None):
             if jcode:
                 jobs_by_style_code[jcode].append(job)
 
+    # 4. Also fetch jobs specifically linked to the POs in po_docs (by po_id or po_number)
+    po_jobs_by_poid = defaultdict(list)
+    po_jobs_by_ponum = defaultdict(list)
+    po_job_or = []
+    for d in po_docs:
+        d_id = str(d.get("_id") or d.get("id") or "")
+        d_num = str(d.get("po_number") or "")
+        if d_id:
+            po_job_or.append({"po_id": d_id})
+            if ObjectId.is_valid(d_id):
+                try:
+                    po_job_or.append({"po_id": oid(d_id)})
+                except Exception:
+                    pass
+        if d_num:
+            po_job_or.append({"po_number": d_num})
+
+    if po_job_or and hasattr(db, "production_jobs"):
+        try:
+            pj_query = {"$or": po_job_or} if len(po_job_or) > 1 else po_job_or[0]
+            po_specific_jobs = await db.production_jobs.find(pj_query).to_list(10000)
+            for j in po_specific_jobs:
+                p_id_val = str(j.get("po_id") or "")
+                p_num_val = str(j.get("po_number") or "")
+                if p_id_val:
+                    po_jobs_by_poid[p_id_val].append(j)
+                if p_num_val:
+                    po_jobs_by_ponum[p_num_val].append(j)
+        except Exception as e:
+            log.warning(f"Error fetching PO-specific production jobs in _attach_po_profitability: {e}")
+
     # Precompute costing per unique style
     from routes.styles import compute_style_costing_from_jobs
     costing_cache = {}
@@ -349,13 +380,53 @@ async def _attach_po_profitability(po_docs: list, db=None):
             costing_cache[scode] = c
 
     for d in po_docs:
+        d_id_str = str(d.get("_id") or d.get("id") or "")
+        d_num_str = str(d.get("po_number") or "")
+        d_jobs_raw = po_jobs_by_poid.get(d_id_str, []) + po_jobs_by_ponum.get(d_num_str, [])
+        seen_dj_ids = set()
+        d_specific_jobs = []
+        for j in d_jobs_raw:
+            jid_k = str(j.get("_id", id(j)))
+            if jid_k not in seen_dj_ids:
+                seen_dj_ids.add(jid_k)
+                d_specific_jobs.append(j)
+
+        po_assigned_roles = {}
+        for j in d_specific_jobs:
+            asgns = j.get("assignments") or {}
+            if isinstance(asgns, dict):
+                for r_k, r_v in asgns.items():
+                    if isinstance(r_v, dict) and r_v.get("worker_id") and r_k not in po_assigned_roles:
+                        po_assigned_roles[r_k] = {
+                            "role": r_k,
+                            "worker_id": str(r_v.get("worker_id")),
+                            "worker_name": r_v.get("worker_name", ""),
+                            "rate_per_pair": float(r_v.get("rate_per_pair") or 0),
+                        }
+
         for item in d.get("line_items", []):
             code = (item.get("style_code") or "").strip()
             sid = str(item.get("style_id") or "")
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
                 item_color = item.get("color")
-                if item_color and (style_doc.get("color_material_overrides") or style_doc.get("color_bom_overrides")) :
+                # Check if this PO has specific jobs with assigned karigars for this line item
+                code_up = code.upper()
+                line_po_jobs = [
+                    j for j in d_specific_jobs
+                    if (
+                        (j.get("style_code") and str(j.get("style_code")).strip().upper() == code_up) or
+                        (j.get("style_id") and str(j.get("style_id")) == sid)
+                    ) and (not item_color or not j.get("color") or str(j.get("color")).lower() == str(item_color).lower())
+                ]
+                has_line_assignment = any(
+                    isinstance(j.get("assignments"), dict) and any(float((a or {}).get("rate_per_pair") or 0) > 0 for a in j.get("assignments", {}).values() if isinstance(a, dict))
+                    for j in line_po_jobs
+                )
+
+                if has_line_assignment:
+                    costing = compute_style_costing_from_jobs(style_doc, line_po_jobs, color=item_color)
+                elif item_color and (style_doc.get("color_material_overrides") or style_doc.get("color_bom_overrides")) :
                     style_id_str = str(style_doc.get("_id") or style_doc.get("id") or "")
                     style_code_str = style_doc.get("code", "")
                     matched_jobs = []
@@ -419,7 +490,54 @@ async def _attach_po_profitability(po_docs: list, db=None):
                     "total_cost": total_cost,
                     "profit": profit,
                     "profit_pct": profit_pct,
+                    "assigned_roles": costing.get("assigned_roles") or [],
                 }
+
+        # 5. Compute PO-level Production Budget and Profitability Rollup
+        tot_bom = 0.0
+        tot_labor = 0.0
+        tot_packing = 0.0
+        tot_outside = 0.0
+        tot_qty = 0
+        has_est = False
+        has_act = False
+
+        for item in d.get("line_items", []):
+            qty = int(item.get("quantity") or 0)
+            tot_qty += qty
+            prof = item.get("profitability") or {}
+            tot_bom += float(prof.get("bom_cost") or 0) * qty
+            tot_labor += float(prof.get("labor_cost") or 0) * qty
+            tot_packing += float(prof.get("packing_cost") or 0) * qty
+            tot_outside += float(prof.get("outside_cost") or 0) * qty
+            if prof.get("is_estimated", True):
+                has_est = True
+            else:
+                has_act = True
+
+        tot_production_budget = round(tot_bom + tot_labor + tot_packing + tot_outside, 2)
+        subtotal = float(d.get("subtotal") or sum(float(it.get("amount") or (float(it.get("unit_price") or 0) * int(it.get("quantity") or 0))) for it in d.get("line_items", [])))
+        tot_profit = round(subtotal - tot_production_budget, 2)
+        tot_profit_pct = round((tot_profit / subtotal * 100), 1) if subtotal > 0 else 0.0
+
+        budget_summary = {
+            "total_bom_cost": round(tot_bom, 2),
+            "total_labor_cost": round(tot_labor, 2),
+            "total_packing_cost": round(tot_packing, 2),
+            "total_outside_cost": round(tot_outside, 2),
+            "total_budget": tot_production_budget,
+            "total_cost": tot_production_budget,
+            "total_revenue": round(subtotal, 2),
+            "total_profit": tot_profit,
+            "profit_pct": tot_profit_pct,
+            "total_quantity": tot_qty,
+            "labor_source": "actual" if (has_act and not has_est) else ("partial" if has_act else "estimated"),
+            "is_estimated": has_est or (not has_act and tot_labor == 0),
+            "is_fully_allocated": has_act and not has_est,
+            "assigned_roles": list(po_assigned_roles.values()),
+        }
+        d["profitability"] = budget_summary
+        d["production_budget"] = budget_summary
 
 
 async def _attach_po_status(po_docs: list, db=None):
@@ -1688,6 +1806,247 @@ async def get_po(pid: str, request: Request):
     await _attach_po_profitability([d], db)
     await _attach_po_status([d], db)
     return stringify(d)
+
+
+@pos_router.get("/pos/{pid}/planning-jobs")
+async def get_po_planning_jobs(pid: str, request: Request):
+    """
+    Fetch planning stage status and allocated karigars/workers for a Purchase Order.
+    Auto-initializes planning production jobs if none exist yet.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales", "production")(u)
+    db = get_db()
+    po = await db.pos.find_one({"_id": oid(pid)})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+
+    po_id_str = str(po.get("_id") or pid)
+    po_num = po.get("po_number", "")
+
+    job_query = [{"po_id": po_id_str}, {"po_number": po_num}]
+    if ObjectId.is_valid(po_id_str):
+        job_query.append({"po_id": oid(po_id_str)})
+
+    jobs = await db.production_jobs.find({"$or": job_query}).to_list(100)
+
+    # Auto-initialize planning jobs if missing
+    if not jobs and po.get("line_items"):
+        durations = await _get_stage_durations(db=db)
+        entered = now_iso()
+        deadline = _compute_deadline(entered, durations.get("procurement", 24))
+        all_styles = await db.styles.find({}, {"code": 1, "_id": 1}).to_list(10000)
+        style_id_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles if s.get("code")}
+
+        new_jobs = []
+        for li in po["line_items"]:
+            style_code_upper = str(li.get("style_code") or "").strip().upper()
+            style_id = style_id_map.get(style_code_upper)
+            new_jobs.append({
+                "source_type": "b2b_client",
+                "po_id": po_id_str,
+                "po_number": po_num,
+                "client_name": po.get("client_name", ""),
+                "style_code": li.get("style_code", ""),
+                "po_style_code": li.get("style_code", ""),
+                "style_id": style_id,
+                "description": li.get("description", ""),
+                "color": li.get("color", ""),
+                "size": li.get("size", ""),
+                "quantity": int(li.get("quantity") or 0),
+                "completed_qty": 0,
+                "stage": "planning",
+                "rejected_qty": 0,
+                "delivery_date": po.get("delivery_date", ""),
+                "stage_entered_at": entered,
+                "stage_deadline": deadline,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "assignments": {},
+                "components": {"upper_done": False, "bottom_done": False, "sole_done": False},
+            })
+        if new_jobs:
+            await db.production_jobs.insert_many(new_jobs)
+            jobs = await db.production_jobs.find({"$or": job_query}).to_list(100)
+
+    # Standard footwear manufacturing roles
+    standard_roles = [
+        {"key": "upper", "label": "Upper Track (Cutting & Stitching)", "category": "component", "suggested_skill": "cutting"},
+        {"key": "bottom", "label": "Bottom Track (Insole & Stamping)", "category": "component", "suggested_skill": "cutting"},
+        {"key": "sole", "label": "Sole Track (Preparation)", "category": "component", "suggested_skill": "finishing"},
+        {"key": "lasting", "label": "Lasting", "category": "assembly", "suggested_skill": "lasting"},
+        {"key": "finishing", "label": "Finishing", "category": "assembly", "suggested_skill": "finishing"},
+        {"key": "qc_pack", "label": "QC & Packing", "category": "assembly", "suggested_skill": "qc_pack"},
+    ]
+
+    roles_status = []
+    for r in standard_roles:
+        r_key = r["key"]
+        assigned_asgn = None
+        for j in jobs:
+            asgn = (j.get("assignments") or {}).get(r_key)
+            if isinstance(asgn, dict) and asgn.get("worker_id"):
+                assigned_asgn = asgn
+                break
+        roles_status.append({
+            **r,
+            "is_allocated": assigned_asgn is not None,
+            "worker_id": assigned_asgn.get("worker_id") if assigned_asgn else None,
+            "worker_name": assigned_asgn.get("worker_name") if assigned_asgn else None,
+            "rate_per_pair": assigned_asgn.get("rate_per_pair") if assigned_asgn else None,
+        })
+
+    allocated_count = sum(1 for r in roles_status if r["is_allocated"])
+    workers = await db.workers.find({"active": {"$ne": False}}).sort("name", 1).to_list(1000)
+
+    return {
+        "po_id": po_id_str,
+        "po_number": po_num,
+        "jobs_count": len(jobs),
+        "roles": roles_status,
+        "allocated_count": allocated_count,
+        "total_roles": len(roles_status),
+        "is_fully_allocated": allocated_count == len(roles_status),
+        "workers": [stringify(w) for w in workers],
+    }
+
+
+@pos_router.post("/pos/{pid}/allocate-karigar")
+async def allocate_po_karigar(pid: str, payload: dict, request: Request):
+    """
+    Allocate or update a worker/karigar for a specific role across production jobs of a PO.
+    Payload: { role: str, worker_id: Optional[str], rate_per_pair: Optional[float], style_code: Optional[str] }
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+    po = await db.pos.find_one({"_id": oid(pid)})
+    if not po:
+        raise HTTPException(404, "Purchase Order not found")
+
+    role = payload.get("role")
+    if not role:
+        raise HTTPException(400, "Missing role")
+
+    worker_id = payload.get("worker_id")
+    rate_per_pair = payload.get("rate_per_pair")
+    style_filter = payload.get("style_code")
+
+    po_id_str = str(po.get("_id") or pid)
+    po_num = po.get("po_number", "")
+
+    job_query = [{"po_id": po_id_str}, {"po_number": po_num}]
+    if ObjectId.is_valid(po_id_str):
+        job_query.append({"po_id": oid(po_id_str)})
+    full_query = {"$or": job_query}
+    if style_filter:
+        full_query["style_code"] = style_filter
+
+    jobs = await db.production_jobs.find(full_query).to_list(200)
+
+    # Auto-initialize if no jobs existed
+    if not jobs and po.get("line_items"):
+        durations = await _get_stage_durations(db=db)
+        entered = now_iso()
+        deadline = _compute_deadline(entered, durations.get("procurement", 24))
+        all_styles = await db.styles.find({}, {"code": 1, "_id": 1}).to_list(10000)
+        style_id_map = {s["code"].strip().upper(): str(s["_id"]) for s in all_styles if s.get("code")}
+
+        new_jobs = []
+        for li in po["line_items"]:
+            style_code_upper = str(li.get("style_code") or "").strip().upper()
+            style_id = style_id_map.get(style_code_upper)
+            new_jobs.append({
+                "source_type": "b2b_client",
+                "po_id": po_id_str,
+                "po_number": po_num,
+                "client_name": po.get("client_name", ""),
+                "style_code": li.get("style_code", ""),
+                "po_style_code": li.get("style_code", ""),
+                "style_id": style_id,
+                "description": li.get("description", ""),
+                "color": li.get("color", ""),
+                "size": li.get("size", ""),
+                "quantity": int(li.get("quantity") or 0),
+                "completed_qty": 0,
+                "stage": "planning",
+                "rejected_qty": 0,
+                "delivery_date": po.get("delivery_date", ""),
+                "stage_entered_at": entered,
+                "stage_deadline": deadline,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "assignments": {},
+                "components": {"upper_done": False, "bottom_done": False, "sole_done": False},
+            })
+        if new_jobs:
+            await db.production_jobs.insert_many(new_jobs)
+            jobs = await db.production_jobs.find(full_query).to_list(200)
+
+    worker_name = ""
+    effective_rate = 0.0
+    if worker_id:
+        worker = await db.workers.find_one({"_id": oid(worker_id)})
+        if not worker:
+            raise HTTPException(404, "Worker not found")
+        worker_name = worker.get("name", "")
+        effective_rate = float(rate_per_pair if rate_per_pair is not None else worker.get("rate_per_pair", 0) or 0)
+
+    comp_stages_map = {
+        "upper": ["cutting", "stitching", "folding", "attachment"],
+        "bottom": ["cutting", "stitching", "stamping"],
+        "sole": ["prep"],
+    }
+
+    for j in jobs:
+        assignments = j.get("assignments") or {}
+        if worker_id:
+            assignments[role] = {
+                "worker_id": str(worker_id),
+                "worker_name": worker_name,
+                "rate_per_pair": effective_rate,
+                "assigned_at": now_iso(),
+            }
+            # Also populate subtasks if component track
+            if role in comp_stages_map:
+                for sub in comp_stages_map[role]:
+                    sub_key = f"{role}.{sub}"
+                    assignments[sub_key] = {
+                        "worker_id": str(worker_id),
+                        "worker_name": worker_name,
+                        "rate_per_pair": effective_rate,
+                        "assigned_at": now_iso(),
+                    }
+        else:
+            assignments.pop(role, None)
+            if role in comp_stages_map:
+                for sub in comp_stages_map[role]:
+                    assignments.pop(f"{role}.{sub}", None)
+
+        await db.production_jobs.update_one(
+            {"_id": j["_id"]},
+            {
+                "$set": {"assignments": assignments, "updated_at": now_iso()},
+                "$push": {
+                    "history": {
+                        "event": "po_karigar_allocation",
+                        "role": role,
+                        "worker_id": worker_id,
+                        "worker_name": worker_name,
+                        "rate_per_pair": effective_rate,
+                        "at": now_iso(),
+                        "by": u.get("email", "system"),
+                    }
+                }
+            }
+        )
+
+    # Re-fetch updated PO with recalculated profitability and production budget
+    updated_po = await db.pos.find_one({"_id": oid(pid)})
+    await _attach_po_profitability([updated_po], db)
+    await _attach_po_status([updated_po], db)
+    return stringify(updated_po)
+
 
 
 @pos_router.post("/pos/validate-styles")
