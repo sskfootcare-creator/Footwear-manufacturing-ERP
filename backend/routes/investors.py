@@ -265,15 +265,17 @@ async def generate_bank_statement_ledger(
         ts = adv.get("created_at") or adv.get("advance_date") or ""
         date_str = adv.get("advance_date") or (ts[:10] if ts else "")
         amount = float(adv.get("amount") or 0.0)
-        po_num = adv.get("po_number") or "N/A"
+        po_num = adv.get("po_number") or adv.get("reference") or "General Capital"
         pairs = int(adv.get("pairs") or 0)
         is_rollover = "Rollover" in (adv.get("notes") or "")
+        pairs_str = f" ({pairs:,} pairs)" if pairs > 0 else ""
+        action_label = "Rollover Advance" if is_rollover else ("PO Advance Disbursement" if adv.get("po_id") else "Capital Inflow")
 
         entries.append({
             "id": f"ADV-{adv_id_str}",
             "raw_id": adv_id_str,
             "type": "ADVANCE",
-            "category": "Rollover Capital Commit" if is_rollover else "PO Capital Commit",
+            "category": "Rollover Capital Commit" if is_rollover else ("PO Capital Commit" if adv.get("po_id") else "Direct Capital Investment"),
             "voucher_no": f"VCH-ADV-{adv_id_str[-6:].upper()}",
             "date": date_str,
             "timestamp": ts,
@@ -282,7 +284,7 @@ async def generate_bank_statement_ledger(
             "investor_name": adv.get("investor_name", investor_name),
             "po_number": po_num,
             "pairs": pairs,
-            "narration": f"{'Rollover Advance' if is_rollover else 'PO Advance Disbursement'}: #{po_num} ({pairs:,} pairs) · Credit to Advances Payable GL 2020",
+            "narration": f"{action_label}: #{po_num}{pairs_str} · Credit to Advances Payable GL 2020",
             "channel": "ROLLOVER_JOURNAL" if is_rollover else "CAPITAL_INFLOW",
             "debit": 0.0,
             "credit": round(amount, 2),
@@ -644,25 +646,46 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
             db=db
         )
 
-    if not payload.po_id:
-        raise HTTPException(400, "Either 'po_id' or 'po_ids' must be specified")
-
     investor = await db.investors.find_one({"_id": oid(iid)})
     if not investor:
         raise HTTPException(404, "Investor not found")
+
+    if not payload.po_id:
+        if not (payload.amount_override and payload.amount_override > 0):
+            raise HTTPException(400, "Either 'po_id', 'po_ids', or a valid 'amount_override' for direct/historical investment must be specified")
+        manual_po_num = (payload.po_number_manual or payload.reference or "GENERAL_CAPITAL").strip()
+        manual_pairs = int(payload.pairs_manual or 0)
+        amt = round(float(payload.amount_override), 2)
+        funding = {
+            "po_id": None,
+            "po_number": manual_po_num,
+            "pairs": manual_pairs,
+            "total_funding_required": amt,
+            "breakdown": {
+                "bom_cost": 0.0,
+                "labour_cost": 0.0,
+                "labor_cost": 0.0,
+                "packing_cost": 0.0,
+                "outside_cost": 0.0,
+                "base_po_budget": amt,
+                "opex_cost": 0.0,
+                "opex_included": False,
+            }
+        }
+    else:
+        # Compute funding required using Stage 1 calculation (reuses compute_po_profitability)
+        funding = await compute_investor_funding_required(
+            po_id=payload.po_id,
+            include_opex=payload.include_opex,
+            db=db
+        )
+        amt = round(float(payload.amount_override), 2) if (payload.amount_override and payload.amount_override > 0) else round(float(funding["total_funding_required"]), 2)
 
     # Margin per pair used: explicit override or investor default
     if payload.margin_per_pair is not None and payload.margin_per_pair >= 0:
         margin_per_pair_used = float(payload.margin_per_pair)
     else:
         margin_per_pair_used = float(investor.get("default_margin_per_pair", 10.0))
-
-    # Compute funding required using Stage 1 calculation (reuses compute_po_profitability)
-    funding = await compute_investor_funding_required(
-        po_id=payload.po_id,
-        include_opex=payload.include_opex,
-        db=db
-    )
 
     bank_doc = None
     if payload.bank_account_id:
@@ -673,13 +696,12 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
         if not bank_doc:
             bank_doc = await db.bank_accounts.find_one({"_id": str(payload.bank_account_id)})
 
-    amt = round(float(payload.amount_override), 2) if (payload.amount_override and payload.amount_override > 0) else round(float(funding["total_funding_required"]), 2)
     adv_date = payload.advance_date or datetime.now(timezone.utc).date().isoformat()
 
     adv_doc = {
         "investor_id": str(investor["_id"]),
         "investor_name": investor.get("name", "Investor"),
-        "po_id": str(funding["po_id"]),
+        "po_id": str(funding["po_id"]) if funding.get("po_id") else None,
         "po_number": funding.get("po_number", ""),
         "pairs": funding.get("pairs", 0),
         "amount": amt,
@@ -719,12 +741,12 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
                 "bank": (bank_doc.get("bank_name") or bank_doc.get("account_name", "Bank")) if bank_doc else "Bank",
                 "bank_account_id": str(payload.bank_account_id),
                 "account_type": "bank",
-                "notes": f"Investor capital advance for PO #{adv_doc.get('po_number')} ({investor.get('name')})",
+                "notes": f"Investor capital advance for #{adv_doc.get('po_number')} ({investor.get('name')})",
                 "type": "investor_funding",
                 "investor_id": str(investor["_id"]),
                 "investor_name": investor.get("name", "Investor"),
                 "advance_id": str(adv_doc["_id"]),
-                "po_id": str(adv_doc.get("po_id", "")),
+                "po_id": str(adv_doc.get("po_id") or ""),
                 "po_number": adv_doc.get("po_number", ""),
                 "by": user.get("email") or user.get("name", ""),
                 "created_at": now_iso(),
@@ -737,6 +759,85 @@ async def create_investor_advance(iid: str, payload: InvestorAdvanceCreateIn, re
 
     eff_adv_mode = getattr(payload, "payment_mode", None) or getattr(payload, "mode", None) or "BANK_TRANSFER"
     await queue_investor_advance_sync(db, adv_doc, investor_doc=investor, payment_mode=eff_adv_mode)
+
+    # Historical settlement handling if marked already settled
+    if payload.already_settled:
+        settle_date = payload.settlement_date or adv_date
+        p_repaid = round(float(payload.principal_repaid if payload.principal_repaid is not None else amt), 2)
+        default_margin = margin_per_pair_used * funding.get("pairs", 0)
+        m_repaid = round(float(payload.margin_repaid if payload.margin_repaid is not None else default_margin), 2)
+        settle_mode = payload.settlement_mode or payload.payment_mode or "Bank Transfer"
+        settle_ref = payload.settlement_reference or payload.reference or ""
+        settle_bank_id = payload.settlement_bank_account_id or payload.bank_account_id
+
+        repayment_doc = {
+            "advance_id": str(adv_doc["_id"]),
+            "investor_id": str(investor["_id"]),
+            "investor_name": investor.get("name", "Investor"),
+            "principal_amount": p_repaid,
+            "margin_per_pair_used": margin_per_pair_used,
+            "pairs": funding.get("pairs", 0),
+            "margin_amount": m_repaid,
+            "total_payout": round(p_repaid + m_repaid, 2),
+            "payout_date": settle_date,
+            "reinvested": False,
+            "reinvested_into_advance_id": None,
+            "mode": settle_mode,
+            "reference": settle_ref,
+            "bank_account_id": str(settle_bank_id) if settle_bank_id else None,
+            "notes": f"Historical settlement for advance #{adv_doc.get('po_number')}",
+            "created_at": now_iso(),
+            "created_by": user.get("email") or user.get("name", ""),
+        }
+        res_rep = await db.investor_repayments.insert_one(repayment_doc)
+        repayment_doc["_id"] = res_rep.inserted_id
+
+        await db.investor_advances.update_one(
+            {"_id": adv_doc["_id"]},
+            {"$set": {
+                "status": "repaid",
+                "repayment_id": str(res_rep.inserted_id),
+                "repaid_at": now_iso()
+            }}
+        )
+        adv_doc["status"] = "repaid"
+        adv_doc["repayment_id"] = str(res_rep.inserted_id)
+
+        # Log repayment outflow to db.payments if bank account specified
+        if settle_bank_id:
+            try:
+                s_bank = await db.bank_accounts.find_one({"_id": oid(settle_bank_id)})
+                if not s_bank:
+                    s_bank = await db.bank_accounts.find_one({"_id": str(settle_bank_id)})
+                await db.payments.insert_one({
+                    "payment_date": settle_date,
+                    "amount": round(p_repaid + m_repaid, 2),
+                    "mode": settle_mode,
+                    "reference": settle_ref,
+                    "bank": (s_bank.get("bank_name") or s_bank.get("account_name", "Bank")) if s_bank else "Bank",
+                    "bank_account_id": str(settle_bank_id),
+                    "account_type": "bank",
+                    "notes": f"Historical capital repayment for #{adv_doc.get('po_number')} ({investor.get('name')})",
+                    "type": "investor_repayment",
+                    "investor_id": str(investor["_id"]),
+                    "investor_name": investor.get("name", "Investor"),
+                    "advance_id": str(adv_doc["_id"]),
+                    "repayment_id": str(res_rep.inserted_id),
+                    "by": user.get("email") or user.get("name", ""),
+                    "created_at": now_iso(),
+                })
+                from routes.banking import sync_bank_account_balance
+                await sync_bank_account_balance(db, str(settle_bank_id))
+            except Exception as pe:
+                log.warning("Could not sync live bank balance for repayment %s: %s", res_rep.inserted_id, pe)
+
+        await queue_investor_repayment_sync(
+            db=db,
+            repayment_doc=repayment_doc,
+            investor_doc=investor,
+            payment_mode=settle_mode,
+            bank_account_id=str(settle_bank_id) if settle_bank_id else None
+        )
 
     return stringify(adv_doc)
 
@@ -963,15 +1064,22 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
         raise HTTPException(404, "Investor associated with advance not found")
 
     pairs = int(adv.get("pairs") or 0)
-    principal_amount = round(float(adv.get("amount") or 0.0), 2)
+    if payload.principal_amount_override is not None and payload.principal_amount_override >= 0:
+        principal_amount = round(float(payload.principal_amount_override), 2)
+    else:
+        principal_amount = round(float(adv.get("amount") or 0.0), 2)
 
-    # Negotiable margin rate per deal
-    if payload.margin_per_pair_override is not None and payload.margin_per_pair_override >= 0:
+    # Negotiable margin rate per deal / direct margin override
+    if payload.margin_amount_override is not None and payload.margin_amount_override >= 0:
+        margin_amount = round(float(payload.margin_amount_override), 2)
+        margin_per_pair_used = round(margin_amount / pairs, 2) if pairs > 0 else float(adv.get("margin_per_pair") or 0.0)
+    elif payload.margin_per_pair_override is not None and payload.margin_per_pair_override >= 0:
         margin_per_pair_used = float(payload.margin_per_pair_override)
+        margin_amount = round(margin_per_pair_used * pairs, 2)
     else:
         margin_per_pair_used = float(adv.get("margin_per_pair") or investor.get("default_margin_per_pair", 10.0))
+        margin_amount = round(margin_per_pair_used * pairs, 2)
 
-    margin_amount = round(margin_per_pair_used * pairs, 2)
     payout_date = payload.payout_date or datetime.now(timezone.utc).date().isoformat()
 
     if payload.action == "repay_in_full":
@@ -990,6 +1098,7 @@ async def execute_repay_or_reinvest(adv_id: str, payload: InvestorRepayActionIn,
             "reinvested_into_advance_id": None,
             "mode": payload.mode or "Bank Transfer",
             "bank_account_id": payload.bank_account_id,
+            "reference": payload.reference or "",
             "notes": payload.notes or "",
             "created_at": now_iso(),
             "created_by": user.get("email") or user.get("name", ""),
@@ -1265,6 +1374,7 @@ async def execute_bulk_repay(payload: InvestorBulkRepayActionIn, request: Reques
                 "reinvested": False,
                 "reinvested_into_advance_id": None,
                 "mode": payload.mode or "Bank Transfer",
+                "reference": payload.reference or "",
                 "bank_account_id": payload.bank_account_id,
                 "notes": payload.notes or "",
                 "created_at": now_iso(),
@@ -1335,6 +1445,7 @@ async def execute_bulk_repay(payload: InvestorBulkRepayActionIn, request: Reques
                 "target_po_id": str(target_po["_id"]),
                 "target_po_number": target_po.get("po_number", ""),
                 "mode": payload.mode or "Bank Transfer",
+                "reference": payload.reference or "",
                 "bank_account_id": payload.bank_account_id,
                 "notes": payload.notes or "",
                 "created_at": now_iso(),

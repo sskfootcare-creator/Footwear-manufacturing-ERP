@@ -8,7 +8,7 @@ import {
   Warehouse, IndianRupee, Settings as SettingsIcon, ReceiptIndianRupee,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check, Bell, TrendingUp, Landmark,
+  Check, Bell, TrendingUp, Landmark, MailCheck,
 } from "lucide-react";
 import AlertBanner from "@/components/AlertBanner";
 
@@ -50,6 +50,7 @@ const NAV_GROUPS = [
       { to: "/vendors",    label: "Vendors",      icon: Truck,       roles: ["admin","manager"] },
       { to: "/vendor-pos", label: "Vendor POs",   icon: FileText,    roles: ["admin","manager"] },
       { to: "/invoices",   label: "Invoices",     icon: ReceiptIndianRupee, roles: ["admin","manager","sales"] },
+      { to: "/gmail-inbox", label: "Gmail Automation", icon: MailCheck, roles: ["admin","manager","sales"] },
       { to: "/investors",  label: "Investors & Funding", icon: Landmark, roles: ["admin","manager"] },
       { to: "/clients",    label: "Clients",      icon: BookOpen,    roles: ["admin","manager","sales"] },
       { to: "/costing",           label: "Costing",           icon: Calculator,  roles: ["admin","manager"] },
@@ -96,6 +97,7 @@ const PAGE_TITLES = {
   "/vendors":              "Vendors",
   "/vendor-pos":           "Vendor POs",
   "/invoices":             "Invoices",
+  "/gmail-inbox":          "Gmail Automation (GRN & Payments)",
   "/investors":            "Investors & PO Funding",
   "/expenses":             "Expenses & P&L",
   "/bank-reconciliation":  "Bank Reconciliation",

@@ -103,6 +103,7 @@ async def e2e_env():
     test_phone = "9988776655"
     await db.investors.delete_many({"$or": [{"email": test_email}, {"phone": test_phone}]})
     await db.investor_advances.delete_many({"investor_name": "Test Titan Capital"})
+    await db.investor_repayments.delete_many({"investor_name": "Test Titan Capital"})
 
     yield {
         "db": db,
@@ -117,6 +118,7 @@ async def e2e_env():
     # Cleanup after test
     await db.investors.delete_many({"$or": [{"email": test_email}, {"phone": test_phone}]})
     await db.investor_advances.delete_many({"investor_name": "Test Titan Capital"})
+    await db.investor_repayments.delete_many({"investor_name": "Test Titan Capital"})
     if created_pos:
         await db.pos.delete_many({"_id": {"$in": created_pos}})
 
@@ -433,3 +435,95 @@ async def test_investor_banking_inflow_and_repayment_sync(e2e_env):
         # Cleanup test bank account and payments
         await db.bank_accounts.delete_one({"_id": res_b.inserted_id})
         await db.payments.delete_many({"bank_account_id": bank_id})
+
+
+@pytest.mark.anyio
+async def test_direct_and_historical_advances_and_ledger(e2e_env):
+    """
+    Test direct capital investment, pre-settled historical advance,
+    repayment with overrides, and bank statement ledger generation.
+    """
+    db = e2e_env["db"]
+    admin_token = create_access_token(e2e_env["admin_id"], e2e_env["admin_email"], "admin")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        # 1. Create investor
+        inv_payload = {
+            "name": "Test Titan Capital",
+            "contact": "Mr. Sharma",
+            "phone": e2e_env["test_phone"],
+            "email": e2e_env["test_email"],
+            "default_margin_per_pair": 10.0,
+            "pin": "1234",
+            "active": True
+        }
+        r_inv = await ac.post("/api/investors", json=inv_payload, headers=headers)
+        assert r_inv.status_code == 201
+        inv_id = r_inv.json()["_id"]
+
+        # 2. Create historical already-settled advance (e.g. past PO funded and closed)
+        hist_adv = {
+            "po_number_manual": "HIST-PO-2025-01",
+            "pairs_manual": 1000,
+            "amount_override": 150000.0,
+            "margin_per_pair": 10.0,
+            "advance_date": "2025-01-15",
+            "already_settled": True,
+            "settlement_date": "2025-02-15",
+            "principal_repaid": 150000.0,
+            "margin_repaid": 10000.0,
+            "settlement_mode": "Bank Transfer",
+            "settlement_reference": "UTR-HIST-001"
+        }
+        r_hist = await ac.post(f"/api/investors/{inv_id}/advances", json=hist_adv, headers=headers)
+        assert r_hist.status_code == 201, r_hist.text
+        hist_data = r_hist.json()
+        assert hist_data["status"] == "repaid"
+        assert hist_data["po_number"] == "HIST-PO-2025-01"
+        assert hist_data["amount"] == 150000.0
+
+        # 3. Create direct active investment (without PO)
+        direct_adv = {
+            "po_number_manual": "DIRECT-CAPITAL-01",
+            "pairs_manual": 500,
+            "amount_override": 75000.0,
+            "margin_per_pair": 12.0,
+            "advance_date": "2026-03-01",
+            "already_settled": False
+        }
+        r_dir = await ac.post(f"/api/investors/{inv_id}/advances", json=direct_adv, headers=headers)
+        assert r_dir.status_code == 201, r_dir.text
+        dir_data = r_dir.json()
+        assert dir_data["status"] == "active"
+        assert dir_data["amount"] == 75000.0
+        dir_id = dir_data["_id"]
+
+        # 4. Repay direct investment with overrides
+        repay_override = {
+            "action": "repay_in_full",
+            "principal_amount_override": 75000.0,
+            "margin_amount_override": 6000.0,
+            "payout_date": "2026-03-20",
+            "mode": "Bank Transfer",
+            "reference": "UTR-REP-OVERRIDE"
+        }
+        r_rep = await ac.post(f"/api/investors/advances/{dir_id}/repay", json=repay_override, headers=headers)
+        assert r_rep.status_code == 200, r_rep.text
+        rep_res = r_rep.json()
+        assert rep_res["repayment"]["principal_amount"] == 75000.0
+        assert rep_res["repayment"]["margin_amount"] == 6000.0
+        assert rep_res["repayment"]["total_payout"] == 81000.0
+
+        # 5. Fetch ledger statement
+        r_ledger = await ac.get(f"/api/investors/ledger?investor_id={inv_id}", headers=headers)
+        assert r_ledger.status_code == 200, r_ledger.text
+        ledger_data = r_ledger.json()
+        assert ledger_data["total_credit_inflow"] == 225000.0
+        assert ledger_data["total_principal_repaid"] == 225000.0
+        assert ledger_data["total_margin_paid"] == 16000.0
+        assert ledger_data["closing_balance"] == 0.0
+        assert ledger_data["transactions_count"] == 4
+

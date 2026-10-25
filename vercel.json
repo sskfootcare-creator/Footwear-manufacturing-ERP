@@ -4,7 +4,35 @@
   "outputDirectory": "frontend/build",
   "functions": {
     "api/index.py": {
-      "excludeFiles": "{frontend/**,tests/**,backend/tests/**,test_reports/**,mongodb-portable/**,docs/**,scratch/**,backend/scratch/**,uploads/**,backend/uploads/**,*.csv,*.log,*.md}"
+      "includeFiles": "backend/**",
+      "excludeFiles": [
+        "frontend/**",
+        "tests/**",
+        "backend/tests/**",
+        "test_reports/**",
+        "mongodb-portable/**",
+        "docs/**",
+        "scratch/**",
+        "backend/scratch/**",
+        "uploads/**",
+        "backend/uploads/**",
+        "backend/.venv/**",
+        ".venv/**",
+        "backend/.pytest_cache/**",
+        ".pytest_cache/**",
+        "backend/financial_erp.db",
+        "backend/lib/bin/**",
+        "supabase/**",
+        ".agents/**",
+        ".emergent/**",
+        "memory/**",
+        "scripts/**",
+        "*.csv",
+        "*.log",
+        "*.md",
+        "*.db",
+        "*.wt"
+      ]
     }
   },
   "headers": [

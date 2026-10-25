@@ -35,3 +35,17 @@ backend/lib/bin
 docs
 SESSION_LOG.md
 ONLINE_COMMERCE_*.md
+*.md
+
+# AI Agents, Scripts, and Internal Folders
+.agents
+.emergent
+memory
+supabase
+scripts
+client_secret.json
+
+# Node Modules (for CLI uploads)
+frontend/node_modules
+node_modules
+

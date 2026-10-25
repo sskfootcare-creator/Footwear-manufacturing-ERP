@@ -48,6 +48,7 @@ import ToolingLibrary from "@/pages/ToolingLibrary";
 import BankReconciliation from "@/pages/BankReconciliation";
 import AnalyticsReportsPage from "@/pages/AnalyticsReportsPage";
 import MobilePicklist from "@/pages/MobilePicklist";
+import GmailInbox from "@/pages/GmailInbox";
 import OfflineStatusIndicator from "@/components/OfflineStatusIndicator";
 import { Loader2 } from "lucide-react";
 
@@ -74,6 +75,7 @@ const ROUTE_PERMISSIONS = {
   "b2b-profitability": { roles: ["admin", "manager"], modules: ["reports", "orders_sales"] },
   "reports": { roles: ["admin", "manager"], modules: ["reports"] },
   "invoices": { roles: ["admin", "manager", "sales"], modules: ["orders_sales"] },
+  "gmail-inbox": { roles: ["admin", "manager", "sales"], modules: ["orders_sales", "reports", "settings_admin"] },
   "clients": { roles: ["admin", "manager", "sales"], modules: ["orders_sales"] },
   "vendors": { roles: ["admin", "manager"], modules: ["procurement"] },
   "vendor-pos": { roles: ["admin", "manager"], modules: ["procurement"] },
@@ -178,6 +180,7 @@ function App() {
             <Route path="reports" element={<RouteGuard path="reports"><Reports /></RouteGuard>} />
             <Route path="analytics" element={<RouteGuard path="analytics"><AnalyticsReportsPage /></RouteGuard>} />
             <Route path="invoices" element={<RouteGuard path="invoices"><Invoices /></RouteGuard>} />
+            <Route path="gmail-inbox" element={<RouteGuard path="gmail-inbox"><GmailInbox /></RouteGuard>} />
             <Route path="expenses" element={<RouteGuard path="expenses"><Expenses /></RouteGuard>} />
             <Route path="bank-reconciliation" element={<RouteGuard path="bank-reconciliation"><BankReconciliation /></RouteGuard>} />
             <Route path="clients" element={<RouteGuard path="clients"><Clients /></RouteGuard>} />

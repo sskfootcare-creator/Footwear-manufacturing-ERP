@@ -108,6 +108,7 @@ from routes.plm import plm_router, DEFAULT_PLM_FOLDERS
 from routes.settings import settings_router
 from routes.workers import workers_router
 from routes.investors import investors_router
+from routes.email_inbox import email_inbox_router
 from routes.vendors import vendors_router
 from routes.banking import banking_router
 from routes.reports import reports_router
@@ -1993,6 +1994,7 @@ app.include_router(banking_router)
 app.include_router(po_ean_router)
 app.include_router(online_returns_router)
 app.include_router(investors_router)
+app.include_router(email_inbox_router)
 
 
 

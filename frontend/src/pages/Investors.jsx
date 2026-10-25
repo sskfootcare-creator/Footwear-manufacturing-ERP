@@ -42,6 +42,7 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Download,
+  History,
 } from "lucide-react";
 
 export default function Investors() {
@@ -88,6 +89,18 @@ export default function Investors() {
   const [showExecutedPOs, setShowExecutedPOs] = useState(false);
   const [customAmountOverride, setCustomAmountOverride] = useState("");
 
+  // Direct / Historical Investment Mode state
+  const [advanceFundingMode, setAdvanceFundingMode] = useState("po_linked"); // "po_linked" | "direct_historical"
+  const [manualPoNumber, setManualPoNumber] = useState("");
+  const [manualPairs, setManualPairs] = useState("");
+  const [alreadySettled, setAlreadySettled] = useState(false);
+  const [settlementDate, setSettlementDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [principalRepaid, setPrincipalRepaid] = useState("");
+  const [marginRepaid, setMarginRepaid] = useState("");
+  const [settlementMode, setSettlementMode] = useState("Bank Transfer");
+  const [settlementReference, setSettlementReference] = useState("");
+  const [settlementBankAccountId, setSettlementBankAccountId] = useState("");
+
   // Repay / Reinvest Form state (Single or Bulk & Banking Outflow)
   const [advancesToSettle, setAdvancesToSettle] = useState([]);
   const [repayActionType, setRepayActionType] = useState("repay_in_full"); // "repay_in_full" | "reinvest"
@@ -96,6 +109,11 @@ export default function Investors() {
   const [repayMode, setRepayMode] = useState("Bank Transfer");
   const [repayBankAccountId, setRepayBankAccountId] = useState("");
   const [submittingRepay, setSubmittingRepay] = useState(false);
+  const [repayPayoutDate, setRepayPayoutDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [repayReference, setRepayReference] = useState("");
+  const [repayNotes, setRepayNotes] = useState("");
+  const [repayPrincipalOverride, setRepayPrincipalOverride] = useState("");
+  const [repayMarginAmountOverride, setRepayMarginAmountOverride] = useState("");
 
   // New Investor Form state
   const [newInvestorName, setNewInvestorName] = useState("");
@@ -330,6 +348,12 @@ export default function Investors() {
     setRepayActionType("repay_in_full");
     setTargetPoId("");
     setRepayMarginOverride(String(adv.margin_per_pair || 10.0));
+    setRepayPayoutDate(new Date().toISOString().slice(0, 10));
+    setRepayReference("");
+    setRepayNotes("");
+    setRepayPrincipalOverride(String(adv.amount || ""));
+    const calcMargin = Math.round((adv.pairs || 0) * (adv.margin_per_pair || 10.0) * 100) / 100;
+    setRepayMarginAmountOverride(String(calcMargin));
     setShowRepayModal(true);
   };
 
@@ -340,7 +364,61 @@ export default function Investors() {
     setRepayActionType(action);
     setTargetPoId("");
     setRepayMarginOverride("");
+    setRepayPayoutDate(new Date().toISOString().slice(0, 10));
+    setRepayReference("");
+    setRepayNotes("");
+    setRepayPrincipalOverride("");
+    setRepayMarginAmountOverride("");
     setShowRepayModal(true);
+  };
+
+  // Export Investor Ledger to CSV
+  const handleExportStatementCsv = () => {
+    if (!filteredStatementTransactions || filteredStatementTransactions.length === 0) {
+      alert("No ledger transactions to export");
+      return;
+    }
+    const headers = [
+      "Value Date",
+      "Voucher Ref",
+      "Type",
+      "Category",
+      "PO / Reference",
+      "Pairs",
+      "Narration",
+      "Settlement Mode",
+      "Debit (Repaid INR)",
+      "Margin Yield (INR)",
+      "Credit (Invested INR)",
+      "Running Balance (INR)",
+      "Status",
+    ];
+
+    const rows = filteredStatementTransactions.map((t) => [
+      `"${t.date || ""}"`,
+      `"${t.voucher_no || t.id || ""}"`,
+      `"${t.type || ""}"`,
+      `"${t.category || ""}"`,
+      `"${t.po_number || ""}"`,
+      t.pairs || 0,
+      `"${(t.narration || "").replace(/"/g, '""')}"`,
+      `"${t.channel || ""}"`,
+      t.debit || 0,
+      t.margin_paid || 0,
+      t.credit || 0,
+      t.running_balance || 0,
+      `"${t.status || ""}"`,
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    link.setAttribute("download", `investor_ledger_${dateStamp}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   // Filtered investors
@@ -402,34 +480,75 @@ export default function Investors() {
     }
   };
 
-  // Handle Create Advance (Supports Multiple POs funded at once & Banking Inflow)
+  // Handle Create Advance (Supports Multiple POs funded at once, Direct Capital / Past Inflow, & Banking Inflow)
   const handleCreateAdvance = async (e) => {
     e.preventDefault();
-    if (!selectedInvestorId || selectedPoIds.length === 0) return;
+    if (!selectedInvestorId) {
+      alert("Please select an investor partner");
+      return;
+    }
+
+    if (advanceFundingMode === "direct_historical") {
+      if (!customAmountOverride || parseFloat(customAmountOverride) <= 0) {
+        alert("Please enter a valid investment amount received (greater than 0)");
+        return;
+      }
+    } else {
+      if (selectedPoIds.length === 0) {
+        alert("Please select at least one Purchase Order to fund");
+        return;
+      }
+    }
+
     setSubmittingAdvance(true);
     try {
-      const payload = {
-        include_opex: includeOpex,
-        margin_per_pair: marginOverride ? parseFloat(marginOverride) : undefined,
-        advance_date: advanceDate || undefined,
-        amount_override: customAmountOverride ? parseFloat(customAmountOverride) : undefined,
-        bank_account_id: selectedBankAccountId || undefined,
-        payment_mode: paymentMode || "Bank Transfer",
-        reference: paymentReference || "",
-        notes: advanceNotes,
-      };
+      if (advanceFundingMode === "direct_historical") {
+        const payload = {
+          po_id: undefined,
+          po_number_manual: manualPoNumber ? manualPoNumber.trim() : undefined,
+          pairs_manual: manualPairs ? parseInt(manualPairs, 10) : 0,
+          amount_override: parseFloat(customAmountOverride),
+          margin_per_pair: marginOverride ? parseFloat(marginOverride) : undefined,
+          advance_date: advanceDate || undefined,
+          bank_account_id: selectedBankAccountId || undefined,
+          payment_mode: paymentMode || "Bank Transfer",
+          reference: paymentReference || "",
+          notes: advanceNotes,
+          already_settled: alreadySettled,
+          settlement_date: alreadySettled ? (settlementDate || undefined) : undefined,
+          principal_repaid: alreadySettled && principalRepaid !== "" ? parseFloat(principalRepaid) : undefined,
+          margin_repaid: alreadySettled && marginRepaid !== "" ? parseFloat(marginRepaid) : undefined,
+          settlement_mode: alreadySettled ? settlementMode : undefined,
+          settlement_reference: alreadySettled ? settlementReference : undefined,
+          settlement_bank_account_id: alreadySettled ? (settlementBankAccountId || undefined) : undefined,
+        };
 
-      if (selectedPoIds.length === 1) {
-        await http.post(`/investors/${selectedInvestorId}/advances`, {
-          po_id: selectedPoIds[0],
-          ...payload,
-        });
+        await http.post(`/investors/${selectedInvestorId}/advances`, payload);
       } else {
-        await http.post(`/investors/${selectedInvestorId}/advances/batch`, {
-          po_ids: selectedPoIds,
-          ...payload,
-        });
+        const payload = {
+          include_opex: includeOpex,
+          margin_per_pair: marginOverride ? parseFloat(marginOverride) : undefined,
+          advance_date: advanceDate || undefined,
+          amount_override: customAmountOverride ? parseFloat(customAmountOverride) : undefined,
+          bank_account_id: selectedBankAccountId || undefined,
+          payment_mode: paymentMode || "Bank Transfer",
+          reference: paymentReference || "",
+          notes: advanceNotes,
+        };
+
+        if (selectedPoIds.length === 1) {
+          await http.post(`/investors/${selectedInvestorId}/advances`, {
+            po_id: selectedPoIds[0],
+            ...payload,
+          });
+        } else {
+          await http.post(`/investors/${selectedInvestorId}/advances/batch`, {
+            po_ids: selectedPoIds,
+            ...payload,
+          });
+        }
       }
+
       setShowCreateAdvanceModal(false);
       setSelectedPoIds([]);
       setSelectedInvestorId("");
@@ -440,7 +559,18 @@ export default function Investors() {
       setAdvanceDate(new Date().toISOString().slice(0, 10));
       setShowExecutedPOs(false);
       setCustomAmountOverride("");
+      setAdvanceFundingMode("po_based");
+      setManualPoNumber("");
+      setManualPairs("");
+      setAlreadySettled(false);
+      setSettlementDate(new Date().toISOString().slice(0, 10));
+      setPrincipalRepaid("");
+      setMarginRepaid("");
+      setSettlementReference("");
+      setSettlementBankAccountId("");
+
       loadData();
+      loadBankStatement();
     } catch (err) {
       const rawDetail = err?.response?.data?.detail;
       const errorMsg = Array.isArray(rawDetail)
@@ -460,22 +590,46 @@ export default function Investors() {
     if (advancesToSettle.length === 0) return;
     setSubmittingRepay(true);
     try {
-      const advIds = advancesToSettle.map((a) => a._id);
-      await http.post("/investors/advances/bulk-repay", {
-        advance_ids: advIds,
-        action: repayActionType,
-        target_po_id: repayActionType === "reinvest" ? targetPoId : undefined,
-        margin_per_pair_override: repayMarginOverride ? parseFloat(repayMarginOverride) : undefined,
-        mode: repayMode,
-        bank_account_id: repayMode !== "Cash" ? (repayBankAccountId || undefined) : undefined,
-      });
+      if (advancesToSettle.length === 1) {
+        const adv = advancesToSettle[0];
+        await http.post(`/investors/advances/${adv._id}/repay`, {
+          action: repayActionType,
+          target_po_id: repayActionType === "reinvest" ? targetPoId : undefined,
+          margin_per_pair_override: repayMarginOverride ? parseFloat(repayMarginOverride) : undefined,
+          principal_amount_override: repayPrincipalOverride !== "" ? parseFloat(repayPrincipalOverride) : undefined,
+          margin_amount_override: repayMarginAmountOverride !== "" ? parseFloat(repayMarginAmountOverride) : undefined,
+          payout_date: repayPayoutDate || undefined,
+          mode: repayMode,
+          reference: repayReference || "",
+          notes: repayNotes || "",
+          bank_account_id: repayMode !== "Cash" ? (repayBankAccountId || undefined) : undefined,
+        });
+      } else {
+        const advIds = advancesToSettle.map((a) => a._id);
+        await http.post("/investors/advances/bulk-repay", {
+          advance_ids: advIds,
+          action: repayActionType,
+          target_po_id: repayActionType === "reinvest" ? targetPoId : undefined,
+          margin_per_pair_override: repayMarginOverride ? parseFloat(repayMarginOverride) : undefined,
+          payout_date: repayPayoutDate || undefined,
+          mode: repayMode,
+          reference: repayReference || "",
+          notes: repayNotes || "",
+          bank_account_id: repayMode !== "Cash" ? (repayBankAccountId || undefined) : undefined,
+        });
+      }
 
       setShowRepayModal(false);
       setAdvancesToSettle([]);
-      setSelectedAdvanceIds((prev) => prev.filter((id) => !advIds.includes(id)));
+      setSelectedAdvanceIds([]);
       setTargetPoId("");
       setRepayMarginOverride("");
+      setRepayPrincipalOverride("");
+      setRepayMarginAmountOverride("");
+      setRepayReference("");
+      setRepayNotes("");
       loadData();
+      loadBankStatement();
     } catch (err) {
       const rawDetail = err?.response?.data?.detail;
       const errorMsg = Array.isArray(rawDetail)
@@ -523,7 +677,22 @@ export default function Investors() {
               <Users className="w-3.5 h-3.5 inline mr-1.5" />
               New Investor
             </BtnSecondary>
-            <BtnPrimary onClick={() => setShowCreateAdvanceModal(true)}>
+            <button
+              onClick={() => {
+                setAdvanceFundingMode("direct_historical");
+                setSelectedPoIds([]);
+                setAdvanceDate(new Date().toISOString().slice(0, 10));
+                setShowCreateAdvanceModal(true);
+              }}
+              className="bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs px-3 py-2 border-2 border-amber-800 shadow-sm transition flex items-center gap-1.5"
+            >
+              <History className="w-3.5 h-3.5" />
+              <span>Record Past Investment</span>
+            </button>
+            <BtnPrimary onClick={() => {
+              setAdvanceFundingMode("po_based");
+              setShowCreateAdvanceModal(true);
+            }}>
               <Plus className="w-3.5 h-3.5 inline mr-1.5" />
               Fund Purchase Orders
             </BtnPrimary>
@@ -1131,11 +1300,20 @@ export default function Investors() {
               <div className="flex items-center gap-2 self-end md:self-auto no-print">
                 <button
                   type="button"
+                  onClick={handleExportStatementCsv}
+                  className="inline-flex items-center gap-2 px-3.5 py-2 bg-emerald-700 text-white text-xs font-bold uppercase tracking-wider border-2 border-slate-900 shadow-ind hover:bg-emerald-600 transition active:translate-x-0.5 active:translate-y-0.5 cursor-pointer"
+                  title="Export Investor Ledger to CSV / Excel"
+                >
+                  <Download className="w-4 h-4 text-emerald-200" />
+                  Export CSV
+                </button>
+                <button
+                  type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-2 px-3.5 py-2 bg-white text-slate-900 text-xs font-bold uppercase tracking-wider border-2 border-slate-900 shadow-ind hover:bg-slate-100 transition active:translate-x-0.5 active:translate-y-0.5 cursor-pointer"
                 >
                   <Printer className="w-4 h-4 text-slate-700" />
-                  Print / Export Investor Ledger
+                  Print Ledger
                 </button>
                 <button
                   type="button"
@@ -1604,14 +1782,22 @@ export default function Investors() {
         </div>
       )}
 
-      {/* MODAL 3: COMMIT ADVANCE (Supports Multiple POs funded at once) */}
+      {/* MODAL 3: COMMIT ADVANCE & PAST INVESTMENTS */}
       {showCreateAdvanceModal && (
         <div className="fixed inset-0 z-[100] grid place-items-center bg-black/50 p-4 overflow-y-auto">
           <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-2xl my-auto flex flex-col max-h-[92vh]">
             <div className="px-5 py-4 border-b-2 border-slate-200 flex items-center justify-between bg-slate-50 flex-shrink-0">
               <div>
-                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">Commercial Commit</div>
-                <div className="font-black text-base mt-0.5">Fund Purchase Order(s) Simultaneously</div>
+                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">
+                  {advanceFundingMode === "direct_historical"
+                    ? "Direct Capital & Past Investments"
+                    : "Commercial Commit"}
+                </div>
+                <div className="font-black text-base mt-0.5">
+                  {advanceFundingMode === "direct_historical"
+                    ? "Record Past Investment / General Capital Inflow"
+                    : "Fund Purchase Order(s) Simultaneously"}
+                </div>
               </div>
               <button
                 onClick={() => setShowCreateAdvanceModal(false)}
@@ -1622,6 +1808,37 @@ export default function Investors() {
             </div>
 
             <form onSubmit={handleCreateAdvance} className="p-5 space-y-4 text-xs overflow-y-auto">
+              {/* Mode Switcher */}
+              <div className="grid grid-cols-2 gap-2 border-2 border-slate-300 p-1 bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setAdvanceFundingMode("po_based")}
+                  className={`py-2 text-[10px] font-bold uppercase tracking-wider transition flex items-center justify-center gap-1.5 ${
+                    advanceFundingMode === "po_based"
+                      ? "bg-[#0F172A] text-white shadow-sm"
+                      : "text-slate-700 hover:text-slate-900"
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Fund Purchase Order(s)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdvanceFundingMode("direct_historical");
+                    setSelectedPoIds([]);
+                  }}
+                  className={`py-2 text-[10px] font-bold uppercase tracking-wider transition flex items-center justify-center gap-1.5 ${
+                    advanceFundingMode === "direct_historical"
+                      ? "bg-[#0F172A] text-white shadow-sm"
+                      : "text-slate-700 hover:text-slate-900"
+                  }`}
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Direct / Past Investment Entry</span>
+                </button>
+              </div>
+
               <div>
                 <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
                   Select Investor Partner <span className="text-red-500">*</span>
@@ -1700,6 +1917,7 @@ export default function Investors() {
                       <option value="RTGS">RTGS</option>
                       <option value="IMPS">IMPS</option>
                       <option value="Cheque">Cheque Deposit</option>
+                      <option value="Cash">Cash Deposit</option>
                     </select>
                   </div>
                   <div>
@@ -1717,261 +1935,490 @@ export default function Investors() {
                 </div>
               </div>
 
-              {/* Multi-PO Selection Box */}
-              <div className="space-y-2 border-2 border-slate-200 p-3 bg-slate-50">
-                <div className="flex flex-col gap-2">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700">
-                      Select Purchase Orders to Fund ({selectedPoIds.length} selected) <span className="text-red-500">*</span>
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const matching = filteredPosToFund.map((p) => p.id || p._id);
-                          setSelectedPoIds(matching);
+              {advanceFundingMode === "direct_historical" ? (
+                /* Direct Capital / Historical Investment Form */
+                <div className="border-2 border-amber-300 bg-amber-50/50 p-4 space-y-4">
+                  <div className="flex items-center gap-2 text-amber-900 font-bold text-xs uppercase tracking-wider">
+                    <History className="w-4 h-4 text-amber-700" />
+                    <span>Historical / General Capital Inflow Particulars</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                        Investment Amount Received (₹) <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="number"
+                        step="1"
+                        required
+                        value={customAmountOverride}
+                        onChange={(e) => {
+                          setCustomAmountOverride(e.target.value);
+                          if (alreadySettled && !principalRepaid) {
+                            setPrincipalRepaid(e.target.value);
+                          }
                         }}
-                        className="text-[10px] text-blue-600 font-bold uppercase hover:underline"
-                      >
-                        Select All Filtered
-                      </button>
-                      <span>·</span>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedPoIds([])}
-                        className="text-[10px] text-slate-500 font-bold uppercase hover:underline"
-                      >
-                        Clear
-                      </button>
+                        placeholder="e.g. 500000"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono font-bold focus:border-[#C27842] focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                        PO Number / Reference Tag
+                      </label>
+                      <input
+                        type="text"
+                        value={manualPoNumber}
+                        onChange={(e) => setManualPoNumber(e.target.value)}
+                        placeholder="e.g. PO-HIST-001 or TRANCHE-1"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                        Manufactured Pairs (Optional)
+                      </label>
+                      <input
+                        type="number"
+                        step="1"
+                        value={manualPairs}
+                        onChange={(e) => {
+                          setManualPairs(e.target.value);
+                          const pairsNum = parseInt(e.target.value, 10) || 0;
+                          const rateNum = parseFloat(marginOverride) || 10;
+                          if (alreadySettled) {
+                            setMarginRepaid(String(pairsNum * rateNum));
+                          }
+                        }}
+                        placeholder="e.g. 1000"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                      />
                     </div>
                   </div>
 
-                  {/* Toggle to show executed / dispatched POs for historical funding */}
-                  <div className="flex items-center justify-between bg-white border border-slate-200 px-2.5 py-1.5 rounded">
-                    <label className="flex items-center gap-2 cursor-pointer select-none text-slate-700 font-bold text-[11px]">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                        Agreed Margin Rate / Pair (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={marginOverride}
+                        onChange={(e) => {
+                          setMarginOverride(e.target.value);
+                          const rateNum = parseFloat(e.target.value) || 0;
+                          const pairsNum = parseInt(manualPairs, 10) || 0;
+                          if (alreadySettled) {
+                            setMarginRepaid(String(pairsNum * rateNum));
+                          }
+                        }}
+                        placeholder="e.g. 10.0"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex items-center">
+                      <div className="text-[11px] font-mono text-slate-600 bg-white p-2.5 border border-slate-200 w-full">
+                        Estimated Margin Yield:{" "}
+                        <strong className="text-emerald-700 font-bold">
+                          {inr((parseInt(manualPairs, 10) || 0) * (parseFloat(marginOverride) || 10.0))}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Past Repayment / Settlement Sub-section */}
+                  <div className="border-t-2 border-amber-200 pt-3">
+                    <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-900 text-xs select-none">
                       <input
                         type="checkbox"
-                        checked={showExecutedPOs}
-                        onChange={(e) => setShowExecutedPOs(e.target.checked)}
-                        className="w-3.5 h-3.5 text-[#C27842] border-slate-300 rounded focus:ring-0"
+                        checked={alreadySettled}
+                        onChange={(e) => {
+                          setAlreadySettled(e.target.checked);
+                          if (e.target.checked) {
+                            if (!principalRepaid && customAmountOverride) {
+                              setPrincipalRepaid(customAmountOverride);
+                            }
+                            const pairsNum = parseInt(manualPairs, 10) || 0;
+                            const rateNum = parseFloat(marginOverride) || 10;
+                            if (!marginRepaid && pairsNum > 0) {
+                              setMarginRepaid(String(pairsNum * rateNum));
+                            }
+                          }
+                        }}
+                        className="w-4 h-4 text-emerald-600 border-2 border-slate-400 rounded focus:ring-0"
                       />
-                      <span>Include Executed / Dispatched POs (Historical / Past Investments)</span>
+                      <span>This investment was already settled / paid back to the investor in the past</span>
                     </label>
-                    <span className="text-[10px] font-mono text-slate-500 font-semibold">
-                      {showExecutedPOs ? "All POs Visible" : "Planning & Procurement Only"}
-                    </span>
+
+                    {alreadySettled && (
+                      <div className="mt-3 p-3 bg-emerald-50 border border-emerald-300 space-y-3 animate-in fade-in duration-200">
+                        <div className="text-[10px] uppercase tracking-wider font-bold text-emerald-900 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Historical Settlement Details</span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Repayment Date <span className="text-red-500">*</span>
+                            </label>
+                            <input
+                              type="date"
+                              required
+                              value={settlementDate}
+                              onChange={(e) => setSettlementDate(e.target.value)}
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Principal Repaid (₹) <span className="text-red-500">*</span>
+                            </label>
+                            <input
+                              type="number"
+                              step="1"
+                              required
+                              value={principalRepaid}
+                              onChange={(e) => setPrincipalRepaid(e.target.value)}
+                              placeholder="e.g. 500000"
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono font-bold focus:border-[#C27842] focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Margin Yield Paid (₹)
+                            </label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={marginRepaid}
+                              onChange={(e) => setMarginRepaid(e.target.value)}
+                              placeholder="e.g. 10000"
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono font-bold focus:border-[#C27842] focus:outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Repayment Payment Mode
+                            </label>
+                            <select
+                              value={settlementMode}
+                              onChange={(e) => setSettlementMode(e.target.value)}
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
+                            >
+                              <option value="Bank Transfer">Bank Transfer (RTGS/NEFT)</option>
+                              <option value="NEFT">NEFT</option>
+                              <option value="RTGS">RTGS</option>
+                              <option value="IMPS">IMPS</option>
+                              <option value="Cheque">Cheque</option>
+                              <option value="Cash">Petty Cash</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Repayment UTR / Ref
+                            </label>
+                            <input
+                              type="text"
+                              value={settlementReference}
+                              onChange={(e) => setSettlementReference(e.target.value)}
+                              placeholder="e.g. UTR-PAYOUT-9876"
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                              Disbursing Bank Account
+                            </label>
+                            <select
+                              value={settlementBankAccountId}
+                              onChange={(e) => setSettlementBankAccountId(e.target.value)}
+                              className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
+                            >
+                              <option value="">-- Same as Inflow Account --</option>
+                              {bankAccounts.map((acc) => (
+                                <option key={acc._id || acc.id} value={acc._id || acc.id}>
+                                  {acc.bank_name || acc.account_name} {acc.account_number ? `(••${acc.account_number.slice(-4)})` : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="p-2.5 bg-white border border-emerald-300 flex justify-between items-center text-xs">
+                          <span className="font-bold text-slate-700">Total Historical Payout Paid:</span>
+                          <span className="font-mono font-black text-emerald-800 text-sm">
+                            {inr((parseFloat(principalRepaid) || 0) + (parseFloat(marginRepaid) || 0))}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
+              ) : (
+                /* Multi-PO Selection Box */
+                <>
+                  <div className="space-y-2 border-2 border-slate-200 p-3 bg-slate-50">
+                    <div className="flex flex-col gap-2">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700">
+                          Select Purchase Orders to Fund ({selectedPoIds.length} selected) <span className="text-red-500">*</span>
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const matching = filteredPosToFund.map((p) => p.id || p._id);
+                              setSelectedPoIds(matching);
+                            }}
+                            className="text-[10px] text-blue-600 font-bold uppercase hover:underline"
+                          >
+                            Select All Filtered
+                          </button>
+                          <span>·</span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPoIds([])}
+                            className="text-[10px] text-slate-500 font-bold uppercase hover:underline"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
 
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={poFilterQuery}
-                    onChange={(e) => setPoFilterQuery(e.target.value)}
-                    placeholder="Filter PO number or client..."
-                    className="w-full pl-8 pr-3 py-1.5 border border-slate-300 bg-white text-xs font-mono focus:outline-none"
-                  />
-                </div>
-
-                <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 border border-slate-200 bg-white">
-                  {filteredPosToFund.length === 0 ? (
-                    <div className="p-4 text-center text-slate-400 text-xs italic">
-                      No purchase orders matching criteria in Planning or Procurement stages.
+                      {/* Toggle to show executed / dispatched POs for historical funding */}
+                      <div className="flex items-center justify-between bg-white border border-slate-200 px-2.5 py-1.5 rounded">
+                        <label className="flex items-center gap-2 cursor-pointer select-none text-slate-700 font-bold text-[11px]">
+                          <input
+                            type="checkbox"
+                            checked={showExecutedPOs}
+                            onChange={(e) => setShowExecutedPOs(e.target.checked)}
+                            className="w-3.5 h-3.5 text-[#C27842] border-slate-300 rounded focus:ring-0"
+                          />
+                          <span>Include Executed / Dispatched POs (Historical / Past Investments)</span>
+                        </label>
+                        <span className="text-[10px] font-mono text-slate-500 font-semibold">
+                          {showExecutedPOs ? "All POs Visible" : "Planning & Procurement Only"}
+                        </span>
+                      </div>
                     </div>
-                  ) : (
-                    filteredPosToFund.map((p) => {
-                      const poId = p.id || p._id;
-                      const isChecked = selectedPoIds.includes(poId);
-                      const isDispatched = p.is_dispatched || p.is_completed || p.production_stage === "dispatched" || p.production_stage === "completed";
-                      return (
-                        <label
-                          key={poId}
-                          className={`flex items-center justify-between p-2.5 hover:bg-slate-50 cursor-pointer ${
-                            isChecked ? "bg-amber-50/70 font-bold" : ""
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={(e) => {
-                                e.stopPropagation();
-                                if (e.target.checked) {
-                                  setSelectedPoIds((prev) => [...prev.filter((id) => id !== poId), poId]);
-                                } else {
-                                  setSelectedPoIds((prev) => prev.filter((id) => id !== poId));
-                                }
-                              }}
-                              className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0 cursor-pointer"
-                            />
-                            <div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-slate-900 font-bold">{p.po_number}</span>
-                                {isDispatched ? (
-                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 uppercase">
-                                    Executed / Dispatched
+
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        value={poFilterQuery}
+                        onChange={(e) => setPoFilterQuery(e.target.value)}
+                        placeholder="Filter PO number or client..."
+                        className="w-full pl-8 pr-3 py-1.5 border border-slate-300 bg-white text-xs font-mono focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 border border-slate-200 bg-white">
+                      {filteredPosToFund.length === 0 ? (
+                        <div className="p-4 text-center text-slate-400 text-xs italic">
+                          No purchase orders matching criteria in Planning or Procurement stages.
+                        </div>
+                      ) : (
+                        filteredPosToFund.map((p) => {
+                          const poId = p.id || p._id;
+                          const isChecked = selectedPoIds.includes(poId);
+                          const isDispatched = p.is_dispatched || p.is_completed || p.production_stage === "dispatched" || p.production_stage === "completed";
+                          return (
+                            <label
+                              key={poId}
+                              className={`flex items-center justify-between p-2.5 hover:bg-slate-50 cursor-pointer ${
+                                isChecked ? "bg-amber-50/70 font-bold" : ""
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    if (e.target.checked) {
+                                      setSelectedPoIds((prev) => [...prev.filter((id) => id !== poId), poId]);
+                                    } else {
+                                      setSelectedPoIds((prev) => prev.filter((id) => id !== poId));
+                                    }
+                                  }}
+                                  className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0 cursor-pointer"
+                                />
+                                <div>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-mono text-slate-900 font-bold">{p.po_number}</span>
+                                    {isDispatched ? (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 uppercase">
+                                        Executed / Dispatched
+                                      </span>
+                                    ) : p.production_stage === "procurement" ? (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-slate-200 text-slate-800 border border-slate-300 uppercase">
+                                        Procurement
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800 border border-purple-200 uppercase">
+                                        Planning
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-slate-500 font-normal text-[10px]">
+                                    {p.client_name || "Client"}
                                   </span>
-                                ) : p.production_stage === "procurement" ? (
-                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-slate-200 text-slate-800 border border-slate-300 uppercase">
-                                    Procurement
-                                  </span>
-                                ) : (
-                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800 border border-purple-200 uppercase">
-                                    Planning
-                                  </span>
-                                )}
+                                </div>
                               </div>
-                              <span className="text-slate-500 font-normal text-[10px]">
-                                {p.client_name || "Client"}
+                              <div className="text-right">
+                                <div className="font-mono font-bold text-slate-900 text-[11px]">
+                                  {p.production_budget?.total_budget != null ? inr(p.production_budget.total_budget) : inr(p.subtotal || 0)}
+                                </div>
+                                <div className="font-mono text-slate-500 text-[10px]">
+                                  {(p.total_quantity || p.quantity || 0).toLocaleString("en-IN")} prs
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                        Negotiated Margin Override / Pair (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={marginOverride}
+                        onChange={(e) => setMarginOverride(e.target.value)}
+                        placeholder="e.g. 10.0"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                        Custom Capital Override (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="1"
+                        value={customAmountOverride}
+                        onChange={(e) => setCustomAmountOverride(e.target.value)}
+                        placeholder="Optional lumpsum override"
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
+                      />
+                      <p className="text-[9px] text-slate-500 mt-0.5">Leave blank to use exact PO Budget.</p>
+                    </div>
+
+                    <div className="p-3 bg-slate-50 border-2 border-slate-200">
+                      <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={includeOpex}
+                          onChange={(e) => setIncludeOpex(e.target.checked)}
+                          className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0"
+                        />
+                        <span>Include Investor Opex Once</span>
+                      </label>
+                      <p className="text-[10px] text-slate-500 mt-1 pl-6">
+                        Applied once across batch.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* LIVE BATCH COMPUTATION PREVIEW BOX */}
+                  {selectedPoIds.length > 0 && (
+                    <div className="p-3.5 bg-slate-100 border-2 border-slate-300 space-y-2.5">
+                      <div className="text-[10px] uppercase font-bold text-slate-600 flex items-center justify-between">
+                        <span className="flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-[#C27842]" />
+                          Multi-PO Capital Calculation Preview
+                        </span>
+                        {loadingPreview && <Loader2 className="w-3 h-3 animate-spin text-slate-500" />}
+                      </div>
+
+                      {batchPreview ? (
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                            <div className="bg-white p-2 border border-slate-200">
+                              <span className="text-slate-500 block text-[9px] uppercase font-bold">Total POs</span>
+                              <span className="font-mono font-bold text-slate-900">{batchPreview.count}</span>
+                            </div>
+                            <div className="bg-white p-2 border border-slate-200">
+                              <span className="text-slate-500 block text-[9px] uppercase font-bold">Total Pairs</span>
+                              <span className="font-mono font-bold text-slate-900">
+                                {batchPreview.total_pairs?.toLocaleString("en-IN")}
+                              </span>
+                            </div>
+                            <div className="bg-white p-2 border border-slate-200 col-span-2">
+                              <span className="text-slate-500 block text-[9px] uppercase font-bold">
+                                Total Capital to Fund
+                              </span>
+                              <span className="font-mono font-black text-slate-950 text-sm">
+                                {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
                               </span>
                             </div>
                           </div>
-                          <div className="text-right">
-                            <div className="font-mono font-bold text-slate-900 text-[11px]">
-                              {p.production_budget?.total_budget != null ? inr(p.production_budget.total_budget) : inr(p.subtotal || 0)}
-                            </div>
-                            <div className="font-mono text-slate-500 text-[10px]">
-                              {(p.total_quantity || p.quantity || 0).toLocaleString("en-IN")} prs
-                            </div>
-                          </div>
-                        </label>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-                    Negotiated Margin Override / Pair (₹)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={marginOverride}
-                    onChange={(e) => setMarginOverride(e.target.value)}
-                    placeholder="e.g. 10.0"
-                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-                    Custom Capital Override (₹)
-                  </label>
-                  <input
-                    type="number"
-                    step="1"
-                    value={customAmountOverride}
-                    onChange={(e) => setCustomAmountOverride(e.target.value)}
-                    placeholder="Optional lumpsum override"
-                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#C27842] focus:outline-none"
-                  />
-                  <p className="text-[9px] text-slate-500 mt-0.5">Leave blank to use exact PO Budget.</p>
-                </div>
-
-                <div className="p-3 bg-slate-50 border-2 border-slate-200">
-                  <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-800">
-                    <input
-                      type="checkbox"
-                      checked={includeOpex}
-                      onChange={(e) => setIncludeOpex(e.target.checked)}
-                      className="w-4 h-4 border-2 border-slate-400 rounded text-[#0F172A] focus:ring-0"
-                    />
-                    <span>Include Investor Opex Once</span>
-                  </label>
-                  <p className="text-[10px] text-slate-500 mt-1 pl-6">
-                    Applied once across batch.
-                  </p>
-                </div>
-              </div>
-
-              {/* LIVE BATCH COMPUTATION PREVIEW BOX */}
-              {selectedPoIds.length > 0 && (
-                <div className="p-3.5 bg-slate-100 border-2 border-slate-300 space-y-2.5">
-                  <div className="text-[10px] uppercase font-bold text-slate-600 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-[#C27842]" />
-                      Multi-PO Capital Calculation Preview
-                    </span>
-                    {loadingPreview && <Loader2 className="w-3 h-3 animate-spin text-slate-500" />}
-                  </div>
-
-                  {batchPreview ? (
-                    <div className="space-y-2">
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                        <div className="bg-white p-2 border border-slate-200">
-                          <span className="text-slate-500 block text-[9px] uppercase font-bold">Total POs</span>
-                          <span className="font-mono font-bold text-slate-900">{batchPreview.count}</span>
-                        </div>
-                        <div className="bg-white p-2 border border-slate-200">
-                          <span className="text-slate-500 block text-[9px] uppercase font-bold">Total Pairs</span>
-                          <span className="font-mono font-bold text-slate-900">
-                            {batchPreview.total_pairs?.toLocaleString("en-IN")}
-                          </span>
-                        </div>
-                        <div className="bg-white p-2 border border-slate-200 col-span-2">
-                          <span className="text-slate-500 block text-[9px] uppercase font-bold">
-                            Total Capital to Fund
-                          </span>
-                          <span className="font-mono font-black text-slate-950 text-sm">
-                            {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Itemized per-PO list */}
-                      <div className="max-h-36 overflow-y-auto border border-slate-200 bg-white text-[11px] divide-y divide-slate-100">
-                        {batchPreview.items?.map((item) => (
-                          <div key={item.po_id} className="p-2 flex justify-between items-center">
-                            <div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-bold text-slate-900 font-mono">{item.po_number}</span>
-                                <span className="text-slate-500">({item.pairs} prs)</span>
-                              </div>
-                              {item.breakdown && (
-                                <div className="text-[9.5px] text-slate-500 mt-0.5 font-mono">
-                                  BOM: {inr(item.breakdown.bom_cost || 0)} · Labour: {inr(item.breakdown.labor_cost || item.breakdown.labour_cost || 0)} · Packing: {inr(item.breakdown.packing_cost || 0)}{item.breakdown.outside_cost ? ` · Outside: ${inr(item.breakdown.outside_cost)}` : ""}
+                          {/* Itemized per-PO list */}
+                          <div className="max-h-36 overflow-y-auto border border-slate-200 bg-white text-[11px] divide-y divide-slate-100">
+                            {batchPreview.items?.map((item) => (
+                              <div key={item.po_id} className="p-2 flex justify-between items-center">
+                                <div>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-bold text-slate-900 font-mono">{item.po_number}</span>
+                                    <span className="text-slate-500">({item.pairs} prs)</span>
+                                  </div>
+                                  {item.breakdown && (
+                                    <div className="text-[9.5px] text-slate-500 mt-0.5 font-mono">
+                                      BOM: {inr(item.breakdown.bom_cost || 0)} · Labour: {inr(item.breakdown.labor_cost || item.breakdown.labour_cost || 0)} · Packing: {inr(item.breakdown.packing_cost || 0)}{item.breakdown.outside_cost ? ` · Outside: ${inr(item.breakdown.outside_cost)}` : ""}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
+                                <div className="text-right">
+                                  <div className="font-mono font-bold text-slate-900">
+                                    {inr(item.base_po_budget || item.funding_required)}
+                                  </div>
+                                  <span className="text-[9px] text-slate-400 uppercase font-semibold">PO Budget</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="bg-slate-900 text-white p-3 flex justify-between items-center">
+                            <div>
+                              <span className="text-[9px] uppercase tracking-wider text-slate-300 block font-bold">
+                                Combined Advance Total {customAmountOverride ? "(Custom Override)" : ""}
+                              </span>
+                              <span className="font-mono text-base font-black">
+                                {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
+                              </span>
                             </div>
                             <div className="text-right">
-                              <div className="font-mono font-bold text-slate-900">
-                                {inr(item.base_po_budget || item.funding_required)}
-                              </div>
-                              <span className="text-[9px] text-slate-400 uppercase font-semibold">PO Budget</span>
+                              <span className="text-[9px] uppercase tracking-wider text-emerald-400 block font-bold">
+                                Combined Yield @ ₹{marginOverride || 10}/pr
+                              </span>
+                              <span className="font-mono text-sm font-bold text-emerald-400">
+                                {inr((batchPreview.total_pairs || 0) * (parseFloat(marginOverride) || 10.0))}
+                              </span>
                             </div>
                           </div>
-                        ))}
-                      </div>
-
-                      <div className="bg-slate-900 text-white p-3 flex justify-between items-center">
-                        <div>
-                          <span className="text-[9px] uppercase tracking-wider text-slate-300 block font-bold">
-                            Combined Advance Total {customAmountOverride ? "(Custom Override)" : ""}
-                          </span>
-                          <span className="font-mono text-base font-black">
-                            {inr(customAmountOverride ? parseFloat(customAmountOverride) : batchPreview.total_funding_required)}
-                          </span>
                         </div>
-                        <div className="text-right">
-                          <span className="text-[9px] uppercase tracking-wider text-emerald-400 block font-bold">
-                            Combined Yield @ ₹{marginOverride || 10}/pr
-                          </span>
-                          <span className="font-mono text-sm font-bold text-emerald-400">
-                            {inr((batchPreview.total_pairs || 0) * (parseFloat(marginOverride) || 10.0))}
-                          </span>
+                      ) : (
+                        <div className="text-slate-500 text-center py-2 text-[11px]">
+                          {loadingPreview ? "Computing combined funding requirement..." : "Selecting POs..."}
                         </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-slate-500 text-center py-2 text-[11px]">
-                      {loadingPreview ? "Computing combined funding requirement..." : "Selecting POs..."}
+                      )}
                     </div>
                   )}
-                </div>
+                </>
               )}
 
               <div>
@@ -1982,7 +2429,7 @@ export default function Investors() {
                   type="text"
                   value={advanceNotes}
                   onChange={(e) => setAdvanceNotes(e.target.value)}
-                  placeholder="Optional syndicate reference"
+                  placeholder="Optional audit remarks or reference"
                   className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#C27842] focus:outline-none"
                 />
               </div>
@@ -1993,10 +2440,20 @@ export default function Investors() {
                 </BtnSecondary>
                 <BtnPrimary
                   type="submit"
-                  disabled={submittingAdvance || selectedPoIds.length === 0 || !selectedInvestorId}
+                  disabled={
+                    submittingAdvance ||
+                    !selectedInvestorId ||
+                    (advanceFundingMode === "direct_historical"
+                      ? !customAmountOverride || parseFloat(customAmountOverride) <= 0
+                      : selectedPoIds.length === 0)
+                  }
                 >
                   {submittingAdvance
-                    ? "Executing Batch Advance..."
+                    ? "Recording Investment..."
+                    : advanceFundingMode === "direct_historical"
+                    ? alreadySettled
+                      ? "Record Past Investment & Settlement"
+                      : "Record Past Investment Inflow"
                     : `Fund ${selectedPoIds.length} Purchase Order${selectedPoIds.length > 1 ? "s" : ""}`}
                 </BtnPrimary>
               </div>
@@ -2081,45 +2538,101 @@ export default function Investors() {
               </div>
 
               {repayActionType === "repay_in_full" ? (
-                <div className="p-4 bg-emerald-50 border-2 border-emerald-300 text-emerald-950 space-y-2">
-                  <div className="font-bold uppercase tracking-wider text-[11px] text-emerald-900">
-                    Full Cash Repayment (Real Cash Out for {advancesToSettle.length} POs)
+                <div className="p-4 bg-emerald-50 border-2 border-emerald-300 text-emerald-950 space-y-2.5">
+                  <div className="font-bold uppercase tracking-wider text-[11px] text-emerald-900 flex justify-between items-center">
+                    <span>Full Cash Repayment (Real Cash Out for {advancesToSettle.length} Advance{advancesToSettle.length > 1 ? "s" : ""})</span>
+                    <span className="font-mono text-[10px] text-emerald-800">GL 2020 + GL 5030</span>
                   </div>
-                  <div className="flex justify-between py-1 border-b border-emerald-200">
-                    <span>Total Principal (Debit Investor Advances Payable 2020):</span>
-                    <span className="font-mono font-bold">
-                      {inr(advancesToSettle.reduce((s, a) => s + (a.amount || 0), 0))}
-                    </span>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-emerald-200">
-                    <span>Total Margin (Debit Investor Margin / Finance Cost 5030):</span>
-                    <span className="font-mono font-bold">
-                      {inr(
-                        advancesToSettle.reduce(
-                          (s, a) =>
-                            s +
-                            (a.pairs || 0) *
-                              (repayMarginOverride ? parseFloat(repayMarginOverride) : a.margin_per_pair || 10.0),
-                          0
-                        )
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between py-1 font-bold text-slate-950 text-sm">
-                    <span>Total Cash Disbursed via Bank/Cash:</span>
-                    <span className="font-mono">
-                      {inr(
-                        advancesToSettle.reduce(
-                          (s, a) =>
-                            s +
-                            (a.amount || 0) +
-                            (a.pairs || 0) *
-                              (repayMarginOverride ? parseFloat(repayMarginOverride) : a.margin_per_pair || 10.0),
-                          0
-                        )
-                      )}
-                    </span>
-                  </div>
+
+                  {advancesToSettle.length === 1 ? (
+                    <div className="space-y-2 pt-1 border-t border-emerald-200">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                            Principal Repaid (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="1"
+                            value={repayPrincipalOverride}
+                            onChange={(e) => setRepayPrincipalOverride(e.target.value)}
+                            placeholder={String(advancesToSettle[0]?.amount || 0)}
+                            className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono font-bold focus:border-[#C27842] focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-700 mb-1">
+                            Margin Yield Amount (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="1"
+                            value={repayMarginAmountOverride}
+                            onChange={(e) => setRepayMarginAmountOverride(e.target.value)}
+                            placeholder={String(
+                              (advancesToSettle[0]?.pairs || 0) * (advancesToSettle[0]?.margin_per_pair || 10.0)
+                            )}
+                            className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono font-bold focus:border-[#C27842] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between py-1.5 font-bold text-slate-950 text-xs bg-white p-2.5 border border-emerald-300">
+                        <span>Total Cash Disbursed via Bank/Cash:</span>
+                        <span className="font-mono text-emerald-900 text-sm font-black">
+                          {inr(
+                            (repayPrincipalOverride !== ""
+                              ? parseFloat(repayPrincipalOverride) || 0
+                              : advancesToSettle[0]?.amount || 0) +
+                              (repayMarginAmountOverride !== ""
+                                ? parseFloat(repayMarginAmountOverride) || 0
+                                : (advancesToSettle[0]?.pairs || 0) *
+                                  (repayMarginOverride
+                                    ? parseFloat(repayMarginOverride)
+                                    : advancesToSettle[0]?.margin_per_pair || 10.0))
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between py-1 border-b border-emerald-200">
+                        <span>Total Principal (Debit Investor Advances Payable 2020):</span>
+                        <span className="font-mono font-bold">
+                          {inr(advancesToSettle.reduce((s, a) => s + (a.amount || 0), 0))}
+                        </span>
+                      </div>
+                      <div className="flex justify-between py-1 border-b border-emerald-200">
+                        <span>Total Margin (Debit Investor Margin / Finance Cost 5030):</span>
+                        <span className="font-mono font-bold">
+                          {inr(
+                            advancesToSettle.reduce(
+                              (s, a) =>
+                                s +
+                                (a.pairs || 0) *
+                                  (repayMarginOverride ? parseFloat(repayMarginOverride) : a.margin_per_pair || 10.0),
+                              0
+                            )
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex justify-between py-1 font-bold text-slate-950 text-sm">
+                        <span>Total Cash Disbursed via Bank/Cash:</span>
+                        <span className="font-mono">
+                          {inr(
+                            advancesToSettle.reduce(
+                              (s, a) =>
+                                s +
+                                (a.amount || 0) +
+                                (a.pairs || 0) *
+                                  (repayMarginOverride ? parseFloat(repayMarginOverride) : a.margin_per_pair || 10.0),
+                              0
+                            )
+                          )}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -2167,7 +2680,19 @@ export default function Investors() {
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                    Payout / Settlement Date <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={repayPayoutDate}
+                    onChange={(e) => setRepayPayoutDate(e.target.value)}
+                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                  />
+                </div>
                 <div>
                   <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
                     Margin Rate Override (₹/pr)
@@ -2177,7 +2702,7 @@ export default function Investors() {
                     step="0.5"
                     value={repayMarginOverride}
                     onChange={(e) => setRepayMarginOverride(e.target.value)}
-                    placeholder="Leave blank for agreed rates"
+                    placeholder="Agreed rate"
                     className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
                   />
                 </div>
@@ -2191,32 +2716,62 @@ export default function Investors() {
                     className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
                   >
                     <option value="Bank Transfer">Bank Transfer (RTGS/NEFT)</option>
+                    <option value="NEFT">NEFT</option>
+                    <option value="RTGS">RTGS</option>
+                    <option value="IMPS">IMPS</option>
                     <option value="Cash">Factory Petty Cash</option>
                     <option value="Cheque">Company Cheque</option>
                   </select>
                 </div>
               </div>
 
-              {repayMode !== "Cash" && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
-                    Disbursing Bank Account <span className="text-red-500">*</span>
+                    Repayment UTR / Cheque Ref
                   </label>
-                  <select
-                    required
-                    value={repayBankAccountId}
-                    onChange={(e) => setRepayBankAccountId(e.target.value)}
-                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
-                  >
-                    <option value="">-- Choose Company Bank Account --</option>
-                    {bankAccounts.map((acc) => (
-                      <option key={acc._id || acc.id} value={acc._id || acc.id}>
-                        {acc.bank_name || acc.account_name} {acc.account_number ? `(••${acc.account_number.slice(-4)})` : ""} · Bal: {inr(acc.current_balance || 0)}
-                      </option>
-                    ))}
-                  </select>
+                  <input
+                    type="text"
+                    value={repayReference}
+                    onChange={(e) => setRepayReference(e.target.value)}
+                    placeholder="e.g. UTR-SETTLE-1234"
+                    className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                  />
                 </div>
-              )}
+                {repayMode !== "Cash" && (
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                      Disbursing Bank Account <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      required
+                      value={repayBankAccountId}
+                      onChange={(e) => setRepayBankAccountId(e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
+                    >
+                      <option value="">-- Choose Company Bank Account --</option>
+                      {bankAccounts.map((acc) => (
+                        <option key={acc._id || acc.id} value={acc._id || acc.id}>
+                          {acc.bank_name || acc.account_name} {acc.account_number ? `(••${acc.account_number.slice(-4)})` : ""} · Bal: {inr(acc.current_balance || 0)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-1">
+                  Settlement Particulars / Voucher Notes
+                </label>
+                <input
+                  type="text"
+                  value={repayNotes}
+                  onChange={(e) => setRepayNotes(e.target.value)}
+                  placeholder="Optional remarks for ledger voucher"
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#C27842] focus:outline-none"
+                />
+              </div>
 
               <div className="pt-2 flex justify-end gap-2 border-t border-slate-200 flex-shrink-0">
                 <BtnSecondary

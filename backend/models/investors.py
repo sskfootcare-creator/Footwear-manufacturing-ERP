@@ -38,6 +38,8 @@ class InvestorUpdate(BaseModel):
 class InvestorAdvanceCreateIn(BaseModel):
     po_id: Optional[str] = Field(None, description="Purchase Order MongoDB ObjectId or string id")
     po_ids: Optional[List[str]] = Field(None, description="Optional list of Purchase Order IDs to fund in batch")
+    po_number_manual: Optional[str] = Field(None, description="Manual PO number or reference if not linked to a system PO")
+    pairs_manual: Optional[int] = Field(None, ge=0, description="Manual pair count if not linked to a system PO")
     include_opex: bool = Field(False, description="Whether to include investor opex recurring templates once")
     margin_per_pair: Optional[float] = Field(None, ge=0.0, description="Optional negotiable margin per pair override")
     advance_date: Optional[str] = Field(None, description="Advance date (YYYY-MM-DD)")
@@ -47,6 +49,14 @@ class InvestorAdvanceCreateIn(BaseModel):
     mode: Optional[str] = Field(None, description="Alias for payment_mode")
     reference: Optional[str] = Field("", description="Transaction UTR / payment reference")
     notes: Optional[str] = ""
+    # Historical / Pre-settled entry fields:
+    already_settled: Optional[bool] = Field(False, description="Whether this historical investment was already repaid/settled")
+    settlement_date: Optional[str] = Field(None, description="Historical repayment date (YYYY-MM-DD)")
+    principal_repaid: Optional[float] = Field(None, ge=0.0, description="Principal amount repaid")
+    margin_repaid: Optional[float] = Field(None, ge=0.0, description="Margin/profit amount paid to investor")
+    settlement_mode: Optional[str] = Field("Bank Transfer", description="Repayment payment mode")
+    settlement_reference: Optional[str] = Field("", description="Repayment UTR/reference")
+    settlement_bank_account_id: Optional[str] = None
 
 
 class InvestorBatchAdvanceCreateIn(BaseModel):
@@ -65,6 +75,8 @@ class InvestorBatchAdvanceCreateIn(BaseModel):
 class InvestorRepayActionIn(BaseModel):
     action: Literal["repay_in_full", "reinvest"] = Field(..., description="Action to perform: repay_in_full or reinvest")
     target_po_id: Optional[str] = Field(None, description="Target PO ID to reinvest into (required if action is reinvest)")
+    principal_amount_override: Optional[float] = Field(None, ge=0.0, description="Optional custom principal amount to repay")
+    margin_amount_override: Optional[float] = Field(None, ge=0.0, description="Optional custom margin/profit amount paid to investor")
     margin_per_pair_override: Optional[float] = Field(None, ge=0.0, description="Optional negotiated margin override")
     payout_date: Optional[str] = Field(None, description="Payout / Reinvestment date (YYYY-MM-DD)")
     mode: Optional[str] = Field("Bank Transfer", description="Payment mode for margin/principal")
