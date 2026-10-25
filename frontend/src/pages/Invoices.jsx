@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { http, inr, API } from "../lib/api";
 import { triggerApiExport } from "../lib/exportUtils";
 import ImageViewModal from "../components/ImageViewModal";
@@ -223,15 +222,15 @@ export default function Invoices() {
               <Plus className="w-4 h-4" />
               Create Direct Invoice
             </BtnPrimary>
-            <Link
-              to="/gmail-inbox"
+            <a
+              href="/gmail-inbox"
               data-testid="btn-gmail-inbox"
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-purple-50 text-purple-900 border-2 border-purple-300 hover:bg-purple-100 transition-colors shadow-sm"
               title="Automate GRN and client payment recording directly from your Gmail inbox"
             >
               <Mail className="w-3.5 h-3.5 text-purple-700" />
               <span>Gmail Automation</span>
-            </Link>
+            </a>
           </div>
         }
       />
