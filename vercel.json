@@ -5,7 +5,7 @@
   "functions": {
     "api/index.py": {
       "includeFiles": "backend/**",
-      "excludeFiles": "{frontend/**,tests/**,backend/tests/**,test_reports/**,mongodb-portable/**,docs/**,scratch/**,backend/scratch/**,uploads/**,backend/uploads/**,backend/.venv/**,.venv/**,backend/.pytest_cache/**,.pytest_cache/**,backend/financial_erp.db,backend/lib/bin/**,supabase/**,.agents/**,.emergent/**,memory/**,scripts/**,*.csv,*.log,*.md,*.db,*.wt}"
+      "excludeFiles": "{frontend/**,tests/**,backend/tests/**,test_reports/**,docs/**,scratch/**,backend/scratch/**,uploads/**,backend/uploads/**,backend/.venv/**,backend/.pytest_cache/**}"
     }
   },
   "headers": [
