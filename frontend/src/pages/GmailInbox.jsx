@@ -39,21 +39,65 @@ import {
   Info,
 } from "lucide-react";
 
+// Helper to style sender entity type badges
+const getSenderBadgeStyle = (entityType) => {
+  const t = (entityType || "").toLowerCase();
+  switch (t) {
+    case "bank":
+      return "bg-blue-100 text-blue-900 border-blue-300";
+    case "client":
+      return "bg-emerald-100 text-emerald-900 border-emerald-300";
+    case "vendor":
+      return "bg-amber-100 text-amber-900 border-amber-300";
+    case "marketplace":
+      return "bg-purple-100 text-purple-900 border-purple-300";
+    case "internal":
+      return "bg-slate-200 text-slate-800 border-slate-300";
+    default:
+      return "bg-gray-100 text-gray-800 border-gray-300";
+  }
+};
+
+const getSenderEmoji = (entityType) => {
+  const t = (entityType || "").toLowerCase();
+  switch (t) {
+    case "bank":
+      return "🏦";
+    case "client":
+      return "🏢";
+    case "vendor":
+      return "🚚";
+    case "marketplace":
+      return "🛍️";
+    case "internal":
+      return "🏭";
+    default:
+      return "🌐";
+  }
+};
+
 export default function GmailInbox() {
   const [items, setItems] = useState([]);
   const [statusInfo, setStatusInfo] = useState(null);
   const [rules, setRules] = useState(null);
   const [invoices, setInvoices] = useState([]);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [domainData, setDomainData] = useState({ custom_mappings: [], detected_domains: [], registries_summary: {} });
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [filterTab, setFilterTab] = useState("pending"); // pending, grn, payment, recorded, dismissed, all
+  const [senderTypeFilter, setSenderTypeFilter] = useState("ALL"); // ALL, Bank, Client, Vendor, Marketplace, Internal, Other
+  const [selectedSenderDomain, setSelectedSenderDomain] = useState(null);
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState(null);
 
   // Modals state
   const [showRulesModal, setShowRulesModal] = useState(false);
+  const [activeRulesTab, setActiveRulesTab] = useState("rules"); // "rules" | "domains"
+  const [newDomainForm, setNewDomainForm] = useState({ domain: "", entity_type: "Client", organization: "" });
+  const [savingDomain, setSavingDomain] = useState(false);
+
   const [showTestModal, setShowTestModal] = useState(false);
   const [editItem, setEditItem] = useState(null); // Item being edited for approval
   const [editForm, setEditForm] = useState({});
@@ -61,7 +105,7 @@ export default function GmailInbox() {
   // Test parser state
   const [testForm, setTestForm] = useState({
     subject: "",
-    sender: "stores@clientcorp.com",
+    sender: "alerts@hdfcbank.net",
     body_text: "",
   });
   const [testResult, setTestResult] = useState(null);
@@ -75,12 +119,13 @@ export default function GmailInbox() {
   const loadAllData = useCallback(async () => {
     setLoading(true);
     try {
-      const [statusRes, itemsRes, rulesRes, invRes, bankRes] = await Promise.all([
+      const [statusRes, itemsRes, rulesRes, invRes, bankRes, domainRes] = await Promise.all([
         http.get("/gmail-inbox/status").catch(() => ({ data: null })),
         http.get("/gmail-inbox/items?limit=100").catch(() => ({ data: { items: [], total: 0 } })),
         http.get("/gmail-inbox/rules").catch(() => ({ data: null })),
         http.get("/invoices").catch(() => ({ data: [] })),
         http.get("/banking/accounts", { params: { active: true } }).catch(() => ({ data: [] })),
+        http.get("/gmail-inbox/sender-domains").catch(() => ({ data: null })),
       ]);
 
       if (statusRes?.data) setStatusInfo(statusRes.data);
@@ -88,6 +133,7 @@ export default function GmailInbox() {
       if (rulesRes?.data) setRules(rulesRes.data);
       if (Array.isArray(invRes?.data)) setInvoices(invRes.data);
       if (Array.isArray(bankRes?.data)) setBankAccounts(bankRes.data);
+      if (domainRes?.data) setDomainData(domainRes.data);
     } catch (err) {
       showToast(friendlyAxiosError(err), "error");
     } finally {
@@ -234,12 +280,67 @@ export default function GmailInbox() {
     }
   };
 
+  // Add new Sender Domain Mapping rule
+  const handleAddDomainRule = async (e) => {
+    e.preventDefault();
+    if (!newDomainForm.domain.trim()) {
+      showToast("Domain name is required (e.g. siyaram.com)", "warning");
+      return;
+    }
+    setSavingDomain(true);
+    try {
+      const res = await http.post("/gmail-inbox/sender-domains", newDomainForm);
+      showToast(res.data.message || "Domain mapping rule saved!");
+      setNewDomainForm({ domain: "", entity_type: "Client", organization: "" });
+      loadAllData();
+    } catch (err) {
+      showToast(friendlyAxiosError(err), "error");
+    } finally {
+      setSavingDomain(false);
+    }
+  };
+
+  // Delete Sender Domain Mapping rule
+  const handleDeleteDomainRule = async (domain) => {
+    if (!window.confirm(`Delete domain mapping rule for ${domain}?`)) return;
+    try {
+      await http.delete(`/gmail-inbox/sender-domains/${encodeURIComponent(domain)}`);
+      showToast(`Rule for ${domain} removed.`);
+      loadAllData();
+    } catch (err) {
+      showToast(friendlyAxiosError(err), "error");
+    }
+  };
+
   // Filter helper functions
   const isPending = (item) => item.status === "pending" || item.status === "pending_review";
   const isRecorded = (item) => item.status === "recorded" || item.status === "processed" || item.status === "auto_recorded";
   const isDismissed = (item) => item.status === "dismissed";
   const isGrn = (item) => item.category?.toLowerCase() === "grn";
   const isPayment = (item) => item.category?.toLowerCase() === "payment";
+
+  // Top detected domains for quick chips
+  const topDetectedDomains = useMemo(() => {
+    if (statusInfo?.top_sender_domains?.length) {
+      return statusInfo.top_sender_domains;
+    }
+    const map = {};
+    items.forEach((it) => {
+      const d = it.sender_domain;
+      if (d) {
+        if (!map[d]) {
+          map[d] = {
+            domain: d,
+            count: 0,
+            label: it.sender_category_label || d,
+            type: it.sender_entity_type || "Other",
+          };
+        }
+        map[d].count += 1;
+      }
+    });
+    return Object.values(map).sort((a, b) => b.count - a.count).slice(0, 6);
+  }, [items, statusInfo]);
 
   // Filtered Items
   const filteredItems = useMemo(() => {
@@ -251,23 +352,38 @@ export default function GmailInbox() {
       if (filterTab === "grn" && !isGrn(item)) return false;
       if (filterTab === "payment" && !isPayment(item)) return false;
 
+      // Sender entity type filter
+      if (senderTypeFilter !== "ALL") {
+        const ent = (item.sender_entity_type || "Other").toLowerCase();
+        if (ent !== senderTypeFilter.toLowerCase()) return false;
+      }
+
+      // Sender domain filter
+      if (selectedSenderDomain) {
+        const d1 = (item.sender_domain || "").toLowerCase();
+        const d2 = (item.sender_root_domain || "").toLowerCase();
+        const targetD = selectedSenderDomain.toLowerCase();
+        if (d1 !== targetD && d2 !== targetD) return false;
+      }
+
       // Text search
       if (search.trim()) {
         const q = search.toLowerCase();
         const matchesSubject = item.subject?.toLowerCase().includes(q);
-        const matchesSender = item.sender?.toLowerCase().includes(q) || item.from_header?.toLowerCase().includes(q) || item.from_email?.toLowerCase().includes(q);
+        const matchesSender = (item.sender || item.from_header || item.from_email || "").toLowerCase().includes(q);
+        const matchesDomain = (item.sender_domain || item.sender_category_label || item.sender_organization || "").toLowerCase().includes(q);
         const matchesInv = (item.extracted_data?.invoice_no || item.matched_invoice_no || "")
           .toLowerCase()
           .includes(q);
         const matchesUtr = (item.extracted_data?.utr_number || item.extracted_data?.reference || "").toLowerCase().includes(q);
         const matchesClient = (item.extracted_data?.client_name || "").toLowerCase().includes(q);
-        if (!matchesSubject && !matchesSender && !matchesInv && !matchesUtr && !matchesClient) {
+        if (!matchesSubject && !matchesSender && !matchesDomain && !matchesInv && !matchesUtr && !matchesClient) {
           return false;
         }
       }
       return true;
     });
-  }, [items, filterTab, search]);
+  }, [items, filterTab, senderTypeFilter, selectedSenderDomain, search]);
 
   // Counts for stat tiles
   const pendingCount = items.filter(isPending).length;
@@ -446,7 +562,7 @@ export default function GmailInbox() {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search subject, invoice #, UTR, sender..."
+                placeholder="Search subject, invoice #, UTR, sender, domain..."
                 className="w-full pl-9 pr-3 py-1.5 text-xs border-2 border-slate-300 focus:border-[#C27842] focus:outline-none font-mono"
               />
               {search && (
@@ -458,6 +574,71 @@ export default function GmailInbox() {
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Sender Categorization Filter Bar */}
+          <div className="p-2.5 sm:p-3 border-b-2 border-slate-200 bg-white flex flex-col md:flex-row md:items-center justify-between gap-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1 flex items-center gap-1">
+                <Building2 className="w-3 h-3 text-slate-400" /> Senders:
+              </span>
+              {[
+                { id: "ALL", label: "All Senders", icon: "👥", count: items.length },
+                { id: "Bank", label: "Banks", icon: "🏦", count: items.filter(i => (i.sender_entity_type || "").toLowerCase() === "bank").length },
+                { id: "Client", label: "Clients", icon: "🏢", count: items.filter(i => (i.sender_entity_type || "").toLowerCase() === "client").length },
+                { id: "Vendor", label: "Vendors", icon: "🚚", count: items.filter(i => (i.sender_entity_type || "").toLowerCase() === "vendor").length },
+                { id: "Marketplace", label: "Marketplaces", icon: "🛍️", count: items.filter(i => (i.sender_entity_type || "").toLowerCase() === "marketplace").length },
+                { id: "Internal", label: "Internal", icon: "🏭", count: items.filter(i => (i.sender_entity_type || "").toLowerCase() === "internal").length },
+              ].map((st) => (
+                <button
+                  key={st.id}
+                  onClick={() => {
+                    setSenderTypeFilter(st.id);
+                    setSelectedSenderDomain(null);
+                  }}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-full flex items-center gap-1.5 transition-all ${
+                    senderTypeFilter === st.id
+                      ? "bg-[#0F172A] text-white shadow-sm"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200"
+                  }`}
+                >
+                  <span>{st.icon}</span>
+                  <span>{st.label}</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${senderTypeFilter === st.id ? "bg-white/20 text-white" : "bg-black/10 text-slate-700"}`}>
+                    {st.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Active domain filter or top domain quick-chips */}
+            {selectedSenderDomain ? (
+              <div className="flex items-center gap-2 bg-amber-50 text-amber-900 border border-amber-300 px-3 py-1 rounded-full text-xs font-semibold">
+                <span>Domain: <strong className="font-mono">@{selectedSenderDomain}</strong></span>
+                <button
+                  onClick={() => setSelectedSenderDomain(null)}
+                  className="text-amber-700 hover:text-amber-950 font-bold"
+                  title="Clear domain filter"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : topDetectedDomains.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Top Domains:</span>
+                {topDetectedDomains.slice(0, 5).map((d) => (
+                  <button
+                    key={d.domain}
+                    onClick={() => setSelectedSenderDomain(d.domain)}
+                    className="px-2 py-0.5 text-[11px] font-mono bg-slate-50 hover:bg-slate-100 text-slate-700 rounded border border-slate-200 flex items-center gap-1 transition-colors"
+                    title={`Filter by @${d.domain} (${d.count} emails)`}
+                  >
+                    <span>{d.label || `@${d.domain}`}</span>
+                    <span className="text-[9px] text-slate-400 font-bold">({d.count})</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           {/* Items Feed */}
@@ -521,6 +702,17 @@ export default function GmailInbox() {
                           </span>
                         )}
 
+                        {/* Sender Categorization Badge */}
+                        {item.sender_category_label && (
+                          <span
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded border ${getSenderBadgeStyle(item.sender_entity_type)}`}
+                            title={`Sender Domain: @${item.sender_domain || "N/A"} (${item.sender_domain_source || "Auto-detected"})`}
+                          >
+                            <span>{getSenderEmoji(item.sender_entity_type)}</span>
+                            <span>{item.sender_category_label}</span>
+                          </span>
+                        )}
+
                         {/* Confidence score */}
                         <span
                           className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono border ${
@@ -569,8 +761,13 @@ export default function GmailInbox() {
                         <h3 className="text-sm sm:text-base font-bold text-slate-900 leading-snug">
                           {item.subject || "(No Subject)"}
                         </h3>
-                        <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-2">
-                          <span>From: <strong className="text-slate-700">{item.sender}</strong></span>
+                        <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-2">
+                          <span>From: <strong className="text-slate-700">{item.from_header || item.sender}</strong></span>
+                          {item.sender_domain && (
+                            <span className="font-mono text-[11px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                              @{item.sender_domain}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -909,11 +1106,11 @@ export default function GmailInbox() {
       )}
 
       {/* ─────────────────────────────────────────────────────────────
-          MODAL: AUTO-POSTING RULES
+          MODAL: AUTO-POSTING & SENDER DOMAIN RULES
       ───────────────────────────────────────────────────────────── */}
       {showRulesModal && rules && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 overflow-y-auto">
-          <Card className="max-w-lg w-full p-6 shadow-2xl relative">
+          <Card className="max-w-2xl w-full p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
             <button
               onClick={() => setShowRulesModal(false)}
               className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"
@@ -923,108 +1120,263 @@ export default function GmailInbox() {
 
             <div className="flex items-center gap-2 mb-2">
               <Sliders className="w-5 h-5 text-[#C27842]" />
-              <h2 className="text-lg font-bold text-slate-900">Auto-Posting Rules</h2>
+              <h2 className="text-lg font-bold text-slate-900">Automation & Sender Rules</h2>
             </div>
-            <p className="text-xs text-slate-500 mb-6">
-              Configure autonomous recording into the ERP core database when emails match with high confidence.
+            <p className="text-xs text-slate-500 mb-4">
+              Configure autonomous recording thresholds and customize sender domain categorization (Banks, Clients, Vendors, Marketplaces).
             </p>
 
-            <form onSubmit={handleSaveRules} className="space-y-5">
-              {/* GRN Auto-post */}
-              <div className="p-4 bg-purple-50/60 rounded border border-purple-200 space-y-3">
-                <div className="flex items-center justify-between">
+            {/* Modal Tabs */}
+            <div className="flex border-b-2 border-slate-200 mb-5 gap-4">
+              <button
+                type="button"
+                onClick={() => setActiveRulesTab("rules")}
+                className={`pb-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 flex items-center gap-1.5 ${
+                  activeRulesTab === "rules"
+                    ? "border-[#C27842] text-[#C27842]"
+                    : "border-transparent text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Auto-Post Thresholds</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveRulesTab("domains")}
+                className={`pb-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 flex items-center gap-1.5 ${
+                  activeRulesTab === "domains"
+                    ? "border-[#C27842] text-[#C27842]"
+                    : "border-transparent text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                <span>Sender Domain Rules ({domainData.custom_mappings?.length || 0})</span>
+              </button>
+            </div>
+
+            {activeRulesTab === "rules" ? (
+              <form onSubmit={handleSaveRules} className="space-y-4">
+                {/* GRN Auto-post */}
+                <div className="p-4 bg-purple-50/60 rounded border border-purple-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-bold text-purple-950">Auto-Record GRNs</div>
+                      <div className="text-xs text-purple-700">
+                        Directly record Goods Receipt Notes when email contains verified quantities.
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={rules.auto_record_grn || false}
+                      onChange={(e) => setRules({ ...rules, auto_record_grn: e.target.checked })}
+                      className="w-5 h-5 accent-purple-700 rounded cursor-pointer"
+                    />
+                  </div>
+
                   <div>
-                    <div className="text-sm font-bold text-purple-950">Auto-Record GRNs</div>
-                    <div className="text-xs text-purple-700">
-                      Directly record Goods Receipt Notes when email contains verified quantities.
+                    <div className="flex justify-between text-xs font-semibold text-purple-900 mb-1">
+                      <span>Minimum Confidence Threshold</span>
+                      <span className="font-mono font-bold">
+                        {Math.round((rules.min_confidence_grn || 0.85) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="1.0"
+                      step="0.05"
+                      value={rules.min_confidence_grn || 0.85}
+                      onChange={(e) => setRules({ ...rules, min_confidence_grn: parseFloat(e.target.value) })}
+                      className="w-full accent-purple-700 cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Payment Auto-post */}
+                <div className="p-4 bg-emerald-50/60 rounded border border-emerald-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-bold text-emerald-950">Auto-Record Client Payments</div>
+                      <div className="text-xs text-emerald-700">
+                        Directly credit bank ledger and invoice allocation upon verified bank alert/remittance.
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={rules.auto_record_payment || false}
+                      onChange={(e) => setRules({ ...rules, auto_record_payment: e.target.checked })}
+                      className="w-5 h-5 accent-emerald-700 rounded cursor-pointer"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs font-semibold text-emerald-900 mb-1">
+                      <span>Minimum Confidence Threshold</span>
+                      <span className="font-mono font-bold">
+                        {Math.round((rules.min_confidence_payment || 0.85) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="1.0"
+                      step="0.05"
+                      value={rules.min_confidence_payment || 0.85}
+                      onChange={(e) => setRules({ ...rules, min_confidence_payment: parseFloat(e.target.value) })}
+                      className="w-full accent-emerald-700 cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Require Exact Match */}
+                <div className="p-4 bg-slate-50 rounded border border-slate-200 flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-slate-800">Require Exact Invoice Match</div>
+                    <div className="text-[11px] text-slate-500">
+                      Only auto-record if the invoice number strictly matches an active ERP invoice.
                     </div>
                   </div>
                   <input
                     type="checkbox"
-                    checked={rules.auto_record_grn || false}
-                    onChange={(e) => setRules({ ...rules, auto_record_grn: e.target.checked })}
-                    className="w-5 h-5 accent-purple-700 rounded cursor-pointer"
+                    checked={rules.require_exact_invoice_match !== false}
+                    onChange={(e) => setRules({ ...rules, require_exact_invoice_match: e.target.checked })}
+                    className="w-5 h-5 accent-slate-800 rounded cursor-pointer"
                   />
                 </div>
 
-                <div>
-                  <div className="flex justify-between text-xs font-semibold text-purple-900 mb-1">
-                    <span>Minimum Confidence Threshold</span>
-                    <span className="font-mono font-bold">
-                      {Math.round((rules.min_confidence_grn || 0.85) * 100)}%
-                    </span>
+                <div className="flex justify-end gap-3 pt-3">
+                  <BtnSecondary type="button" onClick={() => setShowRulesModal(false)}>
+                    Cancel
+                  </BtnSecondary>
+                  <BtnPrimary type="submit">Save Thresholds</BtnPrimary>
+                </div>
+              </form>
+            ) : (
+              /* Sender Domain Rules Tab */
+              <div className="space-y-5">
+                {/* Add Rule Form */}
+                <form onSubmit={handleAddDomainRule} className="p-4 bg-slate-50 rounded border border-slate-200 space-y-3">
+                  <div className="text-xs font-bold text-slate-900 uppercase tracking-wide flex items-center gap-1.5">
+                    <Tag className="w-3.5 h-3.5 text-[#C27842]" />
+                    <span>Add Custom Domain Mapping Rule</span>
                   </div>
-                  <input
-                    type="range"
-                    min="0.5"
-                    max="1.0"
-                    step="0.05"
-                    value={rules.min_confidence_grn || 0.85}
-                    onChange={(e) => setRules({ ...rules, min_confidence_grn: parseFloat(e.target.value) })}
-                    className="w-full accent-purple-700 cursor-pointer"
-                  />
-                </div>
-              </div>
-
-              {/* Payment Auto-post */}
-              <div className="p-4 bg-emerald-50/60 rounded border border-emerald-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-bold text-emerald-950">Auto-Record Client Payments</div>
-                    <div className="text-xs text-emerald-700">
-                      Directly credit bank ledger and invoice allocation upon verified bank alert/remittance.
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-slate-600 block mb-1">Domain</label>
+                      <input
+                        type="text"
+                        value={newDomainForm.domain}
+                        onChange={(e) => setNewDomainForm({ ...newDomainForm, domain: e.target.value })}
+                        placeholder="e.g. siyaram.com"
+                        className="w-full border-2 border-slate-300 p-1.5 text-xs font-mono focus:border-[#C27842] focus:outline-none"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-slate-600 block mb-1">Entity Type</label>
+                      <select
+                        value={newDomainForm.entity_type}
+                        onChange={(e) => setNewDomainForm({ ...newDomainForm, entity_type: e.target.value })}
+                        className="w-full border-2 border-slate-300 p-1.5 text-xs focus:border-[#C27842] focus:outline-none"
+                      >
+                        <option value="Client">🏢 Client</option>
+                        <option value="Bank">🏦 Bank</option>
+                        <option value="Vendor">🚚 Vendor</option>
+                        <option value="Marketplace">🛍️ Marketplace</option>
+                        <option value="Internal">🏭 Internal</option>
+                        <option value="Other">🌐 Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-slate-600 block mb-1">Display Label</label>
+                      <input
+                        type="text"
+                        value={newDomainForm.organization}
+                        onChange={(e) => setNewDomainForm({ ...newDomainForm, organization: e.target.value })}
+                        placeholder="e.g. Siyaram.com or HDFC Bank"
+                        className="w-full border-2 border-slate-300 p-1.5 text-xs focus:border-[#C27842] focus:outline-none"
+                      />
                     </div>
                   </div>
-                  <input
-                    type="checkbox"
-                    checked={rules.auto_record_payment || false}
-                    onChange={(e) => setRules({ ...rules, auto_record_payment: e.target.checked })}
-                    className="w-5 h-5 accent-emerald-700 rounded cursor-pointer"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs font-semibold text-emerald-900 mb-1">
-                    <span>Minimum Confidence Threshold</span>
-                    <span className="font-mono font-bold">
-                      {Math.round((rules.min_confidence_payment || 0.85) * 100)}%
-                    </span>
+                  <div className="flex justify-end pt-1">
+                    <BtnPrimary type="submit" disabled={savingDomain} className="text-xs py-1.5">
+                      {savingDomain ? "Saving Rule..." : "+ Save Domain Mapping"}
+                    </BtnPrimary>
                   </div>
-                  <input
-                    type="range"
-                    min="0.5"
-                    max="1.0"
-                    step="0.05"
-                    value={rules.min_confidence_payment || 0.85}
-                    onChange={(e) => setRules({ ...rules, min_confidence_payment: parseFloat(e.target.value) })}
-                    className="w-full accent-emerald-700 cursor-pointer"
-                  />
-                </div>
-              </div>
+                </form>
 
-              {/* Require Exact Match */}
-              <div className="p-4 bg-slate-50 rounded border border-slate-200 flex items-center justify-between">
+                {/* Custom Mappings Table */}
                 <div>
-                  <div className="text-xs font-bold text-slate-800">Require Exact Invoice Match</div>
-                  <div className="text-[11px] text-slate-500">
-                    Only auto-record if the invoice number strictly matches an active ERP invoice.
+                  <div className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span>Configured Custom Domain Rules</span>
+                    <span className="text-[10px] text-slate-500 font-normal">Overrides default registries</span>
+                  </div>
+                  {domainData.custom_mappings && domainData.custom_mappings.length > 0 ? (
+                    <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-56 overflow-y-auto">
+                      {domainData.custom_mappings.map((m) => (
+                        <div key={m.domain} className="p-2.5 flex items-center justify-between bg-white text-xs hover:bg-slate-50">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-slate-900">@{m.domain}</span>
+                            <ArrowRight className="w-3 h-3 text-slate-400" />
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold border ${getSenderBadgeStyle(m.entity_type)}`}>
+                              <span>{getSenderEmoji(m.entity_type)}</span>
+                              <span>{m.category_label || `${m.organization || m.domain} (${m.entity_type})`}</span>
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteDomainRule(m.domain)}
+                            className="text-red-500 hover:text-red-700 text-xs px-2 py-1 rounded hover:bg-red-50"
+                            title="Delete this domain rule"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 bg-slate-50 rounded border border-dashed border-slate-300 text-center text-xs text-slate-500">
+                      No custom overrides yet. Built-in registries for Banks, Clients, and Marketplaces are automatically categorizing incoming mail.
+                    </div>
+                  )}
+                </div>
+
+                {/* Built-in Registries Overview */}
+                <div className="p-3 bg-slate-50 rounded border border-slate-200 text-xs space-y-2">
+                  <div className="font-bold text-slate-700 uppercase text-[10px] tracking-wide">
+                    Built-in Registries Active in Parser
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                    <div className="p-2 bg-white rounded border border-slate-200">
+                      <div className="text-base font-black text-blue-700">29+</div>
+                      <div className="text-[10px] text-slate-600 font-bold">🏦 Bank Domains</div>
+                      <div className="text-[9px] text-slate-400">HDFC, ICICI, SBI, Axis...</div>
+                    </div>
+                    <div className="p-2 bg-white rounded border border-slate-200">
+                      <div className="text-base font-black text-emerald-700">20+</div>
+                      <div className="text-[10px] text-slate-600 font-bold">🏢 Client Domains</div>
+                      <div className="text-[9px] text-slate-400">Siyaram, Bata, Metro, Reliance...</div>
+                    </div>
+                    <div className="p-2 bg-white rounded border border-slate-200">
+                      <div className="text-base font-black text-purple-700">10+</div>
+                      <div className="text-[10px] text-slate-600 font-bold">🛍️ Marketplaces</div>
+                      <div className="text-[9px] text-slate-400">Myntra, Flipkart, AJIO...</div>
+                    </div>
+                    <div className="p-2 bg-white rounded border border-slate-200">
+                      <div className="text-base font-black text-slate-800">Dynamic</div>
+                      <div className="text-[10px] text-slate-600 font-bold">🏭 ERP Database</div>
+                      <div className="text-[9px] text-slate-400">Live Clients & Vendors</div>
+                    </div>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={rules.require_exact_invoice_match !== false}
-                  onChange={(e) => setRules({ ...rules, require_exact_invoice_match: e.target.checked })}
-                  className="w-5 h-5 accent-slate-800 rounded cursor-pointer"
-                />
-              </div>
 
-              <div className="flex justify-end gap-3 pt-3">
-                <BtnSecondary type="button" onClick={() => setShowRulesModal(false)}>
-                  Cancel
-                </BtnSecondary>
-                <BtnPrimary type="submit">Save Rules</BtnPrimary>
+                <div className="flex justify-end pt-2">
+                  <BtnSecondary type="button" onClick={() => setShowRulesModal(false)}>
+                    Close
+                  </BtnSecondary>
+                </div>
               </div>
-            </form>
+            )}
           </Card>
         </div>
       )}
@@ -1034,7 +1386,7 @@ export default function GmailInbox() {
       ───────────────────────────────────────────────────────────── */}
       {showTestModal && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 overflow-y-auto">
-          <Card className="max-w-2xl w-full p-6 shadow-2xl relative">
+          <Card className="max-w-2xl w-full p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
             <button
               onClick={() => {
                 setShowTestModal(false);
@@ -1047,10 +1399,10 @@ export default function GmailInbox() {
 
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="w-5 h-5 text-purple-600" />
-              <h2 className="text-lg font-bold text-slate-900">Test Email Parser</h2>
+              <h2 className="text-lg font-bold text-slate-900">Test Email Parser & Domain Categorizer</h2>
             </div>
             <p className="text-xs text-slate-500 mb-4">
-              Paste email text or delivery challan information to test real-time classification, entity extraction, and ERP invoice matching.
+              Paste email text or bank credit alerts to test real-time sender domain categorization, entity extraction, and ERP invoice matching.
             </p>
 
             {/* Quick templates */}
@@ -1060,29 +1412,43 @@ export default function GmailInbox() {
                 type="button"
                 onClick={() =>
                   setTestForm({
-                    subject: "GRN Confirmation for INV-2026-001 / PO 4412",
-                    sender: "receiving@bataindia.com",
+                    subject: "Bank Alert: Your A/C has been credited with INR 1,50,000.00 via NEFT",
+                    sender: "alerts@hdfcbank.net",
                     body_text:
-                      "Dear SSK Footwear,\n\nWe have received shipment against Invoice INV-2026-001.\nDispatched Qty: 600 pairs\nAccepted Qty: 580 pairs\nRejected Qty: 20 pairs due to sole pasting defect on size 8.\n\nPlease find the attached GRN delivery note.\n\nRegards,\nWarehouse Team",
+                      "Dear Customer, INR 1,50,000.00 has been credited to your HDFC bank account ending in 4321 on 25-10-2026. UTR: HDFCR52026102500129. Remittance from Metro Brands against Invoice INV-2026-001.",
                   })
                 }
-                className="text-[11px] font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-2.5 py-1 rounded transition-colors"
+                className="text-[11px] font-bold text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-300 px-2.5 py-1 rounded transition-colors flex items-center gap-1"
               >
-                + Sample GRN Email
+                <span>🏦 HDFC Bank Alert</span>
               </button>
               <button
                 type="button"
                 onClick={() =>
                   setTestForm({
-                    subject: "Payment Advice: NEFT / UTR UTIB202610240982 for INV-2026-001",
-                    sender: "accounts@reliancefootprint.in",
+                    subject: "Delivery Acceptance / GRN Confirmation for INV-2026-001 / PO 2220012750",
+                    sender: "orders@siyaram.com",
                     body_text:
-                      "Dear SSK Footwear,\n\nWe have credited INR 1,50,000 to your bank account via NEFT on 24-Oct-2026.\nUTR Number: UTIB202610240982\nAccount: SSK Footwear HDFC Operating A/c\nInvoice Reference: INV-2026-001\n\nKindly acknowledge receipt.\n\nAccounts Dept",
+                      "Dear SSK Footwear Team,\n\nPlease find the goods receipt confirmation for 500 pairs dispatched against Invoice INV-2026-001.\nDispatched Qty: 500 pairs\nAccepted Qty: 495 pairs\nRejected Qty: 5 pairs.\n\nRegards,\nSiyaram Silk Mills Ltd Stores",
                   })
                 }
-                className="text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded transition-colors"
+                className="text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2.5 py-1 rounded transition-colors flex items-center gap-1"
               >
-                + Sample NEFT Payment
+                <span>🏢 Siyaram.com Delivery</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setTestForm({
+                    subject: "Goods Acceptance Advice: PO 2220012750 / INV-2026-001",
+                    sender: "buyer@bata.in",
+                    body_text:
+                      "Dear SSK Footwear,\n\nWe have received shipment against Invoice INV-2026-001.\nDispatched Qty: 600 pairs\nAccepted Qty: 580 pairs\nRejected Qty: 20 pairs due to sole pasting defect on size 8.\n\nRegards,\nBata India Procurement",
+                  })
+                }
+                className="text-[11px] font-bold text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-300 px-2.5 py-1 rounded transition-colors flex items-center gap-1"
+              >
+                <span>🏢 Bata India GRN</span>
               </button>
             </div>
 
@@ -1091,13 +1457,13 @@ export default function GmailInbox() {
                 label="Email Subject"
                 value={testForm.subject}
                 onChange={(e) => setTestForm({ ...testForm, subject: e.target.value })}
-                placeholder="e.g. GRN for INV-2026-001"
+                placeholder="e.g. Bank Alert or GRN Delivery Acceptance"
               />
               <Input
-                label="Sender Email Address"
+                label="Sender Email Address (or from header)"
                 value={testForm.sender}
                 onChange={(e) => setTestForm({ ...testForm, sender: e.target.value })}
-                placeholder="e.g. stores@clientcorp.com"
+                placeholder="e.g. alerts@hdfcbank.net or orders@siyaram.com"
               />
               <div>
                 <label className="text-[10px] uppercase font-bold text-slate-600 tracking-wider block mb-1">
@@ -1131,7 +1497,7 @@ export default function GmailInbox() {
             {/* Test Results View */}
             {testResult && (
               <div className="mt-5 pt-4 border-t-2 border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-slate-600">Classification:</span>
                     <span
@@ -1147,6 +1513,25 @@ export default function GmailInbox() {
                     </span>
                     <span className="text-xs font-bold font-mono text-slate-700">
                       ({Math.round((testResult.confidence || 0) * 100)}% match)
+                    </span>
+                  </div>
+                </div>
+
+                {/* SENDER DOMAIN CATEGORIZATION RESULT */}
+                <div className="p-3 bg-white border-2 border-slate-200 rounded space-y-1 text-xs">
+                  <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                    Sender Domain & Entity Categorization
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded border ${getSenderBadgeStyle(testResult.sender_entity_type)}`}>
+                      <span>{getSenderEmoji(testResult.sender_entity_type)}</span>
+                      <span>{testResult.sender_category_label || `${testResult.sender_organization || testResult.sender_domain} (${testResult.sender_entity_type})`}</span>
+                    </span>
+                    <span className="font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                      Domain: <strong>@{testResult.sender_domain}</strong>
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Source: <strong className="font-mono">{testResult.sender_domain_source || "auto"}</strong>
                     </span>
                   </div>
                 </div>

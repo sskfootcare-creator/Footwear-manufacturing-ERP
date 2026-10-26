@@ -9,6 +9,7 @@ Provides endpoints for:
 - Automation rules and thresholds
 """
 
+import re
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
@@ -18,7 +19,18 @@ from bson import ObjectId
 from auth import get_current_user_factory, require_roles
 from services.email_service import get_email_config, now_iso
 from services.gmail_inbox_service import fetch_recent_emails
-from services.gmail_extractor_service import parse_and_match_email, _safe_float
+from services.gmail_extractor_service import (
+    parse_and_match_email,
+    _safe_float,
+    extract_domain_from_email,
+    normalize_root_domain,
+    categorize_sender_sync,
+    categorize_sender,
+    KNOWN_BANK_DOMAINS,
+    KNOWN_CLIENT_DOMAINS,
+    KNOWN_MARKETPLACE_DOMAINS,
+    INTERNAL_DOMAINS,
+)
 
 log = logging.getLogger("email_inbox_router")
 
@@ -67,6 +79,20 @@ def _decorate_item(item: Any) -> Any:
     item["matched_bank_account_id"] = str(matched_bank.get("id") or matched_bank.get("_id") or "") or None
     item["matched_bank_name"] = matched_bank.get("name") or matched_bank.get("bank_name")
     item["auto_recorded"] = (item.get("status") == "auto_recorded")
+
+    # Ensure sender domain and categorization fields exist
+    from_raw = item.get("from_email") or item.get("from_header") or item.get("sender") or ""
+    s_name = item.get("sender_name") or ""
+    s_dom = item.get("sender_domain") or extract_domain_from_email(from_raw)
+    item["sender_domain"] = s_dom
+    item["sender_root_domain"] = item.get("sender_root_domain") or normalize_root_domain(s_dom)
+
+    if not item.get("sender_category_label"):
+        sync_info = categorize_sender_sync(from_raw, s_name, item.get("subject", ""), item.get("category", ""))
+        item["sender_entity_type"] = item.get("sender_entity_type") or sync_info.get("sender_entity_type", "Other")
+        item["sender_organization"] = item.get("sender_organization") or sync_info.get("sender_organization", "")
+        item["sender_category_label"] = sync_info.get("sender_category_label", "")
+        item["sender_domain_source"] = item.get("sender_domain_source") or sync_info.get("sender_domain_source", "heuristic")
 
     if "total_accepted" in extracted and "accepted_pairs" not in extracted:
         extracted["accepted_pairs"] = extracted["total_accepted"]
@@ -125,6 +151,30 @@ async def get_inbox_status(request: Request):
     auto_recorded = await db.gmail_inbox_items.count_documents({"status": "auto_recorded"})
     processed = await db.gmail_inbox_items.count_documents({"status": "processed"})
 
+    # Sender type counts
+    sender_type_counts = {
+        "Bank": await db.gmail_inbox_items.count_documents({"sender_entity_type": "Bank"}),
+        "Client": await db.gmail_inbox_items.count_documents({"sender_entity_type": "Client"}),
+        "Vendor": await db.gmail_inbox_items.count_documents({"sender_entity_type": "Vendor"}),
+        "Marketplace": await db.gmail_inbox_items.count_documents({"sender_entity_type": "Marketplace"}),
+        "Internal": await db.gmail_inbox_items.count_documents({"sender_entity_type": "Internal"}),
+        "Other": await db.gmail_inbox_items.count_documents({"sender_entity_type": {"$in": ["Other", None, ""]}}),
+    }
+
+    # Top sender domains
+    top_domains = []
+    try:
+        pipeline = [
+            {"$match": {"sender_domain": {"$ne": ""}}},
+            {"$group": {"_id": "$sender_domain", "count": {"$sum": 1}, "label": {"$first": "$sender_category_label"}, "type": {"$first": "$sender_entity_type"}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 8}
+        ]
+        top_raw = await db.gmail_inbox_items.aggregate(pipeline).to_list(8)
+        top_domains = [{"domain": d["_id"], "count": d["count"], "label": d.get("label") or d["_id"], "type": d.get("type") or "Other"} for d in top_raw]
+    except Exception as te:
+        log.warning("Could not aggregate top sender domains: %s", te)
+
     rules_doc = await db.settings.find_one({"_id": "gmail_automation_rules"}) or {}
     last_sync = rules_doc.get("last_sync_at")
 
@@ -137,6 +187,8 @@ async def get_inbox_status(request: Request):
         "auto_recorded_count": auto_recorded,
         "processed_count": processed,
         "total_active_count": pending_grn + pending_pay,
+        "sender_type_counts": sender_type_counts,
+        "top_sender_domains": top_domains,
         "last_sync_at": last_sync,
         "automation_rules": {
             "auto_record_grn": rules_doc.get("auto_record_grn", False),
@@ -252,10 +304,13 @@ async def list_inbox_items(
     request: Request,
     category: Optional[str] = Query(None, description="GRN | PAYMENT | ALL"),
     status: Optional[str] = Query(None, description="pending_review | processed | auto_recorded | dismissed | ALL"),
+    sender_type: Optional[str] = Query(None, description="Bank | Client | Vendor | Marketplace | Internal | Other | ALL"),
+    sender_domain: Optional[str] = Query(None, description="Filter by sender domain e.g. hdfcbank.net or siyaram.com"),
+    search: Optional[str] = Query(None, description="Search across subject, sender, invoice, reference"),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
 ):
-    """Retrieve inbox items with filtering by category and processing status."""
+    """Retrieve inbox items with filtering by category, processing status, and sender domain entity type."""
     user = await _get_user(request)
     db = get_db(request)
     query: Dict[str, Any] = {}
@@ -272,6 +327,41 @@ async def list_inbox_items(
             query["status"] = {"$in": ["recorded", "processed", "auto_recorded"]}
         else:
             query["status"] = s_low
+
+    if sender_type and sender_type.upper() != "ALL":
+        s_type = sender_type.strip()
+        if s_type.lower() == "other":
+            query["sender_entity_type"] = {"$in": ["Other", "other", None, ""]}
+        else:
+            query["sender_entity_type"] = {"$regex": f"^{re.escape(s_type)}$", "$options": "i"}
+
+    if sender_domain and sender_domain.strip():
+        dom_clean = sender_domain.strip().lower()
+        query["$or"] = [
+            {"sender_domain": {"$regex": re.escape(dom_clean), "$options": "i"}},
+            {"sender_root_domain": {"$regex": re.escape(dom_clean), "$options": "i"}},
+            {"from_email": {"$regex": re.escape(dom_clean), "$options": "i"}},
+        ]
+
+    if search and search.strip():
+        q_str = search.strip()
+        search_clauses = [
+            {"subject": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"from_header": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"from_email": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"sender_name": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"sender_domain": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"sender_organization": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"sender_category_label": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"extracted_data.invoice_no": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"extracted_data.reference": {"$regex": re.escape(q_str), "$options": "i"}},
+            {"extracted_data.client_name": {"$regex": re.escape(q_str), "$options": "i"}},
+        ]
+        if "$or" in query:
+            existing_or = query.pop("$or")
+            query["$and"] = [{"$or": existing_or}, {"$or": search_clauses}]
+        else:
+            query["$or"] = search_clauses
 
     cursor = db.gmail_inbox_items.find(query).sort("created_at", -1).skip(skip).limit(limit)
     items = await cursor.to_list(limit)
@@ -486,6 +576,139 @@ async def update_automation_rules(
         upsert=True
     )
     return {"status": "success", "rules": save_doc}
+
+
+# ── Sender Domain Mapping & Categorization Endpoints ──────────────────────────
+
+@email_inbox_router.get("/sender-domains")
+async def get_sender_domains(request: Request):
+    """List custom user domain mappings, known registries, and detected domains from inbox."""
+    user = await _get_user(request)
+    db = get_db(request)
+
+    rules_doc = await db.settings.find_one({"_id": "gmail_automation_rules"}) or {}
+    custom_mappings = rules_doc.get("sender_domain_mappings") or []
+
+    # Get distinct domains detected in gmail_inbox_items
+    detected = []
+    try:
+        pipeline = [
+            {"$match": {"sender_domain": {"$ne": ""}}},
+            {"$group": {
+                "_id": "$sender_domain",
+                "count": {"$sum": 1},
+                "entity_type": {"$first": "$sender_entity_type"},
+                "organization": {"$first": "$sender_organization"},
+                "category_label": {"$first": "$sender_category_label"},
+            }},
+            {"$sort": {"count": -1}},
+            {"$limit": 50}
+        ]
+        raw_items = await db.gmail_inbox_items.aggregate(pipeline).to_list(50)
+        detected = [
+            {
+                "domain": r["_id"],
+                "count": r["count"],
+                "entity_type": r.get("entity_type") or "Other",
+                "organization": r.get("organization") or r["_id"],
+                "category_label": r.get("category_label") or f"{r['_id']} (Other)",
+            }
+            for r in raw_items
+        ]
+    except Exception as de:
+        log.warning("Could not aggregate detected domains: %s", de)
+
+    return {
+        "custom_mappings": custom_mappings,
+        "detected_domains": detected,
+        "registries_summary": {
+            "known_banks_count": len(KNOWN_BANK_DOMAINS),
+            "known_clients_count": len(KNOWN_CLIENT_DOMAINS),
+            "known_marketplaces_count": len(KNOWN_MARKETPLACE_DOMAINS),
+            "internal_domains_count": len(INTERNAL_DOMAINS),
+        }
+    }
+
+
+@email_inbox_router.post("/sender-domains")
+async def save_sender_domain_mapping(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+):
+    """Add or update a custom sender domain mapping rule (e.g. siyaram.com -> Client, hdfcbank.net -> Bank)."""
+    user = await _get_user(request)
+    require_roles("admin", "manager")(user)
+    db = get_db(request)
+
+    raw_domain = extract_domain_from_email(payload.get("domain", ""))
+    if not raw_domain or "." not in raw_domain:
+        raise HTTPException(400, "A valid domain name is required (e.g. siyaram.com or hdfcbank.net)")
+
+    entity_type = (payload.get("entity_type") or "Client").strip().capitalize()
+    valid_types = ["Bank", "Client", "Vendor", "Marketplace", "Internal", "Other"]
+    if entity_type not in valid_types:
+        raise HTTPException(400, f"Invalid entity_type. Must be one of: {', '.join(valid_types)}")
+
+    org_name = (payload.get("organization") or raw_domain).strip()
+    label = f"{org_name} ({entity_type})"
+
+    new_rule = {
+        "domain": raw_domain.lower(),
+        "entity_type": entity_type,
+        "organization": org_name,
+        "category_label": label,
+        "updated_at": now_iso(),
+        "updated_by": user.get("email", "admin"),
+    }
+
+    rules_doc = await db.settings.find_one({"_id": "gmail_automation_rules"}) or {}
+    mappings = rules_doc.get("sender_domain_mappings") or []
+    updated_mappings = [m for m in mappings if (m.get("domain") or "").lower() != raw_domain.lower()]
+    updated_mappings.append(new_rule)
+
+    await db.settings.update_one(
+        {"_id": "gmail_automation_rules"},
+        {"$set": {"sender_domain_mappings": updated_mappings, "updated_at": now_iso()}},
+        upsert=True
+    )
+
+    try:
+        await db.gmail_inbox_items.update_many(
+            {"$or": [{"sender_domain": raw_domain.lower()}, {"sender_root_domain": raw_domain.lower()}]},
+            {"$set": {
+                "sender_entity_type": entity_type,
+                "sender_organization": org_name,
+                "sender_category_label": label,
+                "sender_domain_source": "custom_rule",
+            }}
+        )
+    except Exception as ue:
+        log.warning("Could not retroactively update items for domain %s: %s", raw_domain, ue)
+
+    return {"status": "success", "rule": new_rule, "message": f"Mapping saved for {raw_domain} -> {label}"}
+
+
+@email_inbox_router.delete("/sender-domains/{domain}")
+async def delete_sender_domain_mapping(
+    domain: str,
+    request: Request,
+):
+    """Delete a custom sender domain mapping rule."""
+    user = await _get_user(request)
+    require_roles("admin", "manager")(user)
+    db = get_db(request)
+
+    dom_clean = extract_domain_from_email(domain).lower()
+    rules_doc = await db.settings.find_one({"_id": "gmail_automation_rules"}) or {}
+    mappings = rules_doc.get("sender_domain_mappings") or []
+    filtered = [m for m in mappings if (m.get("domain") or "").lower() != dom_clean]
+
+    await db.settings.update_one(
+        {"_id": "gmail_automation_rules"},
+        {"$set": {"sender_domain_mappings": filtered, "updated_at": now_iso()}},
+        upsert=True
+    )
+    return {"status": "success", "message": f"Mapping for {dom_clean} removed"}
 
 
 # ── Internal Recording Helpers ─────────────────────────────────────────────────

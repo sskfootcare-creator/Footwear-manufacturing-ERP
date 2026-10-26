@@ -36,6 +36,396 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+# ── Known Registries for Sender Domains ───────────────────────────────────────
+
+KNOWN_BANK_DOMAINS: Dict[str, str] = {
+    "hdfcbank.net": "HDFC Bank",
+    "hdfcbank.com": "HDFC Bank",
+    "hdfc.com": "HDFC Bank",
+    "icicibank.com": "ICICI Bank",
+    "icicibank.co.in": "ICICI Bank",
+    "sbi.co.in": "State Bank of India",
+    "statebankofindia.com": "State Bank of India",
+    "kotak.com": "Kotak Mahindra Bank",
+    "kotakbank.com": "Kotak Mahindra Bank",
+    "axisbank.com": "Axis Bank",
+    "axisbank.net": "Axis Bank",
+    "bankofbaroda.com": "Bank of Baroda",
+    "bankofbaroda.co.in": "Bank of Baroda",
+    "pnbindia.in": "Punjab National Bank",
+    "punjabnationalbank.in": "Punjab National Bank",
+    "indusind.com": "IndusInd Bank",
+    "yesbank.in": "Yes Bank",
+    "yesbank.com": "Yes Bank",
+    "canarabank.com": "Canara Bank",
+    "canarabank.in": "Canara Bank",
+    "unionbankofindia.co.in": "Union Bank of India",
+    "unionbankonline.co.in": "Union Bank of India",
+    "idbibank.in": "IDBI Bank",
+    "idbi.com": "IDBI Bank",
+    "rblbank.com": "RBL Bank",
+    "federalbank.co.in": "Federal Bank",
+    "standardchartered.co.in": "Standard Chartered",
+    "sc.com": "Standard Chartered",
+    "hsbc.co.in": "HSBC",
+    "hsbc.com": "HSBC",
+    "citi.com": "Citi Bank",
+    "citibank.co.in": "Citi Bank",
+    "idfcfirstbank.com": "IDFC First Bank",
+    "bandhanbank.com": "Bandhan Bank",
+}
+
+KNOWN_CLIENT_DOMAINS: Dict[str, str] = {
+    "siyaram.com": "Siyaram.com",
+    "siyarams.com": "Siyaram.com",
+    "bata.in": "Bata India",
+    "bata.com": "Bata India",
+    "metrobrands.com": "Metro Brands",
+    "metroshoes.net": "Metro Brands",
+    "relianceretail.com": "Reliance Retail",
+    "ril.com": "Reliance Retail",
+    "tatacliq.com": "Tata CLiQ",
+    "trent-tata.com": "Trent / Westside",
+    "westside.com": "Westside",
+    "woodlandworldwide.com": "Woodland",
+    "redtape.com": "Red Tape",
+    "libertyshoes.com": "Liberty Shoes",
+    "relaxofootwear.com": "Relaxo",
+    "khadims.com": "Khadim's",
+    "campusactivewear.com": "Campus Activewear",
+    "actionshoes.com": "Action Shoes",
+    "shoestoppers.com": "Shoe Stoppers",
+    "v-mart.co.in": "V-Mart",
+    "lifestyle.in": "Lifestyle Stores",
+    "shoppersstop.com": "Shoppers Stop",
+    "pantaloons.com": "Pantaloons",
+}
+
+KNOWN_MARKETPLACE_DOMAINS: Dict[str, str] = {
+    "myntra.com": "Myntra",
+    "flipkart.com": "Flipkart",
+    "amazon.in": "Amazon India",
+    "amazon.com": "Amazon",
+    "ajio.com": "AJIO",
+    "nykaa.com": "Nykaa Fashion",
+    "nykaafashion.com": "Nykaa Fashion",
+    "meesho.com": "Meesho",
+    "snapdeal.com": "Snapdeal",
+    "jiomart.com": "JioMart",
+}
+
+INTERNAL_DOMAINS: Dict[str, str] = {
+    "sskfootcare.com": "SSK Footcare",
+    "sskfootwear.com": "SSK Footcare",
+    "sskgroup.in": "SSK Footcare",
+}
+
+COMMON_PUBLIC_MAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "yahoo.co.in", "outlook.com", "hotmail.com", "icloud.com", "rediffmail.com", "zoho.com"
+}
+
+
+def extract_domain_from_email(from_email: Optional[str]) -> str:
+    """Extract and normalize the email domain part from an email address or header string."""
+    if not from_email:
+        return ""
+    s = str(from_email).strip().lower()
+    if "<" in s and ">" in s:
+        s = s.split("<")[-1].split(">")[0].strip()
+    if "@" in s:
+        s = s.split("@")[-1].strip()
+    s = s.split("/")[0].split(":")[0].strip().strip("[]().,;'\" ")
+    return s
+
+
+def normalize_root_domain(domain: str) -> str:
+    """Extract root domain, correctly handling ccTLDs like .co.in, .com.in, .gov.in."""
+    if not domain:
+        return ""
+    d = domain.lower().strip()
+    parts = d.split(".")
+    if len(parts) <= 2:
+        return d
+    two_part_tlds = {
+        "co.in", "com.in", "net.in", "org.in", "ac.in", "gov.in", "gen.in", "firm.in", "ind.in",
+        "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "com.au", "net.au", "org.au"
+    }
+    suffix_2 = ".".join(parts[-2:])
+    if suffix_2 in two_part_tlds and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def categorize_sender_sync(
+    from_email: str,
+    sender_name: str = "",
+    subject: str = "",
+    category: str = "",
+) -> Dict[str, Any]:
+    """Synchronously categorize sender based on domain registries and keyword heuristics."""
+    raw_domain = extract_domain_from_email(from_email)
+    root_domain = normalize_root_domain(raw_domain)
+
+    # 1. Internal domain
+    if root_domain in INTERNAL_DOMAINS or raw_domain in INTERNAL_DOMAINS:
+        org = INTERNAL_DOMAINS.get(root_domain) or INTERNAL_DOMAINS.get(raw_domain) or "SSK Footcare"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Internal",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Internal)",
+            "sender_domain_source": "internal",
+        }
+
+    # 2. Known Bank domains
+    if root_domain in KNOWN_BANK_DOMAINS or raw_domain in KNOWN_BANK_DOMAINS:
+        org = KNOWN_BANK_DOMAINS.get(root_domain) or KNOWN_BANK_DOMAINS.get(raw_domain) or "Bank"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Bank",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Bank)",
+            "sender_domain_source": "known_bank_registry",
+        }
+
+    # 3. Known Client domains
+    if root_domain in KNOWN_CLIENT_DOMAINS or raw_domain in KNOWN_CLIENT_DOMAINS:
+        org = KNOWN_CLIENT_DOMAINS.get(root_domain) or KNOWN_CLIENT_DOMAINS.get(raw_domain) or "Client"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Client",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Client)",
+            "sender_domain_source": "known_client_registry",
+        }
+
+    # 4. Known Marketplace domains
+    if root_domain in KNOWN_MARKETPLACE_DOMAINS or raw_domain in KNOWN_MARKETPLACE_DOMAINS:
+        org = KNOWN_MARKETPLACE_DOMAINS.get(root_domain) or KNOWN_MARKETPLACE_DOMAINS.get(raw_domain) or "Marketplace"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Marketplace",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Marketplace)",
+            "sender_domain_source": "known_marketplace_registry",
+        }
+
+    # 5. Domain keyword detection
+    dom_lower = (raw_domain or "").lower()
+    snd_lower = (sender_name or "").lower()
+
+    if "bank" in dom_lower or "bank" in snd_lower or (category == "PAYMENT" and ("alert" in dom_lower or "alert" in snd_lower)):
+        org = sender_name.strip() if sender_name else (dom_lower.split(".")[0].capitalize() + " Bank")
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Bank",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Bank)",
+            "sender_domain_source": "heuristic",
+        }
+
+    if category == "GRN" and raw_domain and raw_domain not in COMMON_PUBLIC_MAIL_DOMAINS:
+        prefix = root_domain.split(".")[0].capitalize()
+        org = sender_name.strip() if sender_name else prefix
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Client",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Client)",
+            "sender_domain_source": "heuristic",
+        }
+
+    # 6. Fallback / Generic
+    if raw_domain in COMMON_PUBLIC_MAIL_DOMAINS:
+        org = sender_name.strip() if sender_name else raw_domain
+        ent = "Client" if category == "GRN" else "Other"
+        return {
+            "sender_domain": raw_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": ent,
+            "sender_organization": org,
+            "sender_category_label": f"{org} ({ent})",
+            "sender_domain_source": "public_mail_provider",
+        }
+
+    clean_prefix = root_domain.split(".")[0].capitalize() if root_domain else "Unknown"
+    org = sender_name.strip() if sender_name else clean_prefix
+    ent = "Client" if category in ["GRN", "PAYMENT"] else "Other"
+    return {
+        "sender_domain": raw_domain or root_domain or "unknown",
+        "sender_root_domain": root_domain or "unknown",
+        "sender_entity_type": ent,
+        "sender_organization": org,
+        "sender_category_label": f"{org} ({ent})",
+        "sender_domain_source": "fallback",
+    }
+
+
+async def categorize_sender(
+    from_email: str,
+    sender_name: str = "",
+    subject: str = "",
+    body_text: str = "",
+    category: str = "",
+    db: Any = None,
+) -> Dict[str, Any]:
+    """Asynchronously categorize sender against custom user rules, DB collections (clients, vendors, banks),
+    and known registries.
+    """
+    raw_domain = extract_domain_from_email(from_email)
+    root_domain = normalize_root_domain(raw_domain)
+
+    # 1. Custom domain mapping in MongoDB settings
+    if db is not None and (raw_domain or root_domain):
+        try:
+            rules_doc = await db.settings.find_one({"_id": "gmail_automation_rules"}) or {}
+            custom_mappings = rules_doc.get("sender_domain_mappings") or []
+            for mapping in custom_mappings:
+                rule_dom = (mapping.get("domain") or "").strip().lower()
+                if rule_dom and (rule_dom == raw_domain or rule_dom == root_domain):
+                    org = mapping.get("organization") or rule_dom
+                    ent = mapping.get("entity_type") or "Client"
+                    return {
+                        "sender_domain": raw_domain or root_domain,
+                        "sender_root_domain": root_domain,
+                        "sender_entity_type": ent,
+                        "sender_organization": org,
+                        "sender_category_label": f"{org} ({ent})",
+                        "sender_domain_source": "custom_rule",
+                    }
+        except Exception as ce:
+            log.warning("Could not check custom sender domain rules: %s", ce)
+
+    # 2. Check internal domains
+    if root_domain in INTERNAL_DOMAINS or raw_domain in INTERNAL_DOMAINS:
+        org = INTERNAL_DOMAINS.get(root_domain) or INTERNAL_DOMAINS.get(raw_domain) or "SSK Footcare"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Internal",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Internal)",
+            "sender_domain_source": "internal",
+        }
+
+    # 3. Check known bank registry
+    if root_domain in KNOWN_BANK_DOMAINS or raw_domain in KNOWN_BANK_DOMAINS:
+        org = KNOWN_BANK_DOMAINS.get(root_domain) or KNOWN_BANK_DOMAINS.get(raw_domain) or "Bank"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Bank",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Bank)",
+            "sender_domain_source": "known_bank_registry",
+        }
+
+    # 4. Check known client registry
+    if root_domain in KNOWN_CLIENT_DOMAINS or raw_domain in KNOWN_CLIENT_DOMAINS:
+        org = KNOWN_CLIENT_DOMAINS.get(root_domain) or KNOWN_CLIENT_DOMAINS.get(raw_domain) or "Client"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Client",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Client)",
+            "sender_domain_source": "known_client_registry",
+        }
+
+    # 5. Check known marketplace registry
+    if root_domain in KNOWN_MARKETPLACE_DOMAINS or raw_domain in KNOWN_MARKETPLACE_DOMAINS:
+        org = KNOWN_MARKETPLACE_DOMAINS.get(root_domain) or KNOWN_MARKETPLACE_DOMAINS.get(raw_domain) or "Marketplace"
+        return {
+            "sender_domain": raw_domain or root_domain,
+            "sender_root_domain": root_domain,
+            "sender_entity_type": "Marketplace",
+            "sender_organization": org,
+            "sender_category_label": f"{org} (Marketplace)",
+            "sender_domain_source": "known_marketplace_registry",
+        }
+
+    # 6. Dynamic lookup in ERP Database (db.clients, db.vendors, db.bank_accounts)
+    if db is not None and (raw_domain or root_domain):
+        domain_prefix = root_domain.split(".")[0] if root_domain else ""
+
+        # A. ERP Clients
+        try:
+            if hasattr(db, "clients"):
+                client_doc = await db.clients.find_one({
+                    "$or": [
+                        {"email": {"$regex": re.escape(raw_domain), "$options": "i"}},
+                        {"website": {"$regex": re.escape(raw_domain), "$options": "i"}},
+                        {"name": {"$regex": f"^{re.escape(domain_prefix)}", "$options": "i"}},
+                    ]
+                })
+                if client_doc:
+                    org = client_doc.get("name") or domain_prefix.capitalize()
+                    return {
+                        "sender_domain": raw_domain or root_domain,
+                        "sender_root_domain": root_domain,
+                        "sender_entity_type": "Client",
+                        "sender_organization": org,
+                        "sender_category_label": f"{org} (Client)",
+                        "sender_domain_source": "erp_client",
+                    }
+        except Exception as cle:
+            log.warning("Dynamic ERP client check failed: %s", cle)
+
+        # B. ERP Vendors
+        try:
+            if hasattr(db, "vendors"):
+                vendor_doc = await db.vendors.find_one({
+                    "$or": [
+                        {"email": {"$regex": re.escape(raw_domain), "$options": "i"}},
+                        {"website": {"$regex": re.escape(raw_domain), "$options": "i"}},
+                        {"name": {"$regex": f"^{re.escape(domain_prefix)}", "$options": "i"}},
+                    ]
+                })
+                if vendor_doc:
+                    org = vendor_doc.get("name") or domain_prefix.capitalize()
+                    return {
+                        "sender_domain": raw_domain or root_domain,
+                        "sender_root_domain": root_domain,
+                        "sender_entity_type": "Vendor",
+                        "sender_organization": org,
+                        "sender_category_label": f"{org} (Vendor)",
+                        "sender_domain_source": "erp_vendor",
+                    }
+        except Exception as ve:
+            log.warning("Dynamic ERP vendor check failed: %s", ve)
+
+        # C. ERP Bank Accounts
+        try:
+            if hasattr(db, "bank_accounts"):
+                bank_doc = await db.bank_accounts.find_one({
+                    "$or": [
+                        {"bank_name": {"$regex": re.escape(domain_prefix), "$options": "i"}},
+                        {"name": {"$regex": re.escape(domain_prefix), "$options": "i"}},
+                    ]
+                })
+                if bank_doc:
+                    org = bank_doc.get("bank_name") or bank_doc.get("name") or "Bank"
+                    return {
+                        "sender_domain": raw_domain or root_domain,
+                        "sender_root_domain": root_domain,
+                        "sender_entity_type": "Bank",
+                        "sender_organization": org,
+                        "sender_category_label": f"{org} (Bank)",
+                        "sender_domain_source": "erp_bank",
+                    }
+        except Exception as be:
+            log.warning("Dynamic ERP bank account check failed: %s", be)
+
+    # 7. Fallback to synchronous heuristics
+    return categorize_sender_sync(from_email, sender_name, subject, category)
+
+
 def extract_text_from_attachments(attachments: List[Dict[str, Any]]) -> str:
     """Extract plain text from PDF, CSV, Excel, or text attachments."""
     extracted_chunks = []
@@ -564,16 +954,34 @@ async def parse_and_match_email(email_dict: Dict[str, Any], db=None) -> Dict[str
     classification = classify_email(subject, body_text, sender, attachment_text)
     cat = classification["category"]
 
+    # 3. Categorize Sender Domain
+    from_addr = email_dict.get("from_email", "") or sender
+    s_name = email_dict.get("sender_name", "")
+    sender_info = await categorize_sender(
+        from_email=from_addr,
+        sender_name=s_name,
+        subject=subject,
+        body_text=body_text,
+        category=cat,
+        db=db,
+    )
+
     extracted_data: Dict[str, Any] = {}
     if cat == "GRN":
         extracted_data = extract_grn_data(subject, body_text, sender, attachment_text)
+        if not extracted_data.get("client_name") and sender_info.get("sender_entity_type") == "Client":
+            extracted_data["client_name"] = sender_info.get("sender_organization", "")
     elif cat == "PAYMENT":
         extracted_data = extract_payment_data(subject, body_text, sender, attachment_text)
+        if not extracted_data.get("bank") and sender_info.get("sender_entity_type") == "Bank":
+            extracted_data["bank"] = sender_info.get("sender_organization", "")
+        if not extracted_data.get("client_name") and sender_info.get("sender_entity_type") == "Client":
+            extracted_data["client_name"] = sender_info.get("sender_organization", "")
 
-    # 3. Match against ERP Database
+    # 4. Match against ERP Database
     erp_match = await match_with_erp(cat, extracted_data, db=db)
 
-    # 4. Overall Confidence
+    # 5. Overall Confidence
     base_conf = classification.get("confidence", 0.5)
     match_conf = erp_match.get("match_confidence", 0.0)
     overall_confidence = round(base_conf * 0.4 + match_conf * 0.6 if erp_match.get("is_matched") else base_conf, 2)
@@ -585,6 +993,12 @@ async def parse_and_match_email(email_dict: Dict[str, Any], db=None) -> Dict[str
         "from_header": sender,
         "from_email": email_dict.get("from_email", ""),
         "sender_name": email_dict.get("sender_name", ""),
+        "sender_domain": sender_info.get("sender_domain", ""),
+        "sender_root_domain": sender_info.get("sender_root_domain", ""),
+        "sender_entity_type": sender_info.get("sender_entity_type", "Other"),
+        "sender_organization": sender_info.get("sender_organization", ""),
+        "sender_category_label": sender_info.get("sender_category_label", ""),
+        "sender_domain_source": sender_info.get("sender_domain_source", ""),
         "received_iso": email_dict.get("received_iso") or now_iso(),
         "snippet": email_dict.get("snippet", ""),
         "category": cat,
