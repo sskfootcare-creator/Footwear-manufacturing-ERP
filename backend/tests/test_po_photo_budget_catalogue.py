@@ -77,7 +77,21 @@ def setup_db_loop():
     yield
 
 async def get_admin_headers():
-    # Ensure test styles exist in db.styles for any test runner environment
+    # 1. Ensure test style images exist on disk for CI / clean checkout environments
+    curr_dir = os.path.dirname(os.path.abspath(__file__))  # backend/tests
+    backend_dir = os.path.dirname(curr_dir)                # backend
+    repo_root = os.path.dirname(backend_dir)               # root
+    for base in [backend_dir, repo_root]:
+        cat_dir = os.path.join(base, "uploads", "images", "catalogue")
+        os.makedirs(cat_dir, exist_ok=True)
+        for code in ["S-ZEC-001", "S-ZEC-002", "S-ZEC-003"]:
+            target_file = os.path.join(cat_dir, f"{code}.png")
+            if not os.path.isfile(target_file):
+                from PIL import Image as PILImage
+                img = PILImage.new("RGB", (100, 100), color=(73, 109, 137))
+                img.save(target_file)
+
+    # 2. Ensure test styles exist in db.styles for any test runner environment
     for s in TEST_STYLES:
         await server.db.styles.update_one(
             {"code": s["code"]},

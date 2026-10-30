@@ -3078,31 +3078,56 @@ class CatalogueDownloadRequest(BaseModel):
 
 def _load_image_for_catalogue(image_url: str, style_code: str = ""):
     from PIL import Image as PILImage
+    import base64
+
+    # 0. Base64 Data URI
+    if image_url and image_url.startswith("data:image/"):
+        try:
+            b64data = image_url.split(",", 1)[1] if "," in image_url else image_url
+            return PILImage.open(io.BytesIO(base64.b64decode(b64data)))
+        except Exception:
+            pass
+
+    # Reliable base directory resolution
+    curr_dir = os.path.dirname(os.path.abspath(__file__))  # backend/routes
+    backend_dir = os.path.dirname(curr_dir)                # backend
+    repo_root = os.path.dirname(backend_dir)               # root
+
+    search_roots = [
+        os.getcwd(),
+        backend_dir,
+        repo_root,
+    ]
+
     # 1. Try local catalogue uploads by code
     if style_code:
         clean_code = str(style_code).strip().replace("/", "_")
-        for candidate in [
-            os.path.join("backend", "uploads", "images", "catalogue", f"{clean_code}.png"),
-            os.path.join("uploads", "images", "catalogue", f"{clean_code}.png"),
-        ]:
-            if os.path.isfile(candidate):
-                try:
-                    return PILImage.open(candidate)
-                except Exception:
-                    pass
+        for root in search_roots:
+            for sub in [
+                os.path.join("uploads", "images", "catalogue", f"{clean_code}.png"),
+                os.path.join("backend", "uploads", "images", "catalogue", f"{clean_code}.png"),
+                os.path.join("images", "catalogue", f"{clean_code}.png"),
+            ]:
+                candidate = os.path.join(root, sub)
+                if os.path.isfile(candidate):
+                    try:
+                        return PILImage.open(candidate)
+                    except Exception:
+                        pass
 
     # 2. Try filesystem paths from url
     if image_url:
         for prefix in ["/api/uploads/", "/uploads/"]:
             if prefix in image_url:
                 rel = image_url.split(prefix, 1)[1].split("?", 1)[0]
-                for base in ["uploads", os.path.join("backend", "uploads")]:
-                    target = os.path.join(base, rel)
-                    if os.path.isfile(target):
-                        try:
-                            return PILImage.open(target)
-                        except Exception:
-                            pass
+                for root in search_roots:
+                    for base in ["uploads", os.path.join("backend", "uploads"), ""]:
+                        target = os.path.join(root, base, rel)
+                        if os.path.isfile(target):
+                            try:
+                                return PILImage.open(target)
+                            except Exception:
+                                pass
 
         # 3. If remote HTTP URL
         if image_url.startswith("http://") or image_url.startswith("https://"):
