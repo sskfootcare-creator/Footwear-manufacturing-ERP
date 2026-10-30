@@ -303,7 +303,7 @@ export default function POs() {
       profit,
       profitPct,
       isLaborEstimated: hasEstimated || !hasActual,
-      isActual,
+      isActual: hasActual && !hasEstimated,
       selectedLineRows,
       selectedCount: selectedLineRows.length,
     };
@@ -530,7 +530,7 @@ export default function POs() {
       selectedCount: selectedLines.length,
       totalLines: view.line_items.length,
       isLaborEstimated: hasEstimated || !hasActual,
-      isActual,
+      isActual: hasActual && !hasEstimated,
       isFullyAllocated: !hasEstimated && hasActual,
     };
   }, [view, poViewSelectedLines]);

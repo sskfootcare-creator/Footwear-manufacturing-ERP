@@ -8,6 +8,66 @@ import server
 from server import app
 from auth import create_access_token
 
+TEST_STYLES = [
+    {
+        "code": "S-ZEC-001",
+        "name": "ZECODE T-Strap Flat Sandal 01",
+        "brand": "ZECODE",
+        "category": "Sandals",
+        "color": "Black",
+        "upper_material": "Synthetic Leather",
+        "insole_lining": "Comfort Cushion / Synthetic",
+        "outsole": "TPR / Sheet Sole",
+        "heel_type": "Flat (0.5 inch)",
+        "transfer_price": 550.0,
+        "target_mrp": 1299.0,
+        "cost": 550.0,
+        "image_url": "/api/uploads/images/catalogue/S-ZEC-001.png",
+        "image_thumbnail_url": "/api/uploads/images/catalogue/S-ZEC-001.png",
+        "bom": [{"item": "Synthetic", "rate": 200.0, "quantity": 1.0}],
+        "labor": [{"role": "stitching", "rate": 50.0, "rate_per_pair": 50.0}],
+        "packing_cost": 20.0,
+    },
+    {
+        "code": "S-ZEC-002",
+        "name": "ZECODE T-Strap Flat Sandal 02",
+        "brand": "ZECODE",
+        "category": "Sandals",
+        "color": "Tan",
+        "upper_material": "Synthetic Suede",
+        "insole_lining": "Padded Insole / Rexine",
+        "outsole": "TPR / Sheet Sole",
+        "heel_type": "Flat (0.5 inch)",
+        "transfer_price": 550.0,
+        "target_mrp": 1299.0,
+        "cost": 550.0,
+        "image_url": "/api/uploads/images/catalogue/S-ZEC-002.png",
+        "image_thumbnail_url": "/api/uploads/images/catalogue/S-ZEC-002.png",
+        "bom": [{"item": "Synthetic", "rate": 220.0, "quantity": 1.0}],
+        "labor": [{"role": "stitching", "rate": 50.0, "rate_per_pair": 50.0}],
+        "packing_cost": 20.0,
+    },
+    {
+        "code": "S-ZEC-003",
+        "name": "ZECODE T-Strap Flat Sandal 03",
+        "brand": "ZECODE",
+        "category": "Sandals",
+        "color": "Gold",
+        "upper_material": "Synthetic Metallic",
+        "insole_lining": "Cushioned PU",
+        "outsole": "TPR / Sheet Sole",
+        "heel_type": "Flat (0.5 inch)",
+        "transfer_price": 550.0,
+        "target_mrp": 1299.0,
+        "cost": 550.0,
+        "image_url": "/api/uploads/images/catalogue/S-ZEC-003.png",
+        "image_thumbnail_url": "/api/uploads/images/catalogue/S-ZEC-003.png",
+        "bom": [{"item": "Synthetic", "rate": 230.0, "quantity": 1.0}],
+        "labor": [{"role": "stitching", "rate": 50.0, "rate_per_pair": 50.0}],
+        "packing_cost": 20.0,
+    },
+]
+
 @pytest.fixture(autouse=True)
 def setup_db_loop():
     mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -17,6 +77,14 @@ def setup_db_loop():
     yield
 
 async def get_admin_headers():
+    # Ensure test styles exist in db.styles for any test runner environment
+    for s in TEST_STYLES:
+        await server.db.styles.update_one(
+            {"code": s["code"]},
+            {"$set": s},
+            upsert=True,
+        )
+
     admin_user = await server.db.users.find_one({"role": "admin"})
     if not admin_user:
         admin_user = await server.db.users.find_one()

@@ -479,8 +479,6 @@ async def _attach_po_profitability(po_docs: list, db=None):
 
                 item["profitability"] = {
                     "style_code": style_doc.get("code", "") or item.get("style_code", ""),
-                    "image_url": item_img,
-                    "image_thumbnail_url": item_img,
                     "unit_price": round(unit_price, 2),
                     "bom_cost": round(bom_cost, 2),
                     "labor_cost": round(labor_cost, 2),
