@@ -3062,3 +3062,337 @@ async def catalogue_export_preview(payload: CatalogueExportRequest, request: Req
 async def costing_preview(payload: StyleIn, request: Request, color: Optional[str] = None):
     await _get_user(request)
     return compute_style_costing(payload.model_dump(), color=color)
+
+
+# ============================================================================
+# Catalogue Export with Pictures & Master Specification Sheet
+# ============================================================================
+
+class CatalogueDownloadRequest(BaseModel):
+    style_ids: Optional[List[str]] = None
+    style_codes: Optional[List[str]] = None
+    brand: Optional[str] = "ZECODE"
+    category: Optional[str] = "Women's Footwear (Flats, Wedges, Platform Slides & Kitten Heels)"
+    include_images: bool = True
+
+
+def _load_image_for_catalogue(image_url: str, style_code: str = ""):
+    from PIL import Image as PILImage
+    # 1. Try local catalogue uploads by code
+    if style_code:
+        clean_code = str(style_code).strip().replace("/", "_")
+        for candidate in [
+            os.path.join("backend", "uploads", "images", "catalogue", f"{clean_code}.png"),
+            os.path.join("uploads", "images", "catalogue", f"{clean_code}.png"),
+        ]:
+            if os.path.isfile(candidate):
+                try:
+                    return PILImage.open(candidate)
+                except Exception:
+                    pass
+
+    # 2. Try filesystem paths from url
+    if image_url:
+        for prefix in ["/api/uploads/", "/uploads/"]:
+            if prefix in image_url:
+                rel = image_url.split(prefix, 1)[1].split("?", 1)[0]
+                for base in ["uploads", os.path.join("backend", "uploads")]:
+                    target = os.path.join(base, rel)
+                    if os.path.isfile(target):
+                        try:
+                            return PILImage.open(target)
+                        except Exception:
+                            pass
+
+        # 3. If remote HTTP URL
+        if image_url.startswith("http://") or image_url.startswith("https://"):
+            try:
+                import urllib.request
+                req = urllib.request.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return PILImage.open(io.BytesIO(resp.read()))
+            except Exception:
+                pass
+
+    return None
+
+
+async def build_catalogue_excel(
+    styles: list,
+    brand: str = "ZECODE",
+    category: str = "Women's Footwear (Flats, Wedges, Platform Slides & Kitten Heels)",
+    include_images: bool = True,
+) -> io.BytesIO:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.drawing.image import Image as OpenpyxlImage
+    from PIL import Image as PILImage
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Footwear Costing & Specs"
+    ws.views.sheetView[0].showGridLines = True
+
+    # Title
+    ws.merge_cells("A1:L1")
+    c1 = ws["A1"]
+    c1.value = f"SSK FOOTCARE - MASTER PRODUCT SPECIFICATION & COSTING SHEET ({len(styles)} STYLES)"
+    c1.font = Font(name="Segoe UI", size=14, bold=True, color="1F4E79")
+    c1.alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 36.0
+
+    # Subtitle
+    ws.merge_cells("A2:L2")
+    c2 = ws["A2"]
+    c2.value = f"Brand / Client: {brand} | Category: {category} | Total Catalog: {len(styles)} Styles"
+    c2.font = Font(name="Segoe UI", size=9, bold=False, color="595959")
+    c2.alignment = Alignment(vertical="center")
+    ws.row_dimensions[2].height = 22.0
+    ws.row_dimensions[3].height = 10.0
+
+    headers = [
+        ("Sr. No.", 8, "center"),
+        ("Photo", 17, "center"),
+        ("Vendor SKU", 16, "center"),
+        ("Product Description", 38, "left"),
+        ("Color", 25, "left"),
+        ("Colors ", 20, "left"),
+        ("Upper Material", 32, "left"),
+        ("Insole / Lining", 28, "left"),
+        ("Outsole", 22, "left"),
+        ("Heel Type / Height", 20, "left"),
+        ("TP (₹) [Transfer Price]", 18, "right"),
+        ("Target MRP (₹)", 17, "right"),
+    ]
+
+    hdr_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+    hdr_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+    hdr_border = Border(
+        left=Side(style="thin", color="D9D9D9"),
+        right=Side(style="thin", color="D9D9D9"),
+        top=Side(style="medium", color="1F4E79"),
+        bottom=Side(style="medium", color="1F4E79"),
+    )
+
+    ws.row_dimensions[4].height = 28.0
+    for col_idx, (hdr_text, col_w, halign) in enumerate(headers, 1):
+        cell = ws.cell(4, col_idx, hdr_text)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = hdr_border
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = col_w
+
+    thin_border = Border(
+        left=Side(style="thin", color="E0E0E0"),
+        right=Side(style="thin", color="E0E0E0"),
+        top=Side(style="thin", color="E0E0E0"),
+        bottom=Side(style="thin", color="E0E0E0"),
+    )
+
+    data_font = Font(name="Segoe UI", size=9.5)
+    bold_font = Font(name="Segoe UI", size=10, bold=True)
+
+    start_row = 5
+    for idx, s in enumerate(styles, 1):
+        r = start_row + idx - 1
+        ws.row_dimensions[r].height = 92.0
+
+        # 1. Sr. No.
+        c = ws.cell(r, 1, idx)
+        c.font = bold_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+
+        # 2. Photo
+        c_photo = ws.cell(r, 2)
+        c_photo.border = thin_border
+        if include_images:
+            code = s.get("code", "")
+            img_u = s.get("image_thumbnail_url") or s.get("image_url") or s.get("image_display_url") or ""
+            pil_img = _load_image_for_catalogue(img_u, style_code=code)
+            if pil_img:
+                try:
+                    w, h = pil_img.size
+                    scale = min(62 / w, 110 / h, 1.0)
+                    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+                    buf = io.BytesIO()
+                    if pil_img.mode in ("RGBA", "LA") or (pil_img.mode == "P" and "transparency" in pil_img.info):
+                        pil_img.save(buf, format="PNG")
+                    else:
+                        pil_img.convert("RGB").save(buf, format="PNG")
+                    buf.seek(0)
+                    ox_img = OpenpyxlImage(buf)
+                    ox_img.width = new_w
+                    ox_img.height = new_h
+                    ws.add_image(ox_img, f"B{r}")
+                except Exception as ex:
+                    log.warning(f"Error attaching image for {code}: {ex}")
+
+        # 3. Vendor SKU
+        c = ws.cell(r, 3, s.get("code", ""))
+        c.font = bold_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+
+        # 4. Product Description
+        c = ws.cell(r, 4, s.get("name") or s.get("description") or "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 5. Color
+        colors = s.get("colors") or []
+        color_val = ", ".join(colors) if isinstance(colors, list) else str(colors or "")
+        c = ws.cell(r, 5, color_val)
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 6. Colors (extra variants)
+        c = ws.cell(r, 6, "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 7. Upper Material
+        c = ws.cell(r, 7, s.get("upper_material") or "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 8. Insole / Lining
+        c = ws.cell(r, 8, s.get("insole_lining") or s.get("insole_mould_name") or "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 9. Outsole
+        c = ws.cell(r, 9, s.get("outsole") or s.get("sole_mould_name") or "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 10. Heel Type / Height
+        c = ws.cell(r, 10, s.get("heel_type_height") or s.get("footwear_type") or "")
+        c.font = data_font
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c.border = thin_border
+
+        # 11. TP (Transfer Price)
+        tp = s.get("transfer_price") or s.get("cost_per_pair") or (s.get("costing") or {}).get("total_cost") or 550.0
+        try:
+            tp_num = float(tp)
+        except Exception:
+            tp_num = 550.0
+        c = ws.cell(r, 11, tp_num)
+        c.font = bold_font
+        c.alignment = Alignment(horizontal="right", vertical="center")
+        c.number_format = "#,##0"
+        c.border = thin_border
+
+        # 12. Target MRP
+        mrp = s.get("target_mrp") or s.get("mrp") or ""
+        try:
+            mrp_num = float(mrp) if mrp else ""
+        except Exception:
+            mrp_num = mrp
+        c = ws.cell(r, 12, mrp_num)
+        c.font = data_font
+        c.alignment = Alignment(horizontal="right", vertical="center")
+        if isinstance(mrp_num, (int, float)):
+            c.number_format = "#,##0"
+        c.border = thin_border
+
+    last_r = start_row + len(styles) - 1 if styles else start_row
+
+    if styles:
+        # Summary Row: Average
+        avg_r = last_r + 1
+        ws.row_dimensions[avg_r].height = 24.0
+        c_avg = ws.cell(avg_r, 1, "AVERAGE / BENCHMARK:")
+        c_avg.font = bold_font
+        c_avg.alignment = Alignment(horizontal="left", vertical="center")
+        ws.merge_cells(f"A{avg_r}:J{avg_r}")
+
+        c_avg_tp = ws.cell(avg_r, 11, f"=AVERAGE(K{start_row}:K{last_r})")
+        c_avg_tp.font = bold_font
+        c_avg_tp.alignment = Alignment(horizontal="right", vertical="center")
+        c_avg_tp.number_format = "#,##0"
+
+        c_avg_mrp = ws.cell(avg_r, 12, f"=AVERAGE(L{start_row}:L{last_r})")
+        c_avg_mrp.font = bold_font
+        c_avg_mrp.alignment = Alignment(horizontal="right", vertical="center")
+        c_avg_mrp.number_format = "#,##0"
+
+        # Notes
+        note_r = avg_r + 2
+        ws.merge_cells(f"A{note_r}:L{note_r}")
+        c_note = ws.cell(note_r, 1)
+        c_note.value = "Note: Transfer Prices (TP) are ex-factory wholesale estimates based on SSK Footcare production benchmarks. Final pricing depends on order quantity per SKU, customized inner box packaging, and applicable GST."
+        c_note.font = Font(name="Segoe UI", size=9, italic=True, color="595959")
+        c_note.alignment = Alignment(vertical="center")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@styles_router.post("/styles/catalogue/download")
+async def download_catalogue_post(payload: CatalogueDownloadRequest, request: Request):
+    await _get_user(request)
+    db = get_db()
+    
+    q_or = []
+    if payload.style_ids:
+        valid_oids = [oid(x) for x in payload.style_ids if ObjectId.is_valid(x)]
+        if valid_oids:
+            q_or.append({"_id": {"$in": valid_oids}})
+        q_or.append({"id": {"$in": payload.style_ids}})
+    if payload.style_codes:
+        q_or.append({"code": {"$in": payload.style_codes}})
+
+    if q_or:
+        query = {"$or": q_or}
+    else:
+        query = {"$or": [{"active": {"$ne": False}}, {"deleted_at": {"$exists": False}}]}
+
+    styles = await db.styles.find(query).sort("code", 1).to_list(2000)
+    buf = await build_catalogue_excel(
+        styles,
+        brand=payload.brand or "ZECODE",
+        category=payload.category or "Women's Footwear (Flats, Wedges, Platform Slides & Kitten Heels)",
+        include_images=payload.include_images,
+    )
+    
+    filename = f"SSK_Catalogue_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
+
+@styles_router.get("/styles/catalogue/download")
+async def download_catalogue_get(
+    request: Request,
+    style_ids: Optional[str] = Query(None, description="Comma-separated style IDs or codes"),
+    brand: Optional[str] = "ZECODE",
+    include_images: bool = True,
+):
+    await _get_user(request)
+    db = get_db()
+    ids_list = [x.strip() for x in (style_ids or "").split(",") if x.strip()]
+    payload = CatalogueDownloadRequest(
+        style_ids=ids_list if ids_list else None,
+        style_codes=ids_list if ids_list else None,
+        brand=brand or "ZECODE",
+        include_images=include_images,
+    )
+    return await download_catalogue_post(payload, request)
+

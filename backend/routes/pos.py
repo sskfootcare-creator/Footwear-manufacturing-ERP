@@ -12,6 +12,7 @@ from io import BytesIO
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from bson import ObjectId
+from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 from pymongo import ReturnDocument
 
@@ -405,6 +406,11 @@ async def _attach_po_profitability(po_docs: list, db=None):
             sid = str(item.get("style_id") or "")
             style_doc = styles_map.get(code) or styles_map.get(sid)
             if style_doc:
+                item_img = style_doc.get("image_thumbnail_url") or style_doc.get("image_url") or style_doc.get("image_display_url") or ""
+                if item_img:
+                    item["image_url"] = item_img
+                    item["image_thumbnail_url"] = item_img
+            if style_doc:
                 item_color = item.get("color")
                 # Check if this PO has specific jobs with assigned karigars for this line item
                 code_up = code.upper()
@@ -473,6 +479,8 @@ async def _attach_po_profitability(po_docs: list, db=None):
 
                 item["profitability"] = {
                     "style_code": style_doc.get("code", "") or item.get("style_code", ""),
+                    "image_url": item_img,
+                    "image_thumbnail_url": item_img,
                     "unit_price": round(unit_price, 2),
                     "bom_cost": round(bom_cost, 2),
                     "labor_cost": round(labor_cost, 2),
@@ -1466,6 +1474,12 @@ async def get_b2b_profitability(
             labor_source = costing.get("labor_source", "estimated")
             outside_cost = float(costing.get("outside_cost", 0))
             outside_source = costing.get("outside_source", "estimated")
+
+            # Fallback if style has no granular BOM/Labor yet but has transfer_price or base cost
+            if bom_cost == 0 and labor_cost == 0 and outside_cost == 0:
+                base_cost = float(style_doc.get("transfer_price") or style_doc.get("cost") or style_doc.get("total_cost") or 0)
+                if base_cost > 0:
+                    bom_cost = base_cost
 
             unit_price = float(it.get("unit_price", 0))
             total_cost_val = round(bom_cost + labor_cost + outside_cost + packing, 2)
@@ -5855,3 +5869,241 @@ async def delete_defect(did: str, request: Request):
     db = get_db()
     await db.defects.delete_one({"_id": oid(did)})
     return {"ok": True}
+
+
+# ============================================================================
+# Multi-PO & Multi-Style Production Budget Planning & Alignment
+# ============================================================================
+
+class MultiBudgetSelectionItem(BaseModel):
+    po_id: str
+    po_number: Optional[str] = ""
+    client_name: Optional[str] = ""
+    style_code: str
+    description: Optional[str] = ""
+    color: Optional[str] = ""
+    size: Optional[str] = ""
+    quantity: int = 0
+    unit_price: float = 0.0
+    line_index: Optional[int] = None
+    image_url: Optional[str] = ""
+
+class MultiBudgetCalcPayload(BaseModel):
+    items: List[MultiBudgetSelectionItem] = []
+    po_ids: Optional[List[str]] = []
+
+class MultiBudgetAlignPayload(BaseModel):
+    items: List[MultiBudgetSelectionItem] = []
+    po_ids: List[str] = []
+    notes: Optional[str] = ""
+
+
+@pos_router.post("/pos/multi-budget/calculate")
+async def calculate_multi_po_budget(payload: MultiBudgetCalcPayload, request: Request):
+    """
+    Calculate aggregated production budget & profitability rollup for any combination
+    of styles selected across multiple Purchase Orders from the planning stage.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production", "sales")(u)
+    db = get_db()
+
+    items = payload.items
+    # If no explicit line items passed but po_ids provided, pull all line items from those POs
+    if not items and payload.po_ids:
+        pos_list = await db.pos.find({
+            "$or": [
+                {"_id": {"$in": [oid(pid) for pid in payload.po_ids if ObjectId.is_valid(pid)]}},
+                {"po_number": {"$in": payload.po_ids}},
+            ]
+        }).to_list(100)
+        await _attach_po_profitability(pos_list, db)
+        items = []
+        for p in pos_list:
+            p_id = str(p.get("_id") or "")
+            p_num = p.get("po_number", "")
+            c_name = p.get("client_name", "")
+            for idx, li in enumerate(p.get("line_items") or []):
+                items.append(MultiBudgetSelectionItem(
+                    po_id=p_id,
+                    po_number=p_num,
+                    client_name=c_name,
+                    style_code=li.get("style_code", ""),
+                    description=li.get("description", ""),
+                    color=li.get("color", ""),
+                    size=str(li.get("size", "")),
+                    quantity=int(li.get("quantity") or 0),
+                    unit_price=float(li.get("unit_price") or 0),
+                    line_index=idx,
+                    image_url=li.get("image_thumbnail_url") or li.get("image_url") or "",
+                ))
+
+    # Fetch unique styles
+    style_codes = list({it.style_code.strip() for it in items if it.style_code})
+    styles_list = await db.styles.find({"code": {"$in": style_codes}}).to_list(1000)
+    styles_map = {s["code"].strip().upper(): s for s in styles_list if s.get("code")}
+
+    # Fetch planning jobs for labor rates
+    po_ids_set = list({it.po_id for it in items if it.po_id})
+    job_query = []
+    for pid in po_ids_set:
+        job_query.append({"po_id": pid})
+        if ObjectId.is_valid(pid):
+            job_query.append({"po_id": oid(pid)})
+    jobs = []
+    if job_query:
+        jobs = await db.production_jobs.find({"$or": job_query}).to_list(2000)
+
+    from routes.styles import compute_style_costing_from_jobs
+
+    lines_out = []
+    tot_qty = 0
+    tot_revenue = 0.0
+    tot_bom = 0.0
+    tot_labor = 0.0
+    tot_packing = 0.0
+    tot_outside = 0.0
+    has_estimated_labor = False
+    has_actual_labor = False
+
+    for it in items:
+        qty = int(it.quantity or 0)
+        u_price = float(it.unit_price or 0)
+        rev = round(u_price * qty, 2)
+        tot_qty += qty
+        tot_revenue += rev
+
+        code_up = it.style_code.strip().upper()
+        style_doc = styles_map.get(code_up)
+
+        matched_jobs = [
+            j for j in jobs
+            if (str(j.get("po_id")) == it.po_id or j.get("po_number") == it.po_number)
+            and (str(j.get("style_code", "")).strip().upper() == code_up)
+            and (not it.color or not j.get("color") or str(j.get("color")).lower() == str(it.color).lower())
+        ]
+
+        if style_doc:
+            costing = compute_style_costing_from_jobs(style_doc, matched_jobs, color=it.color)
+            bom_cost = float(costing.get("materials_cost", 0))
+            packing_cost = float(costing.get("packing_cost", 0) or style_doc.get("packing_cost", 0) or 0)
+            labor_cost = float(costing.get("labor_cost", 0))
+            labor_source = costing.get("labor_source", "estimated")
+            outside_cost = float(costing.get("outside_cost", 0))
+            outside_source = costing.get("outside_source", "estimated")
+            img_url = it.image_url or style_doc.get("image_thumbnail_url") or style_doc.get("image_url") or style_doc.get("image_display_url") or ""
+
+            # Fallback if style has no granular BOM/Labor yet but has transfer_price or base cost
+            if bom_cost == 0 and labor_cost == 0 and outside_cost == 0:
+                base_cost = float(style_doc.get("transfer_price") or style_doc.get("cost") or style_doc.get("total_cost") or 0)
+                if base_cost > 0:
+                    bom_cost = base_cost
+        else:
+            bom_cost = 0.0
+            packing_cost = 0.0
+            labor_cost = 0.0
+            labor_source = "estimated"
+            outside_cost = 0.0
+            outside_source = "estimated"
+            img_url = it.image_url or ""
+
+        if labor_source == "actual":
+            has_actual_labor = True
+        else:
+            has_estimated_labor = True
+
+        unit_cost = round(bom_cost + labor_cost + outside_cost + packing_cost, 2)
+        line_cost = round(unit_cost * qty, 2)
+        line_profit = round(rev - line_cost, 2)
+        line_profit_pct = round((line_profit / rev * 100), 1) if rev > 0 else 0.0
+
+        tot_bom += round(bom_cost * qty, 2)
+        tot_labor += round(labor_cost * qty, 2)
+        tot_packing += round(packing_cost * qty, 2)
+        tot_outside += round(outside_cost * qty, 2)
+
+        lines_out.append({
+            "po_id": it.po_id,
+            "po_number": it.po_number,
+            "client_name": it.client_name,
+            "style_code": it.style_code,
+            "description": it.description,
+            "color": it.color,
+            "size": it.size,
+            "quantity": qty,
+            "unit_price": u_price,
+            "revenue": rev,
+            "image_url": img_url,
+            "bom_cost": bom_cost,
+            "labor_cost": labor_cost,
+            "labor_source": labor_source,
+            "is_labor_estimated": labor_source == "estimated",
+            "packing_cost": packing_cost,
+            "outside_cost": outside_cost,
+            "unit_cost": unit_cost,
+            "total_cost": line_cost,
+            "profit": line_profit,
+            "profit_pct": line_profit_pct,
+        })
+
+    tot_production_budget = round(tot_bom + tot_labor + tot_packing + tot_outside, 2)
+    tot_profit = round(tot_revenue - tot_production_budget, 2)
+    tot_profit_pct = round((tot_profit / tot_revenue * 100), 1) if tot_revenue > 0 else 0.0
+
+    return {
+        "total_quantity": tot_qty,
+        "total_revenue": round(tot_revenue, 2),
+        "total_bom_cost": round(tot_bom, 2),
+        "total_labor_cost": round(tot_labor, 2),
+        "total_packing_cost": round(tot_packing, 2),
+        "total_outside_cost": round(tot_outside, 2),
+        "total_cost": tot_production_budget,
+        "total_production_budget": tot_production_budget,
+        "total_profit": tot_profit,
+        "profit_pct": tot_profit_pct,
+        "is_labor_estimated": has_estimated_labor or not has_actual_labor,
+        "is_fully_allocated": has_actual_labor and not has_estimated_labor,
+        "line_items": lines_out,
+        "count": len(lines_out),
+    }
+
+
+@pos_router.post("/pos/multi-budget/align")
+async def align_multi_po_budget(payload: MultiBudgetAlignPayload, request: Request):
+    """
+    Save an official aligned production budget snapshot for selected POs & styles.
+    """
+    u = await _get_user(request)
+    require_roles("admin", "manager", "production")(u)
+    db = get_db()
+
+    calc_res = await calculate_multi_po_budget(
+        MultiBudgetCalcPayload(items=payload.items, po_ids=payload.po_ids),
+        request
+    )
+
+    doc = {
+        "po_ids": payload.po_ids,
+        "notes": payload.notes or "Aligned from PO Planning Stage",
+        "aligned_by": u.get("email", "system"),
+        "aligned_at": now_iso(),
+        "summary": {
+            "total_quantity": calc_res["total_quantity"],
+            "total_revenue": calc_res["total_revenue"],
+            "total_bom_cost": calc_res["total_bom_cost"],
+            "total_labor_cost": calc_res["total_labor_cost"],
+            "total_packing_cost": calc_res["total_packing_cost"],
+            "total_outside_cost": calc_res["total_outside_cost"],
+            "total_production_budget": calc_res["total_production_budget"],
+            "total_profit": calc_res["total_profit"],
+            "profit_pct": calc_res["profit_pct"],
+        },
+        "selected_styles_count": len(calc_res["line_items"]),
+        "line_items": calc_res["line_items"],
+    }
+
+    res = await db.production_budget_alignments.insert_one(doc)
+    doc["id"] = str(res.inserted_id)
+    doc.pop("_id", None)
+    return doc
+

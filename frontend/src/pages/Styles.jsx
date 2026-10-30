@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { http, inr, num, API, formatApiError } from "../lib/api";
 import { broadcastSync, useCrossTabSync } from "../lib/sync";
+import { downloadCatalogueXlsx } from "../lib/exportUtils";
 import {
 
   PageHeader,
@@ -39,6 +40,9 @@ import {
   Copy,
   Check,
   FileSpreadsheet,
+  Square,
+  CheckSquare,
+  Eye,
   Loader2,
   ExternalLink,
 } from "lucide-react";
@@ -160,6 +164,40 @@ export default function Styles() {
   const [simPairs, setSimPairs] = useState(100);
   const [showAllBomLinesForColor, setShowAllBomLinesForColor] = useState(false);
   const [extraOverrideSections, setExtraOverrideSections] = useState([]);
+  // Selection state for Master Catalogue Download (with pictures)
+  const [selectedStyleCodes, setSelectedStyleCodes] = useState([]);
+  const [catalogueViewOpen, setCatalogueViewOpen] = useState(false);
+  const [downloadingCatalogue, setDownloadingCatalogue] = useState(false);
+
+  const toggleStyleSelect = (code) => {
+    setSelectedStyleCodes((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
+    );
+  };
+
+  const selectAllStyles = () => {
+    setSelectedStyleCodes(styles.map((s) => s.code));
+  };
+
+  const clearStyleSelection = () => {
+    setSelectedStyleCodes([]);
+  };
+
+  const handleDownloadCatalogue = async (styleCodesToDownload = null) => {
+    const codes = styleCodesToDownload || (selectedStyleCodes.length > 0 ? selectedStyleCodes : undefined);
+    setDownloadingCatalogue(true);
+    try {
+      await downloadCatalogueXlsx({
+        style_codes: codes,
+        brand: "ZECODE",
+      });
+    } catch (err) {
+      console.error("Failed to download catalogue:", err);
+    } finally {
+      setDownloadingCatalogue(false);
+    }
+  };
+
   // Catalogue export modal state (Phase F)
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPlatform, setExportPlatform] = useState("myntra");
@@ -1299,6 +1337,33 @@ export default function Styles() {
               <Upload className="w-4 h-4 sm:mr-1 inline" />
               <span className="hidden sm:inline">Bulk Upload</span>
             </BtnSecondary>
+            <button
+              type="button"
+              onClick={() => handleDownloadCatalogue()}
+              disabled={downloadingCatalogue}
+              className="px-3 sm:px-4 py-2 border-2 border-emerald-600 bg-emerald-50 hover:bg-emerald-600 hover:text-white text-emerald-800 transition-all text-xs font-bold uppercase tracking-wider rounded shadow-sm inline-flex items-center gap-1.5"
+              title="Download Master Footwear Catalogue (.xlsx) with embedded pictures"
+              data-testid="catalogue-download-btn"
+            >
+              {downloadingCatalogue ? (
+                <Loader2 className="w-4 h-4 animate-spin text-emerald-600" />
+              ) : (
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              )}
+              <span>
+                Catalogue Download {selectedStyleCodes.length > 0 ? `(${selectedStyleCodes.length})` : "(All)"}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setCatalogueViewOpen(true)}
+              className="px-3 py-2 border-2 border-slate-300 hover:border-slate-800 bg-white text-slate-700 text-xs font-bold uppercase tracking-wider rounded shadow-sm inline-flex items-center gap-1.5"
+              title="Open Product Catalogue Specification View"
+              data-testid="catalogue-view-btn"
+            >
+              <Eye className="w-4 h-4 text-slate-600" />
+              <span className="hidden sm:inline">Catalogue View</span>
+            </button>
             <BtnPrimary
               onClick={startNew}
               data-testid="add-style-btn"
@@ -1334,6 +1399,59 @@ export default function Styles() {
           </div>
         </div>
 
+        {/* Master Catalogue Selection & Action Bar */}
+        <div className="bg-gradient-to-r from-amber-50/80 via-slate-50 to-emerald-50/60 border border-slate-200 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-xs" data-testid="catalogue-selection-bar">
+          <div className="flex items-center gap-2 flex-wrap">
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="font-semibold text-slate-800">
+              Catalogue Selection: <b className="text-[#C27842]">{selectedStyleCodes.length}</b> / {styles.length} styles selected
+            </span>
+            {selectedStyleCodes.length > 0 ? (
+              <span className="text-[11px] text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-full border border-emerald-300 font-bold">
+                Ready for Catalogue Download with Pictures
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-500 italic">
+                (Pick styles using the checkboxes below to download a custom catalogue, or click Download to get all styles)
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={selectAllStyles}
+              className="text-xs font-bold text-[#C27842] hover:underline"
+              data-testid="select-all-styles-btn"
+            >
+              Select All ({styles.length})
+            </button>
+            <span className="text-slate-300">|</span>
+            <button
+              type="button"
+              onClick={clearStyleSelection}
+              disabled={selectedStyleCodes.length === 0}
+              className="text-xs font-semibold text-slate-500 hover:text-slate-800 disabled:opacity-40"
+              data-testid="clear-style-selection-btn"
+            >
+              Clear Selection
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownloadCatalogue()}
+              disabled={downloadingCatalogue}
+              className="ml-2 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold uppercase tracking-wider inline-flex items-center gap-1.5 shadow-sm transition-colors"
+              data-testid="catalogue-download-bar-btn"
+            >
+              {downloadingCatalogue ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+              )}
+              <span>Download Catalogue (.xlsx)</span>
+            </button>
+          </div>
+        </div>
+
         {styles.length === 0 ? (
           <Card className="p-12 text-center text-slate-400">
             No styles defined yet. Create your first style to build a BOM and
@@ -1344,12 +1462,38 @@ export default function Styles() {
             className="grid md:grid-cols-2 xl:grid-cols-3 gap-4"
             data-testid="styles-grid"
           >
-            {styles.map((s) => (
+            {styles.map((s) => {
+              const isSelected = selectedStyleCodes.includes(s.code);
+              return (
               <Card
                 key={s.id}
-                className="overflow-hidden hover:border-[#C27842] transition-colors"
+                className={`relative overflow-hidden transition-all ${
+                  isSelected ? "border-2 border-emerald-500 shadow-md bg-emerald-50/10" : "hover:border-[#C27842]"
+                }`}
                 data-testid={`style-card-${s.code}`}
               >
+                {/* Floating Catalogue Select Checkbox */}
+                <div
+                  className={`absolute top-2.5 left-2.5 z-20 px-2 py-1 rounded-md shadow-md border flex items-center gap-1.5 cursor-pointer transition-all ${
+                    isSelected ? "bg-emerald-600 text-white border-emerald-700 font-bold" : "bg-white/95 text-slate-700 border-slate-300 hover:bg-amber-50"
+                  }`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleStyleSelect(s.code);
+                  }}
+                  title={isSelected ? "Deselect this style from catalogue export" : "Select this style for catalogue export"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleStyleSelect(s.code)}
+                    className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                    data-testid={`style-select-${s.code}`}
+                  />
+                  <span className="text-[10px] uppercase font-bold tracking-wider select-none">
+                    {isSelected ? "Selected" : "Select"}
+                  </span>
+                </div>
                 <SafeImage
                   image={{
                     url: s.image_url,
@@ -1548,7 +1692,8 @@ export default function Styles() {
                   </div>
                 </div>
               </Card>
-            ))}
+            );
+          })}
           </div>
         )}
       </div>
@@ -4215,6 +4360,160 @@ export default function Styles() {
           </div>
         </div>
       )}
+
+      {catalogueViewOpen && (
+        <Drawer
+          onClose={() => setCatalogueViewOpen(false)}
+          title="Master Product Specification & Costing Sheet (Catalogue)"
+          width="w-full max-w-[96vw] xl:max-w-7xl 2xl:max-w-[1600px]"
+        >
+          <div className="p-4 sm:p-6 space-y-4 text-xs">
+            {/* Header Banner */}
+            <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 text-white p-4 rounded-xl shadow-md flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-amber-400 font-bold">
+                  SSK FOOTCARE - MASTER PRODUCT SPECIFICATION &amp; COSTING SHEET
+                </div>
+                <div className="text-base font-bold text-white mt-0.5">
+                  Brand / Client: ZECODE | Category: Women&apos;s Footwear | {styles.length} Total Master Styles
+                </div>
+                <div className="text-[11px] text-slate-300 mt-1">
+                  Format mirrors master catalogue (Row heights, fonts, embedded photos, specifications &amp; transfer prices).
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadCatalogue()}
+                  disabled={downloadingCatalogue}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs uppercase tracking-wider inline-flex items-center gap-2 shadow-lg transition-all"
+                  data-testid="drawer-download-catalogue-btn"
+                >
+                  {downloadingCatalogue ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <FileSpreadsheet className="w-4 h-4" />
+                  )}
+                  <span>
+                    Download .xlsx ({selectedStyleCodes.length > 0 ? `${selectedStyleCodes.length} Selected` : "All 28 Styles"})
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Filter & Selection controls */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-200 p-3 rounded-lg">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-slate-700">
+                  Selected for Export: <b className="text-emerald-700">{selectedStyleCodes.length}</b> of {styles.length} styles
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectAllStyles}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 rounded font-bold text-xs"
+                >
+                  Select All
+                </button>
+                <button
+                  type="button"
+                  onClick={clearStyleSelection}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 rounded font-semibold text-xs"
+                >
+                  Clear Selection
+                </button>
+              </div>
+            </div>
+
+            {/* Specification Table */}
+            <div className="border border-slate-200 rounded-lg overflow-x-auto bg-white shadow-xs">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-[#2F5597] text-white">
+                  <tr>
+                    <th className="px-2.5 py-2.5 font-bold w-10 text-center">Select</th>
+                    <th className="px-2 py-2.5 font-bold w-12 text-center">Sr.</th>
+                    <th className="px-2 py-2.5 font-bold w-16 text-center">Photo</th>
+                    <th className="px-3 py-2.5 font-bold w-28 text-center">Vendor SKU</th>
+                    <th className="px-3 py-2.5 font-bold min-w-[200px]">Product Description</th>
+                    <th className="px-3 py-2.5 font-bold w-36">Colors</th>
+                    <th className="px-3 py-2.5 font-bold w-40">Upper Material</th>
+                    <th className="px-3 py-2.5 font-bold w-36">Insole / Lining</th>
+                    <th className="px-3 py-2.5 font-bold w-32">Outsole</th>
+                    <th className="px-3 py-2.5 font-bold w-28">Heel Type</th>
+                    <th className="px-3 py-2.5 font-bold w-24 text-right">TP (₹)</th>
+                    <th className="px-3 py-2.5 font-bold w-24 text-right">Target MRP</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {styles.map((s, idx) => {
+                    const isSelected = selectedStyleCodes.includes(s.code);
+                    const tp = s.transfer_price || s.cost_per_pair || 550;
+                    const mrp = s.target_mrp || s.mrp || 1299;
+                    return (
+                      <tr
+                        key={s.id || idx}
+                        className={`hover:bg-amber-50/50 transition-colors ${
+                          isSelected ? "bg-emerald-50/30" : ""
+                        }`}
+                      >
+                        <td className="px-2.5 py-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleStyleSelect(s.code)}
+                            className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                          />
+                        </td>
+                        <td className="px-2 py-2 text-center font-bold text-slate-500">
+                          {idx + 1}
+                        </td>
+                        <td className="px-2 py-2 text-center">
+                          <ImageThumb
+                            image={s.image_thumbnail_url || s.image_url}
+                            size={44}
+                            alt={s.code}
+                            clickable
+                            className="rounded border shadow-xs inline-block"
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-center font-mono font-bold text-slate-800">
+                          {s.code}
+                        </td>
+                        <td className="px-3 py-2 text-slate-800 font-medium leading-relaxed">
+                          {s.name || s.description}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {(s.colors || []).join(", ") || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {s.upper_material || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {s.insole_lining || s.insole_mould_name || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {s.outsole || s.sole_mould_name || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {s.heel_type_height || s.footwear_type || "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
+                          {inr(tp)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-slate-700">
+                          {inr(mrp)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Drawer>
+      )}
+
     </div>
   );
 }

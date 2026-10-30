@@ -96,3 +96,61 @@ export async function triggerApiExport(endpoint, params = {}, defaultFilename = 
     throw err;
   }
 }
+
+/**
+ * Downloads Master Footwear Product Specification & Costing Sheet (.xlsx) with embedded style pictures.
+ * Matches C:\Users\Dell\Downloads\catalogue.xlsx formatting and columns.
+ */
+export async function downloadCatalogueXlsx({
+  style_ids,
+  style_codes,
+  brand = "ZECODE",
+  category = "Women's Footwear (Flats, Wedges, Platform Slides & Kitten Heels)",
+  defaultFilename = "SSK_Footwear_Catalogue.xlsx",
+} = {}) {
+  const toastId = toast?.loading
+    ? toast.loading("Generating Excel catalogue with style pictures...")
+    : null;
+
+  try {
+    const res = await http.post(
+      "/styles/catalogue/download",
+      {
+        style_ids: style_ids && style_ids.length ? style_ids : undefined,
+        style_codes: style_codes && style_codes.length ? style_codes : undefined,
+        brand,
+        category,
+        include_images: true,
+      },
+      { responseType: "blob" }
+    );
+
+    let filename = defaultFilename;
+    const disposition = res.headers?.["content-disposition"] || res.headers?.["Content-Disposition"];
+    if (disposition && disposition.includes("filename=")) {
+      const match = disposition.match(/filename=["']?([^"';]+)["']?/i);
+      if (match && match[1]) {
+        filename = match[1].trim();
+      }
+    }
+
+    const blob = new Blob([res.data], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    downloadBlob(blob, filename);
+
+    if (toastId && toast?.dismiss) {
+      toast.dismiss(toastId);
+    }
+    toast?.success?.(`Downloaded ${filename} with style pictures!`);
+    return true;
+  } catch (err) {
+    if (toastId && toast?.dismiss) {
+      toast.dismiss(toastId);
+    }
+    const msg = err?.response?.data?.detail || err?.message || "Failed to download catalogue";
+    toast?.error?.(msg);
+    console.error("Catalogue download error:", err);
+    throw err;
+  }
+}

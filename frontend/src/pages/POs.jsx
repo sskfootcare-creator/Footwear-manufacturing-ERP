@@ -1,7 +1,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { http, inr } from "../lib/api";
-import { triggerApiExport } from "../lib/exportUtils";
+import { triggerApiExport, downloadCatalogueXlsx, downloadCsv } from "../lib/exportUtils";
+import { ImageThumb } from "../components/ImageUploader";
 import {
   PageHeader,
   Card,
@@ -39,6 +40,11 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
+  FileSpreadsheet,
+  CheckSquare,
+  Square,
+  Check,
+  X,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
 import PackingListPreviewModal from "../components/PackingListPreviewModal";
@@ -108,6 +114,254 @@ export default function POs() {
   const [showPlanningSection, setShowPlanningSection] = useState(true);
   const [assignModal, setAssignModal] = useState(null);
   const [allocatingKarigar, setAllocatingKarigar] = useState(false);
+
+  // Style photo & detail lookup map
+  const stylesMap = useMemo(() => {
+    const m = new Map();
+    styles.forEach((s) => {
+      if (s.code) m.set(s.code.trim().toUpperCase(), s);
+      if (s.id || s._id) m.set(String(s.id || s._id), s);
+    });
+    return m;
+  }, [styles]);
+
+  const getStyleImage = (styleCode, lineItem = null) => {
+    if (lineItem?.image_thumbnail_url) return lineItem.image_thumbnail_url;
+    if (lineItem?.image_url) return lineItem.image_url;
+    const s = stylesMap.get(String(styleCode || "").trim().toUpperCase());
+    return s?.image_thumbnail_url || s?.image_url || s?.image_display_url || "";
+  };
+
+  // Single PO View Drawer: Filter styles included in budget calculation
+  const [poViewSelectedLines, setPoViewSelectedLines] = useState([]);
+
+  // Multi-PO and Multi-Style Production Budget Calculator state
+  const [selectedPoIds, setSelectedPoIds] = useState([]);
+  const [multiBudgetOpen, setMultiBudgetOpen] = useState(false);
+  const [multiBudgetPoIds, setMultiBudgetPoIds] = useState([]);
+  const [selectedMultiStyleKeys, setSelectedMultiStyleKeys] = useState(new Set());
+  const [aligningBudget, setAligningBudget] = useState(false);
+  const [alignmentSuccess, setAlignmentSuccess] = useState(null);
+
+  const togglePoSelect = (poId) => {
+    setSelectedPoIds((prev) =>
+      prev.includes(poId) ? prev.filter((id) => id !== poId) : [...prev, poId]
+    );
+  };
+
+  const toggleSelectAllPos = () => {
+    if (selectedPoIds.length === displayedPos.length && displayedPos.length > 0) {
+      setSelectedPoIds([]);
+    } else {
+      setSelectedPoIds(displayedPos.map((p) => p.id));
+    }
+  };
+
+  const openMultiBudget = (initialPoIds = []) => {
+    let ids = initialPoIds.length > 0 ? initialPoIds : selectedPoIds;
+    if (ids.length === 0) {
+      ids = activePos.length > 0 ? activePos.slice(0, 5).map((p) => p.id) : pos.slice(0, 5).map((p) => p.id);
+    }
+    setMultiBudgetPoIds(ids);
+
+    const keys = new Set();
+    pos.filter((p) => ids.includes(p.id)).forEach((p) => {
+      (p.line_items || []).forEach((_, idx) => {
+        keys.add(`${p.id}_${idx}`);
+      });
+    });
+    setSelectedMultiStyleKeys(keys);
+    setAlignmentSuccess(null);
+    setMultiBudgetOpen(true);
+  };
+
+  const toggleMultiBudgetPo = (poId) => {
+    setMultiBudgetPoIds((prev) => {
+      const isIncluded = prev.includes(poId);
+      const next = isIncluded ? prev.filter((id) => id !== poId) : [...prev, poId];
+      // When adding, select all styles; when removing, remove style keys
+      const updatedKeys = new Set(selectedMultiStyleKeys);
+      const targetPo = pos.find((p) => p.id === poId);
+      if (targetPo && targetPo.line_items) {
+        targetPo.line_items.forEach((_, idx) => {
+          const k = `${poId}_${idx}`;
+          if (isIncluded) {
+            updatedKeys.delete(k);
+          } else {
+            updatedKeys.add(k);
+          }
+        });
+      }
+      setSelectedMultiStyleKeys(updatedKeys);
+      return next;
+    });
+  };
+
+  const toggleMultiBudgetStyleKey = (key) => {
+    setSelectedMultiStyleKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const selectAllStylesForPo = (poId) => {
+    const targetPo = pos.find((p) => p.id === poId);
+    if (!targetPo || !targetPo.line_items) return;
+    setSelectedMultiStyleKeys((prev) => {
+      const next = new Set(prev);
+      targetPo.line_items.forEach((_, idx) => next.add(`${poId}_${idx}`));
+      return next;
+    });
+  };
+
+  const deselectAllStylesForPo = (poId) => {
+    const targetPo = pos.find((p) => p.id === poId);
+    if (!targetPo || !targetPo.line_items) return;
+    setSelectedMultiStyleKeys((prev) => {
+      const next = new Set(prev);
+      targetPo.line_items.forEach((_, idx) => next.delete(`${poId}_${idx}`));
+      return next;
+    });
+  };
+
+  const multiBudgetSelectedPOs = useMemo(() => {
+    return pos.filter((p) => multiBudgetPoIds.includes(p.id));
+  }, [pos, multiBudgetPoIds]);
+
+  const multiBudgetCalculated = useMemo(() => {
+    let totalQty = 0;
+    let totalRevenue = 0;
+    let totalBom = 0;
+    let totalLabor = 0;
+    let totalPacking = 0;
+    let totalOutside = 0;
+    let hasEstimated = false;
+    let hasActual = false;
+    const selectedLineRows = [];
+
+    multiBudgetSelectedPOs.forEach((p) => {
+      (p.line_items || []).forEach((li, idx) => {
+        const key = `${p.id}_${idx}`;
+        if (selectedMultiStyleKeys.has(key)) {
+          const q = Number(li.quantity || 0);
+          const price = Number(li.unit_price || 0);
+          const rev = q * price;
+          const pr = li.profitability || {};
+          const bom = Number(pr.bom_cost || 0) * q;
+          const labor = Number(pr.labor_cost || 0) * q;
+          const packing = Number(pr.packing_cost || 0) * q;
+          const outside = Number(pr.outside_cost || 0) * q;
+          const lineCost = bom + labor + packing + outside;
+
+          if (pr.is_estimated) hasEstimated = true;
+          else if (Number(pr.labor_cost || 0) > 0) hasActual = true;
+
+          totalQty += q;
+          totalRevenue += rev;
+          totalBom += bom;
+          totalLabor += labor;
+          totalPacking += packing;
+          totalOutside += outside;
+
+          selectedLineRows.push({
+            po: p,
+            lineIndex: idx,
+            lineItem: li,
+            quantity: q,
+            unitPrice: price,
+            revenue: rev,
+            bomCost: bom,
+            laborCost: labor,
+            packingCost: packing,
+            outsideCost: outside,
+            totalCost: lineCost,
+            profit: rev - lineCost,
+            profitPct: rev > 0 ? (((rev - lineCost) / rev) * 100).toFixed(1) : "0.0",
+            isLaborEstimated: pr.is_estimated ?? true,
+          });
+        }
+      });
+    });
+
+    const totalCost = totalBom + totalLabor + totalPacking + totalOutside;
+    const profit = totalRevenue - totalCost;
+    const profitPct = totalRevenue > 0 ? ((profit / totalRevenue) * 100).toFixed(1) : "0.0";
+
+    return {
+      totalQty,
+      totalRevenue,
+      totalBom,
+      totalLabor,
+      totalPacking,
+      totalOutside,
+      totalCost,
+      profit,
+      profitPct,
+      isLaborEstimated: hasEstimated || !hasActual,
+      isActual,
+      selectedLineRows,
+      selectedCount: selectedLineRows.length,
+    };
+  }, [multiBudgetSelectedPOs, selectedMultiStyleKeys]);
+
+  const handleAlignMultiBudget = async () => {
+    setAligningBudget(true);
+    try {
+      const itemsPayload = multiBudgetCalculated.selectedLineRows.map((r) => ({
+        po_id: r.po.id,
+        po_number: r.po.po_number,
+        client_name: r.po.client_name,
+        style_code: r.lineItem.style_code,
+        description: r.lineItem.description,
+        color: r.lineItem.color,
+        size: String(r.lineItem.size || ""),
+        quantity: r.quantity,
+        unit_price: r.unitPrice,
+        line_index: r.lineIndex,
+      }));
+
+      const { data } = await http.post("/pos/multi-budget/align", {
+        items: itemsPayload,
+        po_ids: multiBudgetPoIds,
+        notes: `Production Budget Aligned across ${multiBudgetPoIds.length} POs (${multiBudgetCalculated.selectedCount} styles, ${multiBudgetCalculated.totalQty} pairs)`,
+      });
+
+      setAlignmentSuccess({
+        id: data.id,
+        timestamp: new Date().toLocaleTimeString(),
+        totalBudget: multiBudgetCalculated.totalCost,
+        totalQty: multiBudgetCalculated.totalQty,
+      });
+    } catch (err) {
+      console.error("Failed to align budget:", err);
+      alert("Failed to align production budget: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setAligningBudget(false);
+    }
+  };
+
+  const handleDownloadPoCatalogue = async () => {
+    let codes = [];
+    if (selectedPoIds.length > 0) {
+      pos.filter((p) => selectedPoIds.includes(p.id)).forEach((p) => {
+        (p.line_items || []).forEach((li) => {
+          if (li.style_code) codes.push(li.style_code);
+        });
+      });
+    }
+    codes = Array.from(new Set(codes));
+    await downloadCatalogueXlsx({
+      style_codes: codes.length > 0 ? codes : undefined,
+      brand: "ZECODE",
+      defaultFilename: codes.length > 0 ? `Catalogue_Selected_POs.xlsx` : "SSK_Footwear_Catalogue.xlsx",
+    });
+  };
+
 
   const openPoDocuments = async (po, defaultTab = "all") => {
     setSelectedPoForInvoices(po);
@@ -233,38 +487,35 @@ export default function POs() {
 
   const poBudget = useMemo(() => {
     if (!view || !view.line_items) return null;
-    const pb = view.production_budget || view.profitability || {};
-    let totalBom = pb.total_bom_cost != null ? pb.total_bom_cost : 0;
-    let totalLabor = pb.total_labor_cost != null ? pb.total_labor_cost : 0;
-    let totalPacking = pb.total_packing_cost != null ? pb.total_packing_cost : 0;
-    let totalOutside = pb.total_outside_cost != null ? pb.total_outside_cost : 0;
+    const selectedLines = view.line_items.filter((_, idx) =>
+      poViewSelectedLines.length === 0 || poViewSelectedLines.includes(idx)
+    );
+    let totalBom = 0;
+    let totalLabor = 0;
+    let totalPacking = 0;
+    let totalOutside = 0;
+    let totalSubtotal = 0;
+    let totalQty = 0;
     let hasActual = false;
     let hasEstimated = false;
 
-    if (pb.total_bom_cost == null) {
-      totalBom = 0;
-      totalLabor = 0;
-      totalPacking = 0;
-      totalOutside = 0;
-      view.line_items.forEach((li) => {
-        const q = Number(li.quantity || 0);
-        const pr = li.profitability || {};
-        totalBom += Number(pr.bom_cost || 0) * q;
-        totalLabor += Number(pr.labor_cost || 0) * q;
-        totalPacking += Number(pr.packing_cost || 0) * q;
-        totalOutside += Number(pr.outside_cost || 0) * q;
-        if (pr.is_estimated) hasEstimated = true;
-        else if (Number(pr.labor_cost || 0) > 0) hasActual = true;
-      });
-    } else {
-      hasEstimated = pb.is_estimated ?? false;
-      hasActual = pb.labor_source === "actual";
-    }
+    selectedLines.forEach((li) => {
+      const q = Number(li.quantity || 0);
+      const pr = li.profitability || {};
+      const rate = Number(li.unit_price || 0);
+      totalQty += q;
+      totalSubtotal += rate * q;
+      totalBom += Number(pr.bom_cost || 0) * q;
+      totalLabor += Number(pr.labor_cost || 0) * q;
+      totalPacking += Number(pr.packing_cost || 0) * q;
+      totalOutside += Number(pr.outside_cost || 0) * q;
+      if (pr.is_estimated) hasEstimated = true;
+      else if (Number(pr.labor_cost || 0) > 0) hasActual = true;
+    });
 
-    const totalCost = Number(pb.total_cost || pb.total_budget || (totalBom + totalLabor + totalPacking + totalOutside));
-    const subtotal = Number(view.subtotal || pb.total_revenue || 0);
-    const profit = pb.total_profit != null ? pb.total_profit : (subtotal - totalCost);
-    const profitPct = pb.profit_pct != null ? pb.profit_pct : (subtotal > 0 ? ((profit / subtotal) * 100).toFixed(1) : "0.0");
+    const totalCost = Number(totalBom + totalLabor + totalPacking + totalOutside);
+    const profit = totalSubtotal - totalCost;
+    const profitPct = totalSubtotal > 0 ? ((profit / totalSubtotal) * 100).toFixed(1) : "0.0";
 
     return {
       totalBom,
@@ -272,14 +523,17 @@ export default function POs() {
       totalPacking,
       totalOutside,
       totalCost,
-      subtotal,
+      subtotal: totalSubtotal,
       profit,
       profitPct,
-      isLaborEstimated: hasEstimated || (pb.is_estimated ?? false),
-      isActual: hasActual || pb.labor_source === "actual",
-      isFullyAllocated: pb.is_fully_allocated ?? (!hasEstimated && hasActual),
+      totalQuantity: totalQty,
+      selectedCount: selectedLines.length,
+      totalLines: view.line_items.length,
+      isLaborEstimated: hasEstimated || !hasActual,
+      isActual,
+      isFullyAllocated: !hasEstimated && hasActual,
     };
-  }, [view]);
+  }, [view, poViewSelectedLines]);
 
   const startNew = () => {
     setEditId(null);
@@ -491,6 +745,28 @@ export default function POs() {
           <div className="flex gap-2 items-center flex-wrap">
             <div className="flex items-center gap-1">
               <button
+                type="button"
+                onClick={() => openMultiBudget(selectedPoIds)}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white rounded shadow-sm transition-all"
+                data-testid="header-multi-po-budget-btn"
+                title="Calculate production budget from planning stage across multiple POs & styles"
+              >
+                <Calculator className="w-4 h-4 text-white" />
+                <span>
+                  Budget Calculator {selectedPoIds.length ? `(${selectedPoIds.length} POs)` : "(Multi-PO)"}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadPoCatalogue}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider bg-emerald-50 hover:bg-emerald-600 hover:text-white text-emerald-800 border-2 border-emerald-600 rounded shadow-sm transition-all"
+                data-testid="header-po-catalogue-download-btn"
+                title="Download Excel catalogue with photos for PO styles (matching catalogue.xlsx)"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                <span>Catalogue Download</span>
+              </button>
+              <button
                 data-testid="pos-export-btn"
                 onClick={() =>
                   triggerApiExport(
@@ -618,12 +894,68 @@ export default function POs() {
           </div>
         </div>
 
+        {/* Multi-PO Selection & Batch Production Planning Banner */}
+        {selectedPoIds.length > 0 && (
+          <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-slate-50 border-2 border-amber-500/30 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs" data-testid="multi-po-selection-banner">
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 rounded-lg bg-amber-600 text-white font-bold">
+                <Calculator className="w-4 h-4" />
+              </span>
+              <div>
+                <span className="font-bold text-slate-900">
+                  {selectedPoIds.length} Purchase Order(s) Selected
+                </span>
+                <span className="text-slate-500 text-[11px] block sm:inline sm:ml-2">
+                  Total {pos.filter(p => selectedPoIds.includes(p.id)).reduce((acc, p) => acc + (p.total_quantity || 0), 0)} pairs across selected POs
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => openMultiBudget(selectedPoIds)}
+                className="px-3.5 py-1.5 bg-[#C27842] hover:bg-[#A65D24] text-white rounded font-bold text-xs uppercase tracking-wider inline-flex items-center gap-1.5 shadow-sm transition-colors"
+                data-testid="calculate-selected-pos-budget-btn"
+              >
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Calculate Production Budget</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadPoCatalogue}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-xs inline-flex items-center gap-1 shadow-sm transition-colors"
+                data-testid="download-selected-pos-catalogue-btn"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Download Catalogue (.xlsx)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedPoIds([])}
+                className="px-2.5 py-1.5 bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 rounded font-semibold text-xs"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+
         <Card className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm" data-testid="pos-table">
               <thead className="bg-slate-50 border-b-2 border-slate-200">
                 <tr className="text-left text-[10px] uppercase tracking-wider text-slate-600">
-                  <th className="px-4 py-3 font-bold sticky left-0 z-10 bg-slate-50">PO #</th>
+                  <th className="px-3 py-3 font-bold w-10 text-center bg-slate-50">
+                    <input
+                      type="checkbox"
+                      checked={selectedPoIds.length === displayedPos.length && displayedPos.length > 0}
+                      onChange={toggleSelectAllPos}
+                      title="Select all POs for batch budget planning"
+                      className="w-4 h-4 text-[#C27842] rounded border-slate-300"
+                      data-testid="select-all-pos-checkbox"
+                    />
+                  </th>
+                  <th className="px-4 py-3 font-bold sticky left-0 z-10 bg-slate-50">PO # &amp; Styles</th>
                   <th className="px-4 py-3 font-bold">Status</th>
                   <th className="px-4 py-3 font-bold">Date</th>
                   <th className="px-4 py-3 font-bold">Client</th>
@@ -652,10 +984,42 @@ export default function POs() {
                   paginatedPos.map((p) => (
                     <tr
                       key={p.id}
-                      className="border-b border-slate-100 hover:bg-slate-50"
+                      className={`border-b border-slate-100 hover:bg-slate-50 transition-colors ${
+                        selectedPoIds.includes(p.id) ? "bg-amber-50/40" : ""
+                      }`}
                     >
+                      <td className="px-3 py-3 text-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedPoIds.includes(p.id)}
+                          onChange={() => togglePoSelect(p.id)}
+                          title="Select this PO for budget calculation"
+                          className="w-4 h-4 text-[#C27842] rounded border-slate-300"
+                          data-testid={`select-po-${p.po_number}`}
+                        />
+                      </td>
                       <td className="px-4 py-3 font-mono font-bold sticky left-0 z-10 bg-white">
-                        {p.po_number}
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-900">{p.po_number}</span>
+                        </div>
+                        {/* Style preview photos for this PO */}
+                        <div className="flex items-center -space-x-1.5 mt-1" title="Styles in this PO">
+                          {(p.line_items || []).slice(0, 3).map((li, i) => (
+                            <ImageThumb
+                              key={i}
+                              image={getStyleImage(li.style_code, li)}
+                              size={22}
+                              className="rounded-full border-2 border-white shadow-xs inline-block"
+                              alt={li.style_code}
+                              title={`${li.style_code} (${li.quantity} prs)`}
+                            />
+                          ))}
+                          {(p.line_items || []).length > 3 && (
+                            <span className="text-[9px] font-bold text-slate-500 bg-slate-100 rounded-full px-1 border border-slate-300">
+                              +{p.line_items.length - 3}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         {p.is_completed || p.status === "completed" ? (
@@ -706,6 +1070,14 @@ export default function POs() {
                           data-testid={`ean-${p.po_number}`}
                         >
                           <Barcode className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => openMultiBudget([p.id])}
+                          className="text-slate-600 hover:text-amber-600 p-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center touch-manipulation ml-1"
+                          title="Calculate Production Budget for this PO"
+                          data-testid={`calc-budget-${p.po_number}`}
+                        >
+                          <Calculator className="w-4 h-4 text-amber-600" />
                         </button>
                         <button
                           onClick={() => openView(p)}
@@ -867,6 +1239,7 @@ export default function POs() {
                 <thead className="bg-slate-50">
                   <tr className="text-left">
                     <th className="px-2 py-2 font-bold sticky left-0 z-10 bg-slate-50">External SKU</th>
+                    <th className="px-2 py-2 font-bold text-center w-12">Photo</th>
                     <th className="px-2 py-2 font-bold">SSK Style *</th>
                     <th className="px-2 py-2 font-bold">Description</th>
                     <th className="px-2 py-2 font-bold">Color</th>
@@ -1307,12 +1680,40 @@ export default function POs() {
                   <tbody className="divide-y divide-slate-200">
                     {view.line_items.map((li, i) => {
                       const prof = li.profitability;
+                      const isIncluded = poViewSelectedLines.includes(i);
                       const lineProfit =
                         prof && prof.profit != null
                           ? prof.profit * Number(li.quantity || 0)
                           : null;
                       return (
-                        <tr key={i} className="hover:bg-slate-50/80 transition-colors">
+                        <tr
+                          key={i}
+                          className={`hover:bg-slate-50/80 transition-colors ${
+                            !isIncluded ? "opacity-40 bg-slate-100/50" : ""
+                          }`}
+                        >
+                          <td className="px-2 py-2 text-center">
+                            <input
+                              type="checkbox"
+                              checked={isIncluded}
+                              onChange={() => {
+                                setPoViewSelectedLines((prev) =>
+                                  prev.includes(i) ? prev.filter((idx) => idx !== i) : [...prev, i]
+                                );
+                              }}
+                              className="w-3.5 h-3.5 text-[#C27842] rounded border-slate-300 cursor-pointer"
+                              title="Include / exclude this style from production budget"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <ImageThumb
+                              image={getStyleImage(li.style_code, li)}
+                              size={40}
+                              alt={li.style_code}
+                              clickable
+                              className="rounded border shadow-xs inline-block"
+                            />
+                          </td>
                           <td className="px-2.5 py-2">
                             <div className="font-mono font-bold text-slate-900">
                               {li.style_code}
@@ -2112,6 +2513,447 @@ export default function POs() {
         onClose={() => setPoEanModalOpen(false)}
         onUpdated={load}
       />
+
+      {/* ── MULTI-PO & MULTI-STYLE PRODUCTION BUDGET PLANNING DRAWER ── */}
+      {multiBudgetOpen && (
+        <Drawer
+          onClose={() => setMultiBudgetOpen(false)}
+          title="Multi-PO Production Budget & Planning Alignment"
+          width="w-full max-w-[96vw] xl:max-w-7xl 2xl:max-w-[1600px]"
+        >
+          <div className="p-4 sm:p-6 space-y-5 text-xs">
+            {/* Header Banner */}
+            <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-4 sm:p-5 rounded-xl border border-indigo-900/50 shadow-lg flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-400 shrink-0">
+                  <Calculator className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-amber-400">
+                    Planning Stage · Multi-PO Manufacturing Budget
+                  </div>
+                  <h2 className="text-base font-bold text-white mt-0.5">
+                    Production Budget Alignment ({multiBudgetSelectedPOs.length} POs Selected)
+                  </h2>
+                  <p className="text-slate-300 text-xs mt-1 max-w-2xl leading-relaxed">
+                    Select multiple POs and pick any combination of styles to align manufacturing funds, evaluate BOM &amp; Karigar labor piece wages, and verify production budgets before scheduling batches.
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const distinctCodes = Array.from(new Set(multiBudgetCalculated.selectedLineRows.map(r => r.lineItem.style_code).filter(Boolean)));
+                    await downloadCatalogueXlsx({
+                      style_codes: distinctCodes,
+                      brand: "ZECODE",
+                      defaultFilename: `Aligned_Budget_Catalogue_${new Date().toISOString().slice(0, 10)}.xlsx`,
+                    });
+                  }}
+                  disabled={multiBudgetCalculated.selectedCount === 0}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-lg font-bold text-xs uppercase tracking-wider inline-flex items-center gap-1.5 shadow-md transition-colors"
+                  title="Download catalogue file with pictures for selected styles across POs"
+                  data-testid="multi-budget-catalogue-download-btn"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Download Catalogue (.xlsx)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const headers = ["PO #", "Client", "Style Code", "Description", "Color", "Size", "Qty", "Rate", "Revenue", "BOM Cost", "Labor Cost", "Packing Cost", "Total Cost", "Profit"];
+                    const rows = multiBudgetCalculated.selectedLineRows.map(r => [
+                      r.po.po_number,
+                      r.po.client_name,
+                      r.lineItem.style_code,
+                      r.lineItem.description,
+                      r.lineItem.color,
+                      r.lineItem.size,
+                      r.quantity,
+                      r.unitPrice,
+                      r.revenue,
+                      r.bomCost,
+                      r.laborCost,
+                      r.packingCost,
+                      r.totalCost,
+                      r.profit,
+                    ]);
+                    downloadCsv(`Production_Budget_Breakdown_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
+                  }}
+                  disabled={multiBudgetCalculated.selectedCount === 0}
+                  className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white border border-white/20 rounded-lg font-bold text-xs uppercase tracking-wider inline-flex items-center gap-1.5 transition-colors"
+                  title="Export itemized budget spreadsheet"
+                >
+                  <FileDown className="w-4 h-4" />
+                  <span>CSV Breakdown</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAlignMultiBudget}
+                  disabled={aligningBudget || multiBudgetCalculated.selectedCount === 0}
+                  className="px-4 py-2 bg-[#C27842] hover:bg-[#A65D24] disabled:opacity-40 text-white rounded-lg font-bold text-xs uppercase tracking-wider inline-flex items-center gap-2 shadow-lg transition-colors"
+                  data-testid="confirm-align-budget-btn"
+                >
+                  {aligningBudget ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  <span>{aligningBudget ? "Aligning..." : "Align Budget Snapshot"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Alignment Success Alert */}
+            {alignmentSuccess && (
+              <div className="p-3.5 bg-emerald-50 border-2 border-emerald-300 rounded-xl flex items-center justify-between gap-3 text-emerald-900 shadow-xs" data-testid="budget-alignment-success-alert">
+                <div className="flex items-center gap-2.5">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <div>
+                    <div className="font-bold text-xs">Production Budget Successfully Aligned &amp; Recorded!</div>
+                    <div className="text-[11px] text-emerald-700 mt-0.5">
+                      Snapshot ID: <code className="font-mono font-bold">{alignmentSuccess.id}</code> · Recorded at {alignmentSuccess.timestamp} for {alignmentSuccess.totalQty} pairs ({inr(alignmentSuccess.totalBudget)} budget).
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAlignmentSuccess(null)}
+                  className="p-1 rounded text-emerald-700 hover:bg-emerald-100"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {/* Step 1: PO Multi-Select Chips Bar */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="font-bold uppercase tracking-wider text-slate-700 text-[11px] flex items-center gap-1.5">
+                  <Layers className="w-4 h-4 text-[#C27842]" />
+                  <span>Step 1: Choose Purchase Orders to Combine ({multiBudgetSelectedPOs.length} of {pos.length} selected)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allIds = pos.map(p => p.id);
+                      setMultiBudgetPoIds(allIds);
+                      const k = new Set();
+                      pos.forEach(p => (p.line_items || []).forEach((_, idx) => k.add(`${p.id}_${idx}`)));
+                      setSelectedMultiStyleKeys(k);
+                    }}
+                    className="text-xs font-bold text-[#C27842] hover:underline"
+                  >
+                    Select All POs ({pos.length})
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMultiBudgetPoIds([]);
+                      setSelectedMultiStyleKeys(new Set());
+                    }}
+                    className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {pos.map((p) => {
+                  const isChecked = multiBudgetPoIds.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => toggleMultiBudgetPo(p.id)}
+                      className={`px-3 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-2 transition-all ${
+                        isChecked
+                          ? "bg-amber-100 text-amber-900 border-amber-400 font-bold shadow-xs"
+                          : "bg-white text-slate-600 border-slate-300 hover:border-slate-400"
+                      }`}
+                      data-testid={`multi-budget-po-chip-${p.po_number}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {}}
+                        className="w-3.5 h-3.5 text-[#C27842] rounded border-slate-300 cursor-pointer pointer-events-none"
+                      />
+                      <span>{p.po_number}</span>
+                      <span className="text-[10px] text-slate-500 font-normal">
+                        ({p.client_name} · {p.total_quantity || 0} prs)
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Aggregated Budget KPI Summary Card */}
+            <div className="rounded-xl border-2 border-amber-500/40 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 sm:p-5 shadow-xl space-y-4" data-testid="multi-po-budget-kpi-card">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-700 flex-wrap gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-lg bg-[#C27842]/20 border border-[#C27842]/50 text-[#C27842]">
+                    <Calculator className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Combined Production Budget (Cost to Complete)
+                    </h4>
+                    <p className="text-[11px] text-slate-400">
+                      Calculated for {multiBudgetCalculated.totalQty} pairs across {multiBudgetCalculated.selectedCount} selected styles
+                    </p>
+                  </div>
+                </div>
+                <div>
+                  {multiBudgetCalculated.isLaborEstimated ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                      Estimated Style Labor (Some Karigars Not Yet Allocated)
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      Actual Allocated Karigar Wages
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 4 KPI Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-3">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total BOM Cost
+                  </div>
+                  <div className="text-lg font-black font-mono text-white mt-1">
+                    {inr(multiBudgetCalculated.totalBom)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">Raw materials &amp; soles</div>
+                </div>
+
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-3">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total Labour Cost
+                  </div>
+                  <div className="text-lg font-black font-mono text-amber-400 mt-1">
+                    {inr(multiBudgetCalculated.totalLabor)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5 flex items-center justify-between">
+                    <span>Karigar piece wages</span>
+                    <span className={`text-[9px] font-bold ${multiBudgetCalculated.isLaborEstimated ? "text-amber-400" : "text-emerald-400"}`}>
+                      {multiBudgetCalculated.isLaborEstimated ? "Estimated" : "Allocated"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="bg-slate-800/80 border border-slate-700/80 rounded-lg p-3">
+                  <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    Total Packing Cost
+                  </div>
+                  <div className="text-lg font-black font-mono text-cyan-400 mt-1">
+                    {inr(multiBudgetCalculated.totalPacking)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">Boxes, cartons &amp; labels</div>
+                </div>
+
+                <div className="bg-[#C27842]/20 border border-[#C27842]/60 rounded-lg p-3">
+                  <div className="text-[10px] uppercase font-bold text-amber-200 tracking-wider">
+                    Total Production Budget
+                  </div>
+                  <div className="text-lg font-black font-mono text-[#F59E0B] mt-1">
+                    {inr(multiBudgetCalculated.totalCost)}
+                  </div>
+                  <div className="text-[10px] text-amber-200/80 mt-0.5 font-semibold">Cost to complete</div>
+                </div>
+              </div>
+
+              {/* Commercial Comparison */}
+              <div className="pt-3 border-t border-slate-700/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">Combined Revenue</span>
+                    <span className="font-mono font-bold text-white text-base">{inr(multiBudgetCalculated.totalRevenue)}</span>
+                  </div>
+                  <span className="text-slate-500 font-mono text-lg hidden sm:inline">−</span>
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">Total Budget (Cost)</span>
+                    <span className="font-mono font-bold text-amber-400 text-base">{inr(multiBudgetCalculated.totalCost)}</span>
+                  </div>
+                  <span className="text-slate-500 font-mono text-lg hidden sm:inline">=</span>
+                  <div>
+                    <span className="text-[10px] uppercase text-slate-400 font-semibold block">Projected Margin</span>
+                    <span className={`font-mono font-bold text-base ${multiBudgetCalculated.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      {multiBudgetCalculated.profit >= 0 ? "+" : ""}{inr(multiBudgetCalculated.profit)} ({multiBudgetCalculated.profitPct}%)
+                    </span>
+                  </div>
+                </div>
+                {Number(multiBudgetCalculated.totalOutside || 0) > 0 && (
+                  <div className="text-xs text-purple-300 font-mono">
+                    Outside Labour: <b>{inr(multiBudgetCalculated.totalOutside)}</b>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Step 2: PO Line Items Selection Table */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="font-bold uppercase tracking-wider text-slate-700 text-[11px] flex items-center gap-1.5">
+                  <CheckSquare className="w-4 h-4 text-emerald-600" />
+                  <span>Step 2: Pick Styles from each PO for Budget Alignment ({multiBudgetCalculated.selectedCount} styles selected)</span>
+                </div>
+                <div className="text-slate-500 text-xs">
+                  Tip: Check/uncheck individual styles to tailor the exact production run.
+                </div>
+              </div>
+
+              {multiBudgetSelectedPOs.length === 0 ? (
+                <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-300 text-slate-500">
+                  No Purchase Orders selected above. Click any PO chip in Step 1 to load styles.
+                </div>
+              ) : (
+                multiBudgetSelectedPOs.map((p) => {
+                  const poStylesCount = (p.line_items || []).length;
+                  const poSelectedCount = (p.line_items || []).filter((_, idx) => selectedMultiStyleKeys.has(`${p.id}_${idx}`)).length;
+                  return (
+                    <div key={p.id} className="border border-slate-200 rounded-xl overflow-hidden bg-white shadow-xs">
+                      {/* PO Header Bar */}
+                      <div className="bg-slate-50 border-b border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <span className="font-mono font-bold text-sm text-slate-900">{p.po_number}</span>
+                          <span className="text-slate-600 font-medium">{p.client_name}</span>
+                          <span className="text-slate-400">·</span>
+                          <span className="text-slate-500 text-[11px]">{p.po_date}</span>
+                          <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-2 py-0.5 rounded-full">
+                            {p.total_quantity || 0} pairs total
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-semibold text-slate-600">
+                            {poSelectedCount} of {poStylesCount} styles selected
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => selectAllStylesForPo(p.id)}
+                            className="px-2 py-0.5 bg-white border border-slate-300 hover:bg-slate-100 rounded text-[11px] font-bold text-[#C27842]"
+                          >
+                            Select All
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deselectAllStylesForPo(p.id)}
+                            className="px-2 py-0.5 bg-white border border-slate-300 hover:bg-slate-100 rounded text-[11px] text-slate-600"
+                          >
+                            Deselect All
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Styles Table */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-100/70 border-b border-slate-200 text-slate-600 font-bold text-[11px]">
+                            <tr>
+                              <th className="px-3 py-2 text-center w-10">Select</th>
+                              <th className="px-2 py-2 text-center w-12">Photo</th>
+                              <th className="px-3 py-2">Style / Desc</th>
+                              <th className="px-2 py-2 text-center">Color / Sz</th>
+                              <th className="px-2.5 py-2 text-right">Qty</th>
+                              <th className="px-2.5 py-2 text-right">PO Rate</th>
+                              <th className="px-3 py-2">Cost Breakdown / Pair</th>
+                              <th className="px-2.5 py-2 text-right">Unit Cost</th>
+                              <th className="px-2.5 py-2 text-right">Line Budget</th>
+                              <th className="px-2.5 py-2 text-right">Line Margin</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {(p.line_items || []).map((li, idx) => {
+                              const key = `${p.id}_${idx}`;
+                              const isChecked = selectedMultiStyleKeys.has(key);
+                              const prof = li.profitability || {};
+                              const qty = Number(li.quantity || 0);
+                              const rate = Number(li.unit_price || 0);
+                              const lineRev = qty * rate;
+                              const bom = Number(prof.bom_cost || 0);
+                              const labor = Number(prof.labor_cost || 0);
+                              const packing = Number(prof.packing_cost || 0);
+                              const outside = Number(prof.outside_cost || 0);
+                              const uCost = bom + labor + packing + outside;
+                              const totCost = uCost * qty;
+                              const margin = lineRev - totCost;
+
+                              return (
+                                <tr
+                                  key={idx}
+                                  className={`hover:bg-slate-50 transition-colors ${
+                                    !isChecked ? "opacity-35 bg-slate-50/50" : ""
+                                  }`}
+                                >
+                                  <td className="px-3 py-2 text-center">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => toggleMultiBudgetStyleKey(key)}
+                                      className="w-4 h-4 text-[#C27842] rounded border-slate-300 cursor-pointer"
+                                      title="Include/exclude this style from budget"
+                                      data-testid={`multi-style-checkbox-${p.po_number}-${idx}`}
+                                    />
+                                  </td>
+                                  <td className="px-2 py-1.5 text-center">
+                                    <ImageThumb
+                                      image={getStyleImage(li.style_code, li)}
+                                      size={40}
+                                      alt={li.style_code}
+                                      clickable
+                                      className="rounded border shadow-xs inline-block"
+                                    />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="font-mono font-bold text-slate-900">{li.style_code}</div>
+                                    <div className="text-[11px] text-slate-500 truncate max-w-xs">{li.description || "—"}</div>
+                                  </td>
+                                  <td className="px-2 py-2 text-center text-slate-600 font-mono">
+                                    {li.color || "—"} {li.size ? `· ${li.size}` : ""}
+                                  </td>
+                                  <td className="px-2.5 py-2 text-right font-mono font-bold">{qty}</td>
+                                  <td className="px-2.5 py-2 text-right font-mono">{inr(rate)}</td>
+                                  <td className="px-3 py-2 text-[11px]">
+                                    <div className="flex flex-wrap gap-x-2 text-slate-600">
+                                      <span>BOM: <b>{inr(bom)}</b></span>
+                                      <span>Pack: <b>{inr(packing)}</b></span>
+                                      {outside > 0 && <span>Out: <b className="text-purple-700">{inr(outside)}</b></span>}
+                                    </div>
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <span>Labor: <b className="font-mono">{inr(labor)}</b></span>
+                                      <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                        prof.is_estimated ? "bg-amber-100 text-amber-900" : "bg-emerald-100 text-emerald-900"
+                                      }`}>
+                                        {prof.is_estimated ? "Estimated" : "Allocated"}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <td className="px-2.5 py-2 text-right font-mono font-semibold text-slate-800">{inr(uCost)}</td>
+                                  <td className="px-2.5 py-2 text-right font-mono font-bold text-amber-700">{inr(totCost)}</td>
+                                  <td className="px-2.5 py-2 text-right font-mono font-bold">
+                                    <span className={margin >= 0 ? "text-emerald-700" : "text-rose-600"}>
+                                      {margin >= 0 ? "+" : ""}{inr(margin)}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </Drawer>
+      )}
+
     </div>
   );
 }
