@@ -862,7 +862,7 @@ export default function AppShell() {
   const closeMore = useCallback(() => setMoreOpen(false), []);
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F7F7F5]">
+    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F7F7F5] print:bg-white print:min-h-0 print:h-auto print:block print:p-0 print:m-0">
 
       {/* ── MOBILE TOP BAR ─────────────────────────────────────────── */}
       <MobileTopBar
@@ -888,7 +888,7 @@ export default function AppShell() {
 
       {/* ── MAIN CONTENT ───────────────────────────────────────────── */}
       <main
-        className="flex-1 min-w-0 lg:pl-64 mobile-main-content"
+        className="flex-1 min-w-0 lg:pl-64 mobile-main-content print:p-0 print:m-0 print:pl-0 print:w-full print:bg-white print:min-h-0 print:h-auto"
         data-testid="main-content"
       >
         <AlertBanner />

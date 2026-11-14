@@ -137,40 +137,112 @@ h1, h2, h3, h4, h5, h6 {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 8mm;
+    margin: 6mm 8mm;
   }
   html, body {
-    background: white !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    height: auto !important;
-    overflow: visible !important;
-  }
-  main {
-    padding-left: 0 !important;
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    color: black !important;
     margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  #root, .app-layout, [data-testid="main-content"], main, .mobile-main-content, div[class*="min-h-screen"], div[class*="bg-[#F7F7F5]"] {
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    overflow: visible !important;
     width: 100% !important;
   }
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    min-height: 0 !important;
+    max-height: none !important;
+  }
   /* Hide the whole app shell (sidebar + header + alerts) when printing */
-  [data-testid="sidebar"], .no-print, .print\:hidden, button, header, nav {
+  [data-testid="sidebar"], .no-print, .print\:hidden, button, header, nav, .alert-banner {
     display: none !important;
+  }
+  /* Neutralize any Tailwind space-y margins in print stream */
+  .space-y-6 > :not([hidden]) ~ :not([hidden]),
+  .space-y-4 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
   }
   .techpack-page {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
-    page-break-after: avoid !important;
-    break-after: avoid !important;
-    height: auto !important;
-    max-height: 240mm !important;
-    width: 100% !important;
+    page-break-before: avoid !important;
+    break-before: avoid !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    height: 238mm !important;
+    max-height: 238mm !important;
+    min-height: 238mm !important;
+    width: 184mm !important;
     max-width: 184mm !important;
     overflow: hidden !important;
     margin: 0 auto !important;
-    padding: 0 !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    padding: 2mm !important;
     box-sizing: border-box !important;
+    background: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
   }
-  /* Make scrolling containers visible in print */
-  .overflow-x-auto, .overflow-y-auto, .overflow-hidden, .overflow-auto {
+  /* Only break to a new page between pages — NEVER after the final page */
+  .techpack-page:not(:last-child) {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+  .techpack-page:last-child,
+  .techpack-page-last,
+  #techpack-printable-sheet,
+  #techpack-printable-sheet:last-child,
+  #techpack-printable-sheet.techpack-page-last {
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+  .techpack-image-zone {
+    flex: 1 1 0% !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    max-height: 180mm !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    margin: 2mm 0 !important;
+    padding: 0 !important;
+  }
+  .techpack-image-zone img {
+    max-width: 100% !important;
+    max-height: 100% !important;
+    object-fit: contain !important;
+  }
+  .techpack-bottom-data {
+    margin-top: auto !important;
+    flex-shrink: 0 !important;
+    width: 100% !important;
+    background: #ffffff !important;
+  }
+  /* Make scrolling containers visible in print ONLY for data tables / picklists */
+  .table-container.overflow-x-auto, .picklist-drawer .overflow-y-auto {
     overflow: visible !important;
     max-height: none !important;
   }

@@ -202,7 +202,7 @@ export default function SampleDevelopment() {
   };
 
   return (
-    <div className="bg-[#F7F7F5] min-h-screen">
+    <div className="bg-[#F7F7F5] min-h-screen print:bg-white print:min-h-0 print:h-auto print:p-0 print:m-0">
       <div className="print:hidden">
         {/* ── TOP HEADER (SSK ERP PageHeader) ── */}
         <PageHeader
@@ -2260,13 +2260,35 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
 
   const activePhoto = photos[selectedPhotoIdx] || photos[0];
 
+  // Smart Footwear Tech Pack Pagination:
+  // If there are an odd number of pictures, place the last picture on the final Tech Pack data page
+  // (with technical specs below it), which saves 1 full printed page!
+  // All other pictures are placed 2 per page on preceding visual sheets.
+  // If there are an even number of pictures, all pictures are paired 2 per page,
+  // and the final page is a dedicated full-page Technical Specifications sheet.
+  const photoCount = photos.length;
+  const isOdd = photoCount % 2 === 1;
+  const pairedPhotos = isOdd ? photos.slice(0, photoCount - 1) : photos;
+  const lastOddPhoto = isOdd ? photos[photoCount - 1] : null;
+
+  const photoPages = [];
+  for (let i = 0; i < pairedPhotos.length; i += 2) {
+    photoPages.push(pairedPhotos.slice(i, i + 2));
+  }
+
+  // Total Pages:
+  // 0 photos: 1 page (placeholder + data)
+  // Even photos (>0): photoPages.length + 1 (all paired photo pages + 1 dedicated data page)
+  // Odd photos: photoPages.length + 1 (all paired photo pages + 1 combined last-photo-and-data page)
+  const totalPages = photoCount === 0 ? 1 : (photoPages.length + 1);
+
   const handlePrint = () => {
     window.print();
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block">
-      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl flex flex-col max-h-[92vh] overflow-hidden print:max-w-none print:max-h-none print:shadow-none print:border-none print:overflow-visible">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl flex flex-col max-h-[92vh] overflow-hidden print:max-w-none print:max-h-none print:shadow-none print:border-none print:overflow-visible print:bg-white print:p-0 print:m-0">
         
         {/* ── MODAL SCREEN HEADER (Hidden in Print) ── */}
         <div className="px-5 py-3.5 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0 print:hidden">
@@ -2297,10 +2319,10 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                   ? "bg-[#0F172A] text-white border-[#0F172A]"
                   : "bg-white text-slate-800 border-slate-300 hover:border-slate-900"
               }`}
-              title="Toggle between Interactive Specs and Designer 80% Image Print Preview"
+              title="Toggle between Interactive Specs and Designer Tech Pack Print Preview"
             >
               {viewMode === "print_sheet" ? <Eye className="w-3.5 h-3.5" /> : <Layers className="w-3.5 h-3.5" />}
-              <span>{viewMode === "print_sheet" ? "Standard Specs" : "Designer Sheet Preview"}</span>
+              <span>{viewMode === "print_sheet" ? "Standard Specs" : `Designer Sheet Preview (${totalPages} Page${totalPages > 1 ? "s" : ""})`}</span>
             </button>
 
             <BtnPrimary onClick={handlePrint} title="Print Tech Pack for Designer">
@@ -2395,196 +2417,418 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
           </div>
         </div>
 
-        {/* ── VIEW 2: DESIGNER TECH PACK PRINT SHEET (CLEAN MINIMAL 1-PAGE FIT, ~80% IMAGE) ── */}
-        <div className={`${viewMode === "print_sheet" ? "block" : "hidden"} print:block p-1 sm:p-2 print:p-0 print:m-0 w-full overflow-y-auto print:overflow-visible bg-white text-slate-900 font-sans`}>
-          <div
-            className="techpack-page w-full max-w-[185mm] mx-auto bg-white border border-slate-300 print:border p-2 print:p-1.5 flex flex-col justify-between"
-            style={{ maxHeight: "235mm", boxSizing: "border-box" }}
-          >
-            {/* 1. COMPACT 1-TIER HEADER (~10mm) */}
-            <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
-              <div className="flex items-baseline justify-between">
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">
-                    SSK FOOTCARE &bull; TECH PACK
-                  </span>
-                  <h1 className="text-lg font-black text-slate-900 uppercase tracking-tight leading-tight">
-                    {sample.sample_name}
-                  </h1>
+        {/* ── VIEW 2: DESIGNER TECH PACK PRINT SHEET(S) ── */}
+        <div className={`${viewMode === "print_sheet" ? "block" : "hidden"} print:block p-2 sm:p-4 print:p-0 print:m-0 w-full overflow-y-auto print:overflow-visible bg-slate-100 print:bg-white text-slate-900 font-sans space-y-6 print:space-y-0`}>
+          
+          {/* 1. PRECEDING 2-PHOTO PAGES (Pairs of 2 photos) */}
+          {photoPages.map((pair, pIdx) => {
+            const pageNumber = pIdx + 1;
+            return (
+              <div
+                key={`photo-page-${pIdx}`}
+                className="techpack-page w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
+                style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+              >
+                {/* Header */}
+                <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
+                  <div className="flex items-baseline justify-between">
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">
+                        SSK FOOTCARE &bull; TECH PACK (INSPIRATION ANGLES)
+                      </span>
+                      <h1 className="text-lg font-black text-slate-900 uppercase tracking-tight leading-tight truncate max-w-[90mm]">
+                        {sample.sample_name}
+                      </h1>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono">
+                      <span className="font-bold text-slate-900 bg-slate-100 px-1.5 py-0.5 border border-slate-300">
+                        {sample.temp_code}
+                      </span>
+                      <span className="text-slate-700 font-semibold uppercase">
+                        {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+                      </span>
+                      {sample.season && (
+                        <span className="text-slate-700 font-semibold">
+                          {sample.season}
+                        </span>
+                      )}
+                      <span className="bg-slate-900 text-white font-bold px-1.5 py-0.5 text-[10px]">
+                        PAGE {pageNumber} OF {totalPages}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-2 text-[11px] font-mono">
-                  <span className="font-bold text-slate-900 bg-slate-100 px-1.5 py-0.5 border border-slate-300">
-                    {sample.temp_code}
-                  </span>
-                  <span className="text-slate-700 font-semibold uppercase">
-                    {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
-                  </span>
-                  {sample.season && (
-                    <span className="text-slate-700 font-semibold">
-                      {sample.season}
+                {/* 2 Photos Stacked (Filling ~90% of page height) */}
+                <div className="flex-1 min-h-0 w-full flex flex-col gap-2 my-1 overflow-hidden">
+                  {pair.map((p, idxInPair) => {
+                    const globalPhotoIdx = pIdx * 2 + idxInPair + 1;
+                    return (
+                      <div
+                        key={p.photo_id || idxInPair}
+                        className="flex-1 min-h-0 w-full flex flex-col items-center justify-center border border-slate-200 bg-slate-50/40 p-1 relative overflow-hidden"
+                      >
+                        <img
+                          src={resolveImageUrl(p.url)}
+                          alt={p.caption || `Angle ${globalPhotoIdx}`}
+                          className="w-full h-full object-contain"
+                          style={{ maxHeight: "96mm", maxWidth: "100%" }}
+                        />
+                        <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
+                          <span className="bg-slate-900/85 text-white font-mono text-[9px] font-bold px-1.5 py-0.5 uppercase tracking-wider">
+                            Angle #{globalPhotoIdx}
+                          </span>
+                          {p.is_primary && (
+                            <span className="bg-[#C27842] text-white font-mono text-[9px] font-bold px-1.5 py-0.5 uppercase">
+                              Primary Cover
+                            </span>
+                          )}
+                        </div>
+                        {p.caption && (
+                          <div className="absolute bottom-1.5 left-1.5 right-1.5 bg-slate-900/85 text-white font-mono text-[10px] px-2 py-0.5 text-center truncate">
+                            {p.caption}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Footer on Photo Page */}
+                <div className="border-t border-slate-300 pt-1 mt-auto shrink-0 flex items-center justify-between text-[9px] font-mono text-slate-500">
+                  <span>SSK Footwear R&D &bull; Visual Reference Sheet</span>
+                  <span>Style: {sample.temp_code} &bull; Page {pageNumber} of {totalPages}</span>
+                  <span>Karigar / Tech: {sample.assigned_worker_name || "Unassigned"}</span>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* 2. FINAL PAGE:
+              - If odd number of pictures (or 0 pictures): Tech Pack data sits directly below the last picture (saves 1 page)!
+              - If even number of pictures (>0): Full-page dedicated Technical Specifications sheet */}
+          {isOdd || photoCount === 0 ? (
+            /* COMBINED FINAL PAGE: LAST PICTURE ON TOP + TECH PACK DATA BELOW IT */
+            <div
+              id="techpack-printable-sheet"
+              className="techpack-page techpack-page-last w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
+              style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+            >
+              {/* Header */}
+              <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
+                <div className="flex items-baseline justify-between">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">
+                      SSK FOOTCARE &bull; TECH PACK SPECIFICATION
                     </span>
-                  )}
-                  {sample.assigned_worker_name && (
-                    <span className="text-slate-700 font-semibold">
-                      Tech: {sample.assigned_worker_name}
+                    <h1 className="text-lg font-black text-slate-900 uppercase tracking-tight leading-tight">
+                      {sample.sample_name}
+                    </h1>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[11px] font-mono">
+                    <span className="font-bold text-slate-900 bg-slate-100 px-1.5 py-0.5 border border-slate-300">
+                      {sample.temp_code}
                     </span>
-                  )}
+                    <span className="text-slate-700 font-semibold uppercase">
+                      {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+                    </span>
+                    {sample.season && (
+                      <span className="text-slate-700 font-semibold">
+                        {sample.season}
+                      </span>
+                    )}
+                    <span className="bg-[#C27842] text-white font-bold px-1.5 py-0.5 text-[10px]">
+                      PAGE {totalPages} OF {totalPages}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Visual Zone: Final / Odd Picture (fills ~75% space above the data box) */}
+              <div className="techpack-image-zone flex-1 min-h-0 w-full my-1 flex items-center justify-center overflow-hidden bg-white relative border border-slate-100">
+                {photoCount === 0 ? (
+                  <div className="w-full h-full border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 p-4 text-center">
+                    <Camera className="w-10 h-10 opacity-30 mb-1" />
+                    <p className="font-bold text-xs uppercase tracking-wider text-slate-600">No Sample Inspiration Photos Uploaded</p>
+                  </div>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center overflow-hidden relative">
+                    <img
+                      src={resolveImageUrl(lastOddPhoto.url)}
+                      alt={lastOddPhoto.caption || sample.sample_name}
+                      className="w-full h-full object-contain"
+                      style={{ maxHeight: "155mm", maxWidth: "100%" }}
+                    />
+                    <div className="absolute top-1 left-1 flex items-center gap-1">
+                      <span className="bg-slate-900/85 text-white font-mono text-[9px] font-bold px-1.5 py-0.5 uppercase tracking-wider">
+                        {photoPages.length > 0 ? `Angle #${photoCount} (Final Angle)` : "Hero Cover"}
+                      </span>
+                      {lastOddPhoto.is_primary && (
+                        <span className="bg-[#C27842] text-white font-mono text-[9px] font-bold px-1.5 py-0.5 uppercase">
+                          Primary
+                        </span>
+                      )}
+                    </div>
+                    {lastOddPhoto.caption && (
+                      <div className="absolute bottom-1 left-1 right-1 bg-slate-900/85 text-white font-mono text-[9px] px-2 py-0.5 text-center truncate">
+                        {lastOddPhoto.caption}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Technical Specifications Strip (Fixed directly below the last picture) */}
+              <div className="techpack-bottom-data shrink-0 w-full mt-auto border border-slate-300 bg-white">
+                <div className="grid grid-cols-3 divide-x divide-slate-300">
+                  
+                  {/* Pillar 1: Upper Component */}
+                  <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                    <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                      1. Upper Component
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Material: </span>
+                      <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Color to Dev: </span>
+                      <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Canvas / Lining: </span>
+                      <span className="font-mono text-slate-800">{upper.canvas_backing || "None"} &bull; {upper.lining_material_name || "Std"}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Operations: </span>
+                      <span className="font-mono text-slate-800 capitalize">
+                        {[upper.cutting_operation?.replace("_", " "), upper.stitching_operation?.replace("_", " "), upper.edge_treatment?.replace("_", " ")].filter(Boolean).join(", ")}
+                      </span>
+                    </div>
+                    {upper.has_buckle && (
+                      <div className="text-[10px] leading-tight">
+                        <span className="font-semibold text-slate-500">Buckle / Spec: </span>
+                        <span className="font-mono font-bold text-amber-900">{upper.buckle_spec}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pillar 2: Insole & Socks */}
+                  <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                    <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                      2. Insole / Socks
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Base Board: </span>
+                      <span className="font-mono font-bold text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Cushioning: </span>
+                      <span className="font-mono font-bold text-slate-900">{insole.cushioning_type?.toUpperCase()} &bull; {insole.cushioning_thickness_mm}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Socks Covering: </span>
+                      <span className="font-mono text-slate-800 capitalize">{insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Detailing: </span>
+                      <span className="font-mono text-slate-800 capitalize">{insole.surface_detailing || "None"} &bull; {insole.embossing || "None"}</span>
+                    </div>
+                  </div>
+
+                  {/* Pillar 3: Sole & Heel */}
+                  <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                    <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                      3. Sole & Heel
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Sole Material: </span>
+                      <span className="font-mono font-bold text-slate-900">{sole.sole_material || "TPR"} ({sole.sole_type || "Ready Made"})</span>
+                    </div>
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Mould / Shape: </span>
+                      <span className="font-mono font-bold text-slate-900">{sole.mould_name || "Standard"} ({sole.sole_shape || "Standard"})</span>
+                    </div>
+                    {sample.profile === "heeled" ? (
+                      <div className="text-[10px] leading-tight">
+                        <span className="font-semibold text-slate-500">Heel Spec: </span>
+                        <span className="font-mono font-bold text-purple-900">{sole.heel_type} &bull; {sole.heel_finish} ({sole.heel_height || "Height TBD"})</span>
+                      </div>
+                    ) : (
+                      <div className="text-[10px] leading-tight">
+                        <span className="font-semibold text-slate-500">Profile: </span>
+                        <span className="font-mono text-slate-800">Flat Footwear Mould</span>
+                      </div>
+                    )}
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Processes: </span>
+                      <span className="font-mono text-slate-800">
+                        {[sole.velting ? "Welting" : null, sole.grinding_gripping ? "Grinding" : null, sole.attach_top_piece ? "Top Piece" : null].filter(Boolean).join(", ") || "Standard"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sign-Off Footer Bar */}
+                <div className="border-t border-slate-300 bg-slate-50/60 px-2 py-0.5 flex items-center justify-between text-[9px] font-mono text-slate-700">
+                  <div><span className="font-semibold text-slate-600">Sample Master: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
+                  <div><span className="font-semibold text-slate-600">Footwear Designer: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
+                  <div><span className="font-semibold text-slate-600">Date / Approval: </span> <span className="border-b border-slate-400 inline-block w-16">&nbsp;</span></div>
                 </div>
               </div>
             </div>
+          ) : (
+            /* DEDICATED FULL-PAGE TECHNICAL SPECIFICATIONS SHEET (FOR EVEN PHOTO COUNTS: 2, 4, 6) */
+            <div
+              className="techpack-page techpack-page-last w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2.5 print:p-2 box-border shadow-sm print:shadow-none"
+              style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+            >
+              {/* Header */}
+              <div className="border-b-2 border-slate-900 pb-1 mb-1.5 shrink-0">
+                <div className="flex items-baseline justify-between">
+                  <div>
+                    <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">
+                      SSK FOOTCARE ERP &bull; TECHNICAL SPECIFICATIONS & WORK ORDER
+                    </span>
+                    <h1 className="text-lg font-black text-slate-900 uppercase tracking-tight leading-tight">
+                      {sample.sample_name}
+                    </h1>
+                  </div>
 
-            {/* 2. VISUAL INSPIRATION ZONE: ~75-80% OF PAGE (h-[148mm]) */}
-            <div className="flex-1 my-0.5 flex items-center justify-center overflow-hidden bg-white max-h-[148mm]">
-              {photos.length === 0 ? (
-                <div className="w-full h-full border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 p-4 text-center">
-                  <Camera className="w-10 h-10 opacity-30 mb-1" />
-                  <p className="font-bold text-xs uppercase tracking-wider text-slate-600">No Sample Inspiration Photos Uploaded</p>
+                  <div className="flex items-center gap-1.5 text-xs font-mono">
+                    <span className="font-bold text-white bg-slate-900 px-2 py-0.5 text-[11px]">
+                      {sample.temp_code}
+                    </span>
+                    <span className="text-slate-800 font-bold uppercase text-[11px]">
+                      {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+                    </span>
+                    {sample.season && (
+                      <span className="text-slate-700 font-semibold border border-slate-300 px-1.5 py-0.5 bg-slate-50 text-[11px]">
+                        {sample.season}
+                      </span>
+                    )}
+                    <span className="bg-[#C27842] text-white font-bold px-1.5 py-0.5 text-[10px]">
+                      PAGE {totalPages} OF {totalPages}
+                    </span>
+                  </div>
                 </div>
-              ) : photos.length === 1 ? (
-                /* SINGLE HERO PHOTO: Fills the visual area */
-                <div className="w-full h-full flex items-center justify-center overflow-hidden">
-                  <img
-                    src={resolveImageUrl(photos[0].url)}
-                    alt={photos[0].caption || sample.sample_name}
-                    className="w-full h-full max-h-[145mm] object-contain"
-                  />
+              </div>
+
+              {/* Photo Thumbnail Reference Bar */}
+              <div className="border border-slate-300 bg-slate-50 p-1 mb-1.5 shrink-0">
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-[9px] font-bold uppercase tracking-wider text-slate-600">
+                    Visual Reference Index ({photoCount} Photos across Sheets 1&ndash;{photoPages.length})
+                  </span>
+                  <span className="text-[8px] font-mono text-slate-500">
+                    See preceding visual sheets for full-scale angles
+                  </span>
                 </div>
-              ) : photos.length === 2 ? (
-                /* 2 PHOTOS: Split 50/50 side by side */
-                <div className="grid grid-cols-2 gap-2 w-full h-full max-h-[145mm]">
-                  {photos.slice(0, 2).map((p, i) => (
-                    <div key={p.photo_id || i} className="flex items-center justify-center overflow-hidden border border-slate-200 p-1">
-                      <img
-                        src={resolveImageUrl(p.url)}
-                        alt={p.caption || `Angle ${i+1}`}
-                        className="w-full h-full max-h-[142mm] object-contain"
-                      />
+                <div className="flex items-center gap-1.5">
+                  {photos.map((p, idx) => (
+                    <div key={p.photo_id || idx} className="h-8 w-10 border border-slate-300 bg-white shrink-0 overflow-hidden relative">
+                      <img src={resolveImageUrl(p.url)} alt="thumb" className="w-full h-full object-cover" />
+                      <span className="absolute bottom-0 right-0 bg-slate-900 text-white text-[7px] font-mono px-0.5 leading-none">
+                        #{idx + 1}
+                      </span>
                     </div>
                   ))}
                 </div>
-              ) : photos.length === 3 ? (
-                /* 3 PHOTOS: 1 Hero view (60% width) + 2 stacked detail views (40% width) */
-                <div className="grid grid-cols-12 gap-2 w-full h-full max-h-[145mm]">
-                  <div className="col-span-7 flex items-center justify-center overflow-hidden border border-slate-200 p-1">
-                    <img
-                      src={resolveImageUrl((photos.find(p => p.is_primary) || photos[0]).url)}
-                      alt="Primary View"
-                      className="w-full h-full max-h-[142mm] object-contain"
-                    />
-                  </div>
-                  <div className="col-span-5 flex flex-col gap-1.5 h-full">
-                    {photos.filter(p => p !== (photos.find(p => p.is_primary) || photos[0])).slice(0, 2).map((p, i) => (
-                      <div key={p.photo_id || i} className="flex-1 flex items-center justify-center overflow-hidden border border-slate-200 p-1">
-                        <img
-                          src={resolveImageUrl(p.url)}
-                          alt={`Detail ${i+1}`}
-                          className="w-full h-full max-h-[68mm] object-contain"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                /* 4+ PHOTOS: 2x2 Grid */
-                <div className="grid grid-cols-2 grid-rows-2 gap-1.5 w-full h-full max-h-[145mm]">
-                  {photos.slice(0, 4).map((p, i) => (
-                    <div key={p.photo_id || i} className="flex items-center justify-center overflow-hidden border border-slate-200 p-1">
-                      <img
-                        src={resolveImageUrl(p.url)}
-                        alt={p.caption || `Angle ${i+1}`}
-                        className="w-full h-full max-h-[68mm] object-contain"
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+              </div>
 
-            {/* 3. TECHNICAL SPECIFICATIONS DATA STRIP (COMPACT ~38mm) */}
-            <div className="shrink-0 border border-slate-300 bg-white">
-              <div className="grid grid-cols-3 divide-x divide-slate-300">
+              {/* 3 Pillars Technical Specifications */}
+              <div className="grid grid-cols-3 gap-2 border border-slate-300 bg-white p-2 mb-1.5 shrink-0">
                 
                 {/* Pillar 1: Upper Component */}
-                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
-                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                <div className="space-y-1 border-r border-slate-200 pr-2">
+                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-0.5 mb-1">
                     1. Upper Component
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Material: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Upper Material</span>
                     <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Color to Dev: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Color to Develop</span>
                     <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Canvas / Lining: </span>
-                    <span className="font-mono text-slate-800">{upper.canvas_backing || "None"} &bull; {upper.lining_material_name || "Std"}</span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Canvas Backing</span>
+                    <span className="font-mono text-slate-800">{upper.canvas_backing || "None"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Operations: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Lining Material</span>
+                    <span className="font-mono text-slate-800">{upper.lining_material_name || "Standard"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Operations</span>
                     <span className="font-mono text-slate-800 capitalize">
-                      {[upper.cutting_operation?.replace("_", " "), upper.stitching_operation?.replace("_", " "), upper.edge_treatment?.replace("_", " ")].filter(Boolean).join(", ")}
+                      {[upper.cutting_operation?.replace("_", " "), upper.stitching_operation?.replace("_", " "), upper.edge_treatment?.replace("_", " ")].filter(Boolean).join(", ") || "Standard"}
                     </span>
                   </div>
                   {upper.has_buckle && (
-                    <div className="text-[10px] leading-tight">
-                      <span className="font-semibold text-slate-500">Buckle / Spec: </span>
+                    <div className="text-[10px] leading-tight bg-amber-50 border border-amber-200 p-1">
+                      <span className="font-semibold text-amber-800 block text-[8px] uppercase">Buckle / Hardware</span>
                       <span className="font-mono font-bold text-amber-900">{upper.buckle_spec}</span>
                     </div>
                   )}
                 </div>
 
                 {/* Pillar 2: Insole & Socks */}
-                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
-                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                <div className="space-y-1 border-r border-slate-200 pr-2">
+                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-0.5 mb-1">
                     2. Insole / Socks
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Base Board: </span>
-                    <span className="font-mono font-bold text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}</span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Base Board</span>
+                    <span className="font-mono font-bold text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose Board" : "Paper Board"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Cushioning: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Cushioning Spec</span>
                     <span className="font-mono font-bold text-slate-900">{insole.cushioning_type?.toUpperCase()} &bull; {insole.cushioning_thickness_mm}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Socks Covering: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Socks Covering</span>
                     <span className="font-mono text-slate-800 capitalize">{insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Detailing: </span>
-                    <span className="font-mono text-slate-800 capitalize">{insole.surface_detailing || "None"} &bull; {insole.embossing || "None"}</span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Surface Detailing</span>
+                    <span className="font-mono text-slate-800 capitalize">{insole.surface_detailing || "None"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Embossing / Foil</span>
+                    <span className="font-mono text-slate-800 capitalize">{insole.embossing || "None"}</span>
                   </div>
                 </div>
 
                 {/* Pillar 3: Sole & Heel */}
-                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
-                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                <div className="space-y-1">
+                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-0.5 mb-1">
                     3. Sole & Heel
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Sole Material: </span>
-                    <span className="font-mono font-bold text-slate-900">{sole.sole_material || "TPR"} ({sole.sole_type || "Ready Made"})</span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Sole Material & Type</span>
+                    <span className="font-mono font-bold text-slate-900">{sole.sole_material || "TPR"} &bull; {sole.sole_type || "Ready Made"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Mould / Shape: </span>
-                    <span className="font-mono font-bold text-slate-900">{sole.mould_name || "Standard"} ({sole.sole_shape || "Standard"})</span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Mould & Shape</span>
+                    <span className="font-mono font-bold text-slate-900">{sole.mould_name || "Standard Mould"} &bull; {sole.sole_shape || "Standard"}</span>
                   </div>
                   {sample.profile === "heeled" ? (
-                    <div className="text-[10px] leading-tight">
-                      <span className="font-semibold text-slate-500">Heel Spec: </span>
+                    <div className="text-[10px] leading-tight bg-purple-50 border border-purple-200 p-1">
+                      <span className="font-semibold text-purple-800 block text-[8px] uppercase">Heel Specification</span>
                       <span className="font-mono font-bold text-purple-900">{sole.heel_type} &bull; {sole.heel_finish} ({sole.heel_height || "Height TBD"})</span>
                     </div>
                   ) : (
                     <div className="text-[10px] leading-tight">
-                      <span className="font-semibold text-slate-500">Profile: </span>
-                      <span className="font-mono text-slate-800">Flat Footwear Mould</span>
+                      <span className="font-semibold text-slate-500 block text-[8px] uppercase">Profile</span>
+                      <span className="font-mono text-slate-800">Flat Footwear Standard</span>
                     </div>
                   )}
                   <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500">Processes: </span>
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Processes</span>
                     <span className="font-mono text-slate-800">
                       {[sole.velting ? "Welting" : null, sole.grinding_gripping ? "Grinding" : null, sole.attach_top_piece ? "Top Piece" : null].filter(Boolean).join(", ") || "Standard"}
                     </span>
@@ -2593,15 +2837,43 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
 
               </div>
 
-              {/* Sign-Off Footer Bar */}
-              <div className="border-t border-slate-300 bg-slate-50/60 px-2 py-0.5 flex items-center justify-between text-[9px] font-mono text-slate-700">
-                <div><span className="font-semibold text-slate-600">Sample Master: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
-                <div><span className="font-semibold text-slate-600">Footwear Designer: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
-                <div><span className="font-semibold text-slate-600">Date / Approval: </span> <span className="border-b border-slate-400 inline-block w-16">&nbsp;</span></div>
+              {/* Designer / Karigar Production Notes */}
+              <div className="border border-slate-300 bg-slate-50 p-1.5 mb-1.5 shrink-0">
+                <div className="text-[8px] font-bold uppercase tracking-wider text-slate-600 mb-0.5">
+                  Designer & Karigar Instructions:
+                </div>
+                <div className="text-[9px] font-mono text-slate-800 leading-snug">
+                  {sample.notes || "Develop sample strictly conforming to the reference photos. Maintain critical tolerances on cushion thickness, edge bevel, and sole bonding strength. Prioritize upper finishing accuracy."}
+                </div>
               </div>
-            </div>
 
-          </div>
+              {/* Approval & Sign-Off Bar (Anchored at Bottom) */}
+              <div className="techpack-bottom-data shrink-0 w-full mt-auto border border-slate-400 bg-white p-2">
+                <div className="text-[8px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-300 pb-0.5 mb-1.5">
+                  Production Handover & Quality Sign-Off
+                </div>
+                <div className="grid grid-cols-3 gap-3 text-[9px] font-mono text-slate-800">
+                  <div>
+                    <div className="font-semibold text-slate-600 mb-3">Sample Master / Karigar:</div>
+                    <div className="border-b border-slate-400">&nbsp;</div>
+                    <div className="text-[7px] text-slate-400 mt-0.5">Signature & Date</div>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-600 mb-3">Footwear Designer:</div>
+                    <div className="border-b border-slate-400">&nbsp;</div>
+                    <div className="text-[7px] text-slate-400 mt-0.5">Signature & Date</div>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-600 mb-3">Quality / Production Approval:</div>
+                    <div className="border-b border-slate-400">&nbsp;</div>
+                    <div className="text-[7px] text-slate-400 mt-0.5">Signature & Date</div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          )}
+
         </div>
 
         {/* ── MODAL SCREEN FOOTER (Hidden in Print) ── */}
