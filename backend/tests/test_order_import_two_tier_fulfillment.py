@@ -161,22 +161,20 @@ def test_two_tier_partial_fg_stock_and_cutting_for_remainder():
             "reserved_qty": 0,
         }
 
-        # BOM exists with 1 component: Sole
-        comp_id = ObjectId()
-        bom_item = {
-            "style_id": style_doc["_id"],
-            "component_id": comp_id,
-            "component_code": "SOL-001",
-            "quantity_per_pair": 1,
-            "active": True,
-        }
-        # Component has plenty of stock (100 free)
-        comp_doc = {
-            "_id": comp_id,
-            "component_code": "SOL-001",
-            "component_name": "Rubber Sole",
-            "current_stock": 100,
-            "reserved_stock": 0,
+        # BOM exists with all 3 essential footwear components: Upper, Insole, Sole
+        comp_upper_id = ObjectId()
+        comp_insole_id = ObjectId()
+        comp_sole_id = ObjectId()
+
+        bom_items = [
+            {"style_id": style_doc["_id"], "component_id": comp_upper_id, "component_code": "UP-001", "component_category": "Upper", "quantity_per_pair": 1, "active": True},
+            {"style_id": style_doc["_id"], "component_id": comp_insole_id, "component_code": "INS-001", "component_category": "Insole", "quantity_per_pair": 1, "active": True},
+            {"style_id": style_doc["_id"], "component_id": comp_sole_id, "component_code": "SOL-001", "component_category": "Sole", "quantity_per_pair": 1, "active": True},
+        ]
+        comp_docs = {
+            comp_upper_id: {"_id": comp_upper_id, "component_code": "UP-001", "component_name": "Leather Upper", "component_category": "Upper", "current_stock": 100, "reserved_stock": 0},
+            comp_insole_id: {"_id": comp_insole_id, "component_code": "INS-001", "component_name": "Texon Insole", "component_category": "Insole", "current_stock": 100, "reserved_stock": 0},
+            comp_sole_id: {"_id": comp_sole_id, "component_code": "SOL-001", "component_name": "Rubber Sole", "component_category": "Sole", "current_stock": 100, "reserved_stock": 0},
         }
 
         async def mock_find_one(query, *args, **kwargs):
@@ -187,10 +185,11 @@ def test_two_tier_partial_fg_stock_and_cutting_for_remainder():
             if "_id" in query and isinstance(query["_id"], ObjectId):
                 if query["_id"] == style_doc["_id"]:
                     return style_doc
-                if query["_id"] == comp_id:
-                    return comp_doc
-            if query.get("component_code") == "SOL-001":
-                return comp_doc
+                if query["_id"] in comp_docs:
+                    return comp_docs[query["_id"]]
+            for cdoc in comp_docs.values():
+                if query.get("component_code") == cdoc["component_code"]:
+                    return cdoc
             if query.get("external_sku_key") == "sku-ssk-001":
                 return sku_mapping
             return None
@@ -210,7 +209,7 @@ def test_two_tier_partial_fg_stock_and_cutting_for_remainder():
 
         # Mock style_component_mapping cursor
         bom_cursor = MagicMock()
-        bom_cursor.to_list = AsyncMock(return_value=[bom_item])
+        bom_cursor.to_list = AsyncMock(return_value=bom_items)
         mock_db.style_component_mapping.find = MagicMock(return_value=bom_cursor)
 
         mock_db.production_jobs.insert_many = AsyncMock()
@@ -315,26 +314,24 @@ def test_two_tier_component_stock_insufficient():
         fg_cursor.to_list = AsyncMock(return_value=[])
         mock_db.fg_location_inventory.find = MagicMock(return_value=fg_cursor)
 
-        # BOM exists with 1 component: Sole (needs 1 per pair -> 10 pairs needed)
-        comp_id = ObjectId()
-        bom_item = {
-            "style_id": style_doc["_id"],
-            "component_id": comp_id,
-            "component_code": "SOL-001",
-            "quantity_per_pair": 1,
-            "active": True,
-        }
-        # Component has only 2 units in stock (need 10, shortage of 8)
-        comp_doc = {
-            "_id": comp_id,
-            "component_code": "SOL-001",
-            "component_name": "Rubber Sole",
-            "current_stock": 2,
-            "reserved_stock": 0,
+        # BOM exists with Upper, Insole, and Sole. Sole has only 2 units (need 10, shortage of 8)
+        comp_upper_id = ObjectId()
+        comp_insole_id = ObjectId()
+        comp_sole_id = ObjectId()
+
+        bom_items = [
+            {"style_id": style_doc["_id"], "component_id": comp_upper_id, "component_code": "UP-001", "component_category": "Upper", "quantity_per_pair": 1, "active": True},
+            {"style_id": style_doc["_id"], "component_id": comp_insole_id, "component_code": "INS-001", "component_category": "Insole", "quantity_per_pair": 1, "active": True},
+            {"style_id": style_doc["_id"], "component_id": comp_sole_id, "component_code": "SOL-001", "component_category": "Sole", "quantity_per_pair": 1, "active": True},
+        ]
+        comp_docs = {
+            comp_upper_id: {"_id": comp_upper_id, "component_code": "UP-001", "component_name": "Leather Upper", "component_category": "Upper", "current_stock": 100, "reserved_stock": 0},
+            comp_insole_id: {"_id": comp_insole_id, "component_code": "INS-001", "component_name": "Texon Insole", "component_category": "Insole", "current_stock": 100, "reserved_stock": 0},
+            comp_sole_id: {"_id": comp_sole_id, "component_code": "SOL-001", "component_name": "Rubber Sole", "component_category": "Sole", "current_stock": 2, "reserved_stock": 0},
         }
 
         bom_cursor = MagicMock()
-        bom_cursor.to_list = AsyncMock(return_value=[bom_item])
+        bom_cursor.to_list = AsyncMock(return_value=bom_items)
         mock_db.style_component_mapping.find = MagicMock(return_value=bom_cursor)
 
         async def mock_find_one(query, *args, **kwargs):
@@ -343,10 +340,11 @@ def test_two_tier_component_stock_insufficient():
             if "_id" in query and isinstance(query["_id"], ObjectId):
                 if query["_id"] == style_doc["_id"]:
                     return style_doc
-                if query["_id"] == comp_id:
-                    return comp_doc
-            if query.get("component_code") == "SOL-001":
-                return comp_doc
+                if query["_id"] in comp_docs:
+                    return comp_docs[query["_id"]]
+            for cdoc in comp_docs.values():
+                if query.get("component_code") == cdoc["component_code"]:
+                    return cdoc
             if query.get("external_sku_key") == "sku-ssk-001":
                 return sku_mapping
             return None
@@ -383,3 +381,73 @@ def test_two_tier_component_stock_insufficient():
         assert shortage["shortage"] == 8
 
     asyncio.run(run())
+
+
+def test_two_tier_incomplete_mandatory_components_triggers_portal_alert():
+    """Verify that if a footwear style is missing Upper or Insole or Sole mapping,
+    it cannot be produced and is flagged to be removed from portal."""
+    async def run():
+        mock_db, mock_user, cfg_doc, style_doc, sku_mapping = _build_base_env()
+
+        # 0 FG stock
+        fg_cursor = MagicMock()
+        fg_cursor.sort.return_value = fg_cursor
+        fg_cursor.to_list = AsyncMock(return_value=[])
+        mock_db.fg_location_inventory.find = MagicMock(return_value=fg_cursor)
+
+        # Style has only Sole mapped; missing Upper and Insole/Socks!
+        comp_sole_id = ObjectId()
+        bom_items = [
+            {"style_id": style_doc["_id"], "component_id": comp_sole_id, "component_code": "SOL-001", "component_category": "Sole", "quantity_per_pair": 1, "active": True},
+        ]
+        comp_docs = {
+            comp_sole_id: {"_id": comp_sole_id, "component_code": "SOL-001", "component_name": "Rubber Sole", "component_category": "Sole", "current_stock": 100, "reserved_stock": 0},
+        }
+
+        bom_cursor = MagicMock()
+        bom_cursor.to_list = AsyncMock(return_value=bom_items)
+        mock_db.style_component_mapping.find = MagicMock(return_value=bom_cursor)
+
+        async def mock_find_one(query, *args, **kwargs):
+            if "platform" in query:
+                return cfg_doc
+            if "_id" in query and isinstance(query["_id"], ObjectId):
+                if query["_id"] == style_doc["_id"]:
+                    return style_doc
+                if query["_id"] in comp_docs:
+                    return comp_docs[query["_id"]]
+            for cdoc in comp_docs.values():
+                if query.get("component_code") == cdoc["component_code"]:
+                    return cdoc
+            if query.get("external_sku_key") == "sku-ssk-001":
+                return sku_mapping
+            return None
+
+        mock_db.order_import_format_configs.find_one = AsyncMock(side_effect=mock_find_one)
+        mock_db.sku_map.find_one = AsyncMock(side_effect=mock_find_one)
+        mock_db.styles.find_one = AsyncMock(side_effect=mock_find_one)
+        mock_db.component_master.find_one = AsyncMock(side_effect=mock_find_one)
+        mock_db.production_jobs.insert_many = AsyncMock()
+
+        file_obj = UploadFile(filename="orders.csv", file=io.BytesIO(CSV_TEST_ORDER))
+        with patch("routes.online_orders._get_user", AsyncMock(return_value=mock_user)), \
+             patch("routes.online_orders.get_db", return_value=mock_db):
+            res = await import_configured_online_orders(
+                file=file_obj, platform="generic", dry_run=False, request=MagicMock()
+            )
+
+        # Must flag remove_from_portal because 0 stock and incomplete mandatory components
+        assert res["stats"]["portal_delist_count"] == 1
+        assert res["stats"]["portal_delist_pairs"] == 10
+        assert len(res["committed"]["portal_delist_alerts"]) == 1
+
+        inserted_jobs = mock_db.production_jobs.insert_many.call_args[0][0]
+        job = inserted_jobs[0]
+        assert job["components_available"] is False
+        assert job["remove_from_portal"] is True
+        assert "Upper" in job["missing_components"]
+        assert "Insole/Socks" in job["missing_components"]
+        assert any("UNMAPPED_UPPER" in s.get("component_code", "") for s in job["component_shortages"])
+
+    asyncio.run(run())
+

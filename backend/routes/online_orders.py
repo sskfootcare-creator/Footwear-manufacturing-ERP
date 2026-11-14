@@ -25,6 +25,7 @@ from models.orders import POIn, POLineItem, ProductionStageUpdate
 from models.sku_map import Platform, SheetLocator, HeaderLocator
 from rate_limiter import upload_rate_limiter, bulk_import_rate_limiter
 from routes.online_returns_engine import get_footwear_placeholder_image
+from models.components import classify_footwear_component, MANDATORY_FOOTWEAR_CATEGORIES
 
 log = logging.getLogger("online_orders_routes")
 
@@ -1611,6 +1612,8 @@ async def import_configured_online_orders(
                 remaining_qty = qty
 
             # Tier 2: BOM and Component Stock Check for uncovered remainder
+            named_components = []
+            missing_mandatory = []
             if remaining_qty == 0:
                 fulfillment_status = "in_stock_picklist"
                 components_available = True
@@ -1629,17 +1632,20 @@ async def import_configured_online_orders(
                 if not bom:
                     has_bom = False
                     components_available = False
+                    missing_mandatory = ["Upper", "Insole/Socks", "Sole"]
                     component_shortages = [{
                         "component_code": "NO_BOM",
-                        "component_name": "No BOM Mapped",
+                        "component_name": "No BOM Mapped (Requires Upper, Insole/Socks, and Sole)",
                         "available": 0,
                         "required": remaining_qty,
+                        "shortage": remaining_qty,
                     }]
                     fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_shortage"
                 else:
                     has_bom = True
                     comp_shortages = []
                     needed_res = []
+                    found_categories = set()
                     all_comp_ok = True
 
                     for b in bom:
@@ -1665,12 +1671,29 @@ async def import_configured_online_orders(
                             })
                             continue
 
+                        comp_category = classify_footwear_component(comp, b)
+                        found_categories.add(comp_category)
+
                         comp_key = str(comp.get("_id", comp.get("component_code")))
                         c_stock = int(comp.get("current_stock", 0) or 0)
                         r_stock = int(comp.get("reserved_stock", 0) or 0)
                         free_c = max(0, c_stock - r_stock)
                         already_c = in_flight_comp_claimed.get(comp_key, 0)
                         effective_avail = max(0, free_c - already_c)
+
+                        named_components.append({
+                            "category": comp_category,
+                            "category_label": MANDATORY_FOOTWEAR_CATEGORIES.get(comp_category, "Other"),
+                            "component_id": str(comp.get("_id", "")),
+                            "component_code": comp.get("component_code", ""),
+                            "component_name": comp.get("component_name", ""),
+                            "color": comp.get("color", ""),
+                            "size": comp.get("size", ""),
+                            "quantity_per_pair": need_per_pair,
+                            "needed": total_need,
+                            "available": effective_avail,
+                            "in_stock": effective_avail >= total_need,
+                        })
 
                         if effective_avail < total_need:
                             all_comp_ok = False
@@ -1684,8 +1707,28 @@ async def import_configured_online_orders(
                         else:
                             needed_res.append((comp_key, comp, total_need))
 
+                    # 3-Component Mandatory Rule for Footwear Assembly (Lasting + Pasting):
+                    # To be ready for production/pending list, style must have Upper, Insole/Socks, and Sole!
+                    if "upper" not in found_categories:
+                        missing_mandatory.append("Upper")
+                    if "insole_socks" not in found_categories:
+                        missing_mandatory.append("Insole/Socks")
+                    if "sole" not in found_categories:
+                        missing_mandatory.append("Sole")
+
+                    if missing_mandatory:
+                        all_comp_ok = False
+                        for m_cat in missing_mandatory:
+                            comp_shortages.append({
+                                "component_code": f"UNMAPPED_{m_cat.upper().replace('/', '_')}",
+                                "component_name": f"Missing {m_cat} component mapping (Required for lasting/pasting)",
+                                "available": 0,
+                                "required": remaining_qty,
+                                "shortage": remaining_qty,
+                            })
+
                     component_shortages = comp_shortages
-                    if all_comp_ok:
+                    if all_comp_ok and not missing_mandatory:
                         components_available = True
                         fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_ready"
                         for comp_key, comp, total_need in needed_res:
@@ -1693,6 +1736,9 @@ async def import_configured_online_orders(
                     else:
                         components_available = False
                         fulfillment_status = "partial_stock" if covered_qty > 0 else "produce_shortage"
+
+            remove_from_portal = (covered_qty == 0 and not components_available)
+            portal_alert = "No ready stock & components unavailable — Remove from portal immediately" if remove_from_portal else ""
 
             matched_rows.append({
                 "row_index": r_idx,
@@ -1708,6 +1754,10 @@ async def import_configured_online_orders(
                 "components_available": components_available,
                 "has_bom": has_bom,
                 "component_shortages": component_shortages,
+                "named_components": named_components,
+                "missing_components": missing_mandatory,
+                "remove_from_portal": remove_from_portal,
+                "portal_alert": portal_alert,
                 "unit_price": float(r.get(resolved_cols.get("selling_price", ""), 0.0) or 0.0) if resolved_cols.get("selling_price") else 0.0,
             })
         else:
@@ -1744,6 +1794,10 @@ async def import_configured_online_orders(
             "components_available": components_available if is_row_matched else False,
             "has_bom": has_bom if is_row_matched else False,
             "component_shortages": component_shortages if is_row_matched else [],
+            "named_components": named_components if is_row_matched else [],
+            "missing_components": missing_mandatory if is_row_matched else [],
+            "remove_from_portal": remove_from_portal if is_row_matched else False,
+            "portal_alert": portal_alert if is_row_matched else "",
             "exception_reason": exc_reason,
         })
 
@@ -1813,6 +1867,10 @@ async def import_configured_online_orders(
                 "components_available": m.get("components_available", False),
                 "has_bom": m.get("has_bom", False),
                 "component_shortages": m.get("component_shortages", []),
+                "named_components": m.get("named_components", []),
+                "missing_components": m.get("missing_components", []),
+                "remove_from_portal": m.get("remove_from_portal", False),
+                "portal_alert": m.get("portal_alert", ""),
                 "unit_price": m["unit_price"],
                 "amount": round(m["unit_price"] * rem_qty, 2),
                 "completed_qty": 0,
@@ -1846,6 +1904,24 @@ async def import_configured_online_orders(
                             )
                             if inspect.isawaitable(c_up):
                                 await c_up
+                            if hasattr(db, "component_stock_movements"):
+                                mv_doc = {
+                                    "component_id": c_oid,
+                                    "component_code": b.get("component_code", ""),
+                                    "movement_type": "production_reserve",
+                                    "quantity": tot_need,
+                                    "current_delta": 0,
+                                    "reserved_delta": tot_need,
+                                    "reference_type": "online_order",
+                                    "reference_id": m.get("order_id", ""),
+                                    "style_id": sid_oid,
+                                    "notes": f"Auto-reserved for online order {m.get('order_id', '')} ({m.get('style_code')} {m.get('color')} {m.get('size')})",
+                                    "created_at": now_iso(),
+                                    "by": u.get("email", ""),
+                                }
+                                mv_res = db.component_stock_movements.insert_one(mv_doc)
+                                if inspect.isawaitable(mv_res):
+                                    await mv_res
                 except Exception as e:
                     log.warning(f"Failed to reserve components for job {m['style_code']}: {e}")
 
@@ -1877,6 +1953,8 @@ async def import_configured_online_orders(
     pairs_to_manufacture = sum(m.get("remaining_qty", 0) for m in matched_rows)
     ready_to_produce_pairs = sum(m.get("remaining_qty", 0) for m in matched_rows if m.get("components_available"))
     shortage_pairs = sum(m.get("remaining_qty", 0) for m in matched_rows if not m.get("components_available"))
+    portal_delist_pairs = sum(m.get("quantity", 0) for m in matched_rows if m.get("remove_from_portal"))
+    portal_delist_count = sum(1 for m in matched_rows if m.get("remove_from_portal"))
 
     stats = {
         "total_rows_read": len(rows),
@@ -1891,6 +1969,8 @@ async def import_configured_online_orders(
         "pairs_to_manufacture": pairs_to_manufacture,
         "ready_to_produce_pairs": ready_to_produce_pairs,
         "shortage_pairs": shortage_pairs,
+        "portal_delist_pairs": portal_delist_pairs,
+        "portal_delist_count": portal_delist_count,
     }
 
     batch_id_str = f"IMP_{platform_lc}_{now_iso()[:19].replace('-', '').replace(':', '').replace('T', '_')}"
@@ -1918,6 +1998,19 @@ async def import_configured_online_orders(
             "pairs_fulfilled_from_stock": pairs_fulfilled_from_stock if not dry_run else 0,
             "pairs_to_manufacture": pairs_to_manufacture if not dry_run else 0,
             "exceptions_queued": len(unresolved_rows) if not dry_run else 0,
+            "portal_delist_alerts": [
+                {
+                    "order_id": m["order_id"],
+                    "style_code": m["style_code"],
+                    "color": m["color"],
+                    "size": m["size"],
+                    "quantity": m["quantity"],
+                    "missing_components": m.get("missing_components", []),
+                    "component_shortages": m.get("component_shortages", []),
+                    "alert": "No stock & components unavailable — remove SKU from marketplace portal immediately",
+                }
+                for m in matched_rows if m.get("remove_from_portal")
+            ] if not dry_run else [],
         },
     }
 

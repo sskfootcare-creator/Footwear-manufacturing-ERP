@@ -43,6 +43,7 @@ import InvestorLogin from "@/pages/InvestorLogin";
 import InvestorPortal from "@/pages/InvestorPortal";
 import Investors from "@/pages/Investors";
 import StylePLM from "@/pages/StylePLM";
+import SampleDevelopment from "@/pages/SampleDevelopment";
 import PatternManager from "@/pages/PatternManager";
 import ToolingLibrary from "@/pages/ToolingLibrary";
 import BankReconciliation from "@/pages/BankReconciliation";
@@ -58,6 +59,7 @@ const ROUTE_PERMISSIONS = {
   "mobile/picklist": { roles: ["admin", "manager", "production", "inventory"], modules: ["inventory"] },
 
   "styles": { roles: ["admin", "manager", "production", "sales"], modules: ["production", "orders_sales"] },
+  "samples": { roles: ["admin", "manager", "production", "sales"], modules: ["production", "orders_sales"] },
   "plm": { roles: ["admin", "manager", "production"], modules: ["production"] },
   "patterns": { roles: ["admin", "manager", "production"], modules: ["production"] },
   "tooling": { roles: ["admin", "manager", "production"], modules: ["production"] },
@@ -165,6 +167,7 @@ function App() {
             <Route index element={<Dashboard />} />
             <Route path="investors" element={<RouteGuard path="investors"><Investors /></RouteGuard>} />
             <Route path="styles" element={<RouteGuard path="styles"><Styles /></RouteGuard>} />
+            <Route path="samples" element={<RouteGuard path="samples"><SampleDevelopment /></RouteGuard>} />
             <Route path="plm" element={<RouteGuard path="plm"><StylePLM /></RouteGuard>} />
             <Route path="patterns" element={<RouteGuard path="patterns"><PatternManager /></RouteGuard>} />
             <Route path="tooling" element={<RouteGuard path="tooling"><ToolingLibrary /></RouteGuard>} />

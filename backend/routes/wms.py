@@ -22,6 +22,7 @@ from models.wms import (
     ProductionCardIn,
 )
 from models.inventory import FgStockMovementIn
+from models.components import classify_footwear_component, MANDATORY_FOOTWEAR_CATEGORIES
 from auth import require_roles
 from routes.inventory import _apply_movement
 
@@ -1692,15 +1693,21 @@ async def pending_product_list(request: Request):
         if pending_pairs <= 0:
             pending_pairs = int(j.get("quantity", 0) or 1)
 
+        named_components = []
+        found_categories = set()
+        missing_mandatory = []
+
         if not bom:
             jd["components_available"] = False
             jd["has_bom"] = False
+            missing_mandatory = ["Upper", "Insole/Socks", "Sole"]
             jd["component_shortages"] = [{
                 "component_code": "NO_BOM",
-                "component_name": "No BOM Mapped",
+                "component_name": "No BOM Mapped (Requires Upper, Insole/Socks, and Sole)",
                 "available": 0,
-                "needed": 0,
-                "per_pair": 0,
+                "needed": pending_pairs,
+                "per_pair": 1.0,
+                "shortfall": pending_pairs,
             }]
         else:
             job_ok = True
@@ -1709,11 +1716,29 @@ async def pending_product_list(request: Request):
                 comp = await db.component_master.find_one({"_id": ObjectId(b["component_id"]) if ObjectId.is_valid(str(b["component_id"])) else str(b["component_id"])})
                 if not comp:
                     continue
+                cat = classify_footwear_component(comp, b)
+                found_categories.add(cat)
                 free_stock = max(0, int(comp.get("current_stock", 0)) - int(comp.get("reserved_stock", 0) or 0))
                 per_pair = float(b.get("quantity_per_pair", b.get("qty_per_pair", 1)) or 1)
                 waste = float(b.get("wastage_percent", 0) or 0) / 100.0
                 total_needed = int(round(pending_pairs * per_pair * (1 + waste)))
-                if free_stock < total_needed:
+                is_in_stock = free_stock >= total_needed
+
+                named_components.append({
+                    "category": cat,
+                    "category_label": MANDATORY_FOOTWEAR_CATEGORIES.get(cat, "Other"),
+                    "component_id": str(comp["_id"]),
+                    "component_code": comp.get("component_code", ""),
+                    "component_name": comp.get("component_name", ""),
+                    "color": comp.get("color", ""),
+                    "size": comp.get("size", ""),
+                    "needed": total_needed,
+                    "available": free_stock,
+                    "per_pair": per_pair,
+                    "in_stock": is_in_stock,
+                })
+
+                if not is_in_stock:
                     job_ok = False
                     job_shortages.append({
                         "component_code": comp.get("component_code"),
@@ -1723,9 +1748,36 @@ async def pending_product_list(request: Request):
                         "per_pair":       per_pair,
                         "shortfall":      total_needed - free_stock,
                     })
-            jd["components_available"] = job_ok
+
+            # Enforce 3-Component Rule: Must have Upper, Insole/Socks, and Sole
+            if "upper" not in found_categories:
+                missing_mandatory.append("Upper")
+            if "insole_socks" not in found_categories:
+                missing_mandatory.append("Insole/Socks")
+            if "sole" not in found_categories:
+                missing_mandatory.append("Sole")
+
+            if missing_mandatory:
+                job_ok = False
+                for m_cat in missing_mandatory:
+                    job_shortages.append({
+                        "component_code": f"UNMAPPED_{m_cat.upper().replace('/', '_')}",
+                        "component_name": f"Missing {m_cat} component mapping (Required for lasting/pasting)",
+                        "available": 0,
+                        "needed": pending_pairs,
+                        "per_pair": 1.0,
+                        "shortfall": pending_pairs,
+                    })
+
+            jd["components_available"] = (job_ok and not missing_mandatory)
             jd["has_bom"] = True
             jd["component_shortages"] = job_shortages
+
+        covered_qty = int(j.get("covered_from_stock_qty", 0) or 0)
+        jd["named_components"] = named_components
+        jd["missing_components"] = missing_mandatory
+        jd["remove_from_portal"] = (covered_qty == 0 and not jd["components_available"])
+        jd["portal_alert"] = "No ready stock & components unavailable — Remove from portal immediately" if jd["remove_from_portal"] else ""
 
         s_meta = style_lookup.get(sid, {})
         jd["image_url"]           = s_meta.get("image_thumbnail_url") or s_meta.get("image_display_url") or s_meta.get("image_url") or ""

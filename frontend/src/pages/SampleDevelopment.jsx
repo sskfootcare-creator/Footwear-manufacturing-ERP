@@ -1,0 +1,2640 @@
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { useNavigate } from "react-router-dom";
+import { http, inr, formatApiError, friendlyAxiosError } from "../lib/api";
+import { SafeImage, resolveImageUrl } from "../components/ImageUploader";
+import {
+  PageHeader,
+  Card,
+  BtnPrimary,
+  BtnSecondary,
+  Input,
+  Select,
+  Badge,
+  StatTile,
+} from "../components/ui-kit";
+
+const getErrorMessage = (err, fallback = "An error occurred") => {
+  if (err?.response?.data?.detail) {
+    return formatApiError(err.response.data.detail);
+  }
+  return friendlyAxiosError(err) || fallback;
+};
+import {
+  Sparkles, Plus, Search, Filter, Camera, Trash2, CheckCircle2,
+  AlertCircle, ArrowRight, Layers, Hammer, ShieldAlert,
+  ChevronRight, RefreshCw, X, Upload, Palette, Scissors,
+  Tag, Clock, UserCheck, ExternalLink, SlidersHorizontal, Check, Eye,
+  ChevronLeft, Star, ImagePlus, Images, Printer
+} from "lucide-react";
+
+const STATUS_CONFIG = {
+  draft: { label: "Draft Spec", badgeColor: "slate", accent: "#94A3B8" },
+  in_sampling: { label: "In Sampling", badgeColor: "yellow", accent: "#F59E0B" },
+  sample_ready: { label: "Sample Ready", badgeColor: "blue", accent: "#2563EB" },
+  approved: { label: "Approved for Prod", badgeColor: "green", accent: "#16A34A" },
+  rejected: { label: "Rejected / Discarded", badgeColor: "red", accent: "#DC2626" },
+  transferred_to_style: { label: "Style Master Created", badgeColor: "purple", accent: "#7C3AED" },
+};
+
+export default function SampleDevelopment() {
+  const navigate = useNavigate();
+  const [samples, setSamples] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [profileFilter, setProfileFilter] = useState("all");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusCounts, setStatusCounts] = useState({});
+
+  // Helpers (materials & karigars)
+  const [materials, setMaterials] = useState([]);
+  const [workers, setWorkers] = useState([]);
+
+  // Active Modals
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingSample, setEditingSample] = useState(null);
+  const [photoModalSample, setPhotoModalSample] = useState(null);
+  const [transferModalSample, setTransferModalSample] = useState(null);
+  const [detailSample, setDetailSample] = useState(null);
+
+  // Status transition state
+  const [statusUpdateLoading, setStatusUpdateLoading] = useState(false);
+
+  // Fetch samples
+  const fetchSamples = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = {};
+      if (statusFilter !== "all") params.status = statusFilter;
+      if (profileFilter !== "all") params.profile = profileFilter;
+      if (searchTerm.trim()) params.q = searchTerm.trim();
+
+      const res = await http.get("/samples", { params });
+      setSamples(res.data.items || []);
+      setStatusCounts(res.data.status_counts || {});
+    } catch (err) {
+      console.error("Error fetching samples:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter, profileFilter, searchTerm]);
+
+  // Fetch helpers
+  const fetchHelpers = useCallback(async () => {
+    try {
+      const res = await http.get("/samples/helpers/materials-and-karigars");
+      setMaterials(res.data.materials || []);
+      setWorkers(res.data.workers || []);
+    } catch (err) {
+      console.error("Error fetching helpers:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSamples();
+    fetchHelpers();
+  }, [fetchSamples, fetchHelpers]);
+
+  // Open Create Modal
+  const handleOpenCreate = () => {
+    setEditingSample({
+      sample_name: "",
+      profile: "flat",
+      category: "Footwear",
+      season: "SS26",
+      target_gender: "women",
+      target_cost: 0,
+      target_date: "",
+      assigned_karigar_id: "",
+      assigned_karigar_name: "",
+      notes: "",
+      inspiration_photos: [],
+      upper_spec: {
+        upper_top_material_id: "",
+        upper_top_material_name: "",
+        upper_top_material_code: "",
+        upper_color_to_develop: "",
+        canvas_backing: "",
+        lining_material_id: "",
+        lining_material_name: "",
+        lining_material_code: "",
+        cutting_operation: "die_cut",
+        stitching_operation: "stitching",
+        edge_treatment: "none",
+        has_buckle: false,
+        buckle_spec: "",
+        other_hardware: "",
+      },
+      insole_spec: {
+        profile_type: "flat",
+        heeled_category: "platforms",
+        insole_style_code_shape: "",
+        flat_mould_name_shape: "",
+        base_board: "paper_board",
+        shank_reinforced: false,
+        cushioning_type: "eva",
+        cushioning_thickness_mm: "3mm",
+        socks_covering_type: "matching",
+        socks_material_id: "",
+        socks_material_name: "",
+        socks_color: "",
+        surface_detailing: "none",
+        embossing: "none",
+        embossing_details: "",
+        printing: "none",
+        printing_details: "",
+      },
+      sole_spec: {
+        sole_material: "TPR",
+        sole_type: "ready_made",
+        mould_name: "",
+        sole_shape: "Round",
+        velting: false,
+        grinding: false,
+        gripping: false,
+        attaching_top_piece: false,
+        other_processing: "",
+        heel_type: "none",
+        heel_mould_name: "",
+        heel_height: "",
+        heel_finish: "none",
+        heel_covering_type: "matching",
+        heel_covering_material_id: "",
+        heel_covering_material_name: "",
+      },
+    });
+    setEditorOpen(true);
+  };
+
+  const handleOpenEdit = (sample) => {
+    setEditingSample(JSON.parse(JSON.stringify(sample)));
+    setEditorOpen(true);
+  };
+
+  const handleStatusChange = async (sampleId, newStatus, rejectionReason = "") => {
+    setStatusUpdateLoading(true);
+    try {
+      await http.post(`/samples/${sampleId}/status`, null, {
+        params: { status: newStatus, rejection_reason: rejectionReason }
+      });
+      fetchSamples();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to update status"));
+    } finally {
+      setStatusUpdateLoading(false);
+    }
+  };
+
+  const handleDeleteSample = async (sample) => {
+    if (!window.confirm(`Are you sure you want to discard / delete sample ${sample.temp_code} (${sample.sample_name})?`)) return;
+    try {
+      await http.delete(`/samples/${sample.id || sample._id}`);
+      fetchSamples();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to delete sample"));
+    }
+  };
+
+  const handlePrintTechPack = (sample) => {
+    setDetailSample(sample);
+    setTimeout(() => {
+      window.print();
+    }, 150);
+  };
+
+  return (
+    <div className="bg-[#F7F7F5] min-h-screen">
+      <div className="print:hidden">
+        {/* ── TOP HEADER (SSK ERP PageHeader) ── */}
+        <PageHeader
+          title="Sample Development & Tracking"
+          subtitle="Master / Footwear Sampling Pipeline (R&D & PD Specs)"
+          testId="samples-header"
+          action={
+            <div className="flex items-center gap-2">
+              <BtnSecondary onClick={() => fetchSamples()} disabled={loading} title="Refresh sample list">
+                <RefreshCw className={`w-3.5 h-3.5 inline mr-1 -mt-0.5 ${loading ? "animate-spin" : ""}`} />
+                <span>Refresh</span>
+              </BtnSecondary>
+              <BtnPrimary onClick={handleOpenCreate} data-testid="new-sample-btn">
+                <Plus className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                <span>New Sample Spec</span>
+              </BtnPrimary>
+            </div>
+          }
+        />
+
+        <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
+        {/* ── METRIC / STAT TILES ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 sm:gap-4">
+          <Card
+            onClick={() => setStatusFilter("all")}
+            className={`p-3 sm:p-4 relative overflow-hidden cursor-pointer hover:border-slate-900 transition-all ${
+              statusFilter === "all" ? "border-slate-900 shadow-ind ring-2 ring-slate-900" : "hover:shadow-sm"
+            }`}
+          >
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">Total Samples</div>
+            <div className="font-mono text-xl sm:text-2xl font-black mt-1.5 text-slate-900">
+              {Object.values(statusCounts).reduce((a, b) => a + b, 0)}
+            </div>
+            <div className="text-[11px] text-slate-400 font-mono mt-0.5">All Pipeline</div>
+            <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#C27842]" />
+          </Card>
+
+          {Object.entries(STATUS_CONFIG).map(([key, cfg]) => {
+            const count = statusCounts[key] || 0;
+            return (
+              <Card
+                key={key}
+                onClick={() => setStatusFilter(key)}
+                className={`p-3 sm:p-4 relative overflow-hidden cursor-pointer hover:border-slate-900 transition-all ${
+                  statusFilter === key ? "border-slate-900 shadow-ind ring-2 ring-slate-900" : "hover:shadow-sm"
+                }`}
+              >
+                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate" title={cfg.label}>
+                  {cfg.label}
+                </div>
+                <div className="font-mono text-xl sm:text-2xl font-black mt-1.5 text-slate-900">
+                  {count}
+                </div>
+                <div className="text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+                  {key === "draft" ? "Pending spec" : key === "in_sampling" ? "On workshop floor" : key === "sample_ready" ? "Awaiting review" : key === "approved" ? "Ready for BOM" : key === "transferred_to_style" ? "In Style Master" : "Archived"}
+                </div>
+                <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ background: cfg.accent }} />
+              </Card>
+            );
+          })}
+        </div>
+
+        {/* ── FILTER & SEARCH BAR ── */}
+        <Card className="p-3 sm:p-4 flex flex-col sm:flex-row gap-3 items-center justify-between">
+          <div className="relative w-full sm:w-96">
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search by SMP code, name, season..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs font-mono border-2 border-slate-300 bg-white focus:border-[#2563EB] focus:outline-none"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+            <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 hidden sm:inline">Profile:</span>
+            <div className="inline-flex border-2 border-slate-300 bg-white">
+              <button
+                onClick={() => setProfileFilter("all")}
+                className={`px-3 py-1 text-xs font-bold uppercase tracking-wider transition-colors ${
+                  profileFilter === "all" ? "bg-[#0F172A] text-white" : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setProfileFilter("flat")}
+                className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border-l-2 border-slate-300 transition-colors ${
+                  profileFilter === "flat" ? "bg-[#0F172A] text-white" : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                🥿 Flats
+              </button>
+              <button
+                onClick={() => setProfileFilter("heeled")}
+                className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border-l-2 border-slate-300 transition-colors ${
+                  profileFilter === "heeled" ? "bg-[#0F172A] text-white" : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                👠 Heels
+              </button>
+            </div>
+
+            <BtnSecondary onClick={() => fetchSamples()} className="py-1 px-2.5 text-xs">
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            </BtnSecondary>
+          </div>
+        </Card>
+
+        {/* ── SAMPLES GRID ── */}
+        {loading ? (
+          <div className="flex items-center justify-center py-20 text-slate-500 font-mono text-sm">
+            <RefreshCw className="w-5 h-5 animate-spin mr-2 text-[#C27842]" />
+            <span>Loading sample development pipeline...</span>
+          </div>
+        ) : samples.length === 0 ? (
+          <Card className="text-center py-16 p-6 border-2 border-dashed border-slate-300 bg-white">
+            <Sparkles className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+            <h3 className="text-base font-bold text-slate-900 uppercase tracking-wide">No sample development records found</h3>
+            <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-5">
+              Upload reference inspiration photos and capture footwear upper, insole, and sole technical specifications.
+            </p>
+            <BtnPrimary onClick={handleOpenCreate}>
+              <Plus className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+              <span>Create First Sample Spec</span>
+            </BtnPrimary>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {samples.map((sample) => (
+              <SampleCard
+                key={sample.id || sample._id}
+                sample={sample}
+                onOpenPhotos={() => setPhotoModalSample(sample)}
+                onOpenEdit={() => handleOpenEdit(sample)}
+                onOpenTransfer={() => setTransferModalSample(sample)}
+                onOpenDetail={() => setDetailSample(sample)}
+                onPrintTechPack={() => handlePrintTechPack(sample)}
+                onStatusChange={handleStatusChange}
+                onDelete={handleDeleteSample}
+              />
+            ))}
+          </div>
+        )}
+        </div>
+      </div>
+
+      {/* ── SPEC EDITOR MODAL ── */}
+      {editorOpen && editingSample && (
+        <SpecEditorModal
+          sample={editingSample}
+          materials={materials}
+          workers={workers}
+          onClose={() => {
+            setEditorOpen(false);
+            setEditingSample(null);
+          }}
+          onSaved={() => {
+            setEditorOpen(false);
+            setEditingSample(null);
+            fetchSamples();
+          }}
+        />
+      )}
+
+      {/* ── PHOTO GALLERY & UPLOADER MODAL ── */}
+      {photoModalSample && (
+        <PhotoGalleryModal
+          sample={photoModalSample}
+          onClose={() => setPhotoModalSample(null)}
+          onUpdated={() => {
+            fetchSamples();
+            http.get(`/samples/${photoModalSample.id || photoModalSample._id}`).then(res => {
+              setPhotoModalSample(res.data);
+            });
+          }}
+        />
+      )}
+
+      {/* ── TRANSFER TO STYLE MASTER MODAL ── */}
+      {transferModalSample && (
+        <TransferToStyleModal
+          sample={transferModalSample}
+          onClose={() => setTransferModalSample(null)}
+          onSuccess={(styleCode) => {
+            setTransferModalSample(null);
+            fetchSamples();
+            alert(`Sample successfully transferred to Style Master with code: ${styleCode}! You can now view and edit it in Styles Master.`);
+          }}
+        />
+      )}
+
+      {/* ── DETAIL VIEW & PRINT TECH PACK MODAL ── */}
+      {detailSample && (
+        <DetailViewModal
+          sample={detailSample}
+          onClose={() => setDetailSample(null)}
+          onOpenEdit={() => {
+            const s = detailSample;
+            setDetailSample(null);
+            handleOpenEdit(s);
+          }}
+          onOpenTransfer={() => {
+            const s = detailSample;
+            setDetailSample(null);
+            setTransferModalSample(s);
+          }}
+          onOpenPhotos={() => {
+            const s = detailSample;
+            setDetailSample(null);
+            setPhotoModalSample(s);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SAMPLE CARD (With Interactive Multi-Photo Carousel)
+   ───────────────────────────────────────────────────────────────────────────── */
+function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDetail, onPrintTechPack, onStatusChange, onDelete }) {
+  const sid = sample.id || sample._id;
+  const cfg = STATUS_CONFIG[sample.status] || STATUS_CONFIG.draft;
+  const upper = sample.upper_spec || {};
+  const insole = sample.insole_spec || {};
+  const sole = sample.sole_spec || {};
+
+  const photos = sample.inspiration_photos || [];
+  const [photoIdx, setPhotoIdx] = useState(0);
+
+  // Default to primary photo if available
+  useEffect(() => {
+    if (photos.length > 0) {
+      const pIdx = photos.findIndex(p => p.is_primary);
+      setPhotoIdx(pIdx >= 0 ? pIdx : 0);
+    }
+  }, [photos]);
+
+  const currentPhoto = photos[photoIdx] || photos[0];
+
+  const handlePrevPhoto = (e) => {
+    e.stopPropagation();
+    setPhotoIdx(prev => (prev === 0 ? photos.length - 1 : prev - 1));
+  };
+
+  const handleNextPhoto = (e) => {
+    e.stopPropagation();
+    setPhotoIdx(prev => (prev === photos.length - 1 ? 0 : prev + 1));
+  };
+
+  return (
+    <Card className="flex flex-col relative hover:border-slate-900 hover:shadow-ind transition-all overflow-hidden group">
+      {/* PHOTO HEADER WITH MULTI-IMAGE CAROUSEL */}
+      <div className="relative h-52 bg-slate-100 border-b-2 border-slate-200 flex items-center justify-center overflow-hidden">
+        {currentPhoto?.url ? (
+          <SafeImage
+            src={currentPhoto.url}
+            alt={sample.sample_name}
+            className="w-full h-full object-cover transition duration-300 group-hover:scale-[1.02]"
+          />
+        ) : (
+          <div
+            onClick={onOpenPhotos}
+            className="flex flex-col items-center justify-center text-slate-400 cursor-pointer hover:text-slate-800 transition p-4 text-center"
+          >
+            <Camera className="w-10 h-10 opacity-30 mb-1" />
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-600">No photos uploaded</span>
+            <span className="text-[11px] text-[#C27842] font-semibold underline mt-0.5">+ Click to upload photos</span>
+          </div>
+        )}
+
+        {/* Carousel Navigation Arrows */}
+        {photos.length > 1 && (
+          <>
+            <button
+              onClick={handlePrevPhoto}
+              className="absolute left-2 top-1/2 -translate-y-1/2 p-1.5 bg-[#0F172A]/80 hover:bg-[#0F172A] text-white border border-slate-700 shadow-sm transition z-10"
+              title="Previous photo"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={handleNextPhoto}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-[#0F172A]/80 hover:bg-[#0F172A] text-white border border-slate-700 shadow-sm transition z-10"
+              title="Next photo"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </>
+        )}
+
+        {/* Temporary Code Badge */}
+        <div className="absolute top-2.5 left-2.5 bg-[#0F172A] text-white px-2 py-0.5 text-xs font-mono font-bold tracking-wider border border-[#0F172A] shadow-ind flex items-center gap-1.5 z-10">
+          <span className="w-1.5 h-1.5 bg-amber-400" />
+          <span>{sample.temp_code}</span>
+        </div>
+
+        {/* Status Badge */}
+        <div className="absolute top-2.5 right-2.5 z-10">
+          <Badge color={cfg.badgeColor}>{cfg.label}</Badge>
+        </div>
+
+        {/* Profile Indicator */}
+        <div className="absolute bottom-2.5 left-2.5 z-10">
+          <Badge color={sample.profile === "heeled" ? "purple" : "slate"}>
+            {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+          </Badge>
+        </div>
+
+        {/* Photos Count & Quick Upload Button */}
+        <button
+          onClick={onOpenPhotos}
+          className="absolute bottom-2.5 right-2.5 bg-white text-slate-900 text-xs px-2.5 py-1 border-2 border-slate-300 hover:border-slate-900 flex items-center gap-1.5 font-bold uppercase tracking-wider shadow-sm transition z-10"
+          title="Upload or view inspiration photos"
+        >
+          <Camera className="w-3.5 h-3.5 text-[#C27842]" />
+          <span className="font-mono">{photos.length}</span>
+          <span className="text-[10px] text-slate-500 font-semibold">+ Add</span>
+        </button>
+
+        {/* Thumbnail Carousel Dots */}
+        {photos.length > 1 && (
+          <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-black/60 px-2 py-0.5 z-10">
+            {photos.map((p, idx) => (
+              <span
+                key={p.photo_id || idx}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPhotoIdx(idx);
+                }}
+                className={`w-1.5 h-1.5 cursor-pointer transition ${idx === photoIdx ? "bg-amber-400 scale-125" : "bg-white/40"}`}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* CARD BODY */}
+      <div className="p-4 flex-1 flex flex-col justify-between space-y-3 bg-white">
+        <div>
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-bold text-base text-slate-900 leading-tight truncate" title={sample.sample_name}>
+              {sample.sample_name}
+            </h3>
+            {sample.season && (
+              <span className="text-[10px] font-mono uppercase bg-slate-100 border border-slate-300 px-1.5 py-0.5 text-slate-700 font-bold shrink-0">
+                {sample.season}
+              </span>
+            )}
+          </div>
+
+          {sample.transferred_style_code && (
+            <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 bg-purple-50 border border-purple-300 text-purple-800 text-[11px] font-mono font-bold uppercase">
+              <span>ERP Style:</span>
+              <span className="underline font-black">{sample.transferred_style_code}</span>
+            </div>
+          )}
+
+          {/* 3 Foundation Specifications */}
+          <div className="mt-3 space-y-2 text-xs border-t-2 border-slate-100 pt-2.5">
+            {/* Upper Pillar */}
+            <div className="flex items-start gap-1.5 text-xs">
+              <span className="font-bold text-[10px] uppercase text-slate-500 tracking-wider shrink-0 w-16">Upper:</span>
+              <span className="text-slate-800 truncate font-mono text-[11px]">
+                {upper.upper_top_material_name || "Material not chosen"}
+                {upper.upper_color_to_develop ? ` (${upper.upper_color_to_develop})` : ""}
+                {" · "}
+                <span className="capitalize">{upper.cutting_operation?.replace("_", " ")}</span>
+                {upper.has_buckle ? " · Buckle" : ""}
+              </span>
+            </div>
+
+            {/* Insole Pillar */}
+            <div className="flex items-start gap-1.5 text-xs">
+              <span className="font-bold text-[10px] uppercase text-slate-500 tracking-wider shrink-0 w-16">Insole:</span>
+              <span className="text-slate-800 truncate font-mono text-[11px]">
+                {insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}
+                {" + "}
+                {insole.cushioning_type?.toUpperCase()} {insole.cushioning_thickness_mm}
+                {" · "}
+                {insole.socks_covering_type === "matching" ? "Matching Socks" : (insole.socks_material_name || "Custom Socks")}
+                {insole.embossing && insole.embossing !== "none" ? ` · ${insole.embossing}` : ""}
+              </span>
+            </div>
+
+            {/* Sole Pillar */}
+            <div className="flex items-start gap-1.5 text-xs">
+              <span className="font-bold text-[10px] uppercase text-slate-500 tracking-wider shrink-0 w-16">Sole:</span>
+              <span className="text-slate-800 truncate font-mono text-[11px]">
+                {sole.sole_material || "TPR"}
+                {sole.mould_name ? ` (${sole.mould_name})` : ""}
+                {sample.profile === "heeled" && sole.heel_type !== "none" ? ` · Heel: ${sole.heel_type} (${sole.heel_finish})` : ""}
+                {sole.velting ? " · Welting" : ""}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* CARD ACTIONS */}
+        <div className="border-t-2 border-slate-100 pt-3 space-y-2">
+          {/* Primary Workflow Button */}
+          {sample.status !== "transferred_to_style" && sample.status !== "rejected" ? (
+            <button
+              onClick={onOpenTransfer}
+              className="w-full bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs py-2 px-3 border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg transition-all flex items-center justify-center gap-1.5 active:shadow-none"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Transfer to Style Master (Generate BOM)</span>
+              <ArrowRight className="w-3.5 h-3.5 ml-0.5" />
+            </button>
+          ) : sample.status === "transferred_to_style" ? (
+            <div className="w-full bg-purple-50 border-2 border-purple-300 text-purple-800 font-bold uppercase tracking-wider text-xs py-1.5 px-3 text-center flex items-center justify-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-purple-700" />
+              <span>Style Master Active ({sample.transferred_style_code})</span>
+            </div>
+          ) : (
+            <div className="w-full bg-rose-50 border-2 border-rose-300 text-rose-800 font-bold uppercase tracking-wider text-xs py-1.5 px-3 text-center">
+              Discarded / Rejected
+            </div>
+          )}
+
+          {/* Secondary Actions */}
+          <div className="flex items-center justify-between text-xs pt-1">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onOpenEdit}
+                className="text-xs font-bold uppercase tracking-wider text-slate-800 hover:text-[#C27842] hover:underline"
+              >
+                Edit Specs
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                onClick={onOpenDetail}
+                className="text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-900 hover:underline"
+              >
+                Tech Pack
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                onClick={onPrintTechPack}
+                className="text-xs font-bold uppercase tracking-wider text-[#C27842] hover:underline flex items-center gap-1"
+                title="Print Tech Pack for Designer (80% Image Sheet)"
+              >
+                <Printer className="w-3 h-3" />
+                <span>Print</span>
+              </button>
+            </div>
+
+            {sample.status !== "transferred_to_style" && (
+              <div className="flex items-center gap-1">
+                {sample.status === "draft" && (
+                  <button
+                    onClick={() => onStatusChange(sid, "in_sampling")}
+                    className="px-2 py-0.5 border border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 text-[10px] font-bold uppercase tracking-wider transition"
+                  >
+                    Start Sampling
+                  </button>
+                )}
+                {sample.status === "in_sampling" && (
+                  <button
+                    onClick={() => onStatusChange(sid, "sample_ready")}
+                    className="px-2 py-0.5 border border-blue-400 bg-blue-50 text-blue-800 hover:bg-blue-100 text-[10px] font-bold uppercase tracking-wider transition"
+                  >
+                    Sample Ready
+                  </button>
+                )}
+                {sample.status === "sample_ready" && (
+                  <button
+                    onClick={() => onStatusChange(sid, "approved")}
+                    className="px-2 py-0.5 border border-emerald-400 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 text-[10px] font-bold uppercase tracking-wider transition"
+                  >
+                    Approve
+                  </button>
+                )}
+                <button
+                  onClick={() => onDelete(sample)}
+                  className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 transition border border-transparent hover:border-red-200"
+                  title="Discard / Delete"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODAL 1: SPECIFICATION EDITOR (WITH DIRECT MULTI-PHOTO UPLOAD ZONE)
+   ───────────────────────────────────────────────────────────────────────────── */
+function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
+  const isNew = !sample.id && !sample._id;
+  const sid = sample.id || sample._id;
+  const [formData, setFormData] = useState(JSON.parse(JSON.stringify(sample)));
+  const [activeTab, setActiveTab] = useState("upper");
+  const [saving, setSaving] = useState(false);
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const multiFileInputRef = useRef(null);
+
+  const updateUpper = (field, val) => {
+    setFormData(prev => ({
+      ...prev,
+      upper_spec: { ...prev.upper_spec, [field]: val }
+    }));
+  };
+
+  const updateInsole = (field, val) => {
+    setFormData(prev => ({
+      ...prev,
+      insole_spec: { ...prev.insole_spec, [field]: val }
+    }));
+  };
+
+  const updateSole = (field, val) => {
+    setFormData(prev => ({
+      ...prev,
+      sole_spec: { ...prev.sole_spec, [field]: val }
+    }));
+  };
+
+  // MULTI-PHOTO UPLOAD HANDLER
+  const handleMultiPhotoUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    setUploadingPhotos(true);
+    const uploadData = new FormData();
+    files.forEach(f => {
+      uploadData.append("files", f);
+    });
+
+    try {
+      if (sid) {
+        // Upload directly to existing sample
+        const res = await http.post(`/samples/${sid}/photos`, uploadData);
+        setFormData(prev => ({
+          ...prev,
+          inspiration_photos: res.data.sample?.inspiration_photos || [...(prev.inspiration_photos || []), ...(res.data.photos || [])]
+        }));
+      } else {
+        // Staging upload for new sample
+        const res = await http.post("/samples/upload-photos", uploadData);
+        const newPhotos = res.data.photos || [];
+        setFormData(prev => {
+          const existing = prev.inspiration_photos || [];
+          if (!existing.some(p => p.is_primary) && newPhotos.length > 0) {
+            newPhotos[0].is_primary = true;
+          }
+          return {
+            ...prev,
+            inspiration_photos: [...existing, ...newPhotos]
+          };
+        });
+      }
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to upload inspiration photos"));
+    } finally {
+      setUploadingPhotos(false);
+      if (multiFileInputRef.current) multiFileInputRef.current.value = "";
+    }
+  };
+
+  const handleSetPrimaryPhoto = (photoId) => {
+    setFormData(prev => ({
+      ...prev,
+      inspiration_photos: (prev.inspiration_photos || []).map(p => ({
+        ...p,
+        is_primary: p.photo_id === photoId
+      }))
+    }));
+  };
+
+  const handleRemovePhoto = (photoId) => {
+    setFormData(prev => {
+      const remaining = (prev.inspiration_photos || []).filter(p => p.photo_id !== photoId);
+      if (remaining.length > 0 && !remaining.some(p => p.is_primary)) {
+        remaining[0].is_primary = true;
+      }
+      return { ...prev, inspiration_photos: remaining };
+    });
+  };
+
+  const handleUpdateCaption = (photoId, newCaption) => {
+    setFormData(prev => ({
+      ...prev,
+      inspiration_photos: (prev.inspiration_photos || []).map(p =>
+        p.photo_id === photoId ? { ...p, caption: newCaption } : p
+      )
+    }));
+  };
+
+  const handleSave = async () => {
+    if (!formData.sample_name || !formData.sample_name.trim()) {
+      alert("Please enter a Sample Name");
+      return;
+    }
+    setSaving(true);
+    try {
+      if (isNew) {
+        await http.post("/samples", formData);
+      } else {
+        await http.patch(`/samples/${sid}`, formData);
+      }
+      onSaved();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to save sample specification"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const photos = formData.inspiration_photos || [];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+        {/* MODAL HEADER */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">SSK / Sample R&D Technical Specification</div>
+            <h2 className="text-lg font-black tracking-tight text-slate-900">
+              {isNew ? "Create Sample Development Spec" : `Edit Sample Spec — ${sample.temp_code}`}
+            </h2>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* BASIC ATTRIBUTES STRIP */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 bg-slate-50 grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Sample Name *</label>
+            <input
+              type="text"
+              placeholder="e.g. Strappy Block Heel Sandal"
+              value={formData.sample_name}
+              onChange={(e) => setFormData(prev => ({ ...prev, sample_name: e.target.value }))}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Footwear Profile</label>
+            <select
+              value={formData.profile}
+              onChange={(e) => {
+                const val = e.target.value;
+                setFormData(prev => ({
+                  ...prev,
+                  profile: val,
+                  insole_spec: { ...prev.insole_spec, profile_type: val }
+                }));
+              }}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-bold focus:border-[#2563EB] focus:outline-none"
+            >
+              <option value="flat">🥿 Flat Footwear</option>
+              <option value="heeled">👠 Heeled Footwear</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Season / Collection</label>
+            <input
+              type="text"
+              placeholder="e.g. SS26, Festive 2026"
+              value={formData.season || ""}
+              onChange={(e) => setFormData(prev => ({ ...prev, season: e.target.value }))}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Assigned Karigar / Tech</label>
+            <select
+              value={formData.assigned_karigar_id || ""}
+              onChange={(e) => {
+                const wid = e.target.value;
+                const worker = workers.find(w => (w.id || w._id) === wid);
+                setFormData(prev => ({
+                  ...prev,
+                  assigned_karigar_id: wid,
+                  assigned_karigar_name: worker ? worker.name : ""
+                }));
+              }}
+              className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+            >
+              <option value="">-- Unassigned --</option>
+              {workers.map(w => (
+                <option key={w.id || w._id} value={w.id || w._id}>
+                  {w.name} ({w.role || "Karigar"})
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* ── DEDICATED MULTI-PHOTO UPLOAD SECTION ── */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 bg-white space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-700">Sample Inspiration Photos</span>
+                <span className="font-mono text-[10px] font-bold bg-[#0F172A] text-white px-2 py-0.5">
+                  {photos.length} UPLOADED
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Upload multi-angle photos (front, side, heel, sole). Isolated in <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5">uploads/samples_inspiration/</code>.
+              </p>
+            </div>
+
+            <div>
+              <input
+                type="file"
+                ref={multiFileInputRef}
+                onChange={handleMultiPhotoUpload}
+                multiple
+                accept="image/*"
+                className="hidden"
+              />
+              <BtnSecondary
+                type="button"
+                onClick={() => multiFileInputRef.current?.click()}
+                disabled={uploadingPhotos}
+                className="text-xs"
+              >
+                {uploadingPhotos ? <RefreshCw className="w-3.5 h-3.5 inline mr-1 animate-spin" /> : <ImagePlus className="w-3.5 h-3.5 inline mr-1" />}
+                <span>{uploadingPhotos ? "Uploading..." : "+ Upload Photos"}</span>
+              </BtnSecondary>
+            </div>
+          </div>
+
+          {/* PHOTO THUMBNAILS GALLERY */}
+          {photos.length === 0 ? (
+            <div
+              onClick={() => multiFileInputRef.current?.click()}
+              className="border-2 border-dashed border-slate-300 hover:border-slate-900 rounded p-6 text-center cursor-pointer bg-slate-50/60 transition group"
+            >
+              <Camera className="w-8 h-8 text-slate-400 mx-auto mb-1.5 group-hover:scale-105 transition" />
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-800">
+                Click to browse or drop multiple inspiration photos here
+              </p>
+              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                PNG, JPG, WEBP &bull; Select multiple files at once (Front angle, Heel, Sole, Buckle, etc.)
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5 pt-1">
+              {photos.map((photo, pIdx) => (
+                <div
+                  key={photo.photo_id || pIdx}
+                  className={`group relative border-2 overflow-hidden bg-white shadow-xs flex flex-col ${
+                    photo.is_primary ? "border-amber-500 shadow-ind ring-1 ring-amber-400" : "border-slate-200"
+                  }`}
+                >
+                  <div className="h-24 bg-slate-100 flex items-center justify-center overflow-hidden relative">
+                    <SafeImage src={photo.url} alt="Inspiration" className="w-full h-full object-cover" />
+
+                    {/* Primary Badge */}
+                    {photo.is_primary && (
+                      <span className="absolute top-1 left-1 z-10">
+                        <Badge color="yellow">COVER</Badge>
+                      </span>
+                    )}
+
+                    {/* Quick Action Overlay */}
+                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1.5 p-1 z-10">
+                      {!photo.is_primary && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetPrimaryPhoto(photo.photo_id)}
+                          className="p-1 bg-amber-500 hover:bg-amber-600 text-white text-[10px] font-bold uppercase"
+                          title="Make Primary Cover Photo"
+                        >
+                          <Star className="w-3 h-3" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePhoto(photo.photo_id)}
+                        className="p-1 bg-red-600 hover:bg-red-700 text-white text-[10px]"
+                        title="Delete photo"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Caption Input */}
+                  <input
+                    type="text"
+                    placeholder="Caption (e.g. Front)..."
+                    value={photo.caption || ""}
+                    onChange={(e) => handleUpdateCaption(photo.photo_id, e.target.value)}
+                    className="p-1 text-[10px] font-mono border-t border-slate-200 bg-white focus:outline-none truncate"
+                  />
+                </div>
+              ))}
+
+              {/* Add more tile */}
+              <button
+                type="button"
+                onClick={() => multiFileInputRef.current?.click()}
+                disabled={uploadingPhotos}
+                className="h-full min-h-[96px] border-2 border-dashed border-slate-300 hover:border-slate-900 flex flex-col items-center justify-center text-slate-500 hover:text-slate-900 text-[10px] font-bold uppercase tracking-wider transition bg-slate-50"
+              >
+                <Plus className="w-5 h-5 mb-0.5 opacity-60" />
+                <span>+ More</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* PILLAR TABS */}
+        <div className="flex items-center gap-1 border-b-2 border-slate-200 bg-slate-100 px-5 pt-2">
+          {[
+            { id: "upper", label: "1. Upper Component", icon: Scissors },
+            { id: "insole", label: "2. Insole / Socks", icon: Layers },
+            { id: "sole", label: "3. Sole & Heel", icon: Hammer },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all ${
+                activeTab === tab.id
+                  ? "bg-white border-t-2 border-l-2 border-r-2 border-slate-900 text-slate-900 -mb-[2px] z-10"
+                  : "text-slate-600 hover:text-slate-900 border-b-2 border-transparent hover:border-slate-300"
+              }`}
+            >
+              <tab.icon className="w-3.5 h-3.5 text-[#C27842]" />
+              <span>{tab.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* TAB CONTENTS (SCROLLABLE) */}
+        <div className="p-4 md:p-6 overflow-y-auto flex-1 space-y-4 text-xs bg-white">
+          {/* ──────────────── TAB 1: UPPER SPEC ──────────────── */}
+          {activeTab === "upper" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Upper Top Material */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Palette className="w-4 h-4 text-[#C27842]" />
+                    Upper Top Material
+                  </span>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Select from Material Master:</label>
+                    <select
+                      value={formData.upper_spec?.upper_top_material_id || ""}
+                      onChange={(e) => {
+                        const mid = e.target.value;
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateUpper("upper_top_material_id", mid);
+                          updateUpper("upper_top_material_name", mat.name);
+                          updateUpper("upper_top_material_code", mat.code);
+                        } else {
+                          updateUpper("upper_top_material_id", "");
+                          updateUpper("upper_top_material_name", "");
+                          updateUpper("upper_top_material_code", "");
+                        }
+                      }}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="">-- Select Material --</option>
+                      {materials.map(m => (
+                        <option key={m.id || m._id} value={m.id || m._id}>
+                          {m.name} [{m.code}] - ₹{m.rate}/{m.unit} ({m.category})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Color to be Developed *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Metallic Rose Gold, Tan Crust, Black Gloss"
+                      value={formData.upper_spec?.upper_color_to_develop || ""}
+                      onChange={(e) => updateUpper("upper_color_to_develop", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Backing & Lining */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Layers className="w-4 h-4 text-[#C27842]" />
+                    Canvas Backing & Lining
+                  </span>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Canvas / Interlining Backing:</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 10oz Cotton Twill, Self-Adhesive Foam Canvas"
+                      value={formData.upper_spec?.canvas_backing || ""}
+                      onChange={(e) => updateUpper("canvas_backing", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Lining Material:</label>
+                    <select
+                      value={formData.upper_spec?.lining_material_id || ""}
+                      onChange={(e) => {
+                        const mid = e.target.value;
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateUpper("lining_material_id", mid);
+                          updateUpper("lining_material_name", mat.name);
+                          updateUpper("lining_material_code", mat.code);
+                        } else {
+                          updateUpper("lining_material_id", "");
+                          updateUpper("lining_material_name", "");
+                          updateUpper("lining_material_code", "");
+                        }
+                      }}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="">-- Select Lining Material --</option>
+                      {materials.map(m => (
+                        <option key={m.id || m._id} value={m.id || m._id}>
+                          {m.name} [{m.code}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Upper Operations */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                  <Scissors className="w-4 h-4 text-[#C27842]" />
+                  Upper Manufacturing Operations
+                </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Cutting / Pattern Operation:</label>
+                    <select
+                      value={formData.upper_spec?.cutting_operation || "die_cut"}
+                      onChange={(e) => updateUpper("cutting_operation", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="die_cut">Dye Cut (Die Cutting Press)</option>
+                      <option value="folding">Folding / Skiving Pattern</option>
+                      <option value="both">Both Die Cut + Folding</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Stitching Operation:</label>
+                    <select
+                      value={formData.upper_spec?.stitching_operation || "stitching"}
+                      onChange={(e) => updateUpper("stitching_operation", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="stitching">Stitching (Machine / Karigar)</option>
+                      <option value="no_stitching">No Stitching (Heat Sealed / Seamless)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Edge Treatment:</label>
+                    <select
+                      value={formData.upper_spec?.edge_treatment || "none"}
+                      onChange={(e) => updateUpper("edge_treatment", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="none">Raw Edge / Standard</option>
+                      <option value="edge_coloring">Edge Coloring (Edge Ink Coating)</option>
+                      <option value="folded_edge">Folded & Cemented Edge</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Hardware & Buckle */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                    <Tag className="w-4 h-4 text-[#C27842]" />
+                    Buckles & Hardware Detailing
+                  </span>
+                  <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={formData.upper_spec?.has_buckle || false}
+                      onChange={(e) => updateUpper("has_buckle", e.target.checked)}
+                      className="w-4 h-4 text-slate-900"
+                    />
+                    <span>Has Buckle / Metal Trim</span>
+                  </label>
+                </div>
+
+                {formData.upper_spec?.has_buckle && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Buckle Specification (Size & Finish):</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 15mm Oval Buckle, Antique Brass Finish"
+                        value={formData.upper_spec?.buckle_spec || ""}
+                        onChange={(e) => updateUpper("buckle_spec", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Other Hardware / Rivets / D-rings:</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Eyelets, Rivets, Elastic Goring"
+                        value={formData.upper_spec?.other_hardware || ""}
+                        onChange={(e) => updateUpper("other_hardware", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ──────────────── TAB 2: INSOLE SPEC ──────────────── */}
+          {activeTab === "insole" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Mould / Shape Spec based on Heeled vs Flat */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Hammer className="w-4 h-4 text-[#C27842]" />
+                    {formData.profile === "heeled" ? "Heeled Insole Profile & Shape" : "Flat Mould Name & Shape"}
+                  </span>
+
+                  {formData.profile === "heeled" ? (
+                    <>
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Heeled Insole Category:</label>
+                        <select
+                          value={formData.insole_spec?.heeled_category || "platforms"}
+                          onChange={(e) => updateInsole("heeled_category", e.target.value)}
+                          className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                        >
+                          <option value="platforms">Platforms Insole</option>
+                          <option value="pumps">Pumps Insole</option>
+                          <option value="wedges">Wedge Insole</option>
+                          <option value="block_heel">Block Heel Insole</option>
+                          <option value="other">Other Heeled Profile</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Insole Style Code / Mould Shape:</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. PUMP-SHAPE-38-POINTED, PLAT-50-SQUARE"
+                          value={formData.insole_spec?.insole_style_code_shape || ""}
+                          onChange={(e) => updateInsole("insole_style_code_shape", e.target.value)}
+                          className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Flat Mould Name / Die Shape:</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. FLAT-ROUND-M01, SQUARE-SLIPPER-02"
+                        value={formData.insole_spec?.flat_mould_name_shape || ""}
+                        onChange={(e) => updateInsole("flat_mould_name_shape", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Base Board & Shank */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Layers className="w-4 h-4 text-[#C27842]" />
+                    Base Board (Shank) & Reinforcement
+                  </span>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Base Board Material:</label>
+                    <select
+                      value={formData.insole_spec?.base_board || "paper_board"}
+                      onChange={(e) => updateInsole("base_board", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="paper_board">Paper Board (Standard Shank Board)</option>
+                      <option value="cellulose_board">Cellulose Board (High Rigidity)</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2">
+                    <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.insole_spec?.shank_reinforced || false}
+                        onChange={(e) => updateInsole("shank_reinforced", e.target.checked)}
+                        className="w-4 h-4 text-slate-900"
+                      />
+                      <span>Steel Shank Reinforced (Mandatory for heels &gt; 1.5 in)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Cushioning (EVA / PU Foam) */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                  <Sparkles className="w-4 h-4 text-[#C27842]" />
+                  Cushioning & Padding (EVA / PU Foam)
+                </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Cushioning Foam Type:</label>
+                    <select
+                      value={formData.insole_spec?.cushioning_type || "eva"}
+                      onChange={(e) => updateInsole("cushioning_type", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="eva">EVA Cushioning Sheet</option>
+                      <option value="pu_foam">PU High-Density Foam</option>
+                      <option value="both">Both (EVA Base + PU Foam Top)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Thickness (mm):</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 3mm, 5mm, 3mm EVA + 2mm PU"
+                      value={formData.insole_spec?.cushioning_thickness_mm || "3mm"}
+                      onChange={(e) => updateInsole("cushioning_thickness_mm", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Socks Covering & Detailing */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                  <Palette className="w-4 h-4 text-[#C27842]" />
+                  Insole Covering (Socks) & Detailing
+                </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Socks Covering Material:</label>
+                    <select
+                      value={formData.insole_spec?.socks_covering_type || "matching"}
+                      onChange={(e) => updateInsole("socks_covering_type", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="matching">Matching Upper Top Material</option>
+                      <option value="custom">Select Custom Material from Master</option>
+                    </select>
+                  </div>
+
+                  {formData.insole_spec?.socks_covering_type === "custom" && (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Custom Material:</label>
+                      <select
+                        value={formData.insole_spec?.socks_material_id || ""}
+                        onChange={(e) => {
+                          const mid = e.target.value;
+                          const mat = materials.find(m => (m.id || m._id) === mid);
+                          updateInsole("socks_material_id", mid);
+                          updateInsole("socks_material_name", mat ? mat.name : "");
+                        }}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      >
+                        <option value="">-- Select Material --</option>
+                        {materials.map(m => (
+                          <option key={m.id || m._id} value={m.id || m._id}>
+                            {m.name} [{m.code}]
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Surface Detailing:</label>
+                    <select
+                      value={formData.insole_spec?.surface_detailing || "none"}
+                      onChange={(e) => updateInsole("surface_detailing", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="none">None (Plain)</option>
+                      <option value="patchwork">Patchwork</option>
+                      <option value="stitching">Stitching Rows / Quilting</option>
+                      <option value="both">Both Patchwork + Stitching</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Embossing:</label>
+                    <select
+                      value={formData.insole_spec?.embossing || "none"}
+                      onChange={(e) => updateInsole("embossing", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="none">None</option>
+                      <option value="gold_foil">Gold Foil Stamp</option>
+                      <option value="silver_foil">Silver Foil Stamp</option>
+                      <option value="blind_deboss">Blind Debossing</option>
+                      <option value="heat_emboss">Heat Embossing</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Printing:</label>
+                    <select
+                      value={formData.insole_spec?.printing || "none"}
+                      onChange={(e) => updateInsole("printing", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="none">None</option>
+                      <option value="screen_printing">Screen Printing</option>
+                      <option value="heat_transfer">Heat Transfer Print</option>
+                      <option value="digital_pad">Digital Pad Printing</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ──────────────── TAB 3: SOLE & HEEL SPEC ──────────────── */}
+          {activeTab === "sole" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Sole Material & Mould */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Layers className="w-4 h-4 text-[#C27842]" />
+                    Sole Material & Mould
+                  </span>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Sole Material:</label>
+                    <select
+                      value={formData.sole_spec?.sole_material || "TPR"}
+                      onChange={(e) => updateSole("sole_material", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="TPR">TPR (Thermo Plastic Rubber)</option>
+                      <option value="PVC">PVC (Polyvinyl Chloride)</option>
+                      <option value="PU">PU (Polyurethane Sole)</option>
+                      <option value="Neolite">Neolite / Sheet Sole</option>
+                      <option value="Sheet Sole">Sheet Sole</option>
+                      <option value="Rubber">Vulcanized / Natural Rubber</option>
+                      <option value="EVA">EVA Molded Sole</option>
+                      <option value="Other">Other Material</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Construction Type:</label>
+                    <select
+                      value={formData.sole_spec?.sole_type || "ready_made"}
+                      onChange={(e) => updateSole("sole_type", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="ready_made">Ready-Made Moulded Sole</option>
+                      <option value="die_cut">Die-Cut Sheet Sole</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Mould Name / Code:</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. M-TPR-045"
+                        value={formData.sole_spec?.mould_name || ""}
+                        onChange={(e) => updateSole("mould_name", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Sole Shape:</label>
+                      <select
+                        value={formData.sole_spec?.sole_shape || "Round"}
+                        onChange={(e) => updateSole("sole_shape", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                      >
+                        <option value="Round">Round Toe</option>
+                        <option value="Square">Square Toe</option>
+                        <option value="Pointed">Pointed Toe</option>
+                        <option value="Almond">Almond Toe</option>
+                        <option value="Chisel">Chisel Toe</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Secondary Processing Operations */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Scissors className="w-4 h-4 text-[#C27842]" />
+                    Sole Secondary Processing
+                  </span>
+
+                  <div className="space-y-2.5 pt-1">
+                    <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.sole_spec?.velting || false}
+                        onChange={(e) => updateSole("velting", e.target.checked)}
+                        className="w-4 h-4 text-slate-900"
+                      />
+                      <span>Velting (Welting Stitch Strip / Welt Stitching)</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.sole_spec?.grinding || false}
+                        onChange={(e) => updateSole("grinding", e.target.checked)}
+                        className="w-4 h-4 text-slate-900"
+                      />
+                      <span>Sole Edge Grinding & Buffing</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.sole_spec?.gripping || false}
+                        onChange={(e) => updateSole("gripping", e.target.checked)}
+                        className="w-4 h-4 text-slate-900"
+                      />
+                      <span>Anti-Skid Gripping / Grooving</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 cursor-pointer font-bold uppercase text-[10px] tracking-wider text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.sole_spec?.attaching_top_piece || false}
+                        onChange={(e) => updateSole("attaching_top_piece", e.target.checked)}
+                        className="w-4 h-4 text-slate-900"
+                      />
+                      <span>Attaching Top Piece (Heel Top Lift / Rubber Tip)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Heel Specifications */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                  <Hammer className="w-4 h-4 text-[#C27842]" />
+                  Heel & Platform Construction
+                </span>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Heel Profile:</label>
+                    <select
+                      value={formData.sole_spec?.heel_type || "none"}
+                      onChange={(e) => updateSole("heel_type", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    >
+                      <option value="none">No Heel (Flat)</option>
+                      <option value="platform_gola">Platform Rubber / Plastic Gola</option>
+                      <option value="block_heel">Block Heel</option>
+                      <option value="flared">Flared Heel</option>
+                      <option value="kitten">Kitten Heel</option>
+                      <option value="stiletto">Stiletto Heel</option>
+                      <option value="wedge">Wedge</option>
+                      <option value="just_heel">Just Heel (Standard Mould)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Heel Mould Name / Code:</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. M-HEEL-65MM"
+                      value={formData.sole_spec?.heel_mould_name || ""}
+                      onChange={(e) => updateSole("heel_mould_name", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Heel Height:</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 50mm / 2 inch"
+                      value={formData.sole_spec?.heel_height || ""}
+                      onChange={(e) => updateSole("heel_height", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {formData.sole_spec?.heel_type !== "none" && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200 mt-2">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Heel Finish Type:</label>
+                      <select
+                        value={formData.sole_spec?.heel_finish || "colored"}
+                        onChange={(e) => updateSole("heel_finish", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                      >
+                        <option value="colored">Colored (Spray Painted / Stained)</option>
+                        <option value="covered">Covered (Wrapped with Material)</option>
+                      </select>
+                    </div>
+
+                    {formData.sole_spec?.heel_finish === "covered" && (
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Covering Material:</label>
+                        <select
+                          value={formData.sole_spec?.heel_covering_type || "matching"}
+                          onChange={(e) => updateSole("heel_covering_type", e.target.value)}
+                          className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                        >
+                          <option value="matching">Matching Upper Material</option>
+                          <option value="custom">Select from Materials Master</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* MODAL FOOTER */}
+        <div className="px-5 py-4 bg-slate-50 border-t-2 border-slate-200 flex items-center justify-between flex-shrink-0">
+          <BtnSecondary onClick={onClose} disabled={saving}>
+            Cancel
+          </BtnSecondary>
+
+          <BtnPrimary
+            onClick={handleSave}
+            disabled={saving}
+            data-testid="save-sample-spec-btn"
+          >
+            {saving ? <RefreshCw className="w-3.5 h-3.5 inline mr-1 animate-spin" /> : <Check className="w-3.5 h-3.5 inline mr-1" />}
+            <span>{isNew ? "Create Sample Spec" : "Save Changes"}</span>
+          </BtnPrimary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODAL 2: INSPIRATION PHOTO GALLERY & ISOLATED MULTI-UPLOADER
+   ───────────────────────────────────────────────────────────────────────────── */
+function PhotoGalleryModal({ sample, onClose, onUpdated }) {
+  const [uploading, setUploading] = useState(false);
+  const [caption, setCaption] = useState("");
+  const fileInputRef = useRef(null);
+  const sid = sample.id || sample._id;
+
+  const handleMultiFileUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    setUploading(true);
+    const formData = new FormData();
+    files.forEach(f => formData.append("files", f));
+
+    try {
+      await http.post(`/samples/${sid}/photos`, formData, {
+        params: { caption: caption.trim() }
+      });
+      setCaption("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      onUpdated();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to upload photos"));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSetPrimary = async (photoId) => {
+    try {
+      await http.patch(`/samples/${sid}/photos/${photoId}/primary`);
+      onUpdated();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to set primary cover photo"));
+    }
+  };
+
+  const handleDeletePhoto = async (photoId) => {
+    if (!window.confirm("Delete this inspiration photo?")) return;
+    try {
+      await http.delete(`/samples/${sid}/photos/${photoId}`);
+      onUpdated();
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to delete photo"));
+    }
+  };
+
+  const photos = sample.inspiration_photos || [];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-3xl flex flex-col max-h-[90vh] overflow-hidden">
+        <div className="px-5 py-4 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">SSK / Inspiration Photo Gallery</div>
+            <h3 className="font-black text-base text-slate-900 flex items-center gap-2">
+              <Camera className="w-4 h-4 text-[#C27842]" />
+              <span>Mood Board & Multi-Angle Photos &mdash;</span>
+              <span className="font-mono text-[#C27842]">{sample.temp_code}</span>
+            </h3>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Multi-angle inspiration pictures stored separately in <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5">uploads/samples_inspiration/</code>.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* MULTI-FILE UPLOADER STRIP */}
+        <div className="px-5 py-3 bg-slate-50 border-b-2 border-slate-200 flex flex-col sm:flex-row gap-3 items-center">
+          <input
+            type="text"
+            placeholder="Optional caption for these photos (e.g. Front upper angle, Heel finish)..."
+            value={caption}
+            onChange={(e) => setCaption(e.target.value)}
+            className="w-full sm:flex-1 border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+          />
+
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleMultiFileUpload}
+            multiple
+            accept="image/*"
+            className="hidden"
+          />
+
+          <BtnPrimary
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="text-xs"
+          >
+            {uploading ? <RefreshCw className="w-3.5 h-3.5 inline mr-1 animate-spin" /> : <Upload className="w-3.5 h-3.5 inline mr-1" />}
+            <span>{uploading ? "Uploading..." : "+ Upload Photos"}</span>
+          </BtnPrimary>
+        </div>
+
+        {/* PHOTO GALLERY GRID */}
+        <div className="p-5 overflow-y-auto flex-1 bg-white">
+          {photos.length === 0 ? (
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              className="text-center py-12 border-2 border-dashed border-slate-300 hover:border-slate-900 rounded p-6 cursor-pointer bg-slate-50/60 transition group"
+            >
+              <Camera className="w-10 h-10 opacity-30 mx-auto mb-2 text-slate-400 group-hover:scale-105 transition" />
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-800">No photos uploaded yet</p>
+              <p className="text-[11px] text-slate-500 font-mono mt-1">Click here to select and upload multiple reference photos.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {photos.map((photo) => (
+                <div key={photo.photo_id} className={`group relative border-2 overflow-hidden bg-white shadow-xs ${photo.is_primary ? "border-amber-500 shadow-ind ring-1 ring-amber-400" : "border-slate-200"}`}>
+                  <div className="h-44 bg-slate-100 flex items-center justify-center overflow-hidden relative">
+                    <SafeImage src={photo.url} alt="Inspiration" className="w-full h-full object-cover" />
+
+                    {photo.is_primary && (
+                      <span className="absolute top-2 left-2 z-10">
+                        <Badge color="yellow">PRIMARY COVER</Badge>
+                      </span>
+                    )}
+
+                    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition z-10">
+                      {!photo.is_primary && (
+                        <button
+                          onClick={() => handleSetPrimary(photo.photo_id)}
+                          className="px-2 py-1 bg-amber-500 hover:bg-amber-600 text-white shadow-xs text-[10px] font-bold uppercase flex items-center gap-1"
+                          title="Make Primary Cover"
+                        >
+                          <Star className="w-3 h-3" />
+                          <span>Set Cover</span>
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleDeletePhoto(photo.photo_id)}
+                        className="p-1.5 bg-[#0F172A] hover:bg-red-600 text-white transition shadow-xs text-[10px]"
+                        title="Delete photo"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {photo.caption && (
+                    <div className="p-2 text-[10px] font-mono text-slate-700 truncate border-t border-slate-200 bg-slate-50 font-bold">
+                      {photo.caption}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t-2 border-slate-200 flex justify-end bg-slate-50 flex-shrink-0">
+          <BtnSecondary onClick={onClose}>
+            Done
+          </BtnSecondary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODAL 3: 1-CLICK TRANSFER TO STYLE MASTER (WITH BOM & LABOR GENERATION)
+   ───────────────────────────────────────────────────────────────────────────── */
+function TransferToStyleModal({ sample, onClose, onSuccess }) {
+  const sid = sample.id || sample._id;
+  const [styleCode, setStyleCode] = useState("");
+  const [styleName, setStyleName] = useState(sample.sample_name || "");
+  const [baseSize, setBaseSize] = useState("7");
+  const [marginPct, setMarginPct] = useState(25);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Material Yields (default footwear allowances)
+  const [yields, setYields] = useState({
+    upper_top: 1.2,       // sq ft per pair
+    canvas: 0.15,         // meter per pair
+    lining: 1.0,          // sq ft per pair
+    base_board: 1.0,      // pair
+    cushioning: 1.0,      // pair
+    socks_covering: 0.8,  // sq ft per pair
+    sole: 1.0,            // pair
+    heel: 1.0,            // pair
+    buckle: 1.0,          // pair
+  });
+
+  // Labor piece rates (₹ / pair)
+  const [rates, setRates] = useState({
+    cutting: 12.0,
+    stitching: 25.0,
+    edge_coloring: 8.0,
+    insole_making: 10.0,
+    embossing: 5.0,
+    sole_prep: 15.0,
+    heel_work: 12.0,
+    lasting: 20.0,
+    pasting: 18.0,
+    finishing: 10.0,
+  });
+
+  const upper = sample.upper_spec || {};
+  const insole = sample.insole_spec || {};
+  const sole = sample.sole_spec || {};
+
+  const handleTransfer = async () => {
+    if (!styleCode || !styleCode.trim()) {
+      alert("Please enter the official ERP Style Code");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        style_code: styleCode.trim().toUpperCase(),
+        name: styleName.trim(),
+        base_size: baseSize,
+        margin_pct: Number(marginPct),
+        material_yields: yields,
+        labor_rates: rates,
+        use_sample_photo_as_primary: true,
+      };
+
+      const res = await http.post(`/samples/${sid}/transfer-to-style`, payload);
+      onSuccess(res.data.style?.code || styleCode);
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to transfer sample to Style Master"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+        {/* HEADER */}
+        <div className="px-5 py-4 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">SSK / Style Master Handover</div>
+            <h2 className="text-lg font-black tracking-tight text-slate-900 flex items-center gap-2">
+              <Layers className="w-5 h-5 text-[#C27842]" />
+              <span>Transfer Sample to Style Master</span>
+            </h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Promotes temporary sample <code className="font-mono text-slate-900 font-bold bg-slate-100 px-1 py-0.5">{sample.temp_code}</code> to official ERP production style with pre-populated BOM yields & labor operations.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* BODY */}
+        <div className="p-4 md:p-6 overflow-y-auto flex-1 space-y-4 text-xs bg-white">
+          {/* PRIMARY ERP STYLE DETAILS */}
+          <div className="border-2 border-slate-900 p-4 bg-slate-50 space-y-3">
+            <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+              <Tag className="w-4 h-4 text-[#C27842]" />
+              Official Style Master Assignment
+            </span>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">Official ERP Style Code *</label>
+                <input
+                  type="text"
+                  placeholder="e.g. SSK-2026-H042"
+                  value={styleCode}
+                  onChange={(e) => setStyleCode(e.target.value.toUpperCase())}
+                  className="w-full border-2 border-slate-900 bg-white px-3 py-1.5 font-mono font-black text-sm tracking-wider focus:outline-none focus:ring-1 focus:ring-slate-900"
+                />
+                <span className="text-[10px] text-slate-500 mt-0.5 block font-mono">Permanent unique identifier in ERP.</span>
+              </div>
+
+              <div>
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">Official Style Name</label>
+                <input
+                  type="text"
+                  value={styleName}
+                  onChange={(e) => setStyleName(e.target.value)}
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-bold focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">Base Production Size</label>
+                <select
+                  value={baseSize}
+                  onChange={(e) => setBaseSize(e.target.value)}
+                  className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono font-bold focus:border-[#2563EB] focus:outline-none"
+                >
+                  {["4", "5", "6", "7", "8", "9", "10", "11"].map(s => (
+                    <option key={s} value={s}>Size UK/India {s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* MATERIAL YIELDS PREVIEW & ADJUSTMENT */}
+          <div className="border-2 border-slate-200 p-4 bg-white space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                <Palette className="w-4 h-4 text-[#C27842]" />
+                Pre-Populated Bill of Materials (BOM) & Yield per Pair
+              </span>
+              <span className="text-[10px] font-mono uppercase text-slate-500">
+                Material consumption allowance
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Upper Top */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Upper Top: {upper.upper_top_material_name || "Upper Material"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={yields.upper_top}
+                    onChange={(e) => setYields(p => ({ ...p, upper_top: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
+                </div>
+              </div>
+
+              {/* Canvas */}
+              {upper.canvas_backing && (
+                <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                  <span className="text-xs font-bold text-slate-900 truncate block">
+                    Canvas Backing: {upper.canvas_backing}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={yields.canvas}
+                      onChange={(e) => setYields(p => ({ ...p, canvas: Number(e.target.value) }))}
+                      className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                    />
+                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">mtr / pair</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Lining */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Lining: {upper.lining_material_name || "Standard Lining"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={yields.lining}
+                    onChange={(e) => setYields(p => ({ ...p, lining: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
+                </div>
+              </div>
+
+              {/* Base Board */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Insole Base: {insole.base_board === "cellulose_board" ? "Cellulose Board" : "Paper Board"}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    value={yields.base_board}
+                    onChange={(e) => setYields(p => ({ ...p, base_board: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                </div>
+              </div>
+
+              {/* Cushioning Foam */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Cushion: {insole.cushioning_type?.toUpperCase()} {insole.cushioning_thickness_mm}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    value={yields.cushioning}
+                    onChange={(e) => setYields(p => ({ ...p, cushioning: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                </div>
+              </div>
+
+              {/* Socks Covering */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Socks: {insole.socks_covering_type === "matching" ? "Matching Upper" : insole.socks_material_name}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={yields.socks_covering}
+                    onChange={(e) => setYields(p => ({ ...p, socks_covering: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
+                </div>
+              </div>
+
+              {/* Sole */}
+              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <span className="text-xs font-bold text-slate-900 truncate block">
+                  Sole: {sole.sole_material} {sole.mould_name ? `(${sole.mould_name})` : ""}
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    value={yields.sole}
+                    onChange={(e) => setYields(p => ({ ...p, sole: Number(e.target.value) }))}
+                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                  />
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                </div>
+              </div>
+
+              {/* Heel (if heeled) */}
+              {(sample.profile === "heeled" || sole.heel_type !== "none") && (
+                <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                  <span className="text-xs font-bold text-slate-900 truncate block">
+                    Heel: {sole.heel_type} {sole.heel_mould_name} ({sole.heel_finish})
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      value={yields.heel}
+                      onChange={(e) => setYields(p => ({ ...p, heel: Number(e.target.value) }))}
+                      className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                    />
+                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Buckle */}
+              {upper.has_buckle && (
+                <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                  <span className="text-xs font-bold text-slate-900 truncate block">
+                    Buckle: {upper.buckle_spec || "Standard"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      value={yields.buckle}
+                      onChange={(e) => setYields(p => ({ ...p, buckle: Number(e.target.value) }))}
+                      className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                    />
+                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* LABOR OPERATIONS PREVIEW & ADJUSTMENT */}
+          <div className="border-2 border-slate-200 p-4 bg-white space-y-3">
+            <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+              <Scissors className="w-4 h-4 text-[#C27842]" />
+              Pre-Populated Labor Operations (Planning & Karigar Wages)
+            </span>
+
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Cutting (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.cutting}
+                  onChange={(e) => setRates(p => ({ ...p, cutting: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Stitching (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.stitching}
+                  onChange={(e) => setRates(p => ({ ...p, stitching: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Insole Prep (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.insole_making}
+                  onChange={(e) => setRates(p => ({ ...p, insole_making: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Lasting (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.lasting}
+                  onChange={(e) => setRates(p => ({ ...p, lasting: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Pasting (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.pasting}
+                  onChange={(e) => setRates(p => ({ ...p, pasting: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+
+              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Finishing (₹/pr):</label>
+                <input
+                  type="number"
+                  value={rates.finishing}
+                  onChange={(e) => setRates(p => ({ ...p, finishing: Number(e.target.value) }))}
+                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* FOOTER */}
+        <div className="px-5 py-4 bg-slate-50 border-t-2 border-slate-200 flex items-center justify-between flex-shrink-0">
+          <BtnSecondary onClick={onClose} disabled={submitting}>
+            Cancel
+          </BtnSecondary>
+
+          <button
+            onClick={handleTransfer}
+            disabled={submitting || !styleCode.trim()}
+            className="bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs px-6 py-2.5 border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg transition-all active:shadow-none disabled:opacity-50 flex items-center gap-2"
+          >
+            {submitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
+            <span>Confirm & Transfer to Style Master</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODAL 4: DETAIL VIEW & DESIGNER TECH PACK PRINT SHEET (80% IMAGE COVERAGE)
+   ───────────────────────────────────────────────────────────────────────────── */
+function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPhotos }) {
+  const [viewMode, setViewMode] = useState("screen"); // "screen" or "print_sheet"
+  const upper = sample.upper_spec || {};
+  const insole = sample.insole_spec || {};
+  const sole = sample.sole_spec || {};
+  const photos = sample.inspiration_photos || [];
+  const [selectedPhotoIdx, setSelectedPhotoIdx] = useState(0);
+
+  const activePhoto = photos[selectedPhotoIdx] || photos[0];
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl flex flex-col max-h-[92vh] overflow-hidden print:max-w-none print:max-h-none print:shadow-none print:border-none print:overflow-visible">
+        
+        {/* ── MODAL SCREEN HEADER (Hidden in Print) ── */}
+        <div className="px-5 py-3.5 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0 print:hidden">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500">SSK / Tech Pack Specification</div>
+            <h3 className="font-black text-base text-slate-900 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#C27842]" />
+              <span>{sample.sample_name} &mdash; </span>
+              <span className="font-mono text-[#C27842]">{sample.temp_code}</span>
+            </h3>
+            <div className="flex items-center gap-2 mt-0.5">
+              <Badge color={sample.profile === "heeled" ? "purple" : "slate"}>
+                {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+              </Badge>
+              {sample.season && (
+                <span className="font-mono text-[10px] font-bold uppercase bg-slate-100 border border-slate-300 px-1.5 py-0.5 text-slate-700">
+                  {sample.season}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setViewMode(viewMode === "screen" ? "print_sheet" : "screen")}
+              className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border-2 transition flex items-center gap-1.5 ${
+                viewMode === "print_sheet"
+                  ? "bg-[#0F172A] text-white border-[#0F172A]"
+                  : "bg-white text-slate-800 border-slate-300 hover:border-slate-900"
+              }`}
+              title="Toggle between Interactive Specs and Designer 80% Image Print Preview"
+            >
+              {viewMode === "print_sheet" ? <Eye className="w-3.5 h-3.5" /> : <Layers className="w-3.5 h-3.5" />}
+              <span>{viewMode === "print_sheet" ? "Standard Specs" : "Designer Sheet Preview"}</span>
+            </button>
+
+            <BtnPrimary onClick={handlePrint} title="Print Tech Pack for Designer">
+              <Printer className="w-3.5 h-3.5 inline mr-1" />
+              <span>Print Tech Pack</span>
+            </BtnPrimary>
+
+            <button onClick={onClose} className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900 ml-1" title="Close">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* ── VIEW 1: INTERACTIVE SCREEN SPECIFICATION (Print: Hidden) ── */}
+        <div className={`${viewMode === "screen" ? "block" : "hidden"} print:hidden p-5 overflow-y-auto flex-1 space-y-4 text-xs bg-white`}>
+          {/* PHOTO SHOWCASE */}
+          {photos.length > 0 ? (
+            <div className="space-y-2">
+              <div className="h-64 overflow-hidden bg-slate-100 border-2 border-slate-200 flex items-center justify-center relative">
+                <SafeImage src={activePhoto.url} alt="Sample Active" className="w-full h-full object-contain" />
+                {activePhoto.caption && (
+                  <div className="absolute bottom-2 left-2 right-2 bg-[#0F172A]/90 text-white font-mono px-3 py-1 text-xs border border-slate-700">
+                    {activePhoto.caption}
+                  </div>
+                )}
+                {activePhoto.is_primary && (
+                  <div className="absolute top-2 left-2 z-10">
+                    <Badge color="yellow">PRIMARY COVER</Badge>
+                  </div>
+                )}
+              </div>
+
+              {/* Thumbnails row */}
+              {photos.length > 1 && (
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {photos.map((p, idx) => (
+                    <div
+                      key={p.photo_id || idx}
+                      onClick={() => setSelectedPhotoIdx(idx)}
+                      className={`h-16 w-16 shrink-0 overflow-hidden border-2 cursor-pointer transition ${
+                        idx === selectedPhotoIdx ? "border-slate-900 shadow-ind ring-1 ring-slate-900" : "border-slate-200 opacity-70 hover:opacity-100"
+                      }`}
+                    >
+                      <SafeImage src={p.url} alt="Thumb" className="w-full h-full object-cover" />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              onClick={onOpenPhotos}
+              className="h-32 border-2 border-dashed border-slate-300 hover:border-slate-900 flex flex-col items-center justify-center cursor-pointer text-slate-400 hover:text-slate-700 transition bg-slate-50"
+            >
+              <Camera className="w-8 h-8 opacity-30 mb-1" />
+              <span className="font-bold text-xs uppercase tracking-wider text-slate-600">No photos uploaded yet &bull; Click to add reference photos</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5">
+              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1">👟 Upper Component</h4>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Material:</span> <span className="font-mono text-slate-900">{upper.upper_top_material_name || "N/A"}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Color:</span> <span className="font-mono text-slate-900">{upper.upper_color_to_develop || "N/A"}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Canvas:</span> <span className="font-mono text-slate-900">{upper.canvas_backing || "None"}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Lining:</span> <span className="font-mono text-slate-900">{upper.lining_material_name || "Standard"}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Operations:</span> <span className="font-mono text-slate-900">{upper.cutting_operation}, {upper.stitching_operation}, {upper.edge_treatment}</span></p>
+              {upper.has_buckle && <p><span className="text-[10px] uppercase font-bold text-slate-500">Buckle:</span> <span className="font-mono text-slate-900">{upper.buckle_spec}</span></p>}
+            </div>
+
+            <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5">
+              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1">🩴 Insole / Socks</h4>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Base:</span> <span className="font-mono text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Cushion:</span> <span className="font-mono text-slate-900">{insole.cushioning_type} {insole.cushioning_thickness_mm}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Covering:</span> <span className="font-mono text-slate-900">{insole.socks_covering_type}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Detailing:</span> <span className="font-mono text-slate-900">{insole.surface_detailing}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Embossing:</span> <span className="font-mono text-slate-900">{insole.embossing}</span></p>
+            </div>
+
+            <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5">
+              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1">👞 Sole & Heel</h4>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Material:</span> <span className="font-mono text-slate-900">{sole.sole_material}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Type:</span> <span className="font-mono text-slate-900">{sole.sole_type}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Mould:</span> <span className="font-mono text-slate-900">{sole.mould_name || "N/A"}</span></p>
+              {sole.heel_type !== "none" && (
+                <>
+                  <p><span className="text-[10px] uppercase font-bold text-slate-500">Heel:</span> <span className="font-mono text-slate-900">{sole.heel_type} ({sole.heel_finish})</span></p>
+                  <p><span className="text-[10px] uppercase font-bold text-slate-500">Height:</span> <span className="font-mono text-slate-900">{sole.heel_height || "N/A"}</span></p>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ── VIEW 2: DESIGNER TECH PACK PRINT SHEET (CLEAN MINIMAL 1-PAGE FIT, ~80% IMAGE) ── */}
+        <div className={`${viewMode === "print_sheet" ? "block" : "hidden"} print:block p-1 sm:p-2 print:p-0 print:m-0 w-full overflow-y-auto print:overflow-visible bg-white text-slate-900 font-sans`}>
+          <div
+            className="techpack-page w-full max-w-[185mm] mx-auto bg-white border border-slate-300 print:border p-2 print:p-1.5 flex flex-col justify-between"
+            style={{ maxHeight: "235mm", boxSizing: "border-box" }}
+          >
+            {/* 1. COMPACT 1-TIER HEADER (~10mm) */}
+            <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
+              <div className="flex items-baseline justify-between">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">
+                    SSK FOOTCARE &bull; TECH PACK
+                  </span>
+                  <h1 className="text-lg font-black text-slate-900 uppercase tracking-tight leading-tight">
+                    {sample.sample_name}
+                  </h1>
+                </div>
+
+                <div className="flex items-center gap-2 text-[11px] font-mono">
+                  <span className="font-bold text-slate-900 bg-slate-100 px-1.5 py-0.5 border border-slate-300">
+                    {sample.temp_code}
+                  </span>
+                  <span className="text-slate-700 font-semibold uppercase">
+                    {sample.profile === "heeled" ? "👠 Heeled" : "🥿 Flat"}
+                  </span>
+                  {sample.season && (
+                    <span className="text-slate-700 font-semibold">
+                      {sample.season}
+                    </span>
+                  )}
+                  {sample.assigned_worker_name && (
+                    <span className="text-slate-700 font-semibold">
+                      Tech: {sample.assigned_worker_name}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 2. VISUAL INSPIRATION ZONE: ~75-80% OF PAGE (h-[148mm]) */}
+            <div className="flex-1 my-0.5 flex items-center justify-center overflow-hidden bg-white max-h-[148mm]">
+              {photos.length === 0 ? (
+                <div className="w-full h-full border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 p-4 text-center">
+                  <Camera className="w-10 h-10 opacity-30 mb-1" />
+                  <p className="font-bold text-xs uppercase tracking-wider text-slate-600">No Sample Inspiration Photos Uploaded</p>
+                </div>
+              ) : photos.length === 1 ? (
+                /* SINGLE HERO PHOTO: Fills the visual area */
+                <div className="w-full h-full flex items-center justify-center overflow-hidden">
+                  <img
+                    src={resolveImageUrl(photos[0].url)}
+                    alt={photos[0].caption || sample.sample_name}
+                    className="w-full h-full max-h-[145mm] object-contain"
+                  />
+                </div>
+              ) : photos.length === 2 ? (
+                /* 2 PHOTOS: Split 50/50 side by side */
+                <div className="grid grid-cols-2 gap-2 w-full h-full max-h-[145mm]">
+                  {photos.slice(0, 2).map((p, i) => (
+                    <div key={p.photo_id || i} className="flex items-center justify-center overflow-hidden border border-slate-200 p-1">
+                      <img
+                        src={resolveImageUrl(p.url)}
+                        alt={p.caption || `Angle ${i+1}`}
+                        className="w-full h-full max-h-[142mm] object-contain"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : photos.length === 3 ? (
+                /* 3 PHOTOS: 1 Hero view (60% width) + 2 stacked detail views (40% width) */
+                <div className="grid grid-cols-12 gap-2 w-full h-full max-h-[145mm]">
+                  <div className="col-span-7 flex items-center justify-center overflow-hidden border border-slate-200 p-1">
+                    <img
+                      src={resolveImageUrl((photos.find(p => p.is_primary) || photos[0]).url)}
+                      alt="Primary View"
+                      className="w-full h-full max-h-[142mm] object-contain"
+                    />
+                  </div>
+                  <div className="col-span-5 flex flex-col gap-1.5 h-full">
+                    {photos.filter(p => p !== (photos.find(p => p.is_primary) || photos[0])).slice(0, 2).map((p, i) => (
+                      <div key={p.photo_id || i} className="flex-1 flex items-center justify-center overflow-hidden border border-slate-200 p-1">
+                        <img
+                          src={resolveImageUrl(p.url)}
+                          alt={`Detail ${i+1}`}
+                          className="w-full h-full max-h-[68mm] object-contain"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                /* 4+ PHOTOS: 2x2 Grid */
+                <div className="grid grid-cols-2 grid-rows-2 gap-1.5 w-full h-full max-h-[145mm]">
+                  {photos.slice(0, 4).map((p, i) => (
+                    <div key={p.photo_id || i} className="flex items-center justify-center overflow-hidden border border-slate-200 p-1">
+                      <img
+                        src={resolveImageUrl(p.url)}
+                        alt={p.caption || `Angle ${i+1}`}
+                        className="w-full h-full max-h-[68mm] object-contain"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* 3. TECHNICAL SPECIFICATIONS DATA STRIP (COMPACT ~38mm) */}
+            <div className="shrink-0 border border-slate-300 bg-white">
+              <div className="grid grid-cols-3 divide-x divide-slate-300">
+                
+                {/* Pillar 1: Upper Component */}
+                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                    1. Upper Component
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Material: </span>
+                    <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Color to Dev: </span>
+                    <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Canvas / Lining: </span>
+                    <span className="font-mono text-slate-800">{upper.canvas_backing || "None"} &bull; {upper.lining_material_name || "Std"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Operations: </span>
+                    <span className="font-mono text-slate-800 capitalize">
+                      {[upper.cutting_operation?.replace("_", " "), upper.stitching_operation?.replace("_", " "), upper.edge_treatment?.replace("_", " ")].filter(Boolean).join(", ")}
+                    </span>
+                  </div>
+                  {upper.has_buckle && (
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Buckle / Spec: </span>
+                      <span className="font-mono font-bold text-amber-900">{upper.buckle_spec}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Pillar 2: Insole & Socks */}
+                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                    2. Insole / Socks
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Base Board: </span>
+                    <span className="font-mono font-bold text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Cushioning: </span>
+                    <span className="font-mono font-bold text-slate-900">{insole.cushioning_type?.toUpperCase()} &bull; {insole.cushioning_thickness_mm}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Socks Covering: </span>
+                    <span className="font-mono text-slate-800 capitalize">{insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Detailing: </span>
+                    <span className="font-mono text-slate-800 capitalize">{insole.surface_detailing || "None"} &bull; {insole.embossing || "None"}</span>
+                  </div>
+                </div>
+
+                {/* Pillar 3: Sole & Heel */}
+                <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
+                    3. Sole & Heel
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Sole Material: </span>
+                    <span className="font-mono font-bold text-slate-900">{sole.sole_material || "TPR"} ({sole.sole_type || "Ready Made"})</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Mould / Shape: </span>
+                    <span className="font-mono font-bold text-slate-900">{sole.mould_name || "Standard"} ({sole.sole_shape || "Standard"})</span>
+                  </div>
+                  {sample.profile === "heeled" ? (
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Heel Spec: </span>
+                      <span className="font-mono font-bold text-purple-900">{sole.heel_type} &bull; {sole.heel_finish} ({sole.heel_height || "Height TBD"})</span>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] leading-tight">
+                      <span className="font-semibold text-slate-500">Profile: </span>
+                      <span className="font-mono text-slate-800">Flat Footwear Mould</span>
+                    </div>
+                  )}
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500">Processes: </span>
+                    <span className="font-mono text-slate-800">
+                      {[sole.velting ? "Welting" : null, sole.grinding_gripping ? "Grinding" : null, sole.attach_top_piece ? "Top Piece" : null].filter(Boolean).join(", ") || "Standard"}
+                    </span>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Sign-Off Footer Bar */}
+              <div className="border-t border-slate-300 bg-slate-50/60 px-2 py-0.5 flex items-center justify-between text-[9px] font-mono text-slate-700">
+                <div><span className="font-semibold text-slate-600">Sample Master: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
+                <div><span className="font-semibold text-slate-600">Footwear Designer: </span> <span className="border-b border-slate-400 inline-block w-24">&nbsp;</span></div>
+                <div><span className="font-semibold text-slate-600">Date / Approval: </span> <span className="border-b border-slate-400 inline-block w-16">&nbsp;</span></div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        {/* ── MODAL SCREEN FOOTER (Hidden in Print) ── */}
+        <div className="px-5 py-3 border-t-2 border-slate-200 flex justify-between bg-slate-50 flex-shrink-0 print:hidden">
+          <div className="flex items-center gap-3">
+            <button onClick={onOpenEdit} className="text-xs font-bold uppercase tracking-wider text-slate-800 hover:text-[#C27842] hover:underline">
+              Edit Full Spec
+            </button>
+            <span className="text-slate-300">|</span>
+            <button onClick={onOpenPhotos} className="text-xs font-bold uppercase tracking-wider text-[#C27842] hover:underline">
+              Manage Photos ({photos.length})
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <BtnSecondary onClick={onClose}>
+              Close
+            </BtnSecondary>
+            <BtnPrimary onClick={handlePrint}>
+              <Printer className="w-3.5 h-3.5 inline mr-1" />
+              <span>Print Tech Pack (80% Image)</span>
+            </BtnPrimary>
+            {sample.status !== "transferred_to_style" && (
+              <button
+                onClick={onOpenTransfer}
+                className="bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg transition-all"
+              >
+                Transfer to Style Master
+              </button>
+            )}
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}

@@ -8,7 +8,7 @@ import {
   Warehouse, IndianRupee, Settings as SettingsIcon, ReceiptIndianRupee,
   BookOpen, Truck, ArrowLeftRight, ShoppingBag, Package,
   ClipboardList, PackageOpen, ChevronLeft, MoreHorizontal, X,
-  Check, Bell, TrendingUp, Landmark, MailCheck,
+  Check, Bell, TrendingUp, Landmark, MailCheck, Sparkles,
 } from "lucide-react";
 import AlertBanner from "@/components/AlertBanner";
 
@@ -23,6 +23,7 @@ const NAV_GROUPS = [
     workspaces: ["b2b", "online", "management"],
     items: [
       { to: "/",                    label: "Dashboard",            icon: LayoutDashboard, end: true, roles: ["admin","manager","production","sales"] },
+      { to: "/samples",             label: "Sample Development",   icon: Sparkles,        roles: ["admin","manager","production","sales"] },
       { to: "/styles",              label: "Styles Master",        icon: Layers,          roles: ["admin","manager","sales"] },
       { to: "/plm",                 label: "Digital Style Folder", icon: BookOpen,        roles: ["admin","manager","production","sales"] },
       { to: "/patterns",            label: "Pattern Manager",      icon: Layers,          roles: ["admin","manager","production"] },
@@ -82,6 +83,7 @@ const NAV_GROUPS = [
 /* Route → page title map for mobile top bar */
 const PAGE_TITLES = {
   "/":                     "Dashboard",
+  "/samples":              "Sample Development & Tracking",
   "/styles":               "Styles",
   "/materials":            "Materials",
   "/inventory":            "Raw Material Inventory",

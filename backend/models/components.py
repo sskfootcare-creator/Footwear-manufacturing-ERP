@@ -97,3 +97,40 @@ class StyleComponentMappingUpdate(BaseModel):
     quantity_per_pair:  Optional[float] = None
     wastage_percent:    Optional[float] = None
     active:             Optional[bool]  = None
+
+
+MANDATORY_FOOTWEAR_CATEGORIES = {
+    "upper": "Upper",
+    "insole_socks": "Insole/Socks",
+    "sole": "Sole",
+}
+
+
+def classify_footwear_component(comp_doc: Optional[dict] = None, bom_item: Optional[dict] = None) -> str:
+    """Classify component into one of the 3 essential footwear assembly pillars or other:
+    - 'upper' (Upper, lining, vamp, strap, rexine, leather)
+    - 'insole_socks' (Insole, sockliner, bottom board, strobel, socks, texon)
+    - 'sole' (Sole, outsole, TPR, PVC, sheet)
+    - 'other' (Box, tag, label, packaging, lace, etc.)
+    """
+    comp_doc = comp_doc or {}
+    bom_item = bom_item or {}
+    cat = str(comp_doc.get("component_category") or bom_item.get("component_category") or "").strip().lower()
+    code = str(comp_doc.get("component_code") or bom_item.get("component_code") or "").strip().lower()
+    name = str(comp_doc.get("component_name") or bom_item.get("component_name") or "").strip().lower()
+    blob = f"{cat} {code} {name}"
+
+    if any(w in blob for w in ("sole", "outsole", "tpr")) and "insole" not in blob:
+        return "sole"
+    if any(w in blob for w in ("insole", "sockliner", "bottom", "socks", "texon", "shank", "board")):
+        return "insole_socks"
+    if any(w in blob for w in ("upper", "lining", "vamp", "quarter", "collar", "strap", "rexine", "leather")):
+        return "upper"
+    if cat == "upper":
+        return "upper"
+    if cat in ("insole", "sockliner", "bottom"):
+        return "insole_socks"
+    if cat == "sole":
+        return "sole"
+    return "other"
+

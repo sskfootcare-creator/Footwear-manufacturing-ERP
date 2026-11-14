@@ -109,6 +109,7 @@ from routes.settings import settings_router
 from routes.workers import workers_router
 from routes.investors import investors_router
 from routes.email_inbox import email_inbox_router
+from routes.sampling import sampling_router
 from routes.vendors import vendors_router
 from routes.banking import banking_router
 from routes.reports import reports_router
@@ -1995,6 +1996,7 @@ app.include_router(po_ean_router)
 app.include_router(online_returns_router)
 app.include_router(investors_router)
 app.include_router(email_inbox_router)
+app.include_router(sampling_router)
 
 
 
@@ -2126,6 +2128,10 @@ async def _ensure_startup_indexes(database):
         await database.styles.create_index("code", unique=True)
     except Exception as err:
         log.debug(f"Styles code index notice: {err}")
+    try:
+        await database.samples.create_index("temp_code", unique=True)
+    except Exception as err:
+        log.debug(f"Samples temp_code index notice: {err}")
     try:
         await database.pos.create_index("po_number", unique=True)
     except Exception as err:

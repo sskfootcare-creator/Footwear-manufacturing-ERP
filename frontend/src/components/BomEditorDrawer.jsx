@@ -1,9 +1,24 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { http, friendlyAxiosError } from "../lib/api";
 import { BtnPrimary, BtnSecondary } from "./ui-kit";
 import { SafeImage } from "./ImageUploader";
 import SearchableSelect from "./SearchableSelect";
-import { X, Loader2, Trash2, Save, Plus, Wrench, ToggleLeft, ToggleRight } from "lucide-react";
+import { X, Loader2, Trash2, Save, Plus, Wrench, ToggleLeft, ToggleRight, CheckCircle2, AlertTriangle, Layers } from "lucide-react";
+
+function classifyCategory(c) {
+  if (!c) return "other";
+  const cat = String(c.component_category || "").toLowerCase();
+  const code = String(c.component_code || "").toLowerCase();
+  const name = String(c.component_name || "").toLowerCase();
+  const blob = `${cat} ${code} ${name}`;
+  if ((blob.includes("sole") || blob.includes("outsole") || blob.includes("tpr")) && !blob.includes("insole")) return "sole";
+  if (blob.includes("insole") || blob.includes("sockliner") || blob.includes("bottom") || blob.includes("socks") || blob.includes("texon") || blob.includes("board")) return "insole_socks";
+  if (blob.includes("upper") || blob.includes("lining") || blob.includes("vamp") || blob.includes("quarter") || blob.includes("collar") || blob.includes("strap") || blob.includes("rexine") || blob.includes("leather")) return "upper";
+  if (cat === "upper") return "upper";
+  if (["insole", "sockliner", "bottom"].includes(cat)) return "insole_socks";
+  if (cat === "sole") return "sole";
+  return "other";
+}
 
 /**
  * BomEditorDrawer — inspect and edit a style's Production Card (BOM).
@@ -29,6 +44,7 @@ export default function BomEditorDrawer({ style, onClose, onSaved }) {
   const [saving, setSaving]         = useState(null); // id being saved
   const [adding, setAdding]         = useState(false);
   const [newPick, setNewPick]       = useState({ component_id: "", quantity_per_pair: 1, wastage_percent: 5 });
+  const [filterCat, setFilterCat]   = useState("all");
 
   const load = useCallback(async () => {
     setLoading(true); setErr("");
@@ -123,9 +139,32 @@ export default function BomEditorDrawer({ style, onClose, onSaved }) {
     finally { setAdding(false); }
   };
 
+  // 3 Foundation Slots calculation for Footwear Assembly (Lasting + Pasting)
+  const mappedSlots = useMemo(() => {
+    const slots = { upper: [], insole_socks: [], sole: [], other: [] };
+    for (const r of rows) {
+      if (!r.active) continue;
+      const c = components.find((comp) => comp.id === r.component_id);
+      const cat = classifyCategory(c);
+      slots[cat].push({ row: r, comp: c });
+    }
+    return slots;
+  }, [rows, components]);
+
+  const hasUpper = mappedSlots.upper.length > 0;
+  const hasInsole = mappedSlots.insole_socks.length > 0;
+  const hasSole = mappedSlots.sole.length > 0;
+  const isComplete3 = hasUpper && hasInsole && hasSole;
+
   // Components not yet in this style's BOM (avoid dup key on backend)
-  const alreadyMapped = new Set(rows.map((r) => r.component_id));
-  const pickable = components.filter((c) => !alreadyMapped.has(c.id));
+  const pickable = useMemo(() => {
+    const alreadyMapped = new Set(rows.map((r) => r.component_id));
+    return components.filter((c) => {
+      if (alreadyMapped.has(c.id)) return false;
+      if (filterCat !== "all" && classifyCategory(c) !== filterCat) return false;
+      return true;
+    });
+  }, [components, rows, filterCat]);
 
   const getComponentKey   = (c) => c.id;
   const getComponentLabel = (c) => {
@@ -189,6 +228,133 @@ export default function BomEditorDrawer({ style, onClose, onSaved }) {
           <div className="text-xs text-slate-600">
             Components below are auto-deducted from Component Inventory every time this style is produced.
             Deactivate a row instead of deleting if you want to preserve history but skip deduction temporarily.
+          </div>
+
+          {/* ── 3 FOUNDATION COMPONENTS FOR LASTING & PASTING ── */}
+          <div className="border-2 border-slate-900 bg-slate-50 p-3 sm:p-4 rounded-none space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <div className="text-[11px] font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                  <Layers className="w-4 h-4 text-slate-700" />
+                  3 Foundation Components (Lasting + Pasting)
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  Every footwear style requires Upper, Insole/Socks, and Sole mapped to enter production.
+                </div>
+              </div>
+              <div>
+                {isComplete3 ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> All 3 Tied · Ready to Last & Paste
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-800 border border-red-300">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Incomplete BOM ({[!hasUpper && "Upper", !hasInsole && "Insole", !hasSole && "Sole"].filter(Boolean).join(", ")} missing)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Slot 1: Upper */}
+              <div className={`p-2.5 border-2 ${hasUpper ? "border-slate-300 bg-white" : "border-red-400 bg-red-50/60"} text-xs space-y-1`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[10px] uppercase text-slate-700">👟 1. Upper</span>
+                  {hasUpper ? (
+                    <span className="text-[9px] font-bold text-emerald-700 uppercase">Mapped</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setFilterCat("upper")}
+                      className="text-[9px] font-black uppercase tracking-wider text-red-700 hover:underline"
+                    >
+                      + Assign
+                    </button>
+                  )}
+                </div>
+                {hasUpper ? (
+                  <div className="font-mono text-[11px]">
+                    <div className="font-bold text-slate-900 truncate">
+                      {mappedSlots.upper[0].comp?.component_code || "Upper Mapped"}
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate">
+                      {mappedSlots.upper[0].comp?.component_name || "—"}
+                    </div>
+                    <div className="text-[10px] text-emerald-700 font-bold mt-0.5">
+                      {componentStock(mappedSlots.upper[0].row.component_id)?.avail ?? 0} pairs avail
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-red-600 font-medium">No Upper mapped</div>
+                )}
+              </div>
+
+              {/* Slot 2: Insole / Socks */}
+              <div className={`p-2.5 border-2 ${hasInsole ? "border-slate-300 bg-white" : "border-red-400 bg-red-50/60"} text-xs space-y-1`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[10px] uppercase text-slate-700">🩴 2. Insole / Socks</span>
+                  {hasInsole ? (
+                    <span className="text-[9px] font-bold text-emerald-700 uppercase">Mapped</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setFilterCat("insole_socks")}
+                      className="text-[9px] font-black uppercase tracking-wider text-red-700 hover:underline"
+                    >
+                      + Assign
+                    </button>
+                  )}
+                </div>
+                {hasInsole ? (
+                  <div className="font-mono text-[11px]">
+                    <div className="font-bold text-slate-900 truncate">
+                      {mappedSlots.insole_socks[0].comp?.component_code || "Insole Mapped"}
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate">
+                      {mappedSlots.insole_socks[0].comp?.component_name || "—"}
+                    </div>
+                    <div className="text-[10px] text-emerald-700 font-bold mt-0.5">
+                      {componentStock(mappedSlots.insole_socks[0].row.component_id)?.avail ?? 0} pairs avail
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-red-600 font-medium">No Insole/Socks mapped</div>
+                )}
+              </div>
+
+              {/* Slot 3: Sole */}
+              <div className={`p-2.5 border-2 ${hasSole ? "border-slate-300 bg-white" : "border-red-400 bg-red-50/60"} text-xs space-y-1`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[10px] uppercase text-slate-700">👞 3. Sole</span>
+                  {hasSole ? (
+                    <span className="text-[9px] font-bold text-emerald-700 uppercase">Mapped</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setFilterCat("sole")}
+                      className="text-[9px] font-black uppercase tracking-wider text-red-700 hover:underline"
+                    >
+                      + Assign
+                    </button>
+                  )}
+                </div>
+                {hasSole ? (
+                  <div className="font-mono text-[11px]">
+                    <div className="font-bold text-slate-900 truncate">
+                      {mappedSlots.sole[0].comp?.component_code || "Sole Mapped"}
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate">
+                      {mappedSlots.sole[0].comp?.component_name || "—"}
+                    </div>
+                    <div className="text-[10px] text-emerald-700 font-bold mt-0.5">
+                      {componentStock(mappedSlots.sole[0].row.component_id)?.avail ?? 0} pairs avail
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-red-600 font-medium">No Sole mapped</div>
+                )}
+              </div>
+            </div>
           </div>
 
           {err && (
@@ -402,8 +568,33 @@ export default function BomEditorDrawer({ style, onClose, onSaved }) {
           )}
 
           {/* Add new row */}
-          <div className="border-2 border-slate-200 p-3 sm:p-4 bg-slate-50">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-600 mb-3">Add component</div>
+          <div className="border-2 border-slate-200 p-3 sm:p-4 bg-slate-50 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-[10px] uppercase tracking-wider font-bold text-slate-700">Add component to style</div>
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="text-[10px] uppercase font-bold text-slate-400 mr-1">Filter:</span>
+                {[
+                  { id: "all", label: "All" },
+                  { id: "upper", label: "👟 Upper" },
+                  { id: "insole_socks", label: "🩴 Insole" },
+                  { id: "sole", label: "👞 Sole" },
+                  { id: "other", label: "📦 Other" },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setFilterCat(tab.id)}
+                    className={`px-2 py-0.5 text-[10px] font-bold uppercase transition-colors border ${
+                      filterCat === tab.id
+                        ? "bg-slate-900 text-white border-slate-900"
+                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-end">
               {/* Searchable component picker */}
               <div className="flex-1 min-w-0">

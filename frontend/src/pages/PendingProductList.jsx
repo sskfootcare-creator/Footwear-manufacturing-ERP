@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { http, friendlyAxiosError } from "../lib/api";
 import { PageHeader, Card, BtnPrimary, BtnSecondary, Badge, Input } from "../components/ui-kit";
 import { SafeImage } from "../components/ImageUploader";
+import BomEditorDrawer from "../components/BomEditorDrawer";
 import { Printer, RefreshCw, AlertTriangle, CheckCircle2, X, Wrench, Loader2, Layers } from "lucide-react";
 
 /**
@@ -31,6 +32,9 @@ function useMatrix(rows) {
           shortages:            [],
           has_bom:              true,
           orders:               new Set(), // distinct PO/order numbers
+          named_components:     [],
+          missing_components:   new Set(),
+          remove_from_portal:   false,
         };
       }
       const g = map[key];
@@ -42,6 +46,21 @@ function useMatrix(rows) {
       if (!g.sizes[sz]) g.sizes[sz] = { qty: 0, jobs: 0, ready: true };
       g.sizes[sz].qty  += pending;
       g.sizes[sz].jobs += 1;
+
+      if (r.remove_from_portal) {
+        g.remove_from_portal = true;
+      }
+      if (Array.isArray(r.missing_components)) {
+        r.missing_components.forEach((m) => g.missing_components.add(m));
+      }
+      if (Array.isArray(r.named_components)) {
+        r.named_components.forEach((nc) => {
+          if (!g.named_components.some((x) => x.component_code === nc.component_code)) {
+            g.named_components.push(nc);
+          }
+        });
+      }
+
       if (!r.components_available) {
         g.sizes[sz].ready = false;
         g.any_shortage     = true;
@@ -61,8 +80,14 @@ function useMatrix(rows) {
     }
     const groups = Object.values(map)
       .filter((g) => g.total > 0)                          // hide fully-produced groups
-      .map((g) => ({ ...g, orders: [...g.orders] }))
+      .map((g) => ({
+        ...g,
+        orders: [...g.orders],
+        missing_components: [...g.missing_components],
+      }))
       .sort((a, b) => {
+        // Rows requiring portal removal bubble to top
+        if (a.remove_from_portal !== b.remove_from_portal) return a.remove_from_portal ? -1 : 1;
         // Rows with any shortage bubble to the top for attention
         if (a.any_shortage !== b.any_shortage) return a.any_shortage ? -1 : 1;
         return (a.style_code || "").localeCompare(b.style_code || "");
@@ -82,7 +107,8 @@ export default function PendingProductList() {
   const [rows, setRows]     = useState([]);
   const [loading, setLoad]  = useState(false);
   const [err, setErr]       = useState("");
-  const [filter, setFilter] = useState("all"); // all | available | shortage
+  const [filter, setFilter] = useState("all"); // all | available | shortage | portal_delist
+  const [bomModalStyle, setBomModalStyle] = useState(null);
 
   // Snapshots states
   const [snapshots, setSnapshots]   = useState([]);
@@ -167,14 +193,16 @@ export default function PendingProductList() {
   const filtered = displayRows.filter((r) => {
     if (filter === "available") return r.components_available;
     if (filter === "shortage")  return !r.components_available;
+    if (filter === "portal_delist") return r.remove_from_portal;
     return true;
   });
 
   const totals = {
-    total:     displayRows.length,
-    available: displayRows.filter((r) => r.components_available).length,
-    shortage:  displayRows.filter((r) => !r.components_available).length,
-    pairs:     displayRows.reduce((s, r) => s + (r.quantity || 0), 0),
+    total:         displayRows.length,
+    available:     displayRows.filter((r) => r.components_available).length,
+    shortage:      displayRows.filter((r) => !r.components_available).length,
+    portal_delist: displayRows.filter((r) => r.remove_from_portal).length,
+    pairs:         displayRows.reduce((s, r) => s + (r.quantity || 0), 0),
   };
 
   const { groups, allSizes } = useMatrix(filtered);
@@ -185,7 +213,7 @@ export default function PendingProductList() {
       <div className="print:hidden">
         <PageHeader
           title="Pending Product List"
-          subtitle="Production / Online orders awaiting manufacture"
+          subtitle="Production / Online orders awaiting manufacture (Upper + Insole + Sole assembly)"
           testId="pending-list-header"
           action={
             <div className="flex gap-2">
@@ -247,35 +275,45 @@ export default function PendingProductList() {
         )}
 
         {/* Summary tiles (screen only) */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 print:hidden">
-          <Card className="p-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 print:hidden">
+          <Card className="p-3 sm:p-4">
             <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Total Pending</div>
-            <div className="text-3xl font-black mt-1">{totals.total}</div>
-            <div className="text-xs text-slate-500 mt-1">jobs</div>
+            <div className="text-2xl sm:text-3xl font-black mt-1">{totals.total}</div>
+            <div className="text-xs text-slate-500 mt-0.5">jobs</div>
           </Card>
-          <Card className="p-4 border-green-300">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-green-700">Ready to Produce</div>
-            <div className="text-3xl font-black mt-1 text-green-800">{totals.available}</div>
-            <div className="text-xs text-slate-500 mt-1">components available</div>
+          <Card className="p-3 sm:p-4 border-green-300 bg-green-50/20">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-green-700">Ready to Last & Paste</div>
+            <div className="text-2xl sm:text-3xl font-black mt-1 text-green-800">{totals.available}</div>
+            <div className="text-xs text-green-700 mt-0.5">all 3 components OK</div>
           </Card>
-          <Card className="p-4 border-red-300">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-red-700">Awaiting Components</div>
-            <div className="text-3xl font-black mt-1 text-red-800">{totals.shortage}</div>
-            <div className="text-xs text-slate-500 mt-1">component shortage</div>
+          <Card className="p-3 sm:p-4 border-amber-300 bg-amber-50/20">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-amber-700">Awaiting Components</div>
+            <div className="text-2xl sm:text-3xl font-black mt-1 text-amber-800">{totals.shortage}</div>
+            <div className="text-xs text-amber-700 mt-0.5">component shortage</div>
           </Card>
-          <Card className="p-4">
+          <Card className="p-3 sm:p-4 border-red-300 bg-red-50/30">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-red-700 flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5 text-red-600" /> Remove from Portal
+            </div>
+            <div className="text-2xl sm:text-3xl font-black mt-1 text-red-800">{totals.portal_delist}</div>
+            <div className="text-xs text-red-600 font-bold mt-0.5">zero out on portals</div>
+          </Card>
+          <Card className="p-3 sm:p-4">
             <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Total Pairs</div>
-            <div className="text-3xl font-black mt-1">{totals.pairs.toLocaleString()}</div>
-            <div className="text-xs text-slate-500 mt-1">to manufacture</div>
+            <div className="text-2xl sm:text-3xl font-black mt-1">{totals.pairs.toLocaleString()}</div>
+            <div className="text-xs text-slate-500 mt-0.5">to manufacture</div>
           </Card>
         </div>
 
         {/* Filter tabs & History Date Range Filter (screen only) */}
         <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
-          <div className="flex gap-2">
-            <BtnSecondary onClick={() => setFilter("all")}       className={filter === "all"       ? "bg-slate-900 text-white border-slate-900" : ""} data-testid="filter-all">All ({totals.total})</BtnSecondary>
-            <BtnSecondary onClick={() => setFilter("available")} className={filter === "available" ? "bg-green-700 text-white border-green-700" : ""} data-testid="filter-available">Ready ({totals.available})</BtnSecondary>
-            <BtnSecondary onClick={() => setFilter("shortage")}  className={filter === "shortage"  ? "bg-red-700 text-white border-red-700"    : ""} data-testid="filter-shortage">Shortage ({totals.shortage})</BtnSecondary>
+          <div className="flex gap-2 flex-wrap">
+            <BtnSecondary onClick={() => setFilter("all")}       className={filter === "all"       ? "bg-slate-900 text-white border-slate-900 font-bold" : ""} data-testid="filter-all">All ({totals.total})</BtnSecondary>
+            <BtnSecondary onClick={() => setFilter("available")} className={filter === "available" ? "bg-green-700 text-white border-green-700 font-bold" : ""} data-testid="filter-available">Ready ({totals.available})</BtnSecondary>
+            <BtnSecondary onClick={() => setFilter("shortage")}  className={filter === "shortage"  ? "bg-amber-700 text-white border-amber-700 font-bold" : ""} data-testid="filter-shortage">Shortage ({totals.shortage})</BtnSecondary>
+            <BtnSecondary onClick={() => setFilter("portal_delist")} className={filter === "portal_delist" ? "bg-red-700 text-white border-red-700 font-bold" : "border-red-400 text-red-700 hover:bg-red-50 font-bold"} data-testid="filter-portal-delist">
+              <AlertTriangle className="w-3.5 h-3.5 inline mr-1" /> Remove from Portal ({totals.portal_delist})
+            </BtnSecondary>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">History Range:</span>
@@ -468,6 +506,72 @@ export default function PendingProductList() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* ── ACTION BANNER: REMOVE FROM PORTAL ── */}
+                  {g.remove_from_portal && (
+                    <div className="px-3 py-2 bg-red-600 text-white flex items-center justify-between text-xs font-bold border-t-2 border-red-700">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <AlertTriangle className="w-4 h-4 text-amber-200 animate-pulse flex-shrink-0" />
+                        <span className="truncate">ACTION REQUIRED: NO READY STOCK & COMPONENTS UNAVAILABLE — REMOVE STOCK FROM PORTAL</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBomModalStyle({ id: g.style_id, code: g.style_code, name: g.style_name, image_url: g.image_url, image_display_url: g.image_display_url, image_thumbnail_url: g.image_thumbnail_url })}
+                        className="px-2.5 py-1 bg-white text-red-800 text-[10px] font-black uppercase tracking-wider rounded hover:bg-red-50 flex items-center gap-1 ml-2 flex-shrink-0"
+                      >
+                        <Wrench className="w-3 h-3" /> Tie Components
+                      </button>
+                    </div>
+                  )}
+
+                  {/* ── 3 NAMED ASSEMBLY COMPONENTS FOR LASTING & PASTING ── */}
+                  {(() => {
+                    const upperComp = g.named_components?.find((c) => c.category === "upper");
+                    const insoleComp = g.named_components?.find((c) => c.category === "insole_socks");
+                    const soleComp = g.named_components?.find((c) => c.category === "sole");
+                    return (
+                      <div className="px-3 py-2 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center gap-2 text-xs">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Assembly Components:</span>
+                        <div className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-mono ${
+                          upperComp && upperComp.in_stock ? "bg-white border-slate-300 text-slate-800" : "bg-red-50 border-red-300 text-red-800"
+                        }`}>
+                          <span className="font-bold">👟 Upper:</span>
+                          <span className="truncate max-w-[140px]">{upperComp ? (upperComp.component_name || upperComp.component_code) : (g.missing_components?.includes("Upper") ? "Unmapped" : "Pending")}</span>
+                          {upperComp && <span className={`text-[10px] font-bold ${upperComp.in_stock ? "text-emerald-700" : "text-red-700"}`}>({upperComp.available ?? 0} avail)</span>}
+                        </div>
+                        <div className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-mono ${
+                          insoleComp && insoleComp.in_stock ? "bg-white border-slate-300 text-slate-800" : "bg-red-50 border-red-300 text-red-800"
+                        }`}>
+                          <span className="font-bold">🩴 Insole:</span>
+                          <span className="truncate max-w-[140px]">{insoleComp ? (insoleComp.component_name || insoleComp.component_code) : (g.missing_components?.includes("Insole/Socks") ? "Unmapped" : "Pending")}</span>
+                          {insoleComp && <span className={`text-[10px] font-bold ${insoleComp.in_stock ? "text-emerald-700" : "text-red-700"}`}>({insoleComp.available ?? 0} avail)</span>}
+                        </div>
+                        <div className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-mono ${
+                          soleComp && soleComp.in_stock ? "bg-white border-slate-300 text-slate-800" : "bg-red-50 border-red-300 text-red-800"
+                        }`}>
+                          <span className="font-bold">👞 Sole:</span>
+                          <span className="truncate max-w-[140px]">{soleComp ? (soleComp.component_name || soleComp.component_code) : (g.missing_components?.includes("Sole") ? "Unmapped" : "Pending")}</span>
+                          {soleComp && <span className={`text-[10px] font-bold ${soleComp.in_stock ? "text-emerald-700" : "text-red-700"}`}>({soleComp.available ?? 0} avail)</span>}
+                        </div>
+                        <div className="ml-auto flex items-center gap-2">
+                          {!g.any_shortage && (
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2 py-0.5 border border-emerald-300 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Ready to Last & Paste
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setBomModalStyle({ id: g.style_id, code: g.style_code, name: g.style_name, image_url: g.image_url, image_display_url: g.image_display_url, image_thumbnail_url: g.image_thumbnail_url })}
+                            className="text-[11px] font-bold text-indigo-700 hover:text-indigo-950 underline flex items-center gap-1"
+                            title="Open BOM Production Card to tie or update components"
+                          >
+                            <Wrench className="w-3 h-3" /> Tie Components
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {g.any_shortage && g.shortages.length > 0 && (
                     <div className={`px-3 py-1.5 border-t-2 text-[10px] ${g.has_bom === false ? "bg-amber-50 border-amber-500 text-amber-900" : "bg-red-50 border-red-500 text-red-800"}`}>
                       <span className="font-bold uppercase tracking-wider">
@@ -501,6 +605,14 @@ export default function PendingProductList() {
           ctx={produceCtx}
           onClose={() => setProduceCtx(null)}
           onDone={() => { setProduceCtx(null); load(); }}
+        />
+      )}
+
+      {bomModalStyle && (
+        <BomEditorDrawer
+          style={bomModalStyle}
+          onClose={() => setBomModalStyle(null)}
+          onSaved={() => { load(); }}
         />
       )}
     </div>

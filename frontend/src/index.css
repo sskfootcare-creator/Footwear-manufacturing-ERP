@@ -136,8 +136,8 @@ h1, h2, h3, h4, h5, h6 {
 /* ----- Print styles for ERP ledgers, reports & picklists ----- */
 @media print {
   @page {
-    size: A4;
-    margin: 12mm;
+    size: A4 portrait;
+    margin: 8mm;
   }
   html, body {
     background: white !important;
@@ -146,9 +146,28 @@ h1, h2, h3, h4, h5, h6 {
     height: auto !important;
     overflow: visible !important;
   }
-  /* Hide the whole app shell (sidebar + header) when printing */
-  [data-testid="sidebar"], .no-print, .print\:hidden, button {
+  main {
+    padding-left: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+  }
+  /* Hide the whole app shell (sidebar + header + alerts) when printing */
+  [data-testid="sidebar"], .no-print, .print\:hidden, button, header, nav {
     display: none !important;
+  }
+  .techpack-page {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+    height: auto !important;
+    max-height: 240mm !important;
+    width: 100% !important;
+    max-width: 184mm !important;
+    overflow: hidden !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
   }
   /* Make scrolling containers visible in print */
   .overflow-x-auto, .overflow-y-auto, .overflow-hidden, .overflow-auto {

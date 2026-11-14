@@ -437,12 +437,27 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
       </div>
 
       {/* Two-tier fulfillment preview summary */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         <MiniStat label="In-Stock (ERP Picklist)" value={stats.pairs_fulfilled_from_stock ?? 0} accent="#059669" />
         <MiniStat label="To Manufacture" value={stats.pairs_to_manufacture ?? 0} accent="#D97706" />
         <MiniStat label="Ready to Cut (BOM OK)" value={stats.ready_to_produce_pairs ?? 0} accent="#2563EB" />
         <MiniStat label="Shortage / No BOM" value={stats.shortage_pairs ?? 0} accent="#DC2626" />
+        <MiniStat label="⚠️ Remove from Portal" value={stats.portal_delist_pairs ?? 0} accent="#B91C1C" />
       </div>
+
+      {stats.portal_delist_pairs > 0 && (
+        <div className="bg-red-50 border-2 border-red-500 px-4 py-2.5 text-xs text-red-900 flex items-center justify-between gap-2 font-bold">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>
+              <b>{stats.portal_delist_pairs} pair(s)</b> across <b>{stats.portal_delist_count} SKU(s)</b> have NO ready stock and NO components available!
+            </span>
+          </div>
+          <span className="uppercase tracking-wider text-[10px] bg-red-600 text-white px-2 py-0.5 rounded font-black">
+            Action: Zero Out on Marketplace Portals
+          </span>
+        </div>
+      )}
 
       {(stats.derivation_failed > 0 || stats.empty_leaf_sku > 0) && (
         <div className="bg-amber-50 border-2 border-amber-300 px-4 py-2 text-xs text-amber-900 flex items-start gap-2">
@@ -588,12 +603,19 @@ function PreviewPanel({ preview, error, committing, onBack, onCommit }) {
                             Cutting ({r.remaining_qty ?? r.qty} prs - ready)
                           </Badge>
                         ) : (
-                          <div className="space-y-0.5">
+                          <div className="space-y-1">
                             <Badge color="red">
                               <AlertTriangle className="w-3 h-3 inline mr-1" />
                               {r.has_bom === false ? "No BOM Mapped" : "Shortage"} ({r.remaining_qty ?? r.qty} prs)
                             </Badge>
-                            <div className="text-[10px] text-red-600">Pending Shortage Queue</div>
+                            {r.remove_from_portal ? (
+                              <div className="text-[10px] font-black text-red-700 uppercase tracking-wider bg-red-100 p-1 border border-red-400 rounded-none flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-red-600 shrink-0" />
+                                <span>Remove from Portal</span>
+                              </div>
+                            ) : (
+                              <div className="text-[10px] text-red-600">Pending Shortage Queue</div>
+                            )}
                           </div>
                         )
                       ) : (

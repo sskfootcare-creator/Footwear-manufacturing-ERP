@@ -39,7 +39,7 @@ export default function AlertBanner({ onActionClick }) {
   const isCritical = criticalCount > 0;
 
   return (
-    <div className={`w-full border-b transition-all duration-300 ${
+    <div className={`w-full border-b transition-all duration-300 print:hidden no-print ${
       isCritical
         ? "bg-rose-950/40 border-rose-800 text-rose-200"
         : "bg-amber-950/40 border-amber-800 text-amber-200"
