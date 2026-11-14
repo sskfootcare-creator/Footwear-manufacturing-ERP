@@ -189,6 +189,30 @@ h1, h2, h3, h4, h5, h6 {
   [role="dialog"]:not(.techpack-printable-dialog) {
     display: none !important;
   }
+  .techpack-overlay {
+    display: block !important;
+    position: static !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    overflow: visible !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    max-height: none !important;
+    inset: auto !important;
+    z-index: auto !important;
+  }
+  .techpack-overlay > div {
+    border: none !important;
+    box-shadow: none !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+  }
   /* Neutralize any Tailwind space-y margins in print stream */
   .space-y-6 > :not([hidden]) ~ :not([hidden]),
   .space-y-4 > :not([hidden]) ~ :not([hidden]) {

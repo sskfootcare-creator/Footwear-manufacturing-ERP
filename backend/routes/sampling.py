@@ -10,6 +10,7 @@ Footwear Product Development (PD) pipeline:
 
 import os
 import re
+import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Request, Depends, UploadFile, File, Query
@@ -30,8 +31,14 @@ from services.upload_validator import (
     sanitize_filename,
     ALLOWED_IMAGE_EXTENSIONS,
 )
+from services.imagekit_service import (
+    is_imagekit_configured,
+    upload_to_imagekit_async,
+    delete_from_imagekit_async,
+)
 from constants import MAX_IMAGE_UPLOAD_BYTES
 
+logger = logging.getLogger("sampling")
 sampling_router = APIRouter(prefix="/api/samples", tags=["Sample Development & Tracking"])
 
 
@@ -292,6 +299,70 @@ async def _extract_upload_files(request: Request, files_arg: Any = None, file_ar
     return all_files
 
 
+async def _process_and_upload_photo(
+    content: bytes,
+    safe_name: str,
+    folder_id: str,
+    photo_id: str,
+    is_primary: bool,
+    caption: str = "",
+) -> Dict[str, Any]:
+    """Upload photo to ImageKit when configured, or fallback to local disk."""
+    clean_name = safe_name.replace(" ", "_")
+    clean_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", clean_name)
+    clean_name = re.sub(r"_+", "_", clean_name)
+
+    if is_imagekit_configured():
+        try:
+            ik_res = await upload_to_imagekit_async(
+                file_data=content,
+                file_name=f"{photo_id}_{clean_name}",
+                folder="/ssk-erp/samples_inspiration",
+                tags=["ssk-erp", "samples_inspiration"],
+                use_unique_file_name=True,
+            )
+            url = ik_res.get("url")
+            thumbnail_url = ik_res.get("thumbnail_url") or ik_res.get("thumbnailUrl") or url
+            display_url = ik_res.get("display_url") or url
+            file_id = ik_res.get("fileId")
+            return {
+                "photo_id": photo_id,
+                "url": url,
+                "thumbnail_url": thumbnail_url,
+                "display_url": display_url,
+                "file_id": file_id,
+                "storage": "imagekit",
+                "caption": caption,
+                "is_primary": is_primary,
+                "uploaded_at": now_iso(),
+                "category": "sample_inspiration",
+            }
+        except Exception as ik_err:
+            logger.warning(f"ImageKit upload failed ({ik_err}); falling back to local storage")
+
+    # Local disk fallback
+    sample_dir = os.path.join("uploads", "samples_inspiration", folder_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    unique_name = f"{os.urandom(4).hex()}_{clean_name}"
+    fpath = os.path.join(sample_dir, unique_name)
+    with open(fpath, "wb") as f:
+        f.write(content)
+
+    url = f"/api/uploads/samples_inspiration/{folder_id}/{unique_name}"
+    return {
+        "photo_id": photo_id,
+        "url": url,
+        "thumbnail_url": url,
+        "display_url": url,
+        "file_id": None,
+        "storage": "local",
+        "caption": caption,
+        "is_primary": is_primary,
+        "uploaded_at": now_iso(),
+        "category": "sample_inspiration",
+    }
+
+
 @sampling_router.post("/upload-photos")
 async def upload_multiple_sample_photos(
     request: Request,
@@ -300,7 +371,7 @@ async def upload_multiple_sample_photos(
     file: Optional[Any] = None,
 ):
     """Upload multiple sample inspiration photos in a single batch.
-    Isolated storage path under uploads/samples_inspiration/ with category='sample_inspiration'.
+    Stores to ImageKit.io when configured (with local fallback).
     Can be called during sample creation (staging) or attached to an existing sample.
     """
     u = await _get_user(request)
@@ -319,8 +390,6 @@ async def upload_multiple_sample_photos(
 
     target_sample_id = sample_id or request.query_params.get("sample_id") or (form.get("sample_id") if form else None)
     folder_id = target_sample_id or os.urandom(8).hex()
-    sample_dir = os.path.join("uploads", "samples_inspiration", folder_id)
-    os.makedirs(sample_dir, exist_ok=True)
 
     uploaded_photos = []
     last_err = None
@@ -332,29 +401,26 @@ async def upload_multiple_sample_photos(
                 max_bytes=MAX_IMAGE_UPLOAD_BYTES,
                 category_label="sample_inspiration_photo",
             )
-            unique_name = f"{os.urandom(4).hex()}_{safe_name}"
-            fpath = os.path.join(sample_dir, unique_name)
-            with open(fpath, "wb") as f:
-                f.write(content)
-
-            url = f"/api/uploads/samples_inspiration/{folder_id}/{unique_name}"
             photo_id = os.urandom(6).hex()
-            photo_entry = {
-                "photo_id": photo_id,
-                "url": url,
-                "thumbnail_url": url,
-                "caption": "",
-                "is_primary": (idx == 0),
-                "uploaded_at": now_iso(),
-                "category": "sample_inspiration",
-            }
+            photo_entry = await _process_and_upload_photo(
+                content=content,
+                safe_name=safe_name,
+                folder_id=folder_id,
+                photo_id=photo_id,
+                is_primary=(idx == 0),
+                caption="",
+            )
             uploaded_photos.append(photo_entry)
 
             try:
                 await db.image_uploads.insert_one({
                     "_id": photo_id,
                     "key": photo_id,
-                    "url": url,
+                    "url": photo_entry.get("url"),
+                    "thumbnail_url": photo_entry.get("thumbnail_url"),
+                    "display_url": photo_entry.get("display_url"),
+                    "imagekit_file_id": photo_entry.get("file_id"),
+                    "storage": photo_entry.get("storage", "local"),
                     "category": "sample_inspiration",
                     "is_sample_inspiration": True,
                     "sample_id": target_sample_id or folder_id,
@@ -403,7 +469,7 @@ async def upload_sample_photos_to_sample(
     caption: Optional[str] = None,
     is_primary: Optional[bool] = None,
 ):
-    """Upload one or more sample inspiration photos to an existing sample."""
+    """Upload one or more sample inspiration photos to an existing sample (saved to ImageKit with local fallback)."""
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = get_db(request)
@@ -429,9 +495,6 @@ async def upload_sample_photos_to_sample(
     if not sample:
         raise HTTPException(404, "Sample not found")
 
-    sample_dir = os.path.join("uploads", "samples_inspiration", sid)
-    os.makedirs(sample_dir, exist_ok=True)
-
     uploaded_photos = []
     existing_photos = sample.get("inspiration_photos", [])
     has_existing_primary = any(p.get("is_primary") for p in existing_photos)
@@ -444,31 +507,28 @@ async def upload_sample_photos_to_sample(
                 max_bytes=MAX_IMAGE_UPLOAD_BYTES,
                 category_label="sample_inspiration_photo",
             )
-            unique_name = f"{os.urandom(4).hex()}_{safe_name}"
-            fpath = os.path.join(sample_dir, unique_name)
-            with open(fpath, "wb") as f:
-                f.write(content)
-
-            url = f"/api/uploads/samples_inspiration/{sid}/{unique_name}"
             photo_id = os.urandom(6).hex()
             should_be_primary = (is_primary and idx == 0) or (not has_existing_primary and idx == 0 and len(existing_photos) == 0)
 
-            photo_entry = {
-                "photo_id": photo_id,
-                "url": url,
-                "thumbnail_url": url,
-                "caption": caption if idx == 0 else "",
-                "is_primary": should_be_primary,
-                "uploaded_at": now_iso(),
-                "category": "sample_inspiration",
-            }
+            photo_entry = await _process_and_upload_photo(
+                content=content,
+                safe_name=safe_name,
+                folder_id=sid,
+                photo_id=photo_id,
+                is_primary=should_be_primary,
+                caption=caption if idx == 0 else "",
+            )
             uploaded_photos.append(photo_entry)
 
             try:
                 await db.image_uploads.insert_one({
                     "_id": photo_id,
                     "key": photo_id,
-                    "url": url,
+                    "url": photo_entry.get("url"),
+                    "thumbnail_url": photo_entry.get("thumbnail_url"),
+                    "display_url": photo_entry.get("display_url"),
+                    "imagekit_file_id": photo_entry.get("file_id"),
+                    "storage": photo_entry.get("storage", "local"),
                     "category": "sample_inspiration",
                     "is_sample_inspiration": True,
                     "sample_id": sid,
@@ -557,7 +617,7 @@ async def update_sample_photo_caption(
 
 @sampling_router.delete("/{sid}/photos/{photo_id}")
 async def delete_sample_photo(sid: str, photo_id: str, request: Request):
-    """Remove a photo from the sample's inspiration gallery."""
+    """Remove a photo from the sample's inspiration gallery (and delete from ImageKit if applicable)."""
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = get_db(request)
@@ -566,6 +626,13 @@ async def delete_sample_photo(sid: str, photo_id: str, request: Request):
     if not sample:
         raise HTTPException(404, "Sample not found")
 
+    target_photo = next((p for p in sample.get("inspiration_photos", []) if p.get("photo_id") == photo_id), None)
+    if target_photo and target_photo.get("file_id") and target_photo.get("storage") == "imagekit":
+        try:
+            await delete_from_imagekit_async(target_photo["file_id"])
+        except Exception as e:
+            logger.warning(f"Failed to delete ImageKit photo {target_photo['file_id']}: {e}")
+
     await db.samples.update_one(
         {"_id": oid(sid)},
         {
@@ -573,6 +640,15 @@ async def delete_sample_photo(sid: str, photo_id: str, request: Request):
             "$set": {"updated_at": now_iso()},
         }
     )
+    if db is not None and hasattr(db, "image_uploads"):
+        try:
+            await db.image_uploads.update_one(
+                {"_id": photo_id},
+                {"$set": {"status": "deleted", "deleted_at": now_iso()}}
+            )
+        except Exception:
+            pass
+
     updated = await db.samples.find_one({"_id": oid(sid)})
     return {"ok": True, "sample": stringify(updated)}
 

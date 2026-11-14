@@ -11,25 +11,43 @@ import { http, getBackendUrl } from "../lib/api";
 export function resolveImageUrl(url) {
   if (!url || typeof url !== "string") return url || "";
   const trimmed = url.trim();
-  // Static frontend public assets must NOT be redirected to backend server
+  // Cloud CDN / remote absolute URLs (ImageKit, S3, data/blob URLs) are untouched
   if (
-    trimmed.startsWith("/company/") ||
-    trimmed.startsWith("/static/") ||
-    trimmed.startsWith("/assets/") ||
-    trimmed.startsWith("/favicon") ||
-    trimmed.startsWith("/logo")
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:")
   ) {
     return trimmed;
   }
-  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+  let cleanPath = trimmed;
+  if (!cleanPath.startsWith("/")) {
+    cleanPath = "/" + cleanPath;
+  }
+  // Static frontend public assets must NOT be redirected to backend server
+  if (
+    cleanPath.startsWith("/company/") ||
+    cleanPath.startsWith("/static/") ||
+    cleanPath.startsWith("/assets/") ||
+    cleanPath.startsWith("/favicon") ||
+    cleanPath.startsWith("/logo")
+  ) {
     try {
-      const backendOrigin = getBackendUrl().replace(/\/api\/?$/, "").replace(/\/+$/, "");
-      return `${backendOrigin}${trimmed}`;
+      return encodeURI(decodeURI(cleanPath));
     } catch {
-      return trimmed;
+      return cleanPath;
     }
   }
-  return trimmed;
+  try {
+    const backendOrigin = getBackendUrl().replace(/\/api\/?$/, "").replace(/\/+$/, "");
+    return `${backendOrigin}${encodeURI(decodeURI(cleanPath))}`;
+  } catch {
+    try {
+      return encodeURI(decodeURI(cleanPath));
+    } catch {
+      return cleanPath;
+    }
+  }
 }
 
 /**
@@ -486,6 +504,11 @@ export function SafeImage({
 }) {
   const [errStep, setErrStep] = useState(0); // 0=try display, 1=thumb, 2=placeholder
   const rawInput = image !== undefined ? image : propSrc;
+
+  useEffect(() => {
+    setErrStep(0);
+  }, [rawInput]);
+
   const asObj =
     typeof rawInput === "string"
       ? { url: rawInput, display_url: rawInput, thumbnail_url: rawInput }

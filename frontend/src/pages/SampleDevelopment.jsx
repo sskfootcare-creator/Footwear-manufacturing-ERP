@@ -56,6 +56,7 @@ export default function SampleDevelopment() {
   const [photoModalSample, setPhotoModalSample] = useState(null);
   const [transferModalSample, setTransferModalSample] = useState(null);
   const [detailSample, setDetailSample] = useState(null);
+  const [detailPrintMode, setDetailPrintMode] = useState(false);
 
   // Status transition state
   const [statusUpdateLoading, setStatusUpdateLoading] = useState(false);
@@ -207,10 +208,11 @@ export default function SampleDevelopment() {
   };
 
   const handlePrintTechPack = (sample) => {
+    setDetailPrintMode(true);
     setDetailSample(sample);
     setTimeout(() => {
       window.print();
-    }, 150);
+    }, 200);
   };
 
   return (
@@ -412,20 +414,27 @@ export default function SampleDevelopment() {
       {detailSample && (
         <DetailViewModal
           sample={detailSample}
-          onClose={() => setDetailSample(null)}
+          initialViewMode={detailPrintMode ? "print_sheet" : "screen"}
+          onClose={() => {
+            setDetailSample(null);
+            setDetailPrintMode(false);
+          }}
           onOpenEdit={() => {
             const s = detailSample;
             setDetailSample(null);
+            setDetailPrintMode(false);
             handleOpenEdit(s);
           }}
           onOpenTransfer={() => {
             const s = detailSample;
             setDetailSample(null);
+            setDetailPrintMode(false);
             setTransferModalSample(s);
           }}
           onOpenPhotos={() => {
             const s = detailSample;
             setDetailSample(null);
+            setDetailPrintMode(false);
             setPhotoModalSample(s);
           }}
         />
@@ -2595,8 +2604,8 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────────────────────
    MODAL 4: DETAIL VIEW & DESIGNER TECH PACK PRINT SHEET (80% IMAGE COVERAGE)
    ───────────────────────────────────────────────────────────────────────────── */
-function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPhotos }) {
-  const [viewMode, setViewMode] = useState("screen"); // "screen" or "print_sheet"
+function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPhotos, initialViewMode = "screen" }) {
+  const [viewMode, setViewMode] = useState(initialViewMode); // "screen" or "print_sheet"
   const upper = sample.upper_spec || {};
   const insole = sample.insole_spec || {};
   const sole = sample.sole_spec || {};
@@ -2628,11 +2637,18 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
   const totalPages = photoCount === 0 ? 1 : (photoPages.length + 1);
 
   const handlePrint = () => {
-    window.print();
+    setViewMode("print_sheet");
+    setTimeout(() => {
+      window.print();
+    }, 150);
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block">
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="techpack-overlay techpack-printable-dialog fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block"
+    >
       <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl flex flex-col max-h-[92vh] overflow-hidden print:max-w-none print:max-h-none print:shadow-none print:border-none print:overflow-visible print:bg-white print:p-0 print:m-0">
         
         {/* ── MODAL SCREEN HEADER (Hidden in Print) ── */}

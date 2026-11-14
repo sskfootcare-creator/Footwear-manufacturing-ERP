@@ -46,6 +46,7 @@ http.interceptors.response.use(
   (response) => {
     try {
       const method = response?.config?.method?.toLowerCase();
+      const url = response?.config?.url || "";
       if (method && ["post", "put", "patch", "delete"].includes(method)) {
         if (url.includes("/styles")) broadcastSync("styles", { action: method });
         else if (url.includes("/sku-map")) broadcastSync("sku-map", { action: method });

@@ -343,7 +343,7 @@ async def test_inspiration_photo_isolation(mock_db, mock_admin_user):
 
     assert res["ok"] is True
     photo = res["photo"]
-    assert "/api/uploads/samples_inspiration/" in photo["url"]
+    assert ("ik.imagekit.io" in photo["url"]) or ("/api/uploads/samples_inspiration/" in photo["url"])
     assert photo["category"] == "sample_inspiration"
     assert photo["is_primary"] is True
 
@@ -352,6 +352,43 @@ async def test_inspiration_photo_isolation(mock_db, mock_admin_user):
     assert img_record["category"] == "sample_inspiration"
     assert img_record["is_sample_inspiration"] is True
     assert img_record["sample_id"] == str(sample_id)
+
+
+@pytest.mark.anyio
+async def test_sampling_imagekit_upload_and_delete(mock_db, mock_admin_user):
+    """Verify ImageKit upload and deletion lifecycle for footwear sampling."""
+    from routes.sampling import upload_sample_photo, delete_sample_photo
+    import io
+    from fastapi import UploadFile
+
+    sample_id = ObjectId()
+    photo_id = "ik_photo_999"
+    sample_doc = {
+        "_id": sample_id,
+        "temp_code": "SMP-2026-0099",
+        "inspiration_photos": [
+            {
+                "photo_id": photo_id,
+                "url": "https://ik.imagekit.io/u4qturzfc/ssk-erp/samples_inspiration/test.jpg",
+                "file_id": "file_ik_123",
+                "storage": "imagekit",
+                "is_primary": True,
+            }
+        ],
+    }
+    mock_db.samples.find_one = AsyncMock(return_value=sample_doc)
+    mock_db.samples.update_one = AsyncMock()
+    mock_db.image_uploads.update_one = AsyncMock()
+
+    request = MagicMock()
+    request.state.user = mock_admin_user
+
+    with patch("routes.sampling.get_db", return_value=mock_db), \
+         patch("routes.sampling._get_user", AsyncMock(return_value=mock_admin_user)), \
+         patch("routes.sampling.delete_from_imagekit_async", AsyncMock()) as mock_ik_del:
+        res = await delete_sample_photo(str(sample_id), photo_id, request)
+        assert res["ok"] is True
+        mock_ik_del.assert_awaited_once_with("file_ik_123")
 
 
 @pytest.mark.anyio

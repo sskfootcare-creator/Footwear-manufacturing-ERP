@@ -29,7 +29,9 @@ class SamplePhoto(BaseModel):
     photo_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:10])
     url: str
     thumbnail_url: Optional[str] = None
+    display_url: Optional[str] = None
     file_id: Optional[str] = None
+    storage: Optional[str] = "imagekit"
     caption: Optional[str] = ""
     is_primary: bool = False
     uploaded_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

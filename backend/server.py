@@ -1010,6 +1010,8 @@ def resolve_local_upload_path(url: str) -> Optional[str]:
         idx = url.find(marker)
         if idx >= 0:
             rel = url[idx + len(marker):].split("?", 1)[0].split("#", 1)[0]
+            import urllib.parse
+            rel = urllib.parse.unquote(rel)
             break
     else:
         return None
