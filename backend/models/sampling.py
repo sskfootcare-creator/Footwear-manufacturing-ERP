@@ -36,7 +36,18 @@ class SamplePhoto(BaseModel):
     category: str = "sample_inspiration"
 
 
+class UpperMaterialItem(BaseModel):
+    """Multiple material specifications for upper top (Primary, Secondary, Trim, Accent, Strap, etc.)."""
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    material_code: Optional[str] = None
+    color_to_develop: Optional[str] = ""
+    placement: Optional[str] = "Primary"  # Primary, Secondary, Trim, Accent, Strap, Overlay, Counter, Toe Cap
+    photo_url: Optional[str] = None
+
+
 class UpperSpec(BaseModel):
+    materials: List[UpperMaterialItem] = Field(default_factory=list)
     upper_top_material_id: Optional[str] = None
     upper_top_material_name: Optional[str] = None
     upper_top_material_code: Optional[str] = None
@@ -50,6 +61,7 @@ class UpperSpec(BaseModel):
     edge_treatment: Literal["edge_coloring", "folded_edge", "raw_edge", "none"] = "none"
     has_buckle: bool = False
     buckle_spec: Optional[str] = ""
+    buckle_photo_url: Optional[str] = None
     other_hardware: Optional[str] = ""
 
 

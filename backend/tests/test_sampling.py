@@ -353,3 +353,137 @@ async def test_inspiration_photo_isolation(mock_db, mock_admin_user):
     assert img_record["is_sample_inspiration"] is True
     assert img_record["sample_id"] == str(sample_id)
 
+
+@pytest.mark.anyio
+async def test_multiple_upper_materials_and_transfer_bom(mock_db, mock_admin_user):
+    """Verify multiple upper materials and buckle photos are preserved and transferred to Style BOM."""
+    from models.sampling import UpperMaterialItem
+    sample_id = ObjectId()
+    sample_doc = {
+        "_id": sample_id,
+        "sample_name": "Multi-Strap Wedge",
+        "profile": "flat",
+        "temp_code": "SMP-2026-0005",
+        "status": "approved",
+        "inspiration_photos": [],
+        "upper_spec": {
+            "materials": [
+                {
+                    "material_id": "mat-leather-01",
+                    "material_name": "Tan Nappa Leather",
+                    "material_code": "MAT-LEA-01",
+                    "color_to_develop": "Cognac",
+                    "placement": "Primary",
+                    "photo_url": "/api/uploads/swatch1.jpg"
+                },
+                {
+                    "material_id": "mat-suede-02",
+                    "material_name": "Dark Brown Suede",
+                    "material_code": "MAT-SUE-02",
+                    "color_to_develop": "Espresso",
+                    "placement": "Accent Strap",
+                    "photo_url": "/api/uploads/swatch2.jpg"
+                }
+            ],
+            "upper_top_material_id": "mat-leather-01",
+            "upper_top_material_name": "Tan Nappa Leather",
+            "has_buckle": True,
+            "buckle_spec": "15mm Brass Buckle",
+            "buckle_photo_url": "/api/uploads/buckle1.jpg",
+        },
+        "insole_spec": {"base_board": "paper_board"},
+        "sole_spec": {"sole_material": "TPR", "sole_type": "ready_made"},
+    }
+    mock_db.samples.find_one = AsyncMock(return_value=sample_doc)
+    mock_db.styles.find_one = AsyncMock(return_value=None)
+    mock_db.styles.insert_one = AsyncMock(return_value=MagicMock(inserted_id=ObjectId()))
+    mock_db.samples.update_one = AsyncMock()
+
+    request = MagicMock()
+    request.state.user = mock_admin_user
+
+    transfer_payload = TransferToStyleIn(
+        style_code="ST-MULTI-01",
+        name="Multi-Strap Wedge",
+        margin_pct=25.0,
+        gst_pct=5.0,
+        material_yields={"upper_top": 1.2},
+    )
+
+    with patch("routes.sampling.get_db", return_value=mock_db), \
+         patch("routes.sampling._get_user", AsyncMock(return_value=mock_admin_user)):
+        res = await transfer_sample_to_style(str(sample_id), transfer_payload, request)
+
+    assert res["ok"] is True
+
+    style_doc = mock_db.styles.insert_one.call_args[0][0]
+    assert style_doc["code"] == "ST-MULTI-01"
+    bom_items = style_doc["bom"]
+    # Check that both upper materials were transferred into BOM
+    upper_bom = [b for b in bom_items if b.get("section") == "Upper" and "Tan Nappa" in b.get("material_name", "")]
+    strap_bom = [b for b in bom_items if b.get("section") == "Upper" and "Dark Brown Suede" in b.get("material_name", "")]
+    assert len(upper_bom) == 1
+    assert upper_bom[0]["color"] == "Cognac"
+    assert len(strap_bom) == 1
+    assert strap_bom[0]["color"] == "Espresso"
+
+
+@pytest.mark.anyio
+async def test_insole_socks_color_transfer(mock_db, mock_admin_user):
+    """Verify custom insole socks color is preserved and passed to insole BOM line."""
+    sample_id = ObjectId()
+    sample_doc = {
+        "_id": sample_id,
+        "sample_name": "Two-Tone Sandal",
+        "profile": "flat",
+        "temp_code": "SMP-2026-0009",
+        "status": "approved",
+        "inspiration_photos": [],
+        "upper_spec": {
+            "materials": [
+                {
+                    "material_id": "mat-blk-01",
+                    "material_name": "Black Nappa",
+                    "color_to_develop": "Jet Black",
+                    "placement": "Primary",
+                }
+            ],
+            "upper_top_material_id": "mat-blk-01",
+            "upper_top_material_name": "Black Nappa",
+            "upper_color_to_develop": "Jet Black",
+        },
+        "insole_spec": {
+            "base_board": "paper_board",
+            "socks_covering_type": "custom",
+            "socks_material_name": "Beige Synthetic",
+            "socks_color": "Tan Nude",
+        },
+        "sole_spec": {"sole_material": "TPR", "sole_type": "ready_made"},
+    }
+    mock_db.samples.find_one = AsyncMock(return_value=sample_doc)
+    mock_db.styles.find_one = AsyncMock(return_value=None)
+    mock_db.styles.insert_one = AsyncMock(return_value=MagicMock(inserted_id=ObjectId()))
+    mock_db.samples.update_one = AsyncMock()
+
+    request = MagicMock()
+    request.state.user = mock_admin_user
+
+    transfer_payload = TransferToStyleIn(
+        style_code="ST-TWOTONE-01",
+        name="Two-Tone Sandal",
+        margin_pct=25.0,
+        gst_pct=5.0,
+    )
+
+    with patch("routes.sampling.get_db", return_value=mock_db), \
+         patch("routes.sampling._get_user", AsyncMock(return_value=mock_admin_user)):
+        res = await transfer_sample_to_style(str(sample_id), transfer_payload, request)
+
+    assert res["ok"] is True
+    style_doc = mock_db.styles.insert_one.call_args[0][0]
+    bom_items = style_doc["bom"]
+    socks_bom = [b for b in bom_items if b.get("material_name") == "Beige Synthetic"]
+    assert len(socks_bom) == 1
+    assert socks_bom[0]["color"] == "Tan Nude"
+
+

@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { http, inr, formatApiError, friendlyAxiosError } from "../lib/api";
 import { SafeImage, resolveImageUrl } from "../components/ImageUploader";
+import SearchableSelect from "../components/SearchableSelect";
 import {
   PageHeader,
   Card,
@@ -109,6 +110,16 @@ export default function SampleDevelopment() {
       notes: "",
       inspiration_photos: [],
       upper_spec: {
+        materials: [
+          {
+            material_id: "",
+            material_name: "",
+            material_code: "",
+            color_to_develop: "",
+            placement: "Primary",
+            photo_url: ""
+          }
+        ],
         upper_top_material_id: "",
         upper_top_material_name: "",
         upper_top_material_code: "",
@@ -122,6 +133,7 @@ export default function SampleDevelopment() {
         edge_treatment: "none",
         has_buckle: false,
         buckle_spec: "",
+        buckle_photo_url: "",
         other_hardware: "",
       },
       insole_spec: {
@@ -570,13 +582,36 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
             {/* Upper Pillar */}
             <div className="flex items-start gap-1.5 text-xs">
               <span className="font-bold text-[10px] uppercase text-slate-500 tracking-wider shrink-0 w-16">Upper:</span>
-              <span className="text-slate-800 truncate font-mono text-[11px]">
-                {upper.upper_top_material_name || "Material not chosen"}
-                {upper.upper_color_to_develop ? ` (${upper.upper_color_to_develop})` : ""}
-                {" · "}
-                <span className="capitalize">{upper.cutting_operation?.replace("_", " ")}</span>
-                {upper.has_buckle ? " · Buckle" : ""}
-              </span>
+              <div className="flex-1 min-w-0">
+                <span className="text-slate-800 truncate font-mono text-[11px] block">
+                  {Array.isArray(upper.materials) && upper.materials.length > 0 ? (
+                    upper.materials.map(m => `${m.material_name || "Material"} (${m.placement || "Primary"}${m.color_to_develop ? `: ${m.color_to_develop}` : ""})`).join(" · ")
+                  ) : (
+                    <>
+                      {upper.upper_top_material_name || "Material not chosen"}
+                      {upper.upper_color_to_develop ? ` (${upper.upper_color_to_develop})` : ""}
+                    </>
+                  )}
+                  {" · "}
+                  <span className="capitalize">{upper.cutting_operation?.replace("_", " ")}</span>
+                  {upper.has_buckle ? " · Buckle" : ""}
+                </span>
+                {/* Swatches preview if any upper material or buckle has photo */}
+                {((Array.isArray(upper.materials) && upper.materials.some(m => m.photo_url)) || upper.buckle_photo_url) && (
+                  <div className="flex items-center gap-1 mt-1">
+                    {upper.materials?.filter(m => m.photo_url).map((m, mIdx) => (
+                      <div key={mIdx} className="w-5 h-5 rounded border border-slate-300 overflow-hidden shrink-0 shadow-xs" title={`${m.placement || "Upper"}: ${m.material_name || ""}`}>
+                        <SafeImage src={m.photo_url} alt="Swatch" className="w-full h-full object-cover" />
+                      </div>
+                    ))}
+                    {upper.buckle_photo_url && (
+                      <div className="w-5 h-5 rounded border border-amber-300 overflow-hidden shrink-0 shadow-xs" title={`Buckle: ${upper.buckle_spec || ""}`}>
+                        <SafeImage src={upper.buckle_photo_url} alt="Buckle" className="w-full h-full object-cover" />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Insole Pillar */}
@@ -588,6 +623,7 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
                 {insole.cushioning_type?.toUpperCase()} {insole.cushioning_thickness_mm}
                 {" · "}
                 {insole.socks_covering_type === "matching" ? "Matching Socks" : (insole.socks_material_name || "Custom Socks")}
+                {insole.socks_color ? ` (${insole.socks_color})` : ""}
                 {insole.embossing && insole.embossing !== "none" ? ` · ${insole.embossing}` : ""}
               </span>
             </div>
@@ -704,11 +740,108 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
 function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
   const isNew = !sample.id && !sample._id;
   const sid = sample.id || sample._id;
-  const [formData, setFormData] = useState(JSON.parse(JSON.stringify(sample)));
+  const [formData, setFormData] = useState(() => {
+    const copy = JSON.parse(JSON.stringify(sample));
+    if (!copy.upper_spec) copy.upper_spec = {};
+    if (!Array.isArray(copy.upper_spec.materials) || copy.upper_spec.materials.length === 0) {
+      const topId = copy.upper_spec.upper_top_material_id || "";
+      const matchedMat = materials.find(m => (m.id || m._id) === topId);
+      copy.upper_spec.materials = [
+        {
+          material_id: topId,
+          material_name: copy.upper_spec.upper_top_material_name || (matchedMat ? matchedMat.name : ""),
+          material_code: copy.upper_spec.upper_top_material_code || (matchedMat ? matchedMat.code : ""),
+          color_to_develop: copy.upper_spec.upper_color_to_develop || "",
+          placement: "Primary",
+          photo_url: matchedMat ? (matchedMat.image_url || matchedMat.image_thumbnail_url || "") : ""
+        }
+      ];
+    }
+    return copy;
+  });
   const [activeTab, setActiveTab] = useState("upper");
   const [saving, setSaving] = useState(false);
   const [uploadingPhotos, setUploadingPhotos] = useState(false);
   const multiFileInputRef = useRef(null);
+
+  const addUpperMaterial = () => {
+    setFormData(prev => {
+      const currentList = prev.upper_spec?.materials || [];
+      const nextPlacement = currentList.length === 1 ? "Secondary" : currentList.length === 2 ? "Strap" : "Trim / Accent";
+      const updated = [
+        ...currentList,
+        {
+          material_id: "",
+          material_name: "",
+          material_code: "",
+          color_to_develop: "",
+          placement: nextPlacement,
+          photo_url: ""
+        }
+      ];
+      return {
+        ...prev,
+        upper_spec: {
+          ...prev.upper_spec,
+          materials: updated
+        }
+      };
+    });
+  };
+
+  const removeUpperMaterial = (indexToRemove) => {
+    setFormData(prev => {
+      const currentList = prev.upper_spec?.materials || [];
+      const updated = currentList.filter((_, idx) => idx !== indexToRemove);
+      const first = updated[0] || {};
+      return {
+        ...prev,
+        upper_spec: {
+          ...prev.upper_spec,
+          materials: updated,
+          upper_top_material_id: first.material_id || "",
+          upper_top_material_name: first.material_name || "",
+          upper_top_material_code: first.material_code || "",
+          upper_color_to_develop: first.color_to_develop || ""
+        }
+      };
+    });
+  };
+
+  const updateUpperMaterialItem = (index, field, value) => {
+    setFormData(prev => {
+      const currentList = [...(prev.upper_spec?.materials || [])];
+      if (!currentList[index]) return prev;
+      currentList[index] = { ...currentList[index], [field]: value };
+      const first = currentList[0] || {};
+      return {
+        ...prev,
+        upper_spec: {
+          ...prev.upper_spec,
+          materials: currentList,
+          upper_top_material_id: first.material_id || "",
+          upper_top_material_name: first.material_name || "",
+          upper_top_material_code: first.material_code || "",
+          upper_color_to_develop: first.color_to_develop || ""
+        }
+      };
+    });
+  };
+
+  const uploadCustomPhoto = async (file, onUploaded) => {
+    if (!file) return;
+    try {
+      const upData = new FormData();
+      upData.append("files", file);
+      const res = await http.post("/samples/upload-photos", upData);
+      const url = res.data?.photos?.[0]?.url;
+      if (url) {
+        onUploaded(url);
+      }
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to upload photo"));
+    }
+  };
 
   const updateUpper = (field, val) => {
     setFormData(prev => ({
@@ -825,8 +958,8 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
   const photos = formData.inspiration_photos || [];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-3 md:p-6 overflow-y-auto">
-      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-y-auto">
+      <div className="bg-white border-2 border-slate-900 shadow-2xl w-full max-w-5xl xl:max-w-6xl h-[94vh] max-h-[94vh] flex flex-col overflow-hidden">
         {/* MODAL HEADER */}
         <div className="px-5 py-4 border-b-2 border-slate-200 bg-white flex items-center justify-between flex-shrink-0">
           <div>
@@ -885,10 +1018,14 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
 
           <div>
             <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Assigned Karigar / Tech</label>
-            <select
+            <SearchableSelect
+              options={[{ id: "", name: "-- Unassigned --", role: "" }, ...workers]}
               value={formData.assigned_karigar_id || ""}
-              onChange={(e) => {
-                const wid = e.target.value;
+              getKey={(w) => w.id || w._id || ""}
+              getLabel={(w) => (w.id || w._id) ? `${w.name} (${w.role || "Karigar"})` : "-- Unassigned --"}
+              placeholder="Search or pick karigar..."
+              inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+              onChange={(wid) => {
                 const worker = workers.find(w => (w.id || w._id) === wid);
                 setFormData(prev => ({
                   ...prev,
@@ -896,34 +1033,24 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                   assigned_karigar_name: worker ? worker.name : ""
                 }));
               }}
-              className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-            >
-              <option value="">-- Unassigned --</option>
-              {workers.map(w => (
-                <option key={w.id || w._id} value={w.id || w._id}>
-                  {w.name} ({w.role || "Karigar"})
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </div>
 
         {/* ── DEDICATED MULTI-PHOTO UPLOAD SECTION ── */}
-        <div className="px-5 py-4 border-b-2 border-slate-200 bg-white space-y-3">
+        <div className="px-5 py-2.5 border-b-2 border-slate-200 bg-white space-y-2 shrink-0">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-700">Sample Inspiration Photos</span>
-                <span className="font-mono text-[10px] font-bold bg-[#0F172A] text-white px-2 py-0.5">
-                  {photos.length} UPLOADED
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                Upload multi-angle photos (front, side, heel, sole). Isolated in <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5">uploads/samples_inspiration/</code>.
-              </p>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-700">Sample Inspiration Photos</span>
+              <span className="font-mono text-[10px] font-bold bg-[#0F172A] text-white px-2 py-0.5">
+                {photos.length} UPLOADED
+              </span>
+              <span className="text-[10px] text-slate-400 font-mono hidden md:inline">
+                &bull; uploads/samples_inspiration/
+              </span>
             </div>
 
-            <div>
+            <div className="flex items-center gap-2">
               <input
                 type="file"
                 ref={multiFileInputRef}
@@ -936,7 +1063,7 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                 type="button"
                 onClick={() => multiFileInputRef.current?.click()}
                 disabled={uploadingPhotos}
-                className="text-xs"
+                className="text-xs py-1 px-3"
               >
                 {uploadingPhotos ? <RefreshCw className="w-3.5 h-3.5 inline mr-1 animate-spin" /> : <ImagePlus className="w-3.5 h-3.5 inline mr-1" />}
                 <span>{uploadingPhotos ? "Uploading..." : "+ Upload Photos"}</span>
@@ -948,18 +1075,27 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
           {photos.length === 0 ? (
             <div
               onClick={() => multiFileInputRef.current?.click()}
-              className="border-2 border-dashed border-slate-300 hover:border-slate-900 rounded p-6 text-center cursor-pointer bg-slate-50/60 transition group"
+              className="border-2 border-dashed border-slate-300 hover:border-slate-900 rounded py-2 px-3 flex items-center justify-between cursor-pointer bg-slate-50/70 hover:bg-slate-100 transition group"
             >
-              <Camera className="w-8 h-8 text-slate-400 mx-auto mb-1.5 group-hover:scale-105 transition" />
-              <p className="text-xs font-bold uppercase tracking-wider text-slate-800">
-                Click to browse or drop multiple inspiration photos here
-              </p>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                PNG, JPG, WEBP &bull; Select multiple files at once (Front angle, Heel, Sole, Buckle, etc.)
-              </p>
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 bg-white border border-slate-300 rounded group-hover:border-slate-900">
+                  <Camera className="w-4 h-4 text-slate-500 group-hover:text-slate-900" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-800 group-hover:text-slate-900 block">
+                    Click to browse or drop inspiration photos (Front, Side, Heel, Sole, Buckle)
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    PNG, JPG, WEBP &bull; Select multiple files at once
+                  </span>
+                </div>
+              </div>
+              <span className="text-[11px] font-bold text-blue-600 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded">
+                + Browse Files
+              </span>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5 pt-1">
+            <div className="grid grid-cols-3 sm:grid-cols-6 md:grid-cols-8 gap-2 pt-0.5">
               {photos.map((photo, pIdx) => (
                 <div
                   key={photo.photo_id || pIdx}
@@ -967,58 +1103,50 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                     photo.is_primary ? "border-amber-500 shadow-ind ring-1 ring-amber-400" : "border-slate-200"
                   }`}
                 >
-                  <div className="h-24 bg-slate-100 flex items-center justify-center overflow-hidden relative">
+                  <div className="h-16 bg-slate-100 flex items-center justify-center overflow-hidden relative">
                     <SafeImage src={photo.url} alt="Inspiration" className="w-full h-full object-cover" />
-
-                    {/* Primary Badge */}
                     {photo.is_primary && (
-                      <span className="absolute top-1 left-1 z-10">
+                      <span className="absolute top-0.5 left-0.5 z-10">
                         <Badge color="yellow">COVER</Badge>
                       </span>
                     )}
-
-                    {/* Quick Action Overlay */}
-                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1.5 p-1 z-10">
+                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1 p-1 z-10">
                       {!photo.is_primary && (
                         <button
                           type="button"
                           onClick={() => handleSetPrimaryPhoto(photo.photo_id)}
-                          className="p-1 bg-amber-500 hover:bg-amber-600 text-white text-[10px] font-bold uppercase"
+                          className="p-1 bg-amber-500 hover:bg-amber-600 text-white text-[9px] font-bold uppercase"
                           title="Make Primary Cover Photo"
                         >
-                          <Star className="w-3 h-3" />
+                          <Star className="w-2.5 h-2.5" />
                         </button>
                       )}
                       <button
                         type="button"
                         onClick={() => handleRemovePhoto(photo.photo_id)}
-                        className="p-1 bg-red-600 hover:bg-red-700 text-white text-[10px]"
+                        className="p-1 bg-red-600 hover:bg-red-700 text-white text-[9px]"
                         title="Delete photo"
                       >
-                        <Trash2 className="w-3 h-3" />
+                        <Trash2 className="w-2.5 h-2.5" />
                       </button>
                     </div>
                   </div>
-
-                  {/* Caption Input */}
                   <input
                     type="text"
-                    placeholder="Caption (e.g. Front)..."
+                    placeholder="Caption..."
                     value={photo.caption || ""}
                     onChange={(e) => handleUpdateCaption(photo.photo_id, e.target.value)}
-                    className="p-1 text-[10px] font-mono border-t border-slate-200 bg-white focus:outline-none truncate"
+                    className="p-0.5 text-[9px] font-mono border-t border-slate-200 bg-white focus:outline-none truncate"
                   />
                 </div>
               ))}
-
-              {/* Add more tile */}
               <button
                 type="button"
                 onClick={() => multiFileInputRef.current?.click()}
                 disabled={uploadingPhotos}
-                className="h-full min-h-[96px] border-2 border-dashed border-slate-300 hover:border-slate-900 flex flex-col items-center justify-center text-slate-500 hover:text-slate-900 text-[10px] font-bold uppercase tracking-wider transition bg-slate-50"
+                className="h-full min-h-[64px] border-2 border-dashed border-slate-300 hover:border-slate-900 flex flex-col items-center justify-center text-slate-500 hover:text-slate-900 text-[9px] font-bold uppercase tracking-wider transition bg-slate-50"
               >
-                <Plus className="w-5 h-5 mb-0.5 opacity-60" />
+                <Plus className="w-4 h-4 mb-0.5 opacity-60" />
                 <span>+ More</span>
               </button>
             </div>
@@ -1052,55 +1180,184 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
           {/* ──────────────── TAB 1: UPPER SPEC ──────────────── */}
           {activeTab === "upper" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Upper Top Material */}
-                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
-                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+              {/* Dynamic Upper Top Materials (Full Width - Generous space for 1, 2, 3+ materials) */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/70 space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                  <div className="flex items-center gap-2">
                     <Palette className="w-4 h-4 text-[#C27842]" />
-                    Upper Top Material
-                  </span>
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Select from Material Master:</label>
-                    <select
-                      value={formData.upper_spec?.upper_top_material_id || ""}
-                      onChange={(e) => {
-                        const mid = e.target.value;
-                        const mat = materials.find(m => (m.id || m._id) === mid);
-                        if (mat) {
-                          updateUpper("upper_top_material_id", mid);
-                          updateUpper("upper_top_material_name", mat.name);
-                          updateUpper("upper_top_material_code", mat.code);
-                        } else {
-                          updateUpper("upper_top_material_id", "");
-                          updateUpper("upper_top_material_name", "");
-                          updateUpper("upper_top_material_code", "");
-                        }
-                      }}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="">-- Select Material --</option>
-                      {materials.map(m => (
-                        <option key={m.id || m._id} value={m.id || m._id}>
-                          {m.name} [{m.code}] - ₹{m.rate}/{m.unit} ({m.category})
-                        </option>
-                      ))}
-                    </select>
+                    <span className="font-bold text-xs uppercase tracking-wider text-slate-900">
+                      Upper Top Materials ({formData.upper_spec?.materials?.length || 1} Types)
+                    </span>
+                    <span className="text-[11px] text-slate-500 hidden sm:inline">
+                      &bull; Multi-material footwear (Primary, Straps, Accents, Trims)
+                    </span>
                   </div>
-
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Color to be Developed *</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Metallic Rose Gold, Tan Crust, Black Gloss"
-                      value={formData.upper_spec?.upper_color_to_develop || ""}
-                      onChange={(e) => updateUpper("upper_color_to_develop", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                    />
-                  </div>
+                  <button
+                    type="button"
+                    onClick={addUpperMaterial}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 shadow-sm transition"
+                    title="Add another upper material (Secondary, Strap, Accent, Trim)"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Upper Material</span>
+                  </button>
                 </div>
 
+                <div className="space-y-3">
+                  {(formData.upper_spec?.materials || []).map((mat, idx) => (
+                    <div key={idx} className="p-3.5 bg-white border-2 border-slate-200 rounded shadow-xs space-y-2.5">
+                      {/* Material Card Top Bar */}
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] font-bold uppercase bg-slate-900 text-white px-2 py-0.5">
+                            Material #{idx + 1}
+                          </span>
+                          <span className="text-slate-400 text-xs">&bull;</span>
+                          <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Placement / Role:</span>
+                          <input
+                            type="text"
+                            value={mat.placement || (idx === 0 ? "Primary" : "Secondary")}
+                            onChange={(e) => updateUpperMaterialItem(idx, "placement", e.target.value)}
+                            placeholder="e.g. Primary, Secondary, Strap, Vamp, Trim, Accent"
+                            className="text-xs font-bold text-slate-900 border-b-2 border-dashed border-slate-400 hover:border-slate-900 focus:border-[#2563EB] outline-none px-1.5 py-0.5 w-48 bg-slate-50"
+                            title="Click to edit placement label (e.g. Primary, Strap, Trim, Vamp)"
+                          />
+                        </div>
+
+                        {formData.upper_spec?.materials?.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeUpperMaterial(idx)}
+                            className="inline-flex items-center gap-1 text-[11px] text-red-600 hover:text-red-800 font-bold px-2 py-0.5 hover:bg-red-50 border border-transparent hover:border-red-200 transition"
+                            title="Remove this upper material"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Material Selection and Color Fields - Generous 12-Column Grid */}
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-start">
+                        <div className="md:col-span-7">
+                          <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">
+                            Select from Material Master:
+                          </label>
+                          <SearchableSelect
+                            options={[{ id: "", name: "-- Select Material --", code: "" }, ...materials]}
+                            value={mat.material_id || ""}
+                            getKey={(m) => m.id || m._id || ""}
+                            getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}] - ₹${m.rate || 0}/${m.unit || ""} (${m.category || ""})` : "-- Select Material --"}
+                            placeholder="Search material by name or code..."
+                            inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                            renderOption={(m) => (
+                              <div className="flex items-center gap-2 py-0.5">
+                                {(m.image_url || m.image_thumbnail_url) && (
+                                  <img
+                                    src={resolveImageUrl(m.image_thumbnail_url || m.image_url)}
+                                    alt="mat"
+                                    className="w-6 h-6 rounded border border-slate-300 object-cover shrink-0"
+                                  />
+                                )}
+                                <div className="truncate">
+                                  <span className="font-bold text-slate-900">{m.name}</span>
+                                  <span className="text-[10px] font-mono text-slate-500 ml-1.5">[{m.code}]</span>
+                                </div>
+                              </div>
+                            )}
+                            onChange={(mid) => {
+                              const selectedMat = materials.find(m => (m.id || m._id) === mid);
+                              if (selectedMat) {
+                                updateUpperMaterialItem(idx, "material_id", mid);
+                                updateUpperMaterialItem(idx, "material_name", selectedMat.name);
+                                updateUpperMaterialItem(idx, "material_code", selectedMat.code);
+                                if (selectedMat.image_url || selectedMat.image_thumbnail_url) {
+                                  updateUpperMaterialItem(idx, "photo_url", selectedMat.image_url || selectedMat.image_thumbnail_url);
+                                }
+                              } else {
+                                updateUpperMaterialItem(idx, "material_id", "");
+                                updateUpperMaterialItem(idx, "material_name", "");
+                                updateUpperMaterialItem(idx, "material_code", "");
+                              }
+                            }}
+                          />
+                        </div>
+
+                        <div className="md:col-span-5">
+                          <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">
+                            Color to be Developed *
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Metallic Rose Gold, Tan Crust, Black Gloss"
+                            value={mat.color_to_develop || ""}
+                            onChange={(e) => updateUpperMaterialItem(idx, "color_to_develop", e.target.value)}
+                            className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Swatch Photo Preview - Strictly conditional: If no photo, REMOVE SPACE */}
+                      {mat.photo_url ? (
+                        <div className="flex items-center gap-2.5 p-2 bg-slate-50 border border-slate-200 rounded">
+                          <div className="w-10 h-10 rounded border border-slate-300 overflow-hidden shrink-0 bg-white shadow-xs">
+                            <SafeImage src={mat.photo_url} alt={mat.material_name || "Material"} className="w-full h-full object-cover" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[10px] font-bold text-slate-800 block truncate">
+                              {mat.material_name ? `${mat.material_name} Swatch Attached` : "Attached Swatch Photo"}
+                            </span>
+                            <div className="flex items-center gap-3 mt-0.5">
+                              <label className="text-[10px] text-blue-600 hover:text-blue-800 font-bold cursor-pointer underline">
+                                Change Swatch Photo
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    if (e.target.files?.[0]) {
+                                      uploadCustomPhoto(e.target.files[0], (url) => updateUpperMaterialItem(idx, "photo_url", url));
+                                    }
+                                  }}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => updateUpperMaterialItem(idx, "photo_url", "")}
+                                className="text-[10px] text-red-600 hover:text-red-800 font-bold cursor-pointer underline"
+                              >
+                                Remove Photo
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="pt-0.5">
+                          <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 hover:text-slate-900 font-semibold cursor-pointer">
+                            <Camera className="w-3.5 h-3.5 text-slate-400" />
+                            <span>+ Attach custom swatch photo</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                if (e.target.files?.[0]) {
+                                  uploadCustomPhoto(e.target.files[0], (url) => updateUpperMaterialItem(idx, "photo_url", url));
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Lower Upper Details: Balanced 2 Columns */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Backing & Lining */}
-                <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/70 space-y-3">
                   <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
                     <Layers className="w-4 h-4 text-[#C27842]" />
                     Canvas Backing & Lining
@@ -1119,10 +1376,14 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
 
                   <div>
                     <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Lining Material:</label>
-                    <select
+                    <SearchableSelect
+                      options={[{ id: "", name: "-- Select Lining Material --", code: "" }, ...materials]}
                       value={formData.upper_spec?.lining_material_id || ""}
-                      onChange={(e) => {
-                        const mid = e.target.value;
+                      getKey={(m) => m.id || m._id || ""}
+                      getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}]` : "-- Select Lining Material --"}
+                      placeholder="Search lining material..."
+                      inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      onChange={(mid) => {
                         const mat = materials.find(m => (m.id || m._id) === mid);
                         if (mat) {
                           updateUpper("lining_material_id", mid);
@@ -1134,27 +1395,17 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                           updateUpper("lining_material_code", "");
                         }
                       }}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="">-- Select Lining Material --</option>
-                      {materials.map(m => (
-                        <option key={m.id || m._id} value={m.id || m._id}>
-                          {m.name} [{m.code}]
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                 </div>
-              </div>
 
-              {/* Upper Operations */}
-              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
-                <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
-                  <Scissors className="w-4 h-4 text-[#C27842]" />
-                  Upper Manufacturing Operations
-                </span>
+                {/* Upper Manufacturing Operations */}
+                <div className="border-2 border-slate-200 p-4 bg-slate-50/70 space-y-3">
+                  <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
+                    <Scissors className="w-4 h-4 text-[#C27842]" />
+                    Upper Manufacturing Operations
+                  </span>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Cutting / Pattern Operation:</label>
                     <select
@@ -1168,35 +1419,37 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                     </select>
                   </div>
 
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Stitching Operation:</label>
-                    <select
-                      value={formData.upper_spec?.stitching_operation || "stitching"}
-                      onChange={(e) => updateUpper("stitching_operation", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="stitching">Stitching (Machine / Karigar)</option>
-                      <option value="no_stitching">No Stitching (Heat Sealed / Seamless)</option>
-                    </select>
-                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Stitching Operation:</label>
+                      <select
+                        value={formData.upper_spec?.stitching_operation || "stitching"}
+                        onChange={(e) => updateUpper("stitching_operation", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                      >
+                        <option value="stitching">Stitching (Machine / Karigar)</option>
+                        <option value="no_stitching">No Stitching (Seamless)</option>
+                      </select>
+                    </div>
 
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Edge Treatment:</label>
-                    <select
-                      value={formData.upper_spec?.edge_treatment || "none"}
-                      onChange={(e) => updateUpper("edge_treatment", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="none">Raw Edge / Standard</option>
-                      <option value="edge_coloring">Edge Coloring (Edge Ink Coating)</option>
-                      <option value="folded_edge">Folded & Cemented Edge</option>
-                    </select>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Edge Treatment:</label>
+                      <select
+                        value={formData.upper_spec?.edge_treatment || "none"}
+                        onChange={(e) => updateUpper("edge_treatment", e.target.value)}
+                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                      >
+                        <option value="none">Raw Edge / Standard</option>
+                        <option value="edge_coloring">Edge Coloring (Ink)</option>
+                        <option value="folded_edge">Folded & Cemented</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Hardware & Buckle */}
-              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+              {/* Hardware & Buckle (Full Width) */}
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/70 space-y-3">
                 <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                   <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
                     <Tag className="w-4 h-4 text-[#C27842]" />
@@ -1214,17 +1467,71 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                 </div>
 
                 {formData.upper_spec?.has_buckle && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Buckle Specification (Size & Finish):</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 15mm Oval Buckle, Antique Brass Finish"
-                        value={formData.upper_spec?.buckle_spec || ""}
-                        onChange={(e) => updateUpper("buckle_spec", e.target.value)}
-                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                      />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                    <div className="space-y-2">
+                      <div>
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Buckle Specification (Size & Finish):</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. 15mm Oval Buckle, Antique Brass Finish"
+                          value={formData.upper_spec?.buckle_spec || ""}
+                          onChange={(e) => updateUpper("buckle_spec", e.target.value)}
+                          className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                        />
+                      </div>
+
+                      {/* Buckle Photo Preview - Strictly conditional: If no photo, REMOVE SPACE */}
+                      {formData.upper_spec?.buckle_photo_url ? (
+                        <div className="flex items-center gap-2.5 p-2 bg-amber-50/60 border border-amber-200 rounded">
+                          <div className="w-10 h-10 rounded border border-amber-300 overflow-hidden shrink-0 bg-white shadow-xs">
+                            <SafeImage src={formData.upper_spec.buckle_photo_url} alt="Buckle" className="w-full h-full object-cover" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[10px] font-bold text-amber-900 block truncate">Buckle Photo Attached</span>
+                            <div className="flex items-center gap-3 mt-0.5">
+                              <label className="text-[10px] text-blue-600 hover:text-blue-800 font-bold cursor-pointer underline">
+                                Change Photo
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    if (e.target.files?.[0]) {
+                                      uploadCustomPhoto(e.target.files[0], (url) => updateUpper("buckle_photo_url", url));
+                                    }
+                                  }}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => updateUpper("buckle_photo_url", "")}
+                                className="text-[10px] text-red-600 hover:text-red-800 font-bold cursor-pointer underline"
+                              >
+                                Remove Photo
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 hover:text-slate-900 font-semibold cursor-pointer">
+                            <Camera className="w-3.5 h-3.5 text-slate-400" />
+                            <span>+ Attach Buckle Photo</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                if (e.target.files?.[0]) {
+                                  uploadCustomPhoto(e.target.files[0], (url) => updateUpper("buckle_photo_url", url));
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
+
                     <div>
                       <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Other Hardware / Rivets / D-rings:</label>
                       <input
@@ -1361,13 +1668,13 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
               </div>
 
               {/* Socks Covering & Detailing */}
-              <div className="border-2 border-slate-200 p-4 bg-slate-50/60 space-y-3">
+              <div className="border-2 border-slate-200 p-4 bg-slate-50/70 space-y-3">
                 <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
                   <Palette className="w-4 h-4 text-[#C27842]" />
                   Insole Covering (Socks) & Detailing
                 </span>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Socks Covering Material:</label>
                     <select
@@ -1378,33 +1685,50 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                       <option value="matching">Matching Upper Top Material</option>
                       <option value="custom">Select Custom Material from Master</option>
                     </select>
+
+                    {formData.insole_spec?.socks_covering_type === "custom" && (
+                      <div className="mt-2.5">
+                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Custom Socks Material:</label>
+                        <SearchableSelect
+                          options={[{ id: "", name: "-- Select Material --", code: "" }, ...materials]}
+                          value={formData.insole_spec?.socks_material_id || ""}
+                          getKey={(m) => m.id || m._id || ""}
+                          getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}]` : "-- Select Material --"}
+                          placeholder="Search socks material..."
+                          inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                          onChange={(mid) => {
+                            const mat = materials.find(m => (m.id || m._id) === mid);
+                            updateInsole("socks_material_id", mid);
+                            updateInsole("socks_material_name", mat ? mat.name : "");
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
 
-                  {formData.insole_spec?.socks_covering_type === "custom" && (
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Custom Material:</label>
-                      <select
-                        value={formData.insole_spec?.socks_material_id || ""}
-                        onChange={(e) => {
-                          const mid = e.target.value;
-                          const mat = materials.find(m => (m.id || m._id) === mid);
-                          updateInsole("socks_material_id", mid);
-                          updateInsole("socks_material_name", mat ? mat.name : "");
-                        }}
-                        className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                      >
-                        <option value="">-- Select Material --</option>
-                        {materials.map(m => (
-                          <option key={m.id || m._id} value={m.id || m._id}>
-                            {m.name} [{m.code}]
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1 flex items-center justify-between">
+                      <span>Insole / Socks Color:</span>
+                      <span className="text-[9px] font-normal text-slate-500 lowercase">(if different than Upper)</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Tan, Nude, Beige, Gold (Leave blank if matches upper)"
+                      value={formData.insole_spec?.socks_color || ""}
+                      onChange={(e) => updateInsole("socks_color", e.target.value)}
+                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      {formData.insole_spec?.socks_color ? (
+                        <span className="font-semibold text-blue-900">Custom Socks Color: "{formData.insole_spec.socks_color}"</span>
+                      ) : (
+                        <span>Leave blank to match Upper Primary Color ({formData.upper_spec?.materials?.[0]?.color_to_develop || formData.upper_spec?.upper_color_to_develop || "Primary Upper"})</span>
+                      )}
+                    </p>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-200">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Surface Detailing:</label>
                     <select
@@ -1636,16 +1960,37 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                     </div>
 
                     {formData.sole_spec?.heel_finish === "covered" && (
-                      <div>
-                        <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Covering Material:</label>
-                        <select
-                          value={formData.sole_spec?.heel_covering_type || "matching"}
-                          onChange={(e) => updateSole("heel_covering_type", e.target.value)}
-                          className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-                        >
-                          <option value="matching">Matching Upper Material</option>
-                          <option value="custom">Select from Materials Master</option>
-                        </select>
+                      <div className="space-y-2">
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Covering Type:</label>
+                          <select
+                            value={formData.sole_spec?.heel_covering_type || "matching"}
+                            onChange={(e) => updateSole("heel_covering_type", e.target.value)}
+                            className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
+                          >
+                            <option value="matching">Matching Upper Material</option>
+                            <option value="custom">Select from Materials Master</option>
+                          </select>
+                        </div>
+
+                        {formData.sole_spec?.heel_covering_type === "custom" && (
+                          <div>
+                            <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Select Material:</label>
+                            <SearchableSelect
+                              options={[{ id: "", name: "-- Select Material --", code: "" }, ...materials]}
+                              value={formData.sole_spec?.heel_covering_material_id || ""}
+                              getKey={(m) => m.id || m._id || ""}
+                              getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}]` : "-- Select Material --"}
+                              placeholder="Search heel covering material..."
+                              inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                              onChange={(mid) => {
+                                const mat = materials.find(m => (m.id || m._id) === mid);
+                                updateSole("heel_covering_material_id", mid);
+                                updateSole("heel_covering_material_name", mat ? mat.name : "");
+                              }}
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2383,21 +2728,85 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5">
-              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1">👟 Upper Component</h4>
-              <p><span className="text-[10px] uppercase font-bold text-slate-500">Material:</span> <span className="font-mono text-slate-900">{upper.upper_top_material_name || "N/A"}</span></p>
-              <p><span className="text-[10px] uppercase font-bold text-slate-500">Color:</span> <span className="font-mono text-slate-900">{upper.upper_color_to_develop || "N/A"}</span></p>
+            <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-2">
+              <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1 flex items-center justify-between">
+                <span>👟 Upper Component</span>
+                {Array.isArray(upper.materials) && upper.materials.length > 1 && (
+                  <span className="font-mono text-[9px] bg-slate-200 text-slate-800 px-1.5 py-0.5 rounded font-bold">
+                    {upper.materials.length} Materials
+                  </span>
+                )}
+              </h4>
+
+              {Array.isArray(upper.materials) && upper.materials.length > 0 ? (
+                <div className="space-y-1.5">
+                  {upper.materials.map((m, mIdx) => (
+                    <div key={mIdx} className="bg-white p-2 border border-slate-200 rounded">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-[10px] uppercase text-slate-700 bg-slate-100 px-1 border border-slate-200">
+                          {m.placement || `Material #${mIdx + 1}`}
+                        </span>
+                        {m.color_to_develop && (
+                          <span className="font-mono text-[10px] font-bold text-blue-900">
+                            Color: {m.color_to_develop}
+                          </span>
+                        )}
+                      </div>
+                      <p className="font-mono text-slate-900 text-xs font-bold mt-0.5 truncate">
+                        {m.material_name || "Pending Selection"} {m.material_code ? `[${m.material_code}]` : ""}
+                      </p>
+                      {/* Attached swatch thumbnail - conditional */}
+                      {m.photo_url && (
+                        <div className="flex items-center gap-2 mt-1 pt-1 border-t border-slate-100">
+                          <div className="w-8 h-8 rounded border border-slate-300 overflow-hidden shrink-0 shadow-xs">
+                            <SafeImage src={m.photo_url} alt="Swatch" className="w-full h-full object-cover" />
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono">Swatch Attached</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  <p><span className="text-[10px] uppercase font-bold text-slate-500">Material:</span> <span className="font-mono text-slate-900">{upper.upper_top_material_name || "N/A"}</span></p>
+                  <p><span className="text-[10px] uppercase font-bold text-slate-500">Color:</span> <span className="font-mono text-slate-900">{upper.upper_color_to_develop || "N/A"}</span></p>
+                </>
+              )}
+
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Canvas:</span> <span className="font-mono text-slate-900">{upper.canvas_backing || "None"}</span></p>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Lining:</span> <span className="font-mono text-slate-900">{upper.lining_material_name || "Standard"}</span></p>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Operations:</span> <span className="font-mono text-slate-900">{upper.cutting_operation}, {upper.stitching_operation}, {upper.edge_treatment}</span></p>
-              {upper.has_buckle && <p><span className="text-[10px] uppercase font-bold text-slate-500">Buckle:</span> <span className="font-mono text-slate-900">{upper.buckle_spec}</span></p>}
+              {upper.has_buckle && (
+                <div className="pt-1 border-t border-slate-200">
+                  <p><span className="text-[10px] uppercase font-bold text-slate-500">Buckle:</span> <span className="font-mono text-slate-900">{upper.buckle_spec}</span></p>
+                  {upper.buckle_photo_url && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="w-8 h-8 rounded border border-amber-300 overflow-hidden shrink-0 shadow-xs">
+                        <SafeImage src={upper.buckle_photo_url} alt="Buckle" className="w-full h-full object-cover" />
+                      </div>
+                      <span className="text-[10px] text-amber-800 font-mono">Buckle Photo Attached</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="border-2 border-slate-200 p-3.5 bg-slate-50/60 space-y-1.5">
               <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-1">🩴 Insole / Socks</h4>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Base:</span> <span className="font-mono text-slate-900">{insole.base_board === "cellulose_board" ? "Cellulose" : "Paper Board"}</span></p>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Cushion:</span> <span className="font-mono text-slate-900">{insole.cushioning_type} {insole.cushioning_thickness_mm}</span></p>
-              <p><span className="text-[10px] uppercase font-bold text-slate-500">Covering:</span> <span className="font-mono text-slate-900">{insole.socks_covering_type}</span></p>
+              <p><span className="text-[10px] uppercase font-bold text-slate-500">Covering:</span> <span className="font-mono text-slate-900">{insole.socks_covering_type === "matching" ? "Matching Upper Top Material" : (insole.socks_material_name || "Custom Socks Material")}</span></p>
+              <p>
+                <span className="text-[10px] uppercase font-bold text-slate-500">Socks Color:</span>{" "}
+                <span className="font-mono text-slate-900">
+                  {insole.socks_color ? (
+                    <span className="font-bold text-blue-900">{insole.socks_color}</span>
+                  ) : (
+                    <span className="text-slate-500 italic">Matches Upper ({upper.upper_color_to_develop || upper.materials?.[0]?.color_to_develop || "Standard"})</span>
+                  )}
+                </span>
+              </p>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Detailing:</span> <span className="font-mono text-slate-900">{insole.surface_detailing}</span></p>
               <p><span className="text-[10px] uppercase font-bold text-slate-500">Embossing:</span> <span className="font-mono text-slate-900">{insole.embossing}</span></p>
             </div>
@@ -2426,8 +2835,7 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
             return (
               <div
                 key={`photo-page-${pIdx}`}
-                className="techpack-page w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
-                style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+                className="techpack-page w-full max-w-[190mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
               >
                 {/* Header */}
                 <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
@@ -2512,8 +2920,7 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
             /* COMBINED FINAL PAGE: LAST PICTURE ON TOP + TECH PACK DATA BELOW IT */
             <div
               id="techpack-printable-sheet"
-              className="techpack-page techpack-page-last w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
-              style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+              className="techpack-page techpack-page-last w-full max-w-[190mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2 print:p-1.5 box-border shadow-sm print:shadow-none"
             >
               {/* Header */}
               <div className="border-b border-slate-300 pb-1 mb-1 shrink-0">
@@ -2559,7 +2966,7 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                       src={resolveImageUrl(lastOddPhoto.url)}
                       alt={lastOddPhoto.caption || sample.sample_name}
                       className="w-full h-full object-contain"
-                      style={{ maxHeight: "155mm", maxWidth: "100%" }}
+                      style={{ maxHeight: "120mm", maxWidth: "100%" }}
                     />
                     <div className="absolute top-1 left-1 flex items-center gap-1">
                       <span className="bg-slate-900/85 text-white font-mono text-[9px] font-bold px-1.5 py-0.5 uppercase tracking-wider">
@@ -2586,31 +2993,78 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                   
                   {/* Pillar 1: Upper Component */}
                   <div className="px-1.5 py-1 space-y-0.5 text-slate-900">
-                    <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5">
-                      1. Upper Component
+                    <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200 pb-0.5 mb-0.5 flex items-center justify-between">
+                      <span>1. Upper Component</span>
+                      {Array.isArray(upper.materials) && upper.materials.length > 1 && (
+                        <span className="font-mono text-[8px] bg-slate-100 px-1 border border-slate-300">
+                          {upper.materials.length} MATERIALS
+                        </span>
+                      )}
                     </div>
-                    <div className="text-[10px] leading-tight">
-                      <span className="font-semibold text-slate-500">Material: </span>
-                      <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
-                    </div>
-                    <div className="text-[10px] leading-tight">
-                      <span className="font-semibold text-slate-500">Color to Dev: </span>
-                      <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
-                    </div>
-                    <div className="text-[10px] leading-tight">
+
+                    {Array.isArray(upper.materials) && upper.materials.length > 0 ? (
+                      upper.materials.map((m, mIdx) => (
+                        <div key={mIdx} className="text-[9px] leading-tight flex items-baseline justify-between gap-1">
+                          <span className="font-semibold text-slate-600 truncate">{m.placement || `Mat #${mIdx + 1}`}: </span>
+                          <span className="font-mono font-bold text-slate-900 truncate flex-1 ml-1">{m.material_name || "Pending"}</span>
+                          {m.color_to_develop && (
+                            <span className="font-mono text-[8px] font-bold text-blue-900 shrink-0">[{m.color_to_develop}]</span>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <>
+                        <div className="text-[10px] leading-tight">
+                          <span className="font-semibold text-slate-500">Material: </span>
+                          <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
+                        </div>
+                        <div className="text-[10px] leading-tight">
+                          <span className="font-semibold text-slate-500">Color to Dev: </span>
+                          <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
+                        </div>
+                      </>
+                    )}
+
+                    <div className="text-[9px] leading-tight">
                       <span className="font-semibold text-slate-500">Canvas / Lining: </span>
                       <span className="font-mono text-slate-800">{upper.canvas_backing || "None"} &bull; {upper.lining_material_name || "Std"}</span>
                     </div>
-                    <div className="text-[10px] leading-tight">
+                    <div className="text-[9px] leading-tight">
                       <span className="font-semibold text-slate-500">Operations: </span>
                       <span className="font-mono text-slate-800 capitalize">
                         {[upper.cutting_operation?.replace("_", " "), upper.stitching_operation?.replace("_", " "), upper.edge_treatment?.replace("_", " ")].filter(Boolean).join(", ")}
                       </span>
                     </div>
                     {upper.has_buckle && (
-                      <div className="text-[10px] leading-tight">
+                      <div className="text-[9px] leading-tight">
                         <span className="font-semibold text-slate-500">Buckle / Spec: </span>
                         <span className="font-mono font-bold text-amber-900">{upper.buckle_spec}</span>
+                      </div>
+                    )}
+
+                    {/* Attached Swatch / Buckle Photo Thumbnails Row (Strictly conditional: 0px if no photos) */}
+                    {((Array.isArray(upper.materials) && upper.materials.some(m => m.photo_url)) || upper.buckle_photo_url) && (
+                      <div className="pt-1 mt-0.5 border-t border-slate-200 flex items-center gap-1.5 overflow-hidden">
+                        {upper.materials?.filter(m => m.photo_url).map((m, mIdx) => (
+                          <div key={mIdx} className="flex items-center gap-1 bg-slate-50 border border-slate-300 px-1 py-0.5 rounded">
+                            <div className="w-6 h-6 rounded border border-slate-300 overflow-hidden shrink-0 bg-white">
+                              <img src={resolveImageUrl(m.photo_url)} alt="swatch" className="w-full h-full object-cover" />
+                            </div>
+                            <span className="font-mono text-[7px] font-bold text-slate-700 uppercase tracking-tighter truncate max-w-[14mm]">
+                              {m.placement || `Mat #${mIdx+1}`}
+                            </span>
+                          </div>
+                        ))}
+                        {upper.buckle_photo_url && (
+                          <div className="flex items-center gap-1 bg-amber-50 border border-amber-300 px-1 py-0.5 rounded">
+                            <div className="w-6 h-6 rounded border border-amber-400 overflow-hidden shrink-0 bg-white">
+                              <img src={resolveImageUrl(upper.buckle_photo_url)} alt="buckle" className="w-full h-full object-cover" />
+                            </div>
+                            <span className="font-mono text-[7px] font-bold text-amber-900 uppercase tracking-tighter">
+                              Buckle
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2630,7 +3084,10 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                     </div>
                     <div className="text-[10px] leading-tight">
                       <span className="font-semibold text-slate-500">Socks Covering: </span>
-                      <span className="font-mono text-slate-800 capitalize">{insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}</span>
+                      <span className="font-mono text-slate-800 capitalize">
+                        {insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}
+                        {insole.socks_color ? ` · Color: ${insole.socks_color}` : " (Matching Upper)"}
+                      </span>
                     </div>
                     <div className="text-[10px] leading-tight">
                       <span className="font-semibold text-slate-500">Detailing: </span>
@@ -2682,8 +3139,7 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
           ) : (
             /* DEDICATED FULL-PAGE TECHNICAL SPECIFICATIONS SHEET (FOR EVEN PHOTO COUNTS: 2, 4, 6) */
             <div
-              className="techpack-page techpack-page-last w-full max-w-[184mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2.5 print:p-2 box-border shadow-sm print:shadow-none"
-              style={{ height: "238mm", maxHeight: "238mm", minHeight: "238mm" }}
+              className="techpack-page techpack-page-last w-full max-w-[190mm] mx-auto bg-white border border-slate-300 print:border flex flex-col justify-between p-2.5 print:p-2 box-border shadow-sm print:shadow-none"
             >
               {/* Header */}
               <div className="border-b-2 border-slate-900 pb-1 mb-1.5 shrink-0">
@@ -2743,17 +3199,44 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                 
                 {/* Pillar 1: Upper Component */}
                 <div className="space-y-1 border-r border-slate-200 pr-2">
-                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-0.5 mb-1">
-                    1. Upper Component
+                  <div className="text-[9px] font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-0.5 mb-1 flex items-center justify-between">
+                    <span>1. Upper Component</span>
+                    {Array.isArray(upper.materials) && upper.materials.length > 1 && (
+                      <span className="font-mono text-[8px] bg-slate-100 px-1 border border-slate-300">
+                        {upper.materials.length} MATERIALS
+                      </span>
+                    )}
                   </div>
-                  <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Upper Material</span>
-                    <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
-                  </div>
-                  <div className="text-[10px] leading-tight">
-                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Color to Develop</span>
-                    <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
-                  </div>
+
+                  {Array.isArray(upper.materials) && upper.materials.length > 0 ? (
+                    upper.materials.map((m, mIdx) => (
+                      <div key={mIdx} className="text-[10px] leading-tight pb-0.5">
+                        <span className="font-semibold text-slate-500 block text-[8px] uppercase">
+                          {m.placement || `Material #${mIdx + 1}`}
+                        </span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {m.material_name || "Pending Selection"}
+                        </span>
+                        {m.color_to_develop && (
+                          <span className="font-mono font-bold text-blue-900 ml-1 text-[9px]">
+                            [{m.color_to_develop}]
+                          </span>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <>
+                      <div className="text-[10px] leading-tight">
+                        <span className="font-semibold text-slate-500 block text-[8px] uppercase">Upper Material</span>
+                        <span className="font-mono font-bold text-slate-900">{upper.upper_top_material_name || "Pending Selection"}</span>
+                      </div>
+                      <div className="text-[10px] leading-tight">
+                        <span className="font-semibold text-slate-500 block text-[8px] uppercase">Color to Develop</span>
+                        <span className="font-mono font-bold text-blue-900">{upper.upper_color_to_develop || "N/A"}</span>
+                      </div>
+                    </>
+                  )}
+
                   <div className="text-[10px] leading-tight">
                     <span className="font-semibold text-slate-500 block text-[8px] uppercase">Canvas Backing</span>
                     <span className="font-mono text-slate-800">{upper.canvas_backing || "None"}</span>
@@ -2774,6 +3257,32 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                       <span className="font-mono font-bold text-amber-900">{upper.buckle_spec}</span>
                     </div>
                   )}
+
+                  {/* Attached Swatch / Buckle Photo Gallery Row (Strictly conditional: 0px if no photos) */}
+                  {((Array.isArray(upper.materials) && upper.materials.some(m => m.photo_url)) || upper.buckle_photo_url) && (
+                    <div className="pt-1.5 mt-1 border-t border-slate-200 flex flex-wrap gap-1.5 items-center">
+                      {upper.materials?.filter(m => m.photo_url).map((m, mIdx) => (
+                        <div key={mIdx} className="flex items-center gap-1 bg-slate-50 border border-slate-300 px-1 py-0.5 rounded">
+                          <div className="w-6 h-6 rounded border border-slate-300 overflow-hidden shrink-0 bg-white">
+                            <img src={resolveImageUrl(m.photo_url)} alt="swatch" className="w-full h-full object-cover" />
+                          </div>
+                          <span className="font-mono text-[7px] font-bold text-slate-700 uppercase tracking-tighter truncate max-w-[16mm]">
+                            {m.placement || `Mat #${mIdx+1}`}
+                          </span>
+                        </div>
+                      ))}
+                      {upper.buckle_photo_url && (
+                        <div className="flex items-center gap-1 bg-amber-50 border border-amber-300 px-1 py-0.5 rounded">
+                          <div className="w-6 h-6 rounded border border-amber-400 overflow-hidden shrink-0 bg-white">
+                            <img src={resolveImageUrl(upper.buckle_photo_url)} alt="buckle" className="w-full h-full object-cover" />
+                          </div>
+                          <span className="font-mono text-[7px] font-bold text-amber-900 uppercase tracking-tighter">
+                            Buckle
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Pillar 2: Insole & Socks */}
@@ -2792,6 +3301,10 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
                   <div className="text-[10px] leading-tight">
                     <span className="font-semibold text-slate-500 block text-[8px] uppercase">Socks Covering</span>
                     <span className="font-mono text-slate-800 capitalize">{insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Custom")}</span>
+                  </div>
+                  <div className="text-[10px] leading-tight">
+                    <span className="font-semibold text-slate-500 block text-[8px] uppercase">Socks Color</span>
+                    <span className="font-mono font-bold text-blue-900">{insole.socks_color ? insole.socks_color : "Matches Upper"}</span>
                   </div>
                   <div className="text-[10px] leading-tight">
                     <span className="font-semibold text-slate-500 block text-[8px] uppercase">Surface Detailing</span>

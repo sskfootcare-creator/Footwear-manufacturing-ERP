@@ -137,7 +137,7 @@ h1, h2, h3, h4, h5, h6 {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 6mm 8mm;
+    margin: 0 !important;
   }
   html, body {
     background: #ffffff !important;
@@ -153,7 +153,7 @@ h1, h2, h3, h4, h5, h6 {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
-  #root, .app-layout, [data-testid="main-content"], main, .mobile-main-content, div[class*="min-h-screen"], div[class*="bg-[#F7F7F5]"] {
+  #root, .app-layout, [data-testid="main-content"], main, .mobile-main-content, div[class*="min-h-screen"], div[class*="bg-[#F7F7F5]"], .techpack-modal-wrapper, .techpack-sheet-container {
     background: #ffffff !important;
     background-color: #ffffff !important;
     margin: 0 !important;
@@ -173,8 +173,20 @@ h1, h2, h3, h4, h5, h6 {
     min-height: 0 !important;
     max-height: none !important;
   }
-  /* Hide the whole app shell (sidebar + header + alerts) when printing */
-  [data-testid="sidebar"], .no-print, .print\:hidden, button, header, nav, .alert-banner {
+  /* Hide the whole app shell (sidebar + header + alerts + fixed drawer overlays) when printing */
+  [data-testid="sidebar"],
+  [data-testid="mobile-top-bar"],
+  [data-testid="mobile-bottom-tab-bar"],
+  .no-print,
+  .print\:hidden,
+  button,
+  header,
+  nav,
+  aside,
+  .alert-banner,
+  .fixed.inset-0:not(.techpack-overlay),
+  div[aria-label="More navigation"],
+  [role="dialog"]:not(.techpack-printable-dialog) {
     display: none !important;
   }
   /* Neutralize any Tailwind space-y margins in print stream */
@@ -186,24 +198,22 @@ h1, h2, h3, h4, h5, h6 {
   .techpack-page {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
-    page-break-before: avoid !important;
-    break-before: avoid !important;
+    page-break-before: auto !important;
+    break-before: auto !important;
     display: flex !important;
     flex-direction: column !important;
     justify-content: space-between !important;
-    height: 238mm !important;
-    max-height: 238mm !important;
-    min-height: 238mm !important;
-    width: 184mm !important;
-    max-width: 184mm !important;
+    box-sizing: border-box !important;
+    width: 200mm !important;
+    max-width: 200mm !important;
+    height: 278mm !important;
+    max-height: 280mm !important;
+    min-height: 0 !important;
     overflow: hidden !important;
     margin: 0 auto !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
-    padding: 2mm !important;
-    box-sizing: border-box !important;
+    padding: 5mm 6mm !important;
     background: #ffffff !important;
-    border: 1px solid #cbd5e1 !important;
+    border: none !important;
   }
   /* Only break to a new page between pages — NEVER after the final page */
   .techpack-page:not(:last-child) {
@@ -217,22 +227,26 @@ h1, h2, h3, h4, h5, h6 {
   #techpack-printable-sheet.techpack-page-last {
     page-break-after: avoid !important;
     break-after: avoid !important;
+    margin-bottom: 0 !important;
+    padding-bottom: 5mm !important;
   }
   .techpack-image-zone {
     flex: 1 1 0% !important;
     min-height: 0 !important;
-    height: 100% !important;
-    max-height: 180mm !important;
+    max-height: 135mm !important;
+    height: auto !important;
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
     overflow: hidden !important;
-    margin: 2mm 0 !important;
+    margin: 1.5mm 0 !important;
     padding: 0 !important;
   }
   .techpack-image-zone img {
     max-width: 100% !important;
     max-height: 100% !important;
+    width: auto !important;
+    height: auto !important;
     object-fit: contain !important;
   }
   .techpack-bottom-data {

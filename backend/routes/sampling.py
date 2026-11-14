@@ -655,8 +655,27 @@ async def transfer_sample_to_style(
     # 1. Build Pre-Populated BOM Lines
     bom_items: List[Dict[str, Any]] = []
 
-    # 1A. Upper Top Material
-    if upper_spec.get("upper_top_material_name") or upper_spec.get("upper_top_material_id"):
+    # 1A. Upper Materials (Supports 1, 2, 3+ distinct upper materials)
+    upper_materials = upper_spec.get("materials") or []
+    if upper_materials:
+        for idx, um in enumerate(upper_materials):
+            mat_name = um.get("material_name") or "Upper Material"
+            placement = um.get("placement") or ("Primary" if idx == 0 else "Secondary")
+            bom_items.append({
+                "line_id": os.urandom(4).hex(),
+                "material_id": um.get("material_id") or "",
+                "material_name": f"{mat_name} ({placement})",
+                "material_code": um.get("material_code") or "",
+                "unit": "sq ft",
+                "rate": 0.0,
+                "quantity": float(yields.get("upper_top", 1.2) if idx == 0 else 0.5),
+                "yield_per_unit": 1.0,
+                "waste_pct": 5.0,
+                "section": "Upper",
+                "component": "upper",
+                "color": um.get("color_to_develop") or "",
+            })
+    elif upper_spec.get("upper_top_material_name") or upper_spec.get("upper_top_material_id"):
         bom_items.append({
             "line_id": os.urandom(4).hex(),
             "material_id": upper_spec.get("upper_top_material_id") or "",

@@ -30,6 +30,7 @@ export default function SearchableSelect({
   disabled = false,
   testId,
   className = "",
+  inputClassName = "",
   onRefresh,
   refreshLabel = "Sync / Refresh options",
 }) {
@@ -102,7 +103,7 @@ export default function SearchableSelect({
           if (e.key === "Escape") { setOpen(false); setQuery(""); }
           if (e.key === "Enter" && filtered.length === 1) { e.preventDefault(); pick(filtered[0]); }
         }}
-        className={`w-full border-2 border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-[#2563EB] focus:outline-none font-mono min-h-[44px] ${
+        className={inputClassName || `w-full border-2 border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-[#2563EB] focus:outline-none font-mono min-h-[44px] ${
           disabled ? "opacity-50 cursor-not-allowed bg-slate-50" : ""
         }`}
         data-testid={testId ? `${testId}-input` : undefined}
