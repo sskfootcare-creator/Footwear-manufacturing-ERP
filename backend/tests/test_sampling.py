@@ -281,7 +281,8 @@ async def test_transfer_to_style_master_creates_full_bom_and_labor(mock_db, mock
 
     # Check upper yield
     upper_line = next(b for b in bom if "Velvet Suede" in b["material_name"])
-    assert upper_line["quantity"] == 1.4
+    assert upper_line["quantity"] == 1.0
+    assert upper_line["yield_per_unit"] == 1.4
     assert upper_line["color"] == "Wine Red"
 
     # Verify Labor operations

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.pattern_scanner_service import (
     extract_patterns_from_image_bytes,
+    is_opencv_available,
     A4_WIDTH_MM,
     A4_HEIGHT_MM,
 )

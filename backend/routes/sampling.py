@@ -1263,6 +1263,37 @@ async def transfer_sample_to_style(
                 "vendor": None,
                 "notes": "Upper sewing & lining attachment",
             })
+        if upper_spec.get("edge_treatment") == "edge_coloring":
+            labor_items.append({
+                "name": "Upper Edge Coloring & Treatment",
+                "rate": float(rates.get("edge_coloring", 8.0)),
+                "component": "upper",
+                "is_outside": False,
+                "vendor": None,
+                "notes": "Edge coating / coloring specified in sample pack",
+            })
+        labor_items.append({
+            "name": f"Insole Board & Foam Assembly ({thickness})",
+            "rate": float(rates.get("insole_making", 10.0)),
+            "component": "bottom",
+            "is_outside": False,
+            "vendor": None,
+            "notes": f"Base board ({base_board_label}) + {cushion_type} foam bonding",
+        })
+        sole_ops = []
+        if sole_spec.get("velting"): sole_ops.append("Welting")
+        if sole_spec.get("grinding"): sole_ops.append("Grinding")
+        if sole_spec.get("gripping"): sole_ops.append("Gripping")
+        if sole_spec.get("attaching_top_piece"): sole_ops.append("Top Piece")
+        if sole_ops or sole_spec.get("sole_type") == "die_cut":
+            labor_items.append({
+                "name": f"Sole Processing ({', '.join(sole_ops) if sole_ops else 'Die Cut Prep'})",
+                "rate": float(rates.get("sole_prep", 15.0)),
+                "component": "sole",
+                "is_outside": False,
+                "vendor": None,
+                "notes": "Sole pre-treatment prior to lasting",
+            })
         labor_items.append({
             "name": "Lasting (Upper to Insole/Last)",
             "rate": float(rates.get("lasting", 20.0)),
