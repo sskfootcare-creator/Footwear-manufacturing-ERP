@@ -113,6 +113,7 @@ def mock_admin_user():
 # 1. Pattern Scanner & Computer Vision Calibration Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.skipif(not is_opencv_available(), reason="OpenCV (cv2) not installed in this environment")
 def test_pattern_scanner_extracts_calibrated_geometry(synthetic_a4_scan):
     """Verify that an A4 scanned image on light bed is calibrated accurately to physical mm and cm²."""
     res = extract_patterns_from_image_bytes(synthetic_a4_scan, min_area_sqcm=2.0, background_mode="light")
@@ -145,6 +146,7 @@ def test_pattern_scanner_extracts_calibrated_geometry(synthetic_a4_scan):
     assert "Strap" in p2["piece_name"]
 
 
+@pytest.mark.skipif(not is_opencv_available(), reason="OpenCV (cv2) not installed in this environment")
 def test_pattern_scanner_dark_background_mode(synthetic_dark_a4_scan):
     """Verify that Dark Background mode accurately segments bright contrast patterns on dark scanner beds."""
     res = extract_patterns_from_image_bytes(synthetic_dark_a4_scan, min_area_sqcm=2.0, background_mode="dark")
@@ -159,6 +161,7 @@ def test_pattern_scanner_dark_background_mode(synthetic_dark_a4_scan):
     assert abs(p1["length_mm"] - 100.0) < 3.0
 
 
+@pytest.mark.skipif(not is_opencv_available(), reason="OpenCV (cv2) not installed in this environment")
 def test_pattern_scanner_rejects_empty_or_corrupt_data():
     """Verify error handling on invalid image bytes."""
     with pytest.raises(ValueError):

@@ -179,6 +179,7 @@ async def test_transfer_to_style_master_creates_full_bom_and_labor(mock_db, mock
         "inspiration_photos": [
             {"url": "/api/uploads/samples_inspiration/sample1.jpg", "is_primary": True}
         ],
+        "actual_developed_photo_url": "/api/uploads/samples_actual/actual1.jpg",
         "upper_spec": {
             "upper_top_material_name": "Velvet Suede Synthetic",
             "upper_color_to_develop": "Wine Red",
@@ -267,7 +268,7 @@ async def test_transfer_to_style_master_creates_full_bom_and_labor(mock_db, mock
     assert style_inserted["code"] == "SSK-PLAT-001"
     assert style_inserted["name"] == "Wine Red Platform Pump"
     assert style_inserted["footwear_type"] == "heel"
-    assert style_inserted["image_url"] == "/api/uploads/samples_inspiration/sample1.jpg"
+    assert style_inserted["image_url"] == "/api/uploads/samples_actual/actual1.jpg"
 
     # Verify BOM lines
     bom = style_inserted["bom"]

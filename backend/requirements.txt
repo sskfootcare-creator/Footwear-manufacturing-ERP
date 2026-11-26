@@ -51,6 +51,7 @@ motor==3.3.1
 multidict==6.7.1
 num2words==0.5.14
 numpy==2.4.6
+opencv-python-headless>=4.10.0
 oauthlib==3.3.1
 openpyxl==3.1.5
 packaging==26.2
