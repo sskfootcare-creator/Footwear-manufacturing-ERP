@@ -429,7 +429,10 @@ def _decorate_invoice(doc: dict, payments_map: dict | None = None, grns_map: dic
         inv["due_date"] = None
 
     today_iso = datetime.now().date().isoformat()
-    if outstanding <= 0.01:
+    if inv.get("status") == "voided" or inv.get("active") is False:
+        inv["status"] = "voided"
+        inv["outstanding"] = 0.0
+    elif outstanding <= 0.01:
         inv["status"] = "paid"
     elif paid > 0.01:
         inv["status"] = "partial"
@@ -2041,7 +2044,10 @@ async def get_inflow_cash_forecast(request: Request):
     """Weekly cash inflow forecast based on GRN-calculated due dates for vendor payment planning."""
     await _get_user(request)
     db = _get_db(request)
-    docs = await db.invoices.find({"legacy": {"$ne": True}}, {"file_b64": 0}).sort("created_at", -1).to_list(1000)
+    docs = await db.invoices.find(
+        {"legacy": {"$ne": True}, "status": {"$ne": "voided"}, "active": {"$ne": False}},
+        {"file_b64": 0},
+    ).sort("created_at", -1).to_list(1000)
     inv_ids = [str(d["_id"]) for d in docs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
     grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
@@ -2173,6 +2179,9 @@ async def list_invoices(request: Request, client: Optional[str] = None,
     q: dict = {}
     if not include_legacy:
         q["legacy"] = {"$ne": True}
+    if status != "voided":
+        q["status"] = {"$ne": "voided"}
+        q["active"] = {"$ne": False}
     if client:
         q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
     docs = await db.invoices.find(q, {"file_b64": 0}).sort("created_at", -1).to_list(limit)
@@ -2189,7 +2198,10 @@ async def list_invoices(request: Request, client: Optional[str] = None,
 async def overdue_invoices(request: Request):
     await _get_user(request)
     db = _get_db(request)
-    docs = await db.invoices.find({}, {"file_b64": 0}).sort("due_date", 1).to_list(500)
+    docs = await db.invoices.find(
+        {"status": {"$ne": "voided"}, "active": {"$ne": False}},
+        {"file_b64": 0},
+    ).sort("due_date", 1).to_list(500)
     inv_ids = [str(d["_id"]) for d in docs]
     pay_map = await _aggregate_payments_for_invoices(inv_ids, db=db)
     grn_map = await _aggregate_grn_adjustments(inv_ids, db=db)
@@ -2213,6 +2225,9 @@ async def export_invoices(
     from services.export_service import build_export_response
 
     q: dict = {"legacy": {"$ne": True}}
+    if status != "voided":
+        q["status"] = {"$ne": "voided"}
+        q["active"] = {"$ne": False}
     if client:
         q["client_name"] = {"$regex": re.escape(client), "$options": "i"}
 
