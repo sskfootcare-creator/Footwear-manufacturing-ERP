@@ -24,6 +24,14 @@ class MaterialIn(BaseModel):
     component_category: Optional[str] = None
     default_yield_per_unit: Optional[float] = None
     color:               Optional[str] = ""
+    material_form:       Optional[Literal["roll", "sheet", "unspecified"]] = "roll"
+    dimension_unit:      Optional[str] = "inch"
+    roll_width:          Optional[float] = 50.0   # Default 50 inch width in roll form
+    roll_length:         Optional[float] = None   # Optional roll length (e.g. 50 meters)
+    sheet_width:         Optional[float] = 40.0   # Default 40 inch width in sheet form
+    sheet_height:        Optional[float] = 60.0   # Default 60 inch height in sheet form
+    width_mm:            Optional[float] = None   # Normalized width in mm (for 2D nesting & lace slitting)
+    height_mm:           Optional[float] = None   # Normalized height in mm (for sheet nesting)
     weighted_avg_rate:   Optional[float] = None
     last_purchase_rate:  Optional[float] = None
     balance:             Optional[float] = 0.0

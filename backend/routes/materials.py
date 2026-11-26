@@ -624,6 +624,23 @@ async def get_material(mid: str, request: Request):
     return stringify(doc)
 
 
+def _normalize_material_dimensions(doc: dict) -> dict:
+    """Ensure normalized width_mm and height_mm are stored for 2D nesting & pattern yield."""
+    form = doc.get("material_form") or "roll"
+    u = str(doc.get("dimension_unit") or "inch").lower().strip()
+    scale = 25.4 if u in ("inch", "in", '"') else (10.0 if u in ("cm",) else (1000.0 if u in ("m", "mtr", "meter") else 1.0))
+    if form == "roll":
+        w = float(doc.get("roll_width") if doc.get("roll_width") is not None else 50.0)
+        doc["width_mm"] = round(w * scale, 2)
+        doc["height_mm"] = None
+    elif form == "sheet":
+        w = float(doc.get("sheet_width") if doc.get("sheet_width") is not None else 40.0)
+        h = float(doc.get("sheet_height") if doc.get("sheet_height") is not None else 60.0)
+        doc["width_mm"] = round(w * scale, 2)
+        doc["height_mm"] = round(h * scale, 2)
+    return doc
+
+
 @materials_router.post("/materials")
 async def create_material(payload: MaterialIn, request: Request):
     u = await _get_user(request)
@@ -633,7 +650,7 @@ async def create_material(payload: MaterialIn, request: Request):
     if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}}):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     payload.code = code
-    doc = payload.model_dump()
+    doc = _normalize_material_dimensions(payload.model_dump())
     doc["created_at"] = now_iso()
     doc["updated_at"] = now_iso()
     try:
@@ -656,7 +673,7 @@ async def update_material(mid: str, payload: MaterialIn, request: Request):
     if await db.materials.find_one({"code": {"$regex": f"^{re.escape(code)}$", "$options": "i"}, "_id": {"$ne": oid(mid)}}):
         raise HTTPException(status_code=409, detail=f"Material code '{code}' already exists")
     payload.code = code
-    update = payload.model_dump()
+    update = _normalize_material_dimensions(payload.model_dump())
     update.pop("balance", None)
     if update.get("weighted_avg_rate") is None:
         update.pop("weighted_avg_rate", None)

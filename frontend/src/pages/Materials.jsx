@@ -86,6 +86,14 @@ const emptyForm = {
   component_category: "Sole",
   default_yield_per_unit: "",
   stage_requirements: [],
+  material_form: "roll", // "roll" | "sheet" | "unspecified"
+  dimension_unit: "inch", // "inch" | "mm" | "cm"
+  roll_width: 50, // default 50 inch width in roll form
+  roll_length: "",
+  sheet_width: 40, // default 40 inch width in sheet form
+  sheet_height: 60, // default 60 inch height in sheet form
+  width_mm: 1270,
+  height_mm: null,
 };
 
 export default function Materials() {
@@ -129,6 +137,34 @@ export default function Materials() {
     setFormError("");
     setOpen(true);
   };
+  const convertDimension = (val, fromUnit, toUnit) => {
+    if (val === "" || val == null || isNaN(val)) return val;
+    const num = parseFloat(val);
+    if (fromUnit === toUnit) return num;
+    let mm = num;
+    if (fromUnit === "inch") mm = num * 25.4;
+    else if (fromUnit === "cm") mm = num * 10.0;
+    let res = mm;
+    if (toUnit === "inch") res = mm / 25.4;
+    else if (toUnit === "cm") res = mm / 10.0;
+    return Math.round(res * 100) / 100;
+  };
+
+  const handleDimensionUnitChange = (newUnit) => {
+    const oldUnit = form.dimension_unit || "inch";
+    if (oldUnit === newUnit) return;
+    const newRollW = form.roll_width !== "" ? convertDimension(form.roll_width, oldUnit, newUnit) : "";
+    const newSheetW = form.sheet_width !== "" ? convertDimension(form.sheet_width, oldUnit, newUnit) : "";
+    const newSheetH = form.sheet_height !== "" ? convertDimension(form.sheet_height, oldUnit, newUnit) : "";
+    setForm((f) => ({
+      ...f,
+      dimension_unit: newUnit,
+      roll_width: newRollW,
+      sheet_width: newSheetW,
+      sheet_height: newSheetH,
+    }));
+  };
+
   const startEdit = (m) => {
     setEdit(m.id);
     setForm({
@@ -149,6 +185,14 @@ export default function Materials() {
       component_category: m.component_category || "Sole",
       default_yield_per_unit: m.default_yield_per_unit != null ? m.default_yield_per_unit : "",
       stage_requirements: Array.isArray(m.stage_requirements) ? [...m.stage_requirements] : [],
+      material_form: m.material_form || "roll",
+      dimension_unit: m.dimension_unit || "inch",
+      roll_width: m.roll_width != null ? m.roll_width : 50,
+      roll_length: m.roll_length != null ? m.roll_length : "",
+      sheet_width: m.sheet_width != null ? m.sheet_width : 40,
+      sheet_height: m.sheet_height != null ? m.sheet_height : 60,
+      width_mm: m.width_mm != null ? m.width_mm : 1270,
+      height_mm: m.height_mm != null ? m.height_mm : null,
     });
     setNewStageInput("");
     setFormError("");
@@ -169,6 +213,12 @@ export default function Materials() {
         stage_requirements: Array.isArray(form.stage_requirements)
           ? form.stage_requirements.map((s) => String(s).trim()).filter(Boolean)
           : [],
+        material_form: form.material_form || "roll",
+        dimension_unit: form.dimension_unit || "inch",
+        roll_width: form.roll_width !== "" && form.roll_width != null ? Number(form.roll_width) : 50,
+        roll_length: form.roll_length !== "" && form.roll_length != null ? Number(form.roll_length) : null,
+        sheet_width: form.sheet_width !== "" && form.sheet_width != null ? Number(form.sheet_width) : 40,
+        sheet_height: form.sheet_height !== "" && form.sheet_height != null ? Number(form.sheet_height) : 60,
       };
       if (edit) {
         await http.patch(`/materials/${edit}`, body);
@@ -332,6 +382,24 @@ export default function Materials() {
                             <Badge color="purple">
                               Component: {m.component_category || m.category}
                             </Badge>
+                          )}
+                          {m.material_form === "roll" && (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-200"
+                              title={`Continuous Roll: ${m.roll_width || 50}" width (${m.width_mm || 1270}mm)`}
+                              data-testid={`material-roll-${m.code}`}
+                            >
+                              Roll: {m.roll_width || 50}&quot;
+                            </span>
+                          )}
+                          {m.material_form === "sheet" && (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              title={`Die-Cut Sheet: ${m.sheet_width || 40}" × ${m.sheet_height || 60}" (${m.width_mm || 1016}×${m.height_mm || 1524}mm)`}
+                              data-testid={`material-sheet-${m.code}`}
+                            >
+                              Sheet: {m.sheet_width || 40}&quot;×{m.sheet_height || 60}&quot;
+                            </span>
                           )}
                           {m.stage_requirements && m.stage_requirements.length > 0 ? (
                             <span
@@ -579,6 +647,188 @@ export default function Materials() {
               value={form.notes}
               onChange={(e) => setForm({ ...form, notes: e.target.value })}
             />
+
+            {/* Material Form & Dimensions for Pattern Yield & Lace Calculations */}
+            <div className="border border-blue-200 bg-blue-50/40 p-3.5 rounded-lg space-y-3" data-testid="material-dimensions-section">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                    Physical Format &amp; Dimensions
+                    <span className="text-[10px] font-normal normal-case text-blue-700 font-mono">
+                      (for Pattern Yield &amp; Laces)
+                    </span>
+                  </label>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Defines raw continuous roll width or sheet size automatically used in Pattern Yield simulations.
+                  </p>
+                </div>
+              </div>
+
+              {/* Format Selector: Roll vs Sheet vs None */}
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const u = form.dimension_unit || "inch";
+                    setForm({
+                      ...form,
+                      material_form: "roll",
+                      roll_width: form.roll_width || (u === "inch" ? 50 : (u === "mm" ? 1270 : 127)),
+                    });
+                  }}
+                  className={`py-1.5 px-2 rounded text-xs font-bold border transition ${
+                    form.material_form === "roll"
+                      ? "bg-blue-600 text-white border-blue-700 shadow-xs"
+                      : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                  }`}
+                  data-testid="format-btn-roll"
+                >
+                  Continuous Roll
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const u = form.dimension_unit || "inch";
+                    setForm({
+                      ...form,
+                      material_form: "sheet",
+                      sheet_width: form.sheet_width || (u === "inch" ? 40 : (u === "mm" ? 1016 : 101.6)),
+                      sheet_height: form.sheet_height || (u === "inch" ? 60 : (u === "mm" ? 1524 : 152.4)),
+                    });
+                  }}
+                  className={`py-1.5 px-2 rounded text-xs font-bold border transition ${
+                    form.material_form === "sheet"
+                      ? "bg-emerald-600 text-white border-emerald-700 shadow-xs"
+                      : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                  }`}
+                  data-testid="format-btn-sheet"
+                >
+                  Die-Cut Sheet
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, material_form: "unspecified" })}
+                  className={`py-1.5 px-2 rounded text-xs font-bold border transition ${
+                    form.material_form === "unspecified"
+                      ? "bg-slate-700 text-white border-slate-800 shadow-xs"
+                      : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                  }`}
+                  data-testid="format-btn-other"
+                >
+                  Other / None
+                </button>
+              </div>
+
+              {/* Adjustable Unit Switcher */}
+              {form.material_form !== "unspecified" && (
+                <div className="flex items-center justify-between pt-1 border-t border-blue-100">
+                  <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wide">
+                    Measurement Unit:
+                  </span>
+                  <div className="flex items-center gap-1 bg-white p-0.5 border border-slate-300 rounded">
+                    {["inch", "mm", "cm"].map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => handleDimensionUnitChange(u)}
+                        className={`px-2 py-0.5 text-[11px] font-bold uppercase rounded ${
+                          (form.dimension_unit || "inch") === u
+                            ? "bg-[#2563EB] text-white"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                        data-testid={`dim-unit-${u}`}
+                      >
+                        {u === "inch" ? 'Inch (")' : u}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Roll Inputs */}
+              {form.material_form === "roll" && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                        Roll Width ({form.dimension_unit || "inch"}) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        placeholder="Default 50 inch"
+                        value={form.roll_width}
+                        onChange={(e) => setForm({ ...form, roll_width: e.target.value })}
+                        className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 outline-none bg-white"
+                        data-testid="form-mat-roll-width"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                        Roll Length (meters)
+                      </label>
+                      <input
+                        type="number"
+                        step="1"
+                        min="1"
+                        placeholder="e.g. 50m"
+                        value={form.roll_length}
+                        onChange={(e) => setForm({ ...form, roll_length: e.target.value })}
+                        className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 outline-none bg-white"
+                        data-testid="form-mat-roll-length"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-mono text-blue-700 italic">
+                    ➔ Default: 50&quot; width. Normalized: {
+                      (form.dimension_unit === "mm" ? parseFloat(form.roll_width) : (form.dimension_unit === "cm" ? parseFloat(form.roll_width) * 10 : parseFloat(form.roll_width) * 25.4)) || 1270
+                    } mm usable in roll nesting &amp; lace ribbon slitting.
+                  </p>
+                </div>
+              )}
+
+              {/* Sheet Inputs */}
+              {form.material_form === "sheet" && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                        Sheet Width ({form.dimension_unit || "inch"}) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        placeholder="Default 40 inch"
+                        value={form.sheet_width}
+                        onChange={(e) => setForm({ ...form, sheet_width: e.target.value })}
+                        className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none bg-white"
+                        data-testid="form-mat-sheet-width"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                        Sheet Height ({form.dimension_unit || "inch"}) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        placeholder="Default 60 inch"
+                        value={form.sheet_height}
+                        onChange={(e) => setForm({ ...form, sheet_height: e.target.value })}
+                        className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none bg-white"
+                        data-testid="form-mat-sheet-height"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[10px] font-mono text-emerald-800 italic">
+                    ➔ Default: 40&quot; W × 60&quot; H (1016 × 1524 mm). Used for insole boards &amp; EVA sheet nesting.
+                  </p>
+                </div>
+              )}
+            </div>
             <div className="border border-purple-200 bg-purple-50/50 p-3 rounded space-y-2">
               <label className="flex items-center gap-2 text-xs font-bold text-purple-900 cursor-pointer">
                 <input

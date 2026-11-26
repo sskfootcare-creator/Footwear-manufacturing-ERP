@@ -980,6 +980,9 @@ export default function Styles() {
 
   const updateLineMaterialOverride = (colorName, lineId, materialObj) => {
     if (!colorName || !lineId || !materialObj) return;
+    const baseLine = (form.bom || []).find((b) => b.line_id === lineId);
+    const styleId = form.id || form._id;
+
     setForm((f) => {
       const prevOvs = f.color_bom_overrides || {};
       const colorList = prevOvs[colorName] ? [...prevOvs[colorName]] : [];
@@ -992,8 +995,11 @@ export default function Styles() {
       if (materialObj.color) {
         currentOv.color = materialObj.color;
       }
-      if (currentOv.rate == null) {
+      if (materialObj.rate != null) {
         currentOv.rate = materialObj.rate;
+      }
+      if (materialObj.unit) {
+        currentOv.unit = materialObj.unit;
       }
 
       if (idx >= 0) {
@@ -1010,6 +1016,42 @@ export default function Styles() {
         },
       };
     });
+
+    // Background process: auto-calculate yield & consumption from linked pattern using selected material info
+    if (styleId && materialObj.id) {
+      http.post(`/styles/${styleId}/calculate-color-yield`, {
+        material_id: materialObj.id,
+        section: baseLine?.section || "Upper",
+        component: baseLine?.component || "upper",
+        material_name: materialObj.name || "",
+        base_material_id: baseLine?.material_id || "",
+      }).then((res) => {
+        const d = res?.data;
+        if (!d?.ok) return;
+        setForm((f) => {
+          const prevOvs = f.color_bom_overrides || {};
+          const colorList = prevOvs[colorName] ? [...prevOvs[colorName]] : [];
+          const idx = colorList.findIndex((o) => o.line_id === lineId);
+          if (idx < 0 || colorList[idx].material_id !== materialObj.id) return f;
+          const updatedOv = {
+            ...colorList[idx],
+            quantity: d.quantity,
+            yield_per_unit: d.yield_per_unit,
+            waste_pct: d.waste_pct,
+            unit: d.unit || colorList[idx].unit,
+            rate: d.rate != null ? d.rate : colorList[idx].rate,
+          };
+          colorList[idx] = updatedOv;
+          return {
+            ...f,
+            color_bom_overrides: {
+              ...prevOvs,
+              [colorName]: colorList,
+            },
+          };
+        });
+      }).catch(() => {});
+    }
   };
 
   const resetLineOverride = (colorName, lineId) => {

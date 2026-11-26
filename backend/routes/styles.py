@@ -3064,6 +3064,149 @@ async def costing_preview(payload: StyleIn, request: Request, color: Optional[st
     return compute_style_costing(payload.model_dump(), color=color)
 
 
+class ColorYieldRequest(BaseModel):
+    material_id: str
+    section: Optional[str] = "Upper"
+    component: Optional[str] = "upper"
+    material_name: Optional[str] = ""
+    base_material_id: Optional[str] = ""
+
+
+@styles_router.post("/{sid}/calculate-color-yield")
+async def calculate_style_color_yield(
+    sid: str,
+    payload: ColorYieldRequest,
+    request: Request,
+):
+    """Automatically calculate BOM yield & consumption from linked pattern pieces
+    when a different material is selected for a style color variant.
+    """
+    await _get_user(request)
+    db = get_db(request)
+
+    style = await db.styles.find_one({"_id": oid(sid)})
+    if not style:
+        raise HTTPException(404, "Style not found")
+
+    mat = await db.materials.find_one({"_id": oid(payload.material_id)})
+    if not mat:
+        raise HTTPException(404, "Selected material not found")
+
+    # Find pattern pieces from linked PLM pattern or origin sample
+    pieces = []
+    yield_spec = {}
+    pat_code = style.get("linked_pattern_code")
+    origin_sample_id = style.get("origin_sample_id")
+
+    if pat_code:
+        pat_doc = await db.plm_patterns.find_one({"pattern_code": pat_code})
+        if pat_doc:
+            pieces = pat_doc.get("pattern_pieces") or []
+            yield_spec = pat_doc.get("yield_spec") or {}
+
+    if not pieces and origin_sample_id:
+        try:
+            smp_doc = await db.samples.find_one({"_id": oid(origin_sample_id)})
+            if smp_doc:
+                pieces = smp_doc.get("pattern_pieces") or []
+                yield_spec = smp_doc.get("yield_spec") or {}
+        except Exception:
+            pass
+
+    if not pieces:
+        # No scanned pattern linked — return material's default_yield_per_unit if available
+        def_ypu = float(mat.get("default_yield_per_unit") or 0)
+        if def_ypu > 0:
+            return {
+                "ok": True,
+                "source": "material_default",
+                "quantity": 1.0,
+                "yield_per_unit": def_ypu,
+                "waste_pct": 0.0,
+                "utilization_pct": 85.0,
+                "unit": mat.get("unit") or "meter",
+                "rate": float(mat.get("rate") or 0.0),
+            }
+        return {
+            "ok": False,
+            "message": "No linked pattern pieces found for this style.",
+        }
+
+    # Filter pieces relevant to this BOM line
+    sec_lower = (payload.section or "").lower()
+    comp_lower = (payload.component or "").lower()
+    mname_lower = (payload.material_name or "").lower()
+
+    if "lining" in sec_lower or "lining" in comp_lower:
+        target_pieces = [p for p in pieces if p.get("component") == "lining"]
+        if not target_pieces:
+            target_pieces = [p for p in pieces if p.get("component") not in ["canvas", "canvas_backing"]]
+    elif "canvas" in mname_lower or "canvas" in comp_lower:
+        target_pieces = [p for p in pieces if p.get("component") in ["canvas", "canvas_backing"]]
+        if not target_pieces:
+            target_pieces = [p for p in pieces if p.get("component") != "lining"]
+    elif payload.base_material_id:
+        matched = [p for p in pieces if p.get("material_id") == payload.base_material_id]
+        target_pieces = matched if matched else [p for p in pieces if p.get("component") not in ["lining", "canvas", "canvas_backing"]]
+    else:
+        target_pieces = [p for p in pieces if p.get("component") not in ["lining", "canvas", "canvas_backing"]]
+
+    if not target_pieces:
+        target_pieces = pieces
+
+    # Resolve selected material's physical dimensions
+    from services.yield_nesting_service import simulate_nesting, INCH_TO_MM
+    mform = mat.get("material_form") or "roll"
+    dim_unit = (mat.get("dimension_unit") or "inch").lower()
+    mult = INCH_TO_MM if "in" in dim_unit else (10.0 if "cm" in dim_unit else (1000.0 if dim_unit == "m" else 1.0))
+
+    roll_width_in = 54.0
+    custom_roll_mm = None
+    sheet_l_mm = None
+    sheet_w_mm = None
+
+    if mform == "sheet":
+        sw_mm = float(mat.get("width_mm") or (float(mat.get("sheet_width") or 40.0) * mult))
+        sh_mm = float(mat.get("height_mm") or (float(mat.get("sheet_height") or 60.0) * mult))
+        sheet_l_mm = max(sw_mm, sh_mm)
+        sheet_w_mm = min(sw_mm, sh_mm)
+    else:
+        rw_mm = float(mat.get("width_mm") or (float(mat.get("roll_width") or 54.0) * mult))
+        custom_roll_mm = rw_mm
+        roll_width_in = round(rw_mm / INCH_TO_MM, 2)
+
+    selvage = float(yield_spec.get("selvage_margin_mm") or 20.0)
+    kerf = float(yield_spec.get("kerf_spacing_mm") or 3.0)
+    waste = float(yield_spec.get("waste_allowance_pct") or 5.0)
+    cut_dir = yield_spec.get("cutting_direction") or "length_up"
+
+    res = simulate_nesting(
+        pieces=target_pieces,
+        material_type="sheet" if mform == "sheet" else "roll",
+        roll_width_inches=roll_width_in,
+        custom_roll_width_mm=custom_roll_mm,
+        sheet_length_mm=sheet_l_mm,
+        sheet_width_mm=sheet_w_mm,
+        selvage_margin_mm=selvage,
+        kerf_spacing_mm=kerf,
+        waste_allowance_pct=waste,
+        cutting_direction=cut_dir,
+    )
+
+    return {
+        "ok": True,
+        "source": "pattern_nesting",
+        "quantity": 1.0,
+        "yield_per_unit": float(res.get("yield_per_unit") or 1.0),
+        "waste_pct": 0.0,
+        "utilization_pct": float(res.get("utilization_pct") or 85.0),
+        "unit": res.get("consumption_unit") or mat.get("unit") or ("sheet" if mform == "sheet" else "meter"),
+        "rate": float(mat.get("rate") or 0.0),
+        "material_form": mform,
+        "roll_width_inches": roll_width_in,
+    }
+
+
 # ============================================================================
 # Catalogue Export with Pictures & Master Specification Sheet
 # ============================================================================

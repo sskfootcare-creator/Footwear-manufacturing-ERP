@@ -25,8 +25,9 @@ import {
   AlertCircle, ArrowRight, Layers, Hammer, ShieldAlert,
   ChevronRight, RefreshCw, X, Upload, Palette, Scissors,
   Tag, Clock, UserCheck, ExternalLink, SlidersHorizontal, Check, Eye,
-  ChevronLeft, Star, ImagePlus, Images, Printer
+  ChevronLeft, Star, ImagePlus, Images, Printer, Scan, Ruler, Lock
 } from "lucide-react";
+import PatternYieldModal from "../components/PatternYieldModal";
 
 const STATUS_CONFIG = {
   draft: { label: "Draft Spec", badgeColor: "slate", accent: "#94A3B8" },
@@ -41,7 +42,7 @@ export default function SampleDevelopment() {
   const navigate = useNavigate();
   const [samples, setSamples] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("active");
   const [profileFilter, setProfileFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [statusCounts, setStatusCounts] = useState({});
@@ -57,6 +58,8 @@ export default function SampleDevelopment() {
   const [transferModalSample, setTransferModalSample] = useState(null);
   const [detailSample, setDetailSample] = useState(null);
   const [detailPrintMode, setDetailPrintMode] = useState(false);
+  const [patternYieldModalSample, setPatternYieldModalSample] = useState(null);
+  const [approvalPromptSample, setApprovalPromptSample] = useState(null);
 
   // Status transition state
   const [statusUpdateLoading, setStatusUpdateLoading] = useState(false);
@@ -184,6 +187,17 @@ export default function SampleDevelopment() {
   };
 
   const handleStatusChange = async (sampleId, newStatus, rejectionReason = "") => {
+    if (newStatus === "approved") {
+      const target = samples.find(s => (s.id || s._id) === sampleId);
+      if (target) {
+        setApprovalPromptSample(target);
+        return;
+      }
+    }
+    await executeStatusChange(sampleId, newStatus, rejectionReason);
+  };
+
+  const executeStatusChange = async (sampleId, newStatus, rejectionReason = "") => {
     setStatusUpdateLoading(true);
     try {
       await http.post(`/samples/${sampleId}/status`, null, {
@@ -237,20 +251,20 @@ export default function SampleDevelopment() {
           }
         />
 
-        <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
+        <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1880px] mx-auto">
         {/* ── METRIC / STAT TILES ── */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 sm:gap-4">
           <Card
-            onClick={() => setStatusFilter("all")}
+            onClick={() => setStatusFilter("active")}
             className={`p-3 sm:p-4 relative overflow-hidden cursor-pointer hover:border-slate-900 transition-all ${
-              statusFilter === "all" ? "border-slate-900 shadow-ind ring-2 ring-slate-900" : "hover:shadow-sm"
+              statusFilter === "active" ? "border-slate-900 shadow-ind ring-2 ring-slate-900" : "hover:shadow-sm"
             }`}
           >
-            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">Total Samples</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 truncate">Active Pipeline</div>
             <div className="font-mono text-xl sm:text-2xl font-black mt-1.5 text-slate-900">
-              {Object.values(statusCounts).reduce((a, b) => a + b, 0)}
+              {(statusCounts.draft || 0) + (statusCounts.in_sampling || 0) + (statusCounts.sample_ready || 0) + (statusCounts.approved || 0)}
             </div>
-            <div className="text-[11px] text-slate-400 font-mono mt-0.5">All Pipeline</div>
+            <div className="text-[11px] text-slate-400 font-mono mt-0.5">In Development</div>
             <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#C27842]" />
           </Card>
 
@@ -292,7 +306,31 @@ export default function SampleDevelopment() {
             />
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+            {/* Pipeline vs Archives Toggle */}
+            <div className="inline-flex border-2 border-slate-900 bg-white mr-1">
+              <button
+                onClick={() => setStatusFilter("active")}
+                className={`px-3 py-1 text-xs font-bold uppercase tracking-wider transition-colors ${
+                  statusFilter !== "archived" && statusFilter !== "transferred_to_style" && statusFilter !== "rejected"
+                    ? "bg-[#0F172A] text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                Active Pipeline ({(statusCounts.draft || 0) + (statusCounts.in_sampling || 0) + (statusCounts.sample_ready || 0) + (statusCounts.approved || 0)})
+              </button>
+              <button
+                onClick={() => setStatusFilter("archived")}
+                className={`px-3 py-1 text-xs font-bold uppercase tracking-wider border-l-2 border-slate-900 transition-colors ${
+                  statusFilter === "archived" || statusFilter === "transferred_to_style" || statusFilter === "rejected"
+                    ? "bg-purple-800 text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                Archives ({(statusCounts.transferred_to_style || 0) + (statusCounts.rejected || 0)})
+              </button>
+            </div>
+
             <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 hidden sm:inline">Profile:</span>
             <div className="inline-flex border-2 border-slate-300 bg-white">
               <button
@@ -346,7 +384,7 @@ export default function SampleDevelopment() {
             </BtnPrimary>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {samples.map((sample) => (
               <SampleCard
                 key={sample.id || sample._id}
@@ -356,6 +394,7 @@ export default function SampleDevelopment() {
                 onOpenTransfer={() => setTransferModalSample(sample)}
                 onOpenDetail={() => setDetailSample(sample)}
                 onPrintTechPack={() => handlePrintTechPack(sample)}
+                onOpenPatternYield={() => setPatternYieldModalSample(sample)}
                 onStatusChange={handleStatusChange}
                 onDelete={handleDeleteSample}
               />
@@ -437,7 +476,97 @@ export default function SampleDevelopment() {
             setDetailPrintMode(false);
             setPhotoModalSample(s);
           }}
+          onOpenPatternYield={() => {
+            const s = detailSample;
+            setDetailSample(null);
+            setDetailPrintMode(false);
+            setPatternYieldModalSample(s);
+          }}
         />
+      )}
+
+      {/* ── PATTERN SCANNER & 2D YIELD CALCULATION MODAL ── */}
+      {patternYieldModalSample && (
+        <PatternYieldModal
+          sample={patternYieldModalSample}
+          materials={materials}
+          onClose={() => setPatternYieldModalSample(null)}
+          onSaved={() => {
+            fetchSamples();
+          }}
+          onOpenTransfer={() => {
+            const s = patternYieldModalSample;
+            setPatternYieldModalSample(null);
+            setTransferModalSample(s);
+          }}
+        />
+      )}
+
+      {/* ── SAMPLE APPROVAL & YIELD CALCULATION PROMPT MODAL ── */}
+      {approvalPromptSample && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#F7F7F5] border-2 border-slate-900 shadow-ind-xl max-w-lg w-full p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 bg-emerald-100 border border-emerald-400 flex items-center justify-center text-emerald-800 shrink-0">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base uppercase text-slate-900">
+                  Sample Approved for Production!
+                </h3>
+                <p className="text-xs text-slate-600 mt-1">
+                  <strong>{approvalPromptSample.temp_code}</strong> ({approvalPromptSample.sample_name}) will be updated to <strong>Approved</strong>.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-300 p-3.5 text-xs text-amber-900 space-y-1.5">
+              <p className="font-bold uppercase tracking-wide flex items-center gap-1.5">
+                <Scan className="w-4 h-4 text-[#C27842]" />
+                <span>Calculate Precise BOM Yields with A4 Scanner?</span>
+              </p>
+              <p className="text-amber-800">
+                You can now scan upper patterns on an A4 scanner to extract true 1:1 scale surface area and run 2D roll nesting to determine exact raw material consumption (meters/pair) before generating the Style Master BOM.
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <button
+                onClick={async () => {
+                  const s = approvalPromptSample;
+                  await executeStatusChange(s.id || s._id, "approved");
+                  setApprovalPromptSample(null);
+                  setPatternYieldModalSample(s);
+                }}
+                className="w-full bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs py-2.5 px-4 border-2 border-[#C27842] shadow-ind flex items-center justify-center gap-2"
+              >
+                <Scan className="w-4 h-4" />
+                <span>Scan Pattern & Calculate Yield (Recommended)</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    const s = approvalPromptSample;
+                    await executeStatusChange(s.id || s._id, "approved");
+                    setApprovalPromptSample(null);
+                  }}
+                  className="flex-1 bg-white hover:bg-slate-100 text-slate-700 font-bold uppercase tracking-wider text-xs py-2 px-3 border-2 border-slate-300"
+                >
+                  Approve with Standard Estimates
+                </button>
+
+                <button
+                  onClick={() => setApprovalPromptSample(null)}
+                  className="px-3 py-2 text-xs font-bold uppercase text-slate-500 hover:text-slate-900"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -447,7 +576,7 @@ export default function SampleDevelopment() {
 /* ─────────────────────────────────────────────────────────────────────────────
    SAMPLE CARD (With Interactive Multi-Photo Carousel)
    ───────────────────────────────────────────────────────────────────────────── */
-function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDetail, onPrintTechPack, onStatusChange, onDelete }) {
+function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDetail, onPrintTechPack, onOpenPatternYield, onStatusChange, onDelete }) {
   const sid = sample.id || sample._id;
   const cfg = STATUS_CONFIG[sample.status] || STATUS_CONFIG.draft;
   const upper = sample.upper_spec || {};
@@ -479,9 +608,28 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
 
   return (
     <Card className="flex flex-col relative hover:border-slate-900 hover:shadow-ind transition-all overflow-hidden group">
-      {/* PHOTO HEADER WITH MULTI-IMAGE CAROUSEL */}
+      {/* PHOTO HEADER: Side-by-Side Comparison when Archived with Actual Photo, else Carousel */}
       <div className="relative h-52 bg-slate-100 border-b-2 border-slate-200 flex items-center justify-center overflow-hidden">
-        {currentPhoto?.url ? (
+        {sample.actual_developed_photo_url ? (
+          <div className="w-full h-full grid grid-cols-2 divide-x-2 divide-slate-900">
+            <div className="relative h-full overflow-hidden bg-slate-50">
+              {currentPhoto?.url ? (
+                <SafeImage src={currentPhoto.url} alt="Inspiration" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-400 font-mono">No Insp. Photo</div>
+              )}
+              <span className="absolute bottom-1.5 left-1.5 bg-slate-900/80 text-white text-[9px] font-mono uppercase px-1.5 py-0.5 font-bold">
+                Inspiration
+              </span>
+            </div>
+            <div className="relative h-full overflow-hidden bg-emerald-50/30">
+              <SafeImage src={sample.actual_developed_photo_url} alt="Actual Developed" className="w-full h-full object-cover" />
+              <span className="absolute bottom-1.5 right-1.5 bg-emerald-700/90 text-white text-[9px] font-mono uppercase px-1.5 py-0.5 font-bold">
+                Actual Approved
+              </span>
+            </div>
+          </div>
+        ) : currentPhoto?.url ? (
           <SafeImage
             src={currentPhoto.url}
             alt={sample.sample_name}
@@ -583,6 +731,44 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
             <div className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 bg-purple-50 border border-purple-300 text-purple-800 text-[11px] font-mono font-bold uppercase">
               <span>ERP Style:</span>
               <span className="underline font-black">{sample.transferred_style_code}</span>
+            </div>
+          )}
+
+          {/* Development Timeline (shown for Archived / Transferred samples) */}
+          {(sample.status === "transferred_to_style" || sample.status === "rejected" || (Array.isArray(sample.timeline) && sample.timeline.length > 0)) && (
+            <div className="mt-2 p-2 bg-slate-50 border border-slate-200 rounded space-y-1">
+              <span className="text-[9px] font-mono font-bold uppercase tracking-wider text-slate-500 block">
+                Development Timeline
+              </span>
+              <div className="space-y-0.5">
+                {(Array.isArray(sample.timeline) && sample.timeline.length > 0
+                  ? sample.timeline
+                  : [
+                      ...(sample.created_at ? [{ label: "Draft Created", timestamp: sample.created_at }] : []),
+                      ...(sample.transferred_at ? [{ label: `Transferred (${sample.transferred_style_code || "Style"})`, timestamp: sample.transferred_at }] : []),
+                    ]
+                ).map((ev, eIdx) => (
+                  <div key={eIdx} className="flex items-center justify-between text-[10px] font-mono text-slate-700">
+                    <span className="truncate pr-2 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-purple-600 shrink-0" />
+                      <span>{ev.label}</span>
+                    </span>
+                    <span className="text-slate-500 shrink-0">
+                      {ev.timestamp ? new Date(ev.timestamp).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" }) : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {sample.yield_spec && (
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 border border-emerald-300 text-emerald-800 text-[11px] font-mono font-bold">
+                <Scan className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Yield: {sample.yield_spec.yield_per_unit} prs/{sample.yield_spec.consumption_unit === "sheet" ? "sht" : "m"}</span>
+                <span className="text-emerald-700 font-semibold">({sample.yield_spec.consumption_per_pair} {sample.yield_spec.consumption_unit}/pr)</span>
+              </span>
             </div>
           )}
 
@@ -698,6 +884,37 @@ function SampleCard({ sample, onOpenPhotos, onOpenEdit, onOpenTransfer, onOpenDe
                 <Printer className="w-3 h-3" />
                 <span>Print</span>
               </button>
+              <span className="text-slate-300">|</span>
+              {(() => {
+                const isYieldActive = ["sample_ready", "approved", "transferred_to_style"].includes(sample.status);
+                const hasCalculatedYield = Boolean(sample.yield_spec?.consumption_per_pair);
+                if (isYieldActive) {
+                  return (
+                    <button
+                      onClick={onOpenPatternYield}
+                      className={`text-xs font-bold uppercase tracking-wider flex items-center gap-1 transition ${
+                        hasCalculatedYield
+                          ? "text-emerald-700 hover:text-emerald-900 font-extrabold"
+                          : "text-indigo-700 hover:text-indigo-900 hover:underline"
+                      }`}
+                      title="A4 Pattern Scanner & 2D Yield Engine (Active - Sample Ready)"
+                    >
+                      <Scan className="w-3 h-3" />
+                      <span>Yield {hasCalculatedYield ? "✓" : ""}</span>
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    disabled
+                    className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 cursor-not-allowed opacity-50"
+                    title={`Yield calculation unlocks after sample is marked as 'Sample Ready' (current status: ${sample.status || 'draft'})`}
+                  >
+                    <Lock className="w-3 h-3" />
+                    <span>Yield</span>
+                  </button>
+                );
+              })()}
             </div>
 
             {sample.status !== "transferred_to_style" && (
@@ -1374,12 +1591,27 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
 
                   <div>
                     <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Canvas / Interlining Backing:</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. 10oz Cotton Twill, Self-Adhesive Foam Canvas"
-                      value={formData.upper_spec?.canvas_backing || ""}
-                      onChange={(e) => updateUpper("canvas_backing", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                    <SearchableSelect
+                      options={[{ id: "", name: "-- None / No Canvas Backing --", code: "" }, ...materials]}
+                      value={formData.upper_spec?.canvas_material_id || ""}
+                      getKey={(m) => m.id || m._id || ""}
+                      getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}] - ₹${m.rate || 0}/${m.unit || ""}` : "-- None / No Canvas Backing --"}
+                      placeholder="Search canvas / backing material..."
+                      inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      onChange={(mid) => {
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateUpper("canvas_material_id", mid);
+                          updateUpper("canvas_material_name", mat.name);
+                          updateUpper("canvas_material_code", mat.code);
+                          updateUpper("canvas_backing", mat.name);
+                        } else {
+                          updateUpper("canvas_material_id", "");
+                          updateUpper("canvas_material_name", "");
+                          updateUpper("canvas_material_code", "");
+                          updateUpper("canvas_backing", "");
+                        }
+                      }}
                     />
                   </div>
 
@@ -1617,15 +1849,28 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                   </span>
 
                   <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Base Board Material:</label>
-                    <select
-                      value={formData.insole_spec?.base_board || "paper_board"}
-                      onChange={(e) => updateInsole("base_board", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="paper_board">Paper Board (Standard Shank Board)</option>
-                      <option value="cellulose_board">Cellulose Board (High Rigidity)</option>
-                    </select>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Base Board Material (from Material Master):</label>
+                    <SearchableSelect
+                      options={[{ id: "", name: "-- Select Base Board Material --", code: "" }, ...materials]}
+                      value={formData.insole_spec?.base_board_material_id || ""}
+                      getKey={(m) => m.id || m._id || ""}
+                      getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}] - ₹${m.rate || 0}/${m.unit || ""}` : "-- Select Base Board Material --"}
+                      placeholder="Search base board material..."
+                      inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      onChange={(mid) => {
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateInsole("base_board_material_id", mid);
+                          updateInsole("base_board_material_name", mat.name);
+                          updateInsole("base_board_material_code", mat.code);
+                          updateInsole("base_board", mat.name.toLowerCase().includes("cellulose") ? "cellulose_board" : "paper_board");
+                        } else {
+                          updateInsole("base_board_material_id", "");
+                          updateInsole("base_board_material_name", "");
+                          updateInsole("base_board_material_code", "");
+                        }
+                      }}
+                    />
                   </div>
 
                   <div className="pt-2">
@@ -1651,16 +1896,28 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Cushioning Foam Type:</label>
-                    <select
-                      value={formData.insole_spec?.cushioning_type || "eva"}
-                      onChange={(e) => updateInsole("cushioning_type", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="eva">EVA Cushioning Sheet</option>
-                      <option value="pu_foam">PU High-Density Foam</option>
-                      <option value="both">Both (EVA Base + PU Foam Top)</option>
-                    </select>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Cushioning Foam Material (from Material Master):</label>
+                    <SearchableSelect
+                      options={[{ id: "", name: "-- Select Cushioning Foam --", code: "" }, ...materials]}
+                      value={formData.insole_spec?.cushioning_material_id || ""}
+                      getKey={(m) => m.id || m._id || ""}
+                      getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}] - ₹${m.rate || 0}/${m.unit || ""}` : "-- Select Cushioning Foam --"}
+                      placeholder="Search EVA / PU foam material..."
+                      inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      onChange={(mid) => {
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateInsole("cushioning_material_id", mid);
+                          updateInsole("cushioning_material_name", mat.name);
+                          updateInsole("cushioning_material_code", mat.code);
+                          updateInsole("cushioning_type", mat.name.toLowerCase().includes("pu") ? "pu_foam" : "eva");
+                        } else {
+                          updateInsole("cushioning_material_id", "");
+                          updateInsole("cushioning_material_name", "");
+                          updateInsole("cushioning_material_code", "");
+                        }
+                      }}
+                    />
                   </div>
 
                   <div>
@@ -1797,21 +2054,28 @@ function SpecEditorModal({ sample, materials, workers, onClose, onSaved }) {
                   </span>
 
                   <div>
-                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Sole Material:</label>
-                    <select
-                      value={formData.sole_spec?.sole_material || "TPR"}
-                      onChange={(e) => updateSole("sole_material", e.target.value)}
-                      className="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
-                    >
-                      <option value="TPR">TPR (Thermo Plastic Rubber)</option>
-                      <option value="PVC">PVC (Polyvinyl Chloride)</option>
-                      <option value="PU">PU (Polyurethane Sole)</option>
-                      <option value="Neolite">Neolite / Sheet Sole</option>
-                      <option value="Sheet Sole">Sheet Sole</option>
-                      <option value="Rubber">Vulcanized / Natural Rubber</option>
-                      <option value="EVA">EVA Molded Sole</option>
-                      <option value="Other">Other Material</option>
-                    </select>
+                    <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block mb-1">Sole Material (from Material Master):</label>
+                    <SearchableSelect
+                      options={[{ id: "", name: "-- Select Sole Material --", code: "" }, ...materials]}
+                      value={formData.sole_spec?.sole_material_id || ""}
+                      getKey={(m) => m.id || m._id || ""}
+                      getLabel={(m) => (m.id || m._id) ? `${m.name} [${m.code || ""}] - ₹${m.rate || 0}/${m.unit || ""}` : "-- Select Sole Material --"}
+                      placeholder="Search sole material (TPR, PVC, PU, Sheet)..."
+                      inputClassName="w-full border-2 border-slate-300 bg-white px-3 py-1.5 text-xs font-mono focus:border-[#2563EB] focus:outline-none"
+                      onChange={(mid) => {
+                        const mat = materials.find(m => (m.id || m._id) === mid);
+                        if (mat) {
+                          updateSole("sole_material_id", mid);
+                          updateSole("sole_material_name", mat.name);
+                          updateSole("sole_material_code", mat.code);
+                          updateSole("sole_material", mat.name);
+                        } else {
+                          updateSole("sole_material_id", "");
+                          updateSole("sole_material_name", "");
+                          updateSole("sole_material_code", "");
+                        }
+                      }}
+                    />
                   </div>
 
                   <div>
@@ -2204,59 +2468,121 @@ function PhotoGalleryModal({ sample, onClose, onUpdated }) {
    ───────────────────────────────────────────────────────────────────────────── */
 function TransferToStyleModal({ sample, onClose, onSuccess }) {
   const sid = sample.id || sample._id;
+  const yieldSpec = sample.yield_spec || {};
+  const stdPresets = yieldSpec.standard_presets || [];
+  const insolePreset = stdPresets.find((p) => (p.component_key || "").includes("insole"));
+  const socksPreset = stdPresets.find((p) => (p.component_key || "").includes("socks") || (p.component_key || "").includes("bottom"));
+
   const [styleCode, setStyleCode] = useState("");
+  const [loadingCode, setLoadingCode] = useState(true);
   const [styleName, setStyleName] = useState(sample.sample_name || "");
   const [baseSize, setBaseSize] = useState("7");
   const [marginPct, setMarginPct] = useState(25);
   const [submitting, setSubmitting] = useState(false);
 
-  // Material Yields (default footwear allowances)
-  const [yields, setYields] = useState({
-    upper_top: 1.2,       // sq ft per pair
-    canvas: 0.15,         // meter per pair
-    lining: 1.0,          // sq ft per pair
-    base_board: 1.0,      // pair
-    cushioning: 1.0,      // pair
-    socks_covering: 0.8,  // sq ft per pair
-    sole: 1.0,            // pair
-    heel: 1.0,            // pair
-    buckle: 1.0,          // pair
-  });
+  // Actual Developed Sample Photo (uploaded at transfer; inspiration photo stays in Sample Archive)
+  const [actualPhoto, setActualPhoto] = useState(sample.actual_developed_photo || null);
+  const [actualPhotoUrl, setActualPhotoUrl] = useState(sample.actual_developed_photo_url || "");
+  const [uploadingActualPhoto, setUploadingActualPhoto] = useState(false);
 
-  // Labor piece rates (₹ / pair)
-  const [rates, setRates] = useState({
-    cutting: 12.0,
-    stitching: 25.0,
-    edge_coloring: 8.0,
-    insole_making: 10.0,
-    embossing: 5.0,
-    sole_prep: 15.0,
-    heel_work: 12.0,
-    lasting: 20.0,
-    pasting: 18.0,
-    finishing: 10.0,
-  });
+  const handleUploadActualPhoto = async (file) => {
+    if (!file) return;
+    setUploadingActualPhoto(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await http.post(`/samples/${sid}/actual-photo`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      if (res?.data?.actual_photo_url) {
+        setActualPhotoUrl(res.data.actual_photo_url);
+        setActualPhoto(res.data.actual_photo || null);
+      }
+    } catch (err) {
+      alert(getErrorMessage(err, "Failed to upload actual developed sample photo"));
+    } finally {
+      setUploadingActualPhoto(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    setLoadingCode(true);
+    http.get(`/samples/${sid}/next-style-code`)
+      .then((res) => {
+        if (active && res?.data?.style_code) {
+          setStyleCode(res.data.style_code);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingCode(false);
+      });
+    return () => { active = false; };
+  }, [sid]);
 
   const upper = sample.upper_spec || {};
   const insole = sample.insole_spec || {};
   const sole = sample.sole_spec || {};
+  const matBreakdowns = yieldSpec.material_breakdown || [];
+  const upperTopBreakdowns = matBreakdowns.filter(
+    (mb) => !mb.is_lining && !mb.is_canvas && !(mb.placement || "").toLowerCase().includes("canvas")
+  );
+  const upperMaterialsList = Array.isArray(upper.materials) && upper.materials.length > 0
+    ? upper.materials
+    : [{
+        material_id: upper.upper_top_material_id || "",
+        material_name: upper.upper_top_material_name || "Upper Material",
+        material_code: upper.upper_top_material_code || "",
+        placement: "Primary",
+      }];
+
+  const resolveUpperMatYield = (um, idx) => {
+    const matched = upperTopBreakdowns.find(
+      (mb) =>
+        (um.material_id && mb.material_id === um.material_id) ||
+        (um.material_name && mb.material_name === um.material_name) ||
+        (um.placement && mb.placement === um.placement)
+    ) || upperTopBreakdowns[idx];
+    return Number(matched?.yield_per_unit || yieldSpec?.component_breakdown?.upper?.yield_per_unit || yieldSpec?.yield_per_unit || 15.0);
+  };
+
+  // Material Yields in Pairs / Meter (pair/mtr) or Pairs / Sheet
+  const [yields, setYields] = useState(() => {
+    const base = {
+      upper_top: resolveUpperMatYield(upperMaterialsList[0], 0),
+      canvas: Number(yieldSpec?.component_breakdown?.canvas_reinforcement?.yield_per_unit || 16.0),
+      lining: Number(yieldSpec?.component_breakdown?.lining?.yield_per_unit || 17.0),
+      base_board: Number(insolePreset?.yield_per_unit || 26.0),
+      cushioning: 1.0,
+      socks_covering: Number(socksPreset?.yield_per_unit || 8.0),
+      sole: 1.0,
+      heel: 1.0,
+      buckle: 1.0,
+    };
+    upperMaterialsList.forEach((um, idx) => {
+      base[`upper_mat_${idx}`] = resolveUpperMatYield(um, idx);
+    });
+    return base;
+  });
 
   const handleTransfer = async () => {
-    if (!styleCode || !styleCode.trim()) {
-      alert("Please enter the official ERP Style Code");
+    if (!actualPhotoUrl) {
+      alert("Please upload the actual developed & approved sample photo before transferring to Style Master.");
       return;
     }
-
     setSubmitting(true);
     try {
       const payload = {
-        style_code: styleCode.trim().toUpperCase(),
+        style_code: styleCode ? styleCode.trim().toUpperCase() : null,
         name: styleName.trim(),
         base_size: baseSize,
         margin_pct: Number(marginPct),
         material_yields: yields,
-        labor_rates: rates,
-        use_sample_photo_as_primary: true,
+        labor_rates: {},
+        use_sample_photo_as_primary: false,
+        actual_photo_url: actualPhotoUrl,
+        actual_photo: actualPhoto,
       };
 
       const res = await http.post(`/samples/${sid}/transfer-to-style`, payload);
@@ -2280,7 +2606,7 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
               <span>Transfer Sample to Style Master</span>
             </h2>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Promotes temporary sample <code className="font-mono text-slate-900 font-bold bg-slate-100 px-1 py-0.5">{sample.temp_code}</code> to official ERP production style with pre-populated BOM yields & labor operations.
+              Promotes temporary sample <code className="font-mono text-slate-900 font-bold bg-slate-100 px-1 py-0.5">{sample.temp_code}</code> to official ERP production style with calibrated BOM yields (pair/mtr). Labor &amp; karigar wages are calculated at Planning.
             </p>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900">
@@ -2299,15 +2625,17 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 block mb-1">Official ERP Style Code *</label>
+                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-700 flex items-center justify-between mb-1">
+                  <span>Official ERP Style Code</span>
+                  <span className="text-[9px] px-1.5 py-0.2 bg-emerald-100 text-emerald-800 border border-emerald-300 font-mono">AUTO-ALLOTTED</span>
+                </label>
                 <input
                   type="text"
-                  placeholder="e.g. SSK-2026-H042"
-                  value={styleCode}
-                  onChange={(e) => setStyleCode(e.target.value.toUpperCase())}
-                  className="w-full border-2 border-slate-900 bg-white px-3 py-1.5 font-mono font-black text-sm tracking-wider focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  readOnly
+                  value={loadingCode ? "Allotting..." : styleCode}
+                  className="w-full border-2 border-slate-900 bg-slate-100 px-3 py-1.5 font-mono font-black text-sm tracking-wider text-slate-900 focus:outline-none cursor-not-allowed"
                 />
-                <span className="text-[10px] text-slate-500 mt-0.5 block font-mono">Permanent unique identifier in ERP.</span>
+                <span className="text-[10px] text-slate-500 mt-0.5 block font-mono">Automatically allotted unique ERP Style Code.</span>
               </div>
 
               <div>
@@ -2335,6 +2663,50 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
             </div>
           </div>
 
+          {/* ACTUAL DEVELOPED SAMPLE PHOTO UPLOAD */}
+          <div className="border-2 border-emerald-700 p-4 bg-emerald-50/40 space-y-2.5">
+            <div className="flex items-center justify-between border-b border-emerald-200 pb-2">
+              <span className="font-bold text-xs uppercase tracking-wider text-emerald-950 flex items-center gap-1.5">
+                <Camera className="w-4 h-4 text-emerald-700" />
+                <span>Actual Developed &amp; Approved Sample Photo *</span>
+              </span>
+              <span className="text-[10px] font-mono text-emerald-800 font-bold">
+                Shown in Style Master (Inspiration stays in Sample Archive)
+              </span>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center gap-4">
+              {actualPhotoUrl ? (
+                <div className="w-28 h-24 border-2 border-emerald-600 bg-white overflow-hidden shrink-0">
+                  <SafeImage src={actualPhotoUrl} alt="Actual Developed Sample" className="w-full h-full object-cover" />
+                </div>
+              ) : (
+                <div className="w-28 h-24 border-2 border-dashed border-emerald-400 bg-white flex flex-col items-center justify-center text-emerald-600 shrink-0">
+                  <Camera className="w-6 h-6 opacity-50" />
+                  <span className="text-[9px] font-mono mt-1">Required</span>
+                </div>
+              )}
+              <div className="flex-1 space-y-1.5">
+                <p className="text-[11px] text-slate-700">
+                  Upload the photo of the <strong>actual developed &amp; approved physical sample</strong>. The original inspiration photo will remain archived in Sample Development for side-by-side comparison, while Style Master will display only this actual developed photo.
+                </p>
+                <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold uppercase text-[11px] tracking-wider cursor-pointer shadow-ind">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>{uploadingActualPhoto ? "Uploading..." : (actualPhotoUrl ? "Change Actual Sample Photo" : "Upload Actual Sample Photo")}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingActualPhoto}
+                    onChange={(e) => {
+                      if (e.target.files?.[0]) handleUploadActualPhoto(e.target.files[0]);
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+          </div>
+
           {/* MATERIAL YIELDS PREVIEW & ADJUSTMENT */}
           <div className="border-2 border-slate-200 p-4 bg-white space-y-3">
             <div className="flex items-center justify-between border-b border-slate-200 pb-2">
@@ -2348,28 +2720,46 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {/* Upper Top */}
-              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <span className="text-xs font-bold text-slate-900 truncate block">
-                  Upper Top: {upper.upper_top_material_name || "Upper Material"}
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    step="0.05"
-                    value={yields.upper_top}
-                    onChange={(e) => setYields(p => ({ ...p, upper_top: Number(e.target.value) }))}
-                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
-                  />
-                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
-                </div>
-              </div>
+              {/* Upper Materials (each Primary / Secondary material with its exact calibrated yield) */}
+              {upperMaterialsList.map((um, idx) => {
+                const key = `upper_mat_${idx}`;
+                const matchedMb = upperTopBreakdowns.find(
+                  (mb) =>
+                    (um.material_id && mb.material_id === um.material_id) ||
+                    (um.material_name && mb.material_name === um.material_name) ||
+                    (um.placement && mb.placement === um.placement)
+                ) || upperTopBreakdowns[idx];
+                const unitLabel = (matchedMb?.consumption_unit === "sheet" || yieldSpec?.material_type === "sheet")
+                  ? "pair / sheet"
+                  : "pair / mtr";
+                const matLabel = `${um.placement || (idx === 0 ? "Primary" : "Secondary")}: ${um.material_name || "Upper Material"}${um.material_code ? ` [${um.material_code}]` : ""}`;
+                return (
+                  <div key={key} className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                    <span className="text-xs font-bold text-slate-900 truncate block" title={matLabel}>
+                      {matLabel}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={yields[key] ?? yields.upper_top}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setYields(p => ({ ...p, [key]: val, ...(idx === 0 ? { upper_top: val } : {}) }));
+                        }}
+                        className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                      />
+                      <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">{unitLabel}</span>
+                    </div>
+                  </div>
+                );
+              })}
 
               {/* Canvas */}
-              {upper.canvas_backing && (
+              {(upper.canvas_material_name || upper.canvas_backing) && (
                 <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                  <span className="text-xs font-bold text-slate-900 truncate block">
-                    Canvas Backing: {upper.canvas_backing}
+                  <span className="text-xs font-bold text-slate-900 truncate block" title={`Canvas: ${upper.canvas_material_name || upper.canvas_backing}`}>
+                    Canvas: {upper.canvas_material_name || upper.canvas_backing}{upper.canvas_material_code ? ` [${upper.canvas_material_code}]` : ""}
                   </span>
                   <div className="flex items-center gap-2">
                     <input
@@ -2379,32 +2769,34 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
                       onChange={(e) => setYields(p => ({ ...p, canvas: Number(e.target.value) }))}
                       className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
                     />
-                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">mtr / pair</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / mtr</span>
                   </div>
                 </div>
               )}
 
               {/* Lining */}
-              <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <span className="text-xs font-bold text-slate-900 truncate block">
-                  Lining: {upper.lining_material_name || "Standard Lining"}
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    step="0.05"
-                    value={yields.lining}
-                    onChange={(e) => setYields(p => ({ ...p, lining: Number(e.target.value) }))}
-                    className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
-                  />
-                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
+              {(upper.lining_material_name || upper.lining_material_id) && (
+                <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
+                  <span className="text-xs font-bold text-slate-900 truncate block" title={`Lining: ${upper.lining_material_name}`}>
+                    Lining: {upper.lining_material_name || "Standard Lining"}{upper.lining_material_code ? ` [${upper.lining_material_code}]` : ""}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={yields.lining}
+                      onChange={(e) => setYields(p => ({ ...p, lining: Number(e.target.value) }))}
+                      className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
+                    />
+                    <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / mtr</span>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Base Board */}
               <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
                 <span className="text-xs font-bold text-slate-900 truncate block">
-                  Insole Base: {insole.base_board === "cellulose_board" ? "Cellulose Board" : "Paper Board"}
+                  Insole Base: {insole.base_board_material_name || (insole.base_board === "cellulose_board" ? "Cellulose Board" : "Paper Board")}
                 </span>
                 <div className="flex items-center gap-2">
                   <input
@@ -2414,14 +2806,14 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
                     onChange={(e) => setYields(p => ({ ...p, base_board: Number(e.target.value) }))}
                     className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
                   />
-                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / pair</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / sheet</span>
                 </div>
               </div>
 
               {/* Cushioning Foam */}
               <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
                 <span className="text-xs font-bold text-slate-900 truncate block">
-                  Cushion: {insole.cushioning_type?.toUpperCase()} {insole.cushioning_thickness_mm}
+                  Cushion: {insole.cushioning_material_name || `${insole.cushioning_type?.toUpperCase() || "EVA"} ${insole.cushioning_thickness_mm || "3mm"}`}
                 </span>
                 <div className="flex items-center gap-2">
                   <input
@@ -2438,7 +2830,7 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
               {/* Socks Covering */}
               <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
                 <span className="text-xs font-bold text-slate-900 truncate block">
-                  Socks: {insole.socks_covering_type === "matching" ? "Matching Upper" : insole.socks_material_name}
+                  Socks: {insole.socks_covering_type === "matching" ? "Matching Upper" : (insole.socks_material_name || "Socks Material")}
                 </span>
                 <div className="flex items-center gap-2">
                   <input
@@ -2448,14 +2840,14 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
                     onChange={(e) => setYields(p => ({ ...p, socks_covering: Number(e.target.value) }))}
                     className="w-20 p-1 border-2 border-slate-300 font-mono text-xs text-right font-bold bg-white focus:border-[#2563EB] focus:outline-none"
                   />
-                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">sq ft / pair</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-500 font-mono">pair / mtr</span>
                 </div>
               </div>
 
               {/* Sole */}
               <div className="p-2.5 border-2 border-slate-200 bg-slate-50/60 space-y-1">
                 <span className="text-xs font-bold text-slate-900 truncate block">
-                  Sole: {sole.sole_material} {sole.mould_name ? `(${sole.mould_name})` : ""}
+                  Sole: {sole.sole_material_name || sole.sole_material || "TPR"} {sole.mould_name ? `(${sole.mould_name})` : ""}
                 </span>
                 <div className="flex items-center gap-2">
                   <input
@@ -2508,76 +2900,6 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
               )}
             </div>
           </div>
-
-          {/* LABOR OPERATIONS PREVIEW & ADJUSTMENT */}
-          <div className="border-2 border-slate-200 p-4 bg-white space-y-3">
-            <span className="font-bold text-xs uppercase tracking-wider text-slate-900 flex items-center gap-1.5 border-b border-slate-200 pb-2">
-              <Scissors className="w-4 h-4 text-[#C27842]" />
-              Pre-Populated Labor Operations (Planning & Karigar Wages)
-            </span>
-
-            <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Cutting (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.cutting}
-                  onChange={(e) => setRates(p => ({ ...p, cutting: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Stitching (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.stitching}
-                  onChange={(e) => setRates(p => ({ ...p, stitching: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Insole Prep (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.insole_making}
-                  onChange={(e) => setRates(p => ({ ...p, insole_making: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Lasting (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.lasting}
-                  onChange={(e) => setRates(p => ({ ...p, lasting: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Pasting (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.pasting}
-                  onChange={(e) => setRates(p => ({ ...p, pasting: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="p-2 border-2 border-slate-200 bg-slate-50/60 space-y-1">
-                <label className="text-[10px] uppercase tracking-wider font-bold text-slate-600 block">Finishing (₹/pr):</label>
-                <input
-                  type="number"
-                  value={rates.finishing}
-                  onChange={(e) => setRates(p => ({ ...p, finishing: Number(e.target.value) }))}
-                  className="w-full border-2 border-slate-300 bg-white p-1 text-xs font-mono font-bold text-right focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* FOOTER */}
@@ -2588,8 +2910,9 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
 
           <button
             onClick={handleTransfer}
-            disabled={submitting || !styleCode.trim()}
+            disabled={submitting || loadingCode || uploadingActualPhoto || !actualPhotoUrl}
             className="bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs px-6 py-2.5 border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg transition-all active:shadow-none disabled:opacity-50 flex items-center gap-2"
+            title={!actualPhotoUrl ? "Please upload the actual developed sample photo first" : "Confirm and transfer to Style Master"}
           >
             {submitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Layers className="w-3.5 h-3.5" />}
             <span>Confirm & Transfer to Style Master</span>
@@ -2604,7 +2927,7 @@ function TransferToStyleModal({ sample, onClose, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────────────────────
    MODAL 4: DETAIL VIEW & DESIGNER TECH PACK PRINT SHEET (80% IMAGE COVERAGE)
    ───────────────────────────────────────────────────────────────────────────── */
-function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPhotos, initialViewMode = "screen" }) {
+function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPhotos, onOpenPatternYield, initialViewMode = "screen" }) {
   const [viewMode, setViewMode] = useState(initialViewMode); // "screen" or "print_sheet"
   const upper = sample.upper_spec || {};
   const insole = sample.insole_spec || {};
@@ -3416,18 +3739,36 @@ function DetailViewModal({ sample, onClose, onOpenEdit, onOpenTransfer, onOpenPh
               Manage Photos ({photos.length})
             </button>
           </div>
-          <div className="flex items-center gap-2">
-            <BtnSecondary onClick={onClose}>
-              Close
-            </BtnSecondary>
-            <BtnPrimary onClick={handlePrint}>
-              <Printer className="w-3.5 h-3.5 inline mr-1" />
-              <span>Print Tech Pack (80% Image)</span>
-            </BtnPrimary>
+          <div className="flex items-center gap-2.5">
+            {(() => {
+              const isYieldActive = ["sample_ready", "approved", "transferred_to_style"].includes(sample.status);
+              if (isYieldActive) {
+                return (
+                  <button
+                    onClick={onOpenPatternYield}
+                    className="h-9 px-4 bg-slate-900 hover:bg-slate-800 text-white font-bold uppercase tracking-wider text-xs border-2 border-slate-900 shadow-ind hover:shadow-ind-lg flex items-center justify-center gap-2 transition-all cursor-pointer"
+                    title="A4 Pattern Scanner & 2D Yield Engine (Active - Sample Ready)"
+                  >
+                    <Scan className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Pattern & Yield</span>
+                  </button>
+                );
+              }
+              return (
+                <button
+                  disabled
+                  className="h-9 px-4 bg-slate-100 text-slate-400 border-2 border-slate-300 font-bold uppercase tracking-wider text-xs flex items-center justify-center gap-2 cursor-not-allowed opacity-60"
+                  title={`Yield calculation unlocks after sample is marked as 'Sample Ready' (current status: ${sample.status || 'draft'})`}
+                >
+                  <Lock className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Pattern & Yield (Locked)</span>
+                </button>
+              );
+            })()}
             {sample.status !== "transferred_to_style" && (
               <button
                 onClick={onOpenTransfer}
-                className="bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs px-4 py-2 border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg transition-all"
+                className="h-9 px-4 bg-[#C27842] hover:bg-[#A65D24] text-white font-bold uppercase tracking-wider text-xs border-2 border-[#C27842] shadow-ind hover:shadow-ind-lg flex items-center justify-center gap-2 transition-all cursor-pointer"
               >
                 Transfer to Style Master
               </button>

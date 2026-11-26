@@ -38,6 +38,156 @@ class SamplePhoto(BaseModel):
     category: str = "sample_inspiration"
 
 
+class PatternPiece(BaseModel):
+    piece_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    piece_name: str = "Upper Vamp"
+    component: Optional[str] = "upper"  # upper, lining, trim, counter, insole_covering
+    component_type: Optional[str] = "vamp"  # vamp, quarter, strap, counter, tongue, collar, lace, custom
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    material_code: Optional[str] = None
+    placement: Optional[str] = None  # Tech pack placement: Primary, Secondary, Trim, Accent, Strap, Lining, etc.
+    area_sqcm: float = 0.0
+    length_mm: float = 0.0
+    width_mm: float = 0.0
+    oriented_length_mm: Optional[float] = None
+    oriented_width_mm: Optional[float] = None
+    perimeter_mm: Optional[float] = None
+    aspect_ratio: Optional[float] = None
+    pieces_per_pair: int = 2
+    cutting_direction: Optional[str] = "inherit"  # inherit, length_up (warp), width_up (weft), both
+    measurement_unit: Optional[str] = "mm"  # mm, cm, inch
+    svg_polygon: Optional[str] = ""
+    local_svg_polygon: Optional[str] = ""
+    points_mm: Optional[List[List[float]]] = None
+    local_points_mm: Optional[List[List[float]]] = None
+    bbox_page: Optional[Dict[str, Any]] = None
+
+
+class StandardStripItem(BaseModel):
+    """Standard linear folded strap / lace / unfolded strip component."""
+    strip_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    name: str = "Folded Lace 8mm"
+    strip_type: Optional[Literal["folded", "unfolded"]] = "folded"
+    cut_orientation: Optional[Literal["along_length", "across_width"]] = "along_length"
+    strip_width_mm: Optional[float] = None     # User-defined width for unfolded strip (e.g. 10mm, 15mm, 25.4mm)
+    strip_width_label: Optional[str] = None
+    folded_width_mm: float = 8.0               # 4mm, 8mm, 10mm, 0.5" (12.7mm), etc.
+    folded_width_label: Optional[str] = "8mm"  # display label
+    cut_width_mm: float = 16.0                 # Formula: 2 * folded_width_mm (or strip_width_mm for unfolded)
+    length_mm: float = 650.0                   # Length per piece in mm (defaults to material width if cut in width)
+    pieces_per_pair: int = 2                   # Left + Right = 2
+    component: str = "upper"                   # upper, trim, binding
+    cutting_direction: Optional[str] = "length_up"  # length_up (warp/machine direction)
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    material_code: Optional[str] = None
+    material_rate: Optional[float] = None
+    material_form: Optional[str] = "roll"
+    material_width: Optional[float] = 50.0
+    material_width_unit: Optional[str] = "inch"
+    material_width_mm: Optional[float] = 1270.0
+    material_length: Optional[float] = 1.0
+    material_length_unit: Optional[str] = "meter"
+    material_length_meters: Optional[float] = 1.0
+    lanes_across_roll: Optional[int] = 0
+    total_lace_meters_per_roll_meter: Optional[float] = 0.0
+    laces_yield_per_meter: Optional[float] = 0.0  # Laces yielded from 1 meter of roll
+    pairs_per_meter: Optional[float] = 0.0        # Pairs yielded from 1 meter of roll
+    total_laces_full_roll: Optional[float] = 0.0
+    total_pairs_full_roll: Optional[float] = 0.0
+    consumption_per_pair: float = 0.0
+    yield_per_unit: float = 0.0
+    net_area_sqcm: float = 0.0
+    cost_per_pair: Optional[float] = 0.0
+    formula_note: Optional[str] = ""
+
+
+class StandardPresetComponent(BaseModel):
+    """Preset component with fixed standard factory yield (not recalculated from scan, e.g. die-cut insole/bottom)."""
+    component_key: str
+    name: str
+    material_type: str = "sheet"
+    is_standard_preset: bool = True
+    consumption_per_pair: float = 0.0
+    consumption_unit: str = "sheet"
+    yield_per_unit: float = 0.0
+    yield_unit_label: str = "pairs / sheet"
+    waste_pct: float = 0.0
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    notes: Optional[str] = ""
+
+
+class SampleYieldCalculation(BaseModel):
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    material_type: Literal["roll", "sheet"] = "roll"
+    roll_width_inches: Optional[float] = 54.0
+    custom_roll_width_mm: Optional[float] = None
+    roll_length_meters: Optional[float] = 1.0
+    total_pairs_per_roll: Optional[float] = None
+    sheet_length_mm: Optional[float] = None
+    sheet_width_mm: Optional[float] = None
+    selvage_margin_mm: float = 20.0
+    kerf_spacing_mm: float = 3.0
+    waste_allowance_pct: float = 5.0
+    cutting_direction: str = "length_up"  # length_up (warp - no stretch), width_up (weft), both
+    measurement_unit: str = "mm"  # mm, cm, inch
+    expected_pieces_count: Optional[int] = None
+    consumption_per_pair: float = 0.0
+    consumption_unit: str = "meter"
+    yield_per_unit: float = 0.0
+    yield_unit_label: str = "pairs / meter"
+    utilization_pct: float = 0.0
+    waste_pct: float = 0.0
+    net_area_sqcm_per_pair: float = 0.0
+    gross_area_sqcm_per_pair: float = 0.0
+    pieces_analysis: Optional[List[Dict[str, Any]]] = None
+    standard_strips: List[StandardStripItem] = Field(default_factory=list)
+    standard_presets: List[Dict[str, Any]] = Field(default_factory=list)
+    component_breakdown: Optional[Dict[str, Any]] = None
+    material_breakdown: Optional[List[Dict[str, Any]]] = None
+    visual_nesting_preview: Optional[Dict[str, Any]] = None
+    calculated_at: Optional[str] = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class CalculateYieldIn(BaseModel):
+    material_type: Literal["roll", "sheet"] = "roll"
+    material_id: Optional[str] = None
+    material_name: Optional[str] = None
+    roll_width_inches: Optional[float] = 54.0
+    custom_roll_width_mm: Optional[float] = None
+    roll_length_meters: Optional[float] = 1.0
+    sheet_length_mm: Optional[float] = None
+    sheet_width_mm: Optional[float] = None
+    selvage_margin_mm: Optional[float] = 20.0
+    kerf_spacing_mm: Optional[float] = 3.0
+    waste_allowance_pct: Optional[float] = 5.0
+    cutting_direction: Optional[Literal["length_up", "width_up", "both"]] = "length_up"
+    measurement_unit: Optional[str] = "mm"
+    expected_pieces_count: Optional[int] = None
+    pieces: Optional[List[PatternPiece]] = None
+    standard_strips: Optional[List[StandardStripItem]] = None
+    standard_presets: Optional[List[Dict[str, Any]]] = None
+    upper_spec: Optional[Dict[str, Any]] = None
+    canvas_backing: Optional[str] = None
+    lining_material_id: Optional[str] = None
+    lining_material_name: Optional[str] = None
+    lining_material_code: Optional[str] = None
+
+
+class ImportPatternIn(BaseModel):
+    pattern_code: Optional[str] = None
+    pattern_id: Optional[str] = None
+
+
+class SaveToLibraryIn(BaseModel):
+    pattern_name: str
+    pattern_code: Optional[str] = None
+    category: Optional[str] = "Upper Pattern"
+
+
 class UpperMaterialItem(BaseModel):
     """Multiple material specifications for upper top (Primary, Secondary, Trim, Accent, Strap, etc.)."""
     material_id: Optional[str] = None
@@ -119,6 +269,11 @@ class SampleCreateIn(BaseModel):
     assigned_karigar_name: Optional[str] = None
     notes: Optional[str] = ""
     inspiration_photos: List[SamplePhoto] = Field(default_factory=list)
+    pattern_pieces: List[PatternPiece] = Field(default_factory=list)
+    standard_strips: List[StandardStripItem] = Field(default_factory=list)
+    linked_pattern_code: Optional[str] = None
+    yield_spec: Optional[SampleYieldCalculation] = None
+    pattern_scan_url: Optional[str] = None
     upper_spec: UpperSpec = Field(default_factory=UpperSpec)
     insole_spec: InsoleSpec = Field(default_factory=InsoleSpec)
     sole_spec: SoleSpec = Field(default_factory=SoleSpec)
@@ -145,13 +300,18 @@ class SampleUpdateIn(BaseModel):
     status: Optional[SampleStatus] = None
     rejection_reason: Optional[str] = None
     inspiration_photos: Optional[List[SamplePhoto]] = None
+    pattern_pieces: Optional[List[PatternPiece]] = None
+    standard_strips: Optional[List[StandardStripItem]] = None
+    linked_pattern_code: Optional[str] = None
+    yield_spec: Optional[SampleYieldCalculation] = None
+    pattern_scan_url: Optional[str] = None
     upper_spec: Optional[UpperSpec] = None
     insole_spec: Optional[InsoleSpec] = None
     sole_spec: Optional[SoleSpec] = None
 
 
 class TransferToStyleIn(BaseModel):
-    style_code: str
+    style_code: Optional[str] = None
     name: Optional[str] = None
     category: Optional[str] = "Footwear"
     base_size: Optional[str] = "7"
@@ -160,10 +320,12 @@ class TransferToStyleIn(BaseModel):
     material_yields: Optional[Dict[str, float]] = Field(default_factory=dict)
     labor_rates: Optional[Dict[str, float]] = Field(default_factory=dict)
     use_sample_photo_as_primary: bool = True
+    actual_photo_url: Optional[str] = None
+    actual_photo: Optional[Dict[str, Any]] = None
 
     @field_validator("style_code")
     @classmethod
     def _validate_style_code(cls, v):
-        if not v or not v.strip():
-            raise PydanticCustomError("style_code_empty", "Official ERP Style Code cannot be empty")
-        return v.strip().upper()
+        if v is None:
+            return None
+        return str(v).strip().upper() or None
