@@ -4252,9 +4252,30 @@ async def update_job_components(jid: str, payload: ComponentUpdate, request: Req
     if not job:
         raise HTTPException(404, "Not found")
     comps = job.get("components") or {"upper_done": False, "bottom_done": False, "sole_done": False}
+    assignments = job.get("assignments") or {}
+    outside_items = job.get("outside_labour") or []
+
+    def _has_karigar_for_comp(c_key: str) -> bool:
+        if (assignments.get(c_key) or {}).get("worker_id"):
+            return True
+        if any(
+            k.startswith(f"{c_key}.") and (v or {}).get("worker_id")
+            for k, v in assignments.items()
+        ):
+            return True
+        if any((ol or {}).get("component") == c_key and (ol or {}).get("vendor_id") for ol in outside_items):
+            return True
+        return False
+
     for k in ("upper_done", "bottom_done", "sole_done"):
         v = getattr(payload, k)
         if v is not None:
+            comp_name = k.replace("_done", "")
+            if bool(v) and comp_name in ("upper", "bottom") and not _has_karigar_for_comp(comp_name):
+                raise HTTPException(
+                    400,
+                    f"Cannot mark {comp_name.title()} as Ready without assigning a Karigar first.",
+                )
             comps[k] = bool(v)
 
     tracks = dict(job.get("component_tracks") or {})
@@ -4348,6 +4369,21 @@ async def update_job_component_stage(jid: str, payload: ComponentStageUpdate, re
         track["current_stage"] = stages_list[stage_idx + 1]
         track["status"] = "in_progress"
     else:
+        # Marking component Ready: require karigar assignment for upper/bottom
+        if comp in ("upper", "bottom"):
+            asgns = job.get("assignments") or {}
+            ols = job.get("outside_labour") or []
+            has_worker = bool(
+                (asgns.get(comp) or {}).get("worker_id")
+                or any(k.startswith(f"{comp}.") and (v or {}).get("worker_id") for k, v in asgns.items())
+                or any((ol or {}).get("component") == comp and (ol or {}).get("vendor_id") for ol in ols)
+                or payload.worker_id
+            )
+            if not has_worker:
+                raise HTTPException(
+                    400,
+                    f"Cannot mark {comp.title()} as Ready without assigning a Karigar first.",
+                )
         track["current_stage"] = "ready"
         track["status"] = "ready"
     tracks[comp] = track

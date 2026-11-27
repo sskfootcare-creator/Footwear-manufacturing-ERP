@@ -233,10 +233,24 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
         client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
         client.table("journal_lines").upsert(lines, on_conflict="id").execute()
 
-        # 4. Sales Invoices
+        # 4. Sales Invoices (with GSTN & line_items snapshot)
         paid_amt = round(float(invoice_doc.get("received_amount") or 0.0), 2)
         net_rec = max(0.0, round(grand_total - paid_amt, 2))
         inv_status = "PAID" if net_rec <= 0.01 else ("PARTIALLY_PAID" if paid_amt > 0 else "POSTED")
+
+        cust_gstin = (invoice_doc.get("client_gstin") or invoice_doc.get("gstin") or "").strip().upper()
+        if not cust_gstin and client_uuid:
+            try:
+                ent_res = client.table("financial_entities").select("gstin").eq("id", client_uuid).execute()
+                if ent_res.data and ent_res.data[0].get("gstin"):
+                    cust_gstin = str(ent_res.data[0]["gstin"]).strip().upper()
+            except Exception:
+                pass
+
+        line_items_snap = invoice_doc.get("line_items_snapshot") or invoice_doc.get("line_items") or []
+        po_num_val = invoice_doc.get("po_number") or (
+            " + ".join(invoice_doc["po_numbers"]) if invoice_doc.get("po_numbers") else "DIRECT"
+        )
 
         inv_row = {
             "id": inv_uuid,
@@ -244,9 +258,9 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
             "invoice_date": inv_date_str,
             "due_date": due_date_str,
             "client_id": client_uuid,
-            "po_number": invoice_doc.get("po_number") or "DIRECT",
-            "customer_gstin": invoice_doc.get("client_gstin") or "",
-            "place_of_supply": invoice_doc.get("place_of_supply") or "09-Uttar Pradesh",
+            "po_number": po_num_val,
+            "customer_gstin": cust_gstin,
+            "place_of_supply": invoice_doc.get("place_of_supply") or invoice_doc.get("client_state") or "09-Uttar Pradesh",
             "subtotal": subtotal,
             "cgst_rate": float(invoice_doc.get("cgst_rate") or 0.0),
             "cgst_amount": cgst_amt,
@@ -260,9 +274,47 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
             "status": inv_status,
             "journal_entry_id": je_id,
             "notes": invoice_doc.get("notes") or "",
+            "line_items": line_items_snap,
         }
-        res_inv = client.table("sales_invoices").upsert(inv_row, on_conflict="id").execute()
-        log.info("Successfully synced Direct Invoice %s (%s) to Supabase.", invoice_no, inv_uuid)
+        try:
+            res_inv = client.table("sales_invoices").upsert(inv_row, on_conflict="id").execute()
+        except Exception as col_err:
+            # Fallback if line_items column migration hasn't run yet
+            if "line_items" in str(col_err):
+                inv_row.pop("line_items", None)
+                res_inv = client.table("sales_invoices").upsert(inv_row, on_conflict="id").execute()
+            else:
+                raise
+
+        # 5. Upsert normalized product lines into public.sales_invoice_lines (including customer_gstin)
+        if line_items_snap:
+            try:
+                inv_line_rows = []
+                for l_idx, li in enumerate(line_items_snap, start=1):
+                    q_val = float(li.get("quantity") if li.get("quantity") is not None else (li.get("qty") or 0))
+                    rate_val = float(li.get("unit_price") if li.get("unit_price") is not None else (li.get("rate") or 0))
+                    amt_val = float(li.get("amount") if li.get("amount") is not None else round(q_val * rate_val, 2))
+                    inv_line_rows.append({
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"{inv_uuid}_prod_line_{l_idx}")),
+                        "invoice_id": inv_uuid,
+                        "invoice_no": invoice_no,
+                        "line_number": l_idx,
+                        "po_number": po_num_val,
+                        "customer_gstin": cust_gstin,
+                        "style_code": str(li.get("style_code") or ""),
+                        "color": str(li.get("color") or ""),
+                        "size": str(li.get("size") or ""),
+                        "hsn_code": str(li.get("hsn_code") or "6403"),
+                        "quantity": q_val,
+                        "unit_price": rate_val,
+                        "amount": amt_val,
+                    })
+                if inv_line_rows:
+                    client.table("sales_invoice_lines").upsert(inv_line_rows, on_conflict="id").execute()
+            except Exception as line_err:
+                log.debug("Could not upsert sales_invoice_lines for %s: %s", invoice_no, line_err)
+
+        log.info("Successfully synced Invoice %s (%s) to Supabase.", invoice_no, inv_uuid)
         return res_inv.data[0] if (res_inv and getattr(res_inv, "data", None)) else inv_row
 
     except Exception as e:

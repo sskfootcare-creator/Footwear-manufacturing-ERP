@@ -14,6 +14,7 @@ import {
   usePagination,
 } from "../components/ui-kit";
 import { Drawer } from "./Materials";
+import MonthlyStaffPayroll from "../components/MonthlyStaffPayroll";
 import {
   Calendar,
   FileDown,
@@ -59,6 +60,7 @@ export default function Payroll() {
   const [confirm, setConfirm] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [cashLedgers, setCashLedgers] = useState([]);
+  const [payrollMode, setPayrollMode] = useState("karigar"); // 'karigar' | 'monthly'
 
   const payrollRows = data?.rows || [];
   const {
@@ -282,6 +284,38 @@ export default function Payroll() {
       />
 
       <div className="p-2 sm:p-4 lg:p-8 space-y-4">
+        {/* Top Ledger Mode Switcher: Karigar (Piece Rate) vs Monthly Salaried Staff */}
+        <div className="inline-flex border-2 border-slate-900 bg-white shadow-ind">
+          <button
+            type="button"
+            onClick={() => setPayrollMode("karigar")}
+            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition ${
+              payrollMode === "karigar"
+                ? "bg-slate-900 text-white"
+                : "text-slate-700 hover:bg-slate-100"
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            <span>Karigar Ledger (Piece Rate)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPayrollMode("monthly")}
+            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-l-2 border-slate-900 flex items-center gap-2 transition ${
+              payrollMode === "monthly"
+                ? "bg-[#C27842] text-white"
+                : "text-slate-700 hover:bg-slate-100"
+            }`}
+          >
+            <UsersIcon className="w-4 h-4" />
+            <span>Monthly Salaried Staff &amp; Attendance</span>
+          </button>
+        </div>
+
+        {payrollMode === "monthly" ? (
+          <MonthlyStaffPayroll />
+        ) : (
+          <>
         <div className="flex flex-col sm:flex-row sm:items-end gap-2.5 bg-white p-3 sm:p-4 border-2 border-slate-200 shadow-sm rounded-lg sm:rounded-none">
           <div className="grid grid-cols-2 gap-2 flex-1">
             <div className="w-full">
@@ -455,6 +489,8 @@ export default function Payroll() {
                 <PaginationControls {...payrollPaginationProps} />
               </div>
             </Card>
+          </>
+        )}
           </>
         )}
       </div>

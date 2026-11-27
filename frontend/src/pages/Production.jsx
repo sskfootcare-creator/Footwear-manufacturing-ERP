@@ -654,18 +654,22 @@ export default function Production() {
     }
   };
   const toggleComponent = async (group, key, val) => {
-    if (key === "heel_gola_done") {
-      await Promise.all(group.rows.map(j =>
-        http.patch(`/production/jobs/${j.id}/component-stage`, {
-          component: "heel_gola",
-          stage: val ? "ready" : (j.component_specs?.components?.heel_gola?.stages?.[0] || "cover_cutting"),
-          completed_qty: j.quantity,
-        })
-      ));
-    } else {
-      await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}/components`, { [key]: val })));
+    try {
+      if (key === "heel_gola_done") {
+        await Promise.all(group.rows.map(j =>
+          http.patch(`/production/jobs/${j.id}/component-stage`, {
+            component: "heel_gola",
+            stage: val ? "ready" : (j.component_specs?.components?.heel_gola?.stages?.[0] || "cover_cutting"),
+            completed_qty: j.quantity,
+          })
+        ));
+      } else {
+        await Promise.all(group.rows.map(j => http.patch(`/production/jobs/${j.id}/components`, { [key]: val })));
+      }
+      load();
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message || "Failed to update component status");
     }
-    load();
   };
   const assignWorker = async (group, role, workerId, rate, overwrite = false) => {
     if ((role === "sole" || role.startsWith("sole.")) && isSoleReadyToUse(group, styleByCode[group.style_code])) {
@@ -2724,24 +2728,50 @@ function ParallelComponentCard({
 
         {/* Ready / Pending toggle */}
         <div className="mt-1 flex items-center justify-between gap-1" onClick={(e) => e.stopPropagation()}>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onToggle(!done)}
-            data-testid={`toggle-comp-${groupKey}-${compKey}`}
-            title={done ? "Click to mark In Progress" : "Click to mark Ready"}
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold transition-all border ${
-              done
-                ? "bg-emerald-600 text-white border-emerald-600 shadow-xs hover:bg-emerald-700"
-                : "bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200"
-            }`}
-          >
-            {done ? (
-              <><Check className="w-2.5 h-2.5 stroke-[3]" /><span>Ready</span></>
-            ) : (
-              <span>Pending</span>
-            )}
-          </button>
+          {(() => {
+            const requiresKarigar = compKey === "upper" || compKey === "bottom";
+            const hasKarigarAssigned = Boolean(
+              assignment?.worker_id ||
+              subtasks.some((st) => assignments[st.key]?.worker_id) ||
+              outsideCount > 0
+            );
+            const blockReadyWithoutKarigar = !done && requiresKarigar && !hasKarigarAssigned;
+            return (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => {
+                  if (blockReadyWithoutKarigar) {
+                    alert(`Please assign a Karigar to ${label} (or its sub-tasks) before marking it Ready.`);
+                    onOpenAssign?.(compKey);
+                    return;
+                  }
+                  onToggle(!done);
+                }}
+                data-testid={`toggle-comp-${groupKey}-${compKey}`}
+                title={
+                  blockReadyWithoutKarigar
+                    ? `Assign a Karigar to ${label} before marking Ready`
+                    : done
+                    ? "Click to mark In Progress"
+                    : "Click to mark Ready"
+                }
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold transition-all border ${
+                  done
+                    ? "bg-emerald-600 text-white border-emerald-600 shadow-xs hover:bg-emerald-700"
+                    : blockReadyWithoutKarigar
+                    ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
+                    : "bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200"
+                }`}
+              >
+                {done ? (
+                  <><Check className="w-2.5 h-2.5 stroke-[3]" /><span>Ready</span></>
+                ) : (
+                  <span>Pending</span>
+                )}
+              </button>
+            );
+          })()}
 
           {outsideCount > 0 && (
             <span

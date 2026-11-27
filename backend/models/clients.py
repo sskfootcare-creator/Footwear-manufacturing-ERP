@@ -90,6 +90,7 @@ class DirectInvoiceIn(BaseModel):
     client_state_code: Optional[str] = None
 
     # Invoice parameters
+    po_number: Optional[str] = ""     # Optional Client PO / Order No.
     invoice_date: Optional[str] = None  # DD/MM/YYYY or YYYY-MM-DD
     payment_terms_days: Optional[int] = 30
     due_date: Optional[str] = None      # Optional override; auto-computed if omitted

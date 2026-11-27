@@ -259,9 +259,49 @@ async def _get_max_invoice_seq(fy_label: str, db=None) -> int:
     return max_seq
 
 
+async def _get_active_invoice_seqs(fy_label: str, db=None) -> set[int]:
+    """Collect all currently active (non-voided) invoice sequence numbers for the FY."""
+    prefix = f"SSK{fy_label}-"
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)")
+    used: set[int] = set()
+
+    async def _scan(coll, active_filter: dict):
+        if coll is None:
+            return
+        try:
+            find_fn = getattr(coll, "find", None)
+            if not find_fn:
+                return
+            q = {"invoice_no": {"$regex": rf"^{re.escape(prefix)}"}, **active_filter}
+            cursor = find_fn(q, {"invoice_no": 1})
+            if hasattr(cursor, "to_list"):
+                docs = await _maybe_await(cursor.to_list(10000))
+            elif inspect.isawaitable(cursor):
+                docs = await cursor
+            else:
+                docs = list(cursor) if cursor else []
+            if isinstance(docs, list):
+                for doc in docs:
+                    if isinstance(doc, dict):
+                        ino = str(doc.get("invoice_no") or "")
+                        m = pattern.match(ino)
+                        if m:
+                            try:
+                                used.add(int(m.group(1)))
+                            except ValueError:
+                                pass
+        except Exception as e:
+            log.warning(f"Error scanning active sequence on {coll}: {e}")
+
+    await _scan(getattr(db, "invoices", None), {"status": {"$ne": "voided"}, "active": {"$ne": False}})
+    await _scan(getattr(db, "dispatch_records", None), {"status": {"$ne": "cancelled"}})
+    return used
+
+
 async def next_invoice_no(db=None) -> str:
-    """Generate strictly-serial SSK<FY>-XXX format (e.g. SSK26-27-020) with atomic counter initialization
-    and duplicate collision retry handling (F-020).
+    """Generate strictly-serial SSK<FY>-XXX format (e.g. SSK26-27-020).
+    Reuses deleted/voided sequence numbers so gaps (e.g. deleted 59, 60) are filled
+    continuously rather than skipped.
     """
     if db is None:
         db = getattr(__import__("server"), "db")
@@ -277,53 +317,26 @@ async def next_invoice_no(db=None) -> str:
     min_seq = 16 if fy_label == "26-27" else 1
     counter_id = f"invoice_{fy_label}"
 
-    # Atomic counter initialization if counter doc does not exist yet (avoid repeated full scans)
-    counter_doc = await _safe_find_one(getattr(db, "counters", None), {"_id": counter_id})
-    if not counter_doc:
-        max_existing = await _get_max_invoice_seq(fy_label, db=db)
-        baseline = max(min_seq - 1, max_existing)
-        try:
-            counters_coll = getattr(db, "counters", None)
-            if counters_coll is not None and hasattr(counters_coll, "update_one"):
-                res = counters_coll.update_one(
-                    {"_id": counter_id},
-                    {"$setOnInsert": {"seq": baseline}},
-                    upsert=True,
-                )
-                await _maybe_await(res)
-        except Exception as e:
-            log.warning(f"Counter init race on {counter_id}: {e}")
-
-    # Allocate sequence with duplicate collision handling (up to 10 retries)
+    # Find the lowest unused sequence >= min_seq (reuses voided/deleted numbers)
+    used_seqs = await _get_active_invoice_seqs(fy_label, db=db)
     seq = min_seq
-    for _ in range(10):
-        counter = None
-        counters_coll = getattr(db, "counters", None)
-        if counters_coll is not None and hasattr(counters_coll, "find_one_and_update"):
-            try:
-                res = counters_coll.find_one_and_update(
-                    {"_id": counter_id},
-                    {"$inc": {"seq": 1}},
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
-                counter = await _maybe_await(res)
-            except Exception as e:
-                log.warning(f"Error incrementing counter: {e}")
-                counter = None
+    while seq in used_seqs:
+        seq += 1
 
-        seq = int(counter.get("seq", min_seq)) if isinstance(counter, dict) else min_seq
-        candidate_no = f"SSK{fy_label}-{seq:03d}"
-        
-        # Guard against collision with manual / out-of-band inserts
-        exists_inv = await _safe_find_one(getattr(db, "invoices", None), {"invoice_no": candidate_no})
-        exists_dr = await _safe_find_one(getattr(db, "dispatch_records", None), {"invoice_no": candidate_no})
-        if not exists_inv and not exists_dr:
-            return candidate_no
-        log.warning(f"Invoice number collision on {candidate_no}; incrementing counter to next sequence")
+    # Keep counter doc synchronized
+    counters_coll = getattr(db, "counters", None)
+    if counters_coll is not None and hasattr(counters_coll, "update_one"):
+        try:
+            res = counters_coll.update_one(
+                {"_id": counter_id},
+                {"$set": {"seq": seq}},
+                upsert=True,
+            )
+            await _maybe_await(res)
+        except Exception as e:
+            log.warning(f"Counter sync error on {counter_id}: {e}")
 
-    # Fallback if loop exhausted
-    return f"SSK{fy_label}-{seq + 1:03d}"
+    return f"SSK{fy_label}-{seq:03d}"
 
 
 def _extract_credit_days(payment_terms_text: str | None) -> int:
@@ -904,6 +917,63 @@ async def _enrich_cartons_with_mapped_sku(cartons: list[dict], db=None) -> list[
     return cartons
 
 
+async def _enrich_invoice_client_metadata(inv_doc: dict, db) -> dict:
+    """Ensure client_gstin, billing_address, and place_of_supply are populated from PO or Client Master."""
+    if not inv_doc or db is None:
+        return inv_doc
+    gstin = (inv_doc.get("client_gstin") or inv_doc.get("gstin") or "").strip().upper()
+    billing_addr = inv_doc.get("billing_address") or inv_doc.get("client_address") or ""
+    place_of_supply = inv_doc.get("place_of_supply") or inv_doc.get("client_state") or ""
+
+    if (not gstin or not billing_addr) and inv_doc.get("po_id"):
+        try:
+            po_doc = await db.pos.find_one({"_id": oid(str(inv_doc["po_id"]))})
+            if po_doc:
+                gstin = gstin or (po_doc.get("client_gstin") or po_doc.get("gstin") or "").strip().upper()
+                billing_addr = billing_addr or po_doc.get("client_address") or po_doc.get("billing_address") or po_doc.get("shipping_address") or ""
+                place_of_supply = place_of_supply or po_doc.get("client_state") or ""
+        except Exception:
+            pass
+
+    if (not gstin or not billing_addr) and (inv_doc.get("client_id") or inv_doc.get("client_name")):
+        try:
+            c_doc = None
+            if inv_doc.get("client_id"):
+                c_doc = await db.clients.find_one({"_id": oid(str(inv_doc["client_id"]))})
+            if not c_doc and inv_doc.get("client_name"):
+                cname = str(inv_doc["client_name"]).strip()
+                c_doc = await db.clients.find_one({
+                    "$or": [
+                        {"company_name": {"$regex": f"^{re.escape(cname)}$", "$options": "i"}},
+                        {"name": {"$regex": f"^{re.escape(cname)}$", "$options": "i"}},
+                    ]
+                })
+            if c_doc:
+                gstin = gstin or (c_doc.get("gstin") or "").strip().upper()
+                billing_addr = billing_addr or c_doc.get("billing_address") or c_doc.get("shipping_address") or ""
+                place_of_supply = place_of_supply or c_doc.get("state") or ""
+        except Exception:
+            pass
+
+    updates = {}
+    if gstin and inv_doc.get("client_gstin") != gstin:
+        inv_doc["client_gstin"] = gstin
+        updates["client_gstin"] = gstin
+    if billing_addr and not inv_doc.get("billing_address"):
+        inv_doc["billing_address"] = billing_addr
+        updates["billing_address"] = billing_addr
+    if place_of_supply and not inv_doc.get("place_of_supply"):
+        inv_doc["place_of_supply"] = place_of_supply
+        updates["place_of_supply"] = place_of_supply
+
+    if updates and inv_doc.get("_id"):
+        try:
+            await db.invoices.update_one({"_id": inv_doc["_id"]}, {"$set": updates})
+        except Exception:
+            pass
+    return inv_doc
+
+
 async def queue_invoice_sync(inv_doc: dict, db=None) -> None:
     """Enqueues an invoice into outbox_events and attempts immediate sync to Supabase."""
     if not inv_doc:
@@ -913,6 +983,7 @@ async def queue_invoice_sync(inv_doc: dict, db=None) -> None:
     try:
         import json
         from bson import json_util
+        inv_doc = await _enrich_invoice_client_metadata(inv_doc, db)
         inv_id_str = str(inv_doc.get("_id") or inv_doc.get("id"))
         payload = json.loads(json_util.dumps(inv_doc))
 
@@ -1698,9 +1769,11 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
     invoice_iso = _invoice_iso_date(invoice_date)
     due_date = payload.due_date or _due_iso(invoice_iso, payment_terms_days)
 
+    eff_po_no = (payload.po_number or "").strip() or "DIRECT"
+
     # 5. Build PDF Document
     po_dict = {
-        "po_number": "DIRECT",
+        "po_number": eff_po_no,
         "po_date": invoice_date,
         "client_name": client_name,
         "client_address": billing_address,
@@ -1736,8 +1809,8 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
         "grn_date": None,
         "grn_recorded": False,
         "po_id": None,
-        "po_number": "DIRECT",
-        "po_numbers": ["DIRECT"],
+        "po_number": eff_po_no,
+        "po_numbers": [eff_po_no],
         "client_id": client_master_id,
         "client_name": client_name,
         "contact_person": contact_person,
@@ -1796,6 +1869,204 @@ async def create_direct_invoice(payload: DirectInvoiceIn, request: Request):
             "X-Invoice-No": invoice_no,
         }
     )
+
+
+@invoice_packing_router.put("/invoices/{id}/direct", dependencies=[Depends(pdf_rate_limiter)])
+async def update_direct_invoice(id: str, payload: DirectInvoiceIn, request: Request):
+    """Edit a direct tax invoice within 72 hours of creation. Locked after 72 hours."""
+    u = await _get_user(request)
+    require_roles("admin", "manager", "sales")(u)
+    db = _get_db(request)
+
+    existing = await db.invoices.find_one({"_id": oid(id)})
+    if not existing:
+        raise HTTPException(404, "Invoice not found")
+    if existing.get("status") == "voided" or existing.get("active") is False:
+        raise HTTPException(400, "Cannot edit a deleted/voided invoice")
+    if not existing.get("is_direct_invoice"):
+        raise HTTPException(400, "Only direct invoices can be edited here")
+
+    created_raw = existing.get("created_at")
+    if created_raw:
+        try:
+            created_dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            elapsed_hrs = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600.0
+            if elapsed_hrs > 72.0:
+                raise HTTPException(
+                    403,
+                    f"Edit window expired ({elapsed_hrs:.1f}h elapsed). Direct invoices can only be edited within 72 hours of creation.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    client_name = (payload.client_name or "").strip()
+    if not client_name:
+        raise HTTPException(400, "Client name is required")
+
+    client_gstin = (payload.client_gstin or "").strip().upper()
+    contact_person = (payload.contact_person or "").strip()
+    phone = (payload.phone or "").strip()
+    email = (payload.email or "").strip()
+    pan = (payload.pan or "").strip().upper()
+    billing_address = (payload.billing_address or "").strip()
+    shipping_address = (payload.shipping_address or billing_address).strip()
+
+    supplier_state_code = (payload.supplier_state_code or existing.get("supplier_state_code") or "09").strip()
+    client_state_code = (payload.client_state_code or (client_gstin[:2] if len(client_gstin) >= 2 and client_gstin[:2].isdigit() else "09")).strip()
+    place_of_supply = (payload.place_of_supply or existing.get("place_of_supply") or f"{client_state_code}-State").strip()
+
+    tax_mode = (payload.tax_mode or "auto").lower()
+    is_intra_state = (tax_mode == "intra") if tax_mode in ("intra", "inter") else (client_state_code == supplier_state_code)
+
+    total_gst_rate = float(payload.gst_rate if payload.gst_rate is not None else 5.0)
+    if payload.cgst_rate is not None or payload.sgst_rate is not None or payload.igst_rate is not None:
+        cgst_rate = float(payload.cgst_rate or 0.0)
+        sgst_rate = float(payload.sgst_rate or 0.0)
+        igst_rate = float(payload.igst_rate or 0.0)
+    else:
+        if is_intra_state:
+            cgst_rate = round(total_gst_rate / 2.0, 2)
+            sgst_rate = round(total_gst_rate / 2.0, 2)
+            igst_rate = 0.0
+        else:
+            cgst_rate = 0.0
+            sgst_rate = 0.0
+            igst_rate = round(total_gst_rate, 2)
+
+    raw_items = payload.line_items or []
+    if not raw_items:
+        raise HTTPException(400, "At least one line item is required")
+
+    line_items_snapshot = []
+    subtotal = 0.0
+    total_pairs = 0
+    for it in raw_items:
+        it_d = it.model_dump() if hasattr(it, "model_dump") else dict(it)
+        qty = int(it_d.get("quantity") or it_d.get("qty") or 0)
+        unit_price = float(it_d.get("unit_price") or it_d.get("rate") or 0.0)
+        if qty <= 0:
+            raise HTTPException(400, "Line item quantity must be greater than 0")
+        amt = round(qty * unit_price, 2)
+        subtotal += amt
+        total_pairs += qty
+        line_items_snapshot.append({
+            "style_code": str(it_d.get("style_code") or "").strip(),
+            "color": str(it_d.get("color") or "").strip(),
+            "size": str(it_d.get("size") or "").strip(),
+            "hsn_code": str(it_d.get("hsn_code") or "6403").strip(),
+            "qty": qty,
+            "quantity": qty,
+            "unit_price": unit_price,
+            "rate": unit_price,
+            "amount": amt,
+        })
+
+    subtotal = round(subtotal, 2)
+    cgst_amount = round(subtotal * (cgst_rate / 100.0), 2)
+    sgst_amount = round(subtotal * (sgst_rate / 100.0), 2)
+    igst_amount = round(subtotal * (igst_rate / 100.0), 2)
+    grand_total = round(subtotal + cgst_amount + sgst_amount + igst_amount, 2)
+
+    invoice_no = existing.get("invoice_no")
+    invoice_date = (payload.invoice_date or existing.get("invoice_date") or datetime.now(timezone.utc).strftime("%d/%m/%Y")).strip()
+    payment_terms_days = int(payload.payment_terms_days or existing.get("payment_terms_days") or 30)
+    eff_po_no = (payload.po_number or "").strip() or "DIRECT"
+
+    try:
+        if "/" in invoice_date:
+            inv_dt = datetime.strptime(invoice_date, "%d/%m/%Y")
+        else:
+            inv_dt = datetime.fromisoformat(invoice_date[:10])
+    except Exception:
+        inv_dt = datetime.now(timezone.utc)
+    invoice_iso = inv_dt.date().isoformat()
+    due_date = payload.due_date or (inv_dt + timedelta(days=payment_terms_days)).date().isoformat()
+
+    po_dict = {
+        "po_number": eff_po_no,
+        "po_date": invoice_date,
+        "client_name": client_name,
+        "client_address": billing_address,
+        "billing_address": billing_address,
+        "shipping_address": shipping_address,
+        "client_gstin": client_gstin,
+        "client_state": place_of_supply,
+        "client_state_code": client_state_code,
+        "supplier_state_code": supplier_state_code,
+        "tax_mode": tax_mode,
+        "is_intra_state": is_intra_state,
+        "cgst_rate": cgst_rate,
+        "sgst_rate": sgst_rate,
+        "igst_rate": igst_rate,
+        "line_items": line_items_snapshot,
+    }
+    pdf_bytes = build_invoice(
+        po_dict, invoice_no, invoice_date,
+        transport_mode=payload.transport_mode or "",
+        vehicle_no=payload.vehicle_no or "",
+        supply_date=payload.supply_date or "",
+        line_items=line_items_snapshot,
+    )
+
+    update_fields = {
+        "invoice_date": invoice_date,
+        "invoice_iso_date": invoice_iso,
+        "due_date": due_date,
+        "payment_terms_days": payment_terms_days,
+        "po_number": eff_po_no,
+        "po_numbers": [eff_po_no],
+        "client_id": payload.client_id or existing.get("client_id"),
+        "client_name": client_name,
+        "contact_person": contact_person,
+        "phone": phone,
+        "email": email,
+        "client_gstin": client_gstin,
+        "billing_address": billing_address,
+        "shipping_address": shipping_address,
+        "place_of_supply": place_of_supply,
+        "client_state_code": client_state_code,
+        "supplier_state_code": supplier_state_code,
+        "tax_mode": tax_mode,
+        "is_intra_state": is_intra_state,
+        "cgst_rate": cgst_rate,
+        "cgst_amount": cgst_amount,
+        "sgst_rate": sgst_rate,
+        "sgst_amount": sgst_amount,
+        "igst_rate": igst_rate,
+        "igst_amount": igst_amount,
+        "subtotal": subtotal,
+        "total_amount": subtotal,
+        "grand_total": grand_total,
+        "net_amount": grand_total,
+        "total_pairs": total_pairs,
+        "total_quantity": total_pairs,
+        "quantity": total_pairs,
+        "line_items_snapshot": line_items_snapshot,
+        "transport_mode": payload.transport_mode or "",
+        "vehicle_no": payload.vehicle_no or "",
+        "supply_date": payload.supply_date or "",
+        "notes": payload.notes or "",
+        "updated_at": now_iso(),
+        "updated_by": u["email"],
+        "file_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+    }
+
+    await db.invoices.update_one({"_id": oid(id)}, {"$set": update_fields})
+    updated_doc = await db.invoices.find_one({"_id": oid(id)})
+    await queue_invoice_sync(updated_doc, db=db)
+
+    decorated = _decorate_invoice(updated_doc, payments_map={}, grns_map={})
+    return {
+        "ok": True,
+        "invoice": decorated,
+        "invoice_id": id,
+        "invoice_no": invoice_no,
+        "pdf_url": f"/api/invoices/{id}/file",
+    }
 
 
 @invoice_packing_router.delete("/invoices/{id}")

@@ -107,6 +107,7 @@ from services.imagekit_service import (
 from routes.plm import plm_router, DEFAULT_PLM_FOLDERS
 from routes.settings import settings_router
 from routes.workers import workers_router
+from routes.staff_payroll import staff_payroll_router
 from routes.investors import investors_router
 from routes.email_inbox import email_inbox_router
 from routes.sampling import sampling_router
@@ -1979,6 +1980,7 @@ app.include_router(auth_router)
 app.include_router(plm_router)
 app.include_router(settings_router)
 app.include_router(workers_router)
+app.include_router(staff_payroll_router)
 app.include_router(vendors_router)
 app.include_router(notifications_router)
 app.include_router(components_router)

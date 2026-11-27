@@ -44,6 +44,7 @@ import {
   Mail,
   Send,
   Paperclip,
+  Edit3,
 } from "lucide-react";
 
 const STATUS_COLOR = {
@@ -76,6 +77,7 @@ export default function Invoices() {
   const [cashAccounts, setCashAccounts] = useState([]);
   const [styles, setStyles] = useState([]);
   const [showDirectModal, setShowDirectModal] = useState(false);
+  const [editingDirectInvoice, setEditingDirectInvoice] = useState(null);
   const [reminderFor, setReminderFor] = useState(null);
   const [showBatchReminderModal, setShowBatchReminderModal] = useState(false);
 
@@ -618,6 +620,27 @@ export default function Invoices() {
                             </button>
                           </>
                         )}
+                        {r.is_direct_invoice && (() => {
+                          const createdMs = r.created_at ? new Date(r.created_at).getTime() : 0;
+                          const canEdit72h = createdMs > 0 && (Date.now() - createdMs) <= 72 * 3600 * 1000;
+                          return canEdit72h ? (
+                            <button
+                              onClick={() => setEditingDirectInvoice(r)}
+                              className="text-slate-600 hover:text-blue-600 p-1.5"
+                              title="Edit Direct Invoice (within 72h window)"
+                              data-testid={`inv-edit-${r.invoice_no}`}
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span
+                              className="text-slate-300 p-1.5 inline-block cursor-not-allowed"
+                              title="Direct Invoice edit locked (72h window expired)"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </span>
+                          );
+                        })()}
                         <button
                           onClick={() => setDeleteFor(r)}
                           className="text-slate-600 hover:text-red-600 p-1.5"
@@ -738,13 +761,18 @@ export default function Invoices() {
           }}
         />
       )}
-      {showDirectModal && (
+      {(showDirectModal || editingDirectInvoice) && (
         <DirectInvoiceModal
-          onClose={() => setShowDirectModal(false)}
+          editingInvoice={editingDirectInvoice}
+          onClose={() => {
+            setShowDirectModal(false);
+            setEditingDirectInvoice(null);
+          }}
           onCreated={(newInv) => {
             setShowDirectModal(false);
+            setEditingDirectInvoice(null);
             load();
-            if (newInv?.invoice_id) {
+            if (newInv?.invoice_id && !editingDirectInvoice) {
               const token = localStorage.getItem("token") || "";
               window.open(`${API}/invoices/${newInv.invoice_id}/file?token=${token}`, "_blank");
             }
@@ -3384,45 +3412,65 @@ const INDIAN_STATES = [
   { code: "38", name: "Ladakh" },
 ];
 
-function DirectInvoiceModal({ onClose, onCreated }) {
-  const [clientType, setClientType] = useState("existing");
+function DirectInvoiceModal({ onClose, onCreated, editingInvoice = null }) {
+  const isEdit = Boolean(editingInvoice?.id || editingInvoice?._id);
+  const [clientType, setClientType] = useState(isEdit ? "existing" : "existing");
   const [savedClients, setSavedClients] = useState([]);
-  const [selectedClientId, setSelectedClientId] = useState("");
-  const [sameAsBilling, setSameAsBilling] = useState(true);
+  const [selectedClientId, setSelectedClientId] = useState(editingInvoice?.client_id || "");
+  const [sameAsBilling, setSameAsBilling] = useState(
+    editingInvoice ? (!editingInvoice.shipping_address || editingInvoice.shipping_address === editingInvoice.billing_address) : true
+  );
 
   // Supplier / Seller State (Fetched from company settings, default UP 09)
-  const [supplierStateCode, setSupplierStateCode] = useState("09");
+  const [supplierStateCode, setSupplierStateCode] = useState(editingInvoice?.supplier_state_code || "09");
   const [supplierStateName, setSupplierStateName] = useState("Uttar Pradesh");
 
   // Client Details
-  const [clientName, setClientName] = useState("");
-  const [contactPerson, setContactPerson] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [gstin, setGstin] = useState("");
+  const [clientName, setClientName] = useState(editingInvoice?.client_name || "");
+  const [contactPerson, setContactPerson] = useState(editingInvoice?.contact_person || "");
+  const [phone, setPhone] = useState(editingInvoice?.phone || "");
+  const [email, setEmail] = useState(editingInvoice?.email || "");
+  const [gstin, setGstin] = useState(editingInvoice?.client_gstin || "");
   const [pan, setPan] = useState("");
-  const [billingAddress, setBillingAddress] = useState("");
-  const [shippingAddress, setShippingAddress] = useState("");
-  const [stateCode, setStateCode] = useState("09");
-  const [placeOfSupply, setPlaceOfSupply] = useState("09-Uttar Pradesh");
-  const [paymentTermsDays, setPaymentTermsDays] = useState(30);
-  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
-  const [saveClientToMaster, setSaveClientToMaster] = useState(true);
+  const [billingAddress, setBillingAddress] = useState(editingInvoice?.billing_address || "");
+  const [shippingAddress, setShippingAddress] = useState(editingInvoice?.shipping_address || "");
+  const [stateCode, setStateCode] = useState(editingInvoice?.client_state_code || "09");
+  const [placeOfSupply, setPlaceOfSupply] = useState(editingInvoice?.place_of_supply || "09-Uttar Pradesh");
+  const [poNumber, setPoNumber] = useState(
+    editingInvoice?.po_number && editingInvoice.po_number !== "DIRECT" ? editingInvoice.po_number : ""
+  );
+  const [paymentTermsDays, setPaymentTermsDays] = useState(editingInvoice?.payment_terms_days ?? 30);
+  const [invoiceDate, setInvoiceDate] = useState(
+    editingInvoice?.invoice_iso_date || new Date().toISOString().slice(0, 10)
+  );
+  const [saveClientToMaster, setSaveClientToMaster] = useState(!isEdit);
 
   // Tax Mode: 'auto' | 'intra' | 'inter'
-  const [taxMode, setTaxMode] = useState("auto");
-  const [gstPreset, setGstPreset] = useState("5");
-  const [customGstRate, setCustomGstRate] = useState(5.0);
+  const initTotalGst = editingInvoice
+    ? Number(editingInvoice.cgst_rate || 0) + Number(editingInvoice.sgst_rate || 0) + Number(editingInvoice.igst_rate || 0)
+    : 5;
+  const [taxMode, setTaxMode] = useState(editingInvoice?.tax_mode || "auto");
+  const [gstPreset, setGstPreset] = useState(["0", "5", "12", "18"].includes(String(initTotalGst)) ? String(initTotalGst) : "custom");
+  const [customGstRate, setCustomGstRate] = useState(initTotalGst);
 
-  // Line items
-  const [items, setItems] = useState([
-    { style_code: "", color: "", size: "", hsn_code: "6403", qty: 10, unit_price: 500 },
-  ]);
+  // Line items (blank by default — no hardcoded sample/default entries)
+  const [items, setItems] = useState(
+    Array.isArray(editingInvoice?.line_items_snapshot) && editingInvoice.line_items_snapshot.length > 0
+      ? editingInvoice.line_items_snapshot.map((it) => ({
+          style_code: it.style_code || "",
+          color: it.color || "",
+          size: it.size || "",
+          hsn_code: it.hsn_code || "",
+          qty: it.quantity ?? it.qty ?? "",
+          unit_price: it.unit_price ?? it.rate ?? "",
+        }))
+      : [{ style_code: "", color: "", size: "", hsn_code: "", qty: "", unit_price: "" }]
+  );
 
   // Logistics / Dispatch
-  const [transportMode, setTransportMode] = useState("");
-  const [vehicleNo, setVehicleNo] = useState("");
-  const [notes, setNotes] = useState("");
+  const [transportMode, setTransportMode] = useState(editingInvoice?.transport_mode || "");
+  const [vehicleNo, setVehicleNo] = useState(editingInvoice?.vehicle_no || "");
+  const [notes, setNotes] = useState(editingInvoice?.notes || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -3538,7 +3586,7 @@ function DirectInvoiceModal({ onClose, onCreated }) {
   const addItem = () => {
     setItems((prev) => [
       ...prev,
-      { style_code: "", color: "", size: "", hsn_code: "6403", qty: 10, unit_price: 500 },
+      { style_code: "", color: "", size: "", hsn_code: "", qty: "", unit_price: "" },
     ]);
   };
 
@@ -3596,6 +3644,7 @@ function DirectInvoiceModal({ onClose, onCreated }) {
         client_state_code: stateCode,
         supplier_state_code: supplierStateCode,
         tax_mode: taxMode,
+        po_number: poNumber.trim(),
         payment_terms_days: Number(paymentTermsDays),
         invoice_date: invoiceDate,
         gst_rate: effectiveGstRate,
@@ -3617,7 +3666,9 @@ function DirectInvoiceModal({ onClose, onCreated }) {
         })),
       };
 
-      const res = await http.post("/invoices/direct", payload);
+      const res = isEdit
+        ? await http.put(`/invoices/${editingInvoice.id || editingInvoice._id}/direct`, payload)
+        : await http.post("/invoices/direct", payload);
       onCreated(res.data);
     } catch (err) {
       setError(err.response?.data?.detail || err.message || "Failed to generate direct invoice.");
@@ -3633,8 +3684,12 @@ function DirectInvoiceModal({ onClose, onCreated }) {
           <div>
             <div className="flex items-center gap-2">
               <Building2 className="w-5 h-5 text-[#16A34A]" />
-              <h2 className="text-lg font-bold">Create Direct Tax Invoice</h2>
-              <Badge color="green" className="ml-2 font-mono text-[10px]">NO PO REQUIRED</Badge>
+              <h2 className="text-lg font-bold">
+                {isEdit ? `Edit Direct Tax Invoice (${editingInvoice?.invoice_no || ""})` : "Create Direct Tax Invoice"}
+              </h2>
+              <Badge color="green" className="ml-2 font-mono text-[10px]">
+                {isEdit ? "72H EDIT WINDOW" : "OPTIONAL PO / ORDER NO."}
+              </Badge>
             </div>
             <p className="text-xs text-slate-300 mt-0.5">
               Issue direct invoices to clients with automatic footwear GST rates & custom payment terms.
@@ -3836,7 +3891,16 @@ function DirectInvoiceModal({ onClose, onCreated }) {
               <Percent className="w-4 h-4 text-[#16A34A]" /> 2. Invoice Terms & Footwear GST Rates
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <Field label="PO / Order No.">
+                <input
+                  type="text"
+                  placeholder="e.g. PO-2026-045"
+                  value={poNumber}
+                  onChange={(e) => setPoNumber(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white font-mono focus:border-[#16A34A] outline-none"
+                />
+              </Field>
               <Field label="Invoice Date">
                 <input
                   type="date"

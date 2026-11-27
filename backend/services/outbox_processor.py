@@ -27,14 +27,39 @@ from services.supabase_investor_service import (
 
 log = logging.getLogger("erp.outbox")
 
+async def requeue_failed_connection_events(db: Any) -> int:
+    """Re-queue outbox events that failed due to temporary Supabase connection outages."""
+    try:
+        res = await db.outbox_events.update_many(
+            {
+                "status": "failed",
+                "error": {"$regex": "connect|refused|10061|timeout|unavailable|no confirmation", "$options": "i"},
+            },
+            {"$set": {"status": "pending", "retries": 0, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        if res.modified_count:
+            log.info(f"Re-queued {res.modified_count} previously failed outbox events for Supabase sync.")
+        return res.modified_count
+    except Exception as e:
+        log.warning(f"Failed to requeue failed outbox events: {e}")
+        return 0
+
+
 async def process_outbox_events(db: Any):
     """
     Background worker that continuously polls the outbox_events collection
     and pushes pending events to Supabase.
     """
     log.info("Starting Supabase outbox processor background worker...")
+    await requeue_failed_connection_events(db)
+    _requeue_tick = 0
     while True:
         try:
+            _requeue_tick += 1
+            if _requeue_tick % 12 == 0:  # Every ~60s when idle, check if Supabase recovered to retry failed events
+                from db.supabase_client import get_supabase_admin_client
+                if get_supabase_admin_client():
+                    await requeue_failed_connection_events(db)
             # Find one pending event, prioritizing older ones
             event = await db.outbox_events.find_one_and_update(
                 {"status": "pending"},
