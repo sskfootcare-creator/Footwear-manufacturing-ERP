@@ -13,11 +13,19 @@ from auth import get_current_user_factory, require_roles
 log = logging.getLogger("staff_payroll")
 staff_payroll_router = APIRouter(prefix="/api/staff-payroll", tags=["Monthly Staff Payroll"])
 
-_get_user = get_current_user_factory(lambda: __import__("server").db)
-
-
 def _get_db(request: Request):
     return getattr(request.app, "mongodb", None) or __import__("server").db
+
+
+async def _get_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
+    import server
+    if getattr(server, "get_current_user", None) is not None:
+        return await server.get_current_user(request)
+    fn = await get_current_user_factory(_get_db(request))
+    return await fn(request)
 
 
 def now_iso() -> str:
