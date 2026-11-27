@@ -121,9 +121,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate Supabase Schema (Dry-run / lint)
+      - name: Start Local Supabase & Apply Migrations
+        run: |
+          supabase start
+
+      - name: Validate Supabase Schema (Lint)
         run: |
           supabase db lint --level error
+
+      - name: Stop Local Supabase
+        if: always()
+        run: |
+          supabase stop || true
 
   frontend-gate:
     name: Frontend Quality, Unit Tests & Production Build (OPS-020, OPS-022)
