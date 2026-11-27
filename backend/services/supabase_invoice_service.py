@@ -230,8 +230,6 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
             "posted_by": invoice_doc.get("by") or "system",
             "posted_at": datetime.now(timezone.utc).isoformat(),
         }
-        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
-        client.table("journal_lines").upsert(lines, on_conflict="id").execute()
 
         # 4. Sales Invoices (with GSTN & line_items snapshot)
         paid_amt = round(float(invoice_doc.get("received_amount") or 0.0), 2)
@@ -276,41 +274,58 @@ def sync_direct_invoice_to_supabase(invoice_doc: Dict[str, Any]) -> Optional[Dic
             "notes": invoice_doc.get("notes") or "",
             "line_items": line_items_snap,
         }
+
+        inv_line_rows = []
+        for l_idx, li in enumerate(line_items_snap, start=1):
+            q_val = float(li.get("quantity") if li.get("quantity") is not None else (li.get("qty") or 0))
+            rate_val = float(li.get("unit_price") if li.get("unit_price") is not None else (li.get("rate") or 0))
+            amt_val = float(li.get("amount") if li.get("amount") is not None else round(q_val * rate_val, 2))
+            inv_line_rows.append({
+                "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"{inv_uuid}_prod_line_{l_idx}")),
+                "invoice_id": inv_uuid,
+                "invoice_no": invoice_no,
+                "line_number": l_idx,
+                "po_number": po_num_val,
+                "customer_gstin": cust_gstin,
+                "style_code": str(li.get("style_code") or ""),
+                "color": str(li.get("color") or ""),
+                "size": str(li.get("size") or ""),
+                "hsn_code": str(li.get("hsn_code") or "6403"),
+                "quantity": q_val,
+                "unit_price": rate_val,
+                "amount": amt_val,
+            })
+
+        # Prefer atomic transactional RPC; fall back only if RPC is not yet deployed
+        try:
+            rpc_res = client.rpc("sync_sales_invoice_tx", {
+                "p_je": je_row,
+                "p_je_lines": lines,
+                "p_invoice": inv_row,
+                "p_invoice_lines": inv_line_rows,
+            }).execute()
+            if rpc_res and getattr(rpc_res, "data", None):
+                log.info("Atomically synced Invoice %s (%s) to Supabase via RPC.", invoice_no, inv_uuid)
+                return rpc_res.data
+        except Exception as rpc_err:
+            err_s = str(rpc_err)
+            if "sync_sales_invoice_tx" not in err_s and "PGRST202" not in err_s:
+                raise
+
+        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
+        client.table("journal_lines").upsert(lines, on_conflict="id").execute()
         try:
             res_inv = client.table("sales_invoices").upsert(inv_row, on_conflict="id").execute()
         except Exception as col_err:
-            # Fallback if line_items column migration hasn't run yet
             if "line_items" in str(col_err):
                 inv_row.pop("line_items", None)
                 res_inv = client.table("sales_invoices").upsert(inv_row, on_conflict="id").execute()
             else:
                 raise
 
-        # 5. Upsert normalized product lines into public.sales_invoice_lines (including customer_gstin)
-        if line_items_snap:
+        if inv_line_rows:
             try:
-                inv_line_rows = []
-                for l_idx, li in enumerate(line_items_snap, start=1):
-                    q_val = float(li.get("quantity") if li.get("quantity") is not None else (li.get("qty") or 0))
-                    rate_val = float(li.get("unit_price") if li.get("unit_price") is not None else (li.get("rate") or 0))
-                    amt_val = float(li.get("amount") if li.get("amount") is not None else round(q_val * rate_val, 2))
-                    inv_line_rows.append({
-                        "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"{inv_uuid}_prod_line_{l_idx}")),
-                        "invoice_id": inv_uuid,
-                        "invoice_no": invoice_no,
-                        "line_number": l_idx,
-                        "po_number": po_num_val,
-                        "customer_gstin": cust_gstin,
-                        "style_code": str(li.get("style_code") or ""),
-                        "color": str(li.get("color") or ""),
-                        "size": str(li.get("size") or ""),
-                        "hsn_code": str(li.get("hsn_code") or "6403"),
-                        "quantity": q_val,
-                        "unit_price": rate_val,
-                        "amount": amt_val,
-                    })
-                if inv_line_rows:
-                    client.table("sales_invoice_lines").upsert(inv_line_rows, on_conflict="id").execute()
+                client.table("sales_invoice_lines").upsert(inv_line_rows, on_conflict="id").execute()
             except Exception as line_err:
                 log.debug("Could not upsert sales_invoice_lines for %s: %s", invoice_no, line_err)
 
@@ -384,7 +399,6 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
             "posted_by": payment_doc.get("by") or "system",
             "posted_at": datetime.now(timezone.utc).isoformat(),
         }
-        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
 
         # 2. Receipt Journal Lines
         lines = [
@@ -413,7 +427,6 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
                 "reconciliation_status": "RECONCILED",
             }
         ]
-        client.table("journal_lines").upsert(lines, on_conflict="id").execute()
 
         # 3. Payment Voucher
         voucher_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"VCH_REC_{pay_id}"))
@@ -432,31 +445,57 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
             "journal_entry_id": je_id,
             "notes": narration,
         }
-        res_vch = client.table("payment_vouchers").upsert(voucher_row, on_conflict="id").execute()
 
-        # 4. Voucher Allocations
+        # 4. Voucher Allocations (idempotent)
         allocations = payment_doc.get("allocations") or {}
         alloc_rows = []
+        affected_inv_uuids = []
         for inv_id_str, alloc_amt in allocations.items():
             alloc_amt_flt = round(float(alloc_amt or 0.0), 2)
             if alloc_amt_flt <= 0:
                 continue
             inv_uuid = to_uuid(inv_id_str)
+            affected_inv_uuids.append(inv_uuid)
             alloc_rows.append({
                 "id": str(uuid.uuid5(uuid.NAMESPACE_OID, f"{voucher_id}_{inv_uuid}")),
                 "voucher_id": voucher_id,
                 "sales_invoice_id": inv_uuid,
                 "allocated_amount": alloc_amt_flt,
             })
-            # Also update invoice in Supabase
+
+        # Prefer atomic transactional RPC (derives paid_amount from voucher_allocations)
+        try:
+            rpc_res = client.rpc("sync_invoice_payment_tx", {
+                "p_je": je_row,
+                "p_je_lines": lines,
+                "p_voucher": voucher_row,
+                "p_allocations": alloc_rows,
+            }).execute()
+            if rpc_res and getattr(rpc_res, "data", None):
+                log.info("Atomically recorded receipt voucher %s into Supabase via RPC.", voucher_id)
+                return rpc_res.data
+        except Exception as rpc_err:
+            err_s = str(rpc_err)
+            if "sync_invoice_payment_tx" not in err_s and "PGRST202" not in err_s:
+                raise
+
+        # Fallback path if RPC is not yet deployed: upsert allocations FIRST, then derive paid_amount from SUM(allocations)
+        client.table("journal_entries").upsert(je_row, on_conflict="id").execute()
+        client.table("journal_lines").upsert(lines, on_conflict="id").execute()
+        res_vch = client.table("payment_vouchers").upsert(voucher_row, on_conflict="id").execute()
+
+        if alloc_rows:
+            client.table("voucher_allocations").upsert(alloc_rows, on_conflict="id").execute()
+
+        for inv_uuid in set(affected_inv_uuids):
             try:
-                cur_inv = client.table("sales_invoices").select("grand_total, paid_amount").eq("id", inv_uuid).execute()
+                cur_inv = client.table("sales_invoices").select("grand_total").eq("id", inv_uuid).execute()
                 if cur_inv.data:
                     gt = float(cur_inv.data[0].get("grand_total") or 0.0)
-                    old_paid = float(cur_inv.data[0].get("paid_amount") or 0.0)
-                    new_paid = round(old_paid + alloc_amt_flt, 2)
+                    all_allocs = client.table("voucher_allocations").select("allocated_amount").eq("sales_invoice_id", inv_uuid).execute()
+                    new_paid = round(sum(float(a.get("allocated_amount") or 0.0) for a in (all_allocs.data or [])), 2)
                     new_net = max(0.0, round(gt - new_paid, 2))
-                    st = "PAID" if new_net <= 0.01 else "PARTIALLY_PAID"
+                    st = "PAID" if new_net <= 0.01 else ("PARTIALLY_PAID" if new_paid > 0 else "POSTED")
                     client.table("sales_invoices").update({
                         "paid_amount": new_paid,
                         "net_receivable": new_net,
@@ -464,9 +503,6 @@ def sync_invoice_payment_to_supabase(payment_doc: Dict[str, Any], invoice_docs: 
                     }).eq("id", inv_uuid).execute()
             except Exception as ie:
                 log.debug("Could not update sales_invoice %s in Supabase: %s", inv_uuid, ie)
-
-        if alloc_rows:
-            client.table("voucher_allocations").upsert(alloc_rows, on_conflict="id").execute()
 
         log.info("Successfully recorded receipt voucher %s into Supabase.", voucher_id)
         return res_vch.data[0] if (res_vch and getattr(res_vch, "data", None)) else voucher_row

@@ -4110,6 +4110,7 @@ function DirectInvoiceModal({ onClose, onCreated, editingInvoice = null }) {
                         <td className="p-2">
                           <input
                             type="text"
+                            placeholder="6403"
                             value={it.hsn_code}
                             onChange={(e) => handleItemChange(idx, "hsn_code", e.target.value)}
                             className="w-16 border border-slate-300 rounded px-2 py-1 font-mono text-center focus:border-purple-600 outline-none"
@@ -4120,6 +4121,7 @@ function DirectInvoiceModal({ onClose, onCreated, editingInvoice = null }) {
                             type="number"
                             min="1"
                             required
+                            placeholder="0"
                             value={it.qty}
                             onChange={(e) => handleItemChange(idx, "qty", e.target.value)}
                             className="w-20 border border-slate-300 rounded px-2 py-1 font-mono text-right font-bold focus:border-purple-600 outline-none"
@@ -4131,6 +4133,7 @@ function DirectInvoiceModal({ onClose, onCreated, editingInvoice = null }) {
                             step="0.01"
                             min="0"
                             required
+                            placeholder="0.00"
                             value={it.unit_price}
                             onChange={(e) => handleItemChange(idx, "unit_price", e.target.value)}
                             className="w-24 border border-slate-300 rounded px-2 py-1 font-mono text-right font-bold focus:border-purple-600 outline-none"

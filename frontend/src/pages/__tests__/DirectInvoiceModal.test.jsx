@@ -62,7 +62,7 @@ describe("Direct Invoice (No PO) Flow in Invoices.jsx", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Create Direct Tax Invoice")).toBeInTheDocument();
-      expect(screen.getByText(/NO PO REQUIRED/i)).toBeInTheDocument();
+      expect(screen.getByText(/OPTIONAL PO \/ ORDER NO\./i)).toBeInTheDocument();
     });
   });
 

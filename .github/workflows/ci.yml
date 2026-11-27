@@ -123,7 +123,7 @@ jobs:
 
       - name: Validate Supabase Schema (Dry-run / lint)
         run: |
-          supabase db lint --level error || true
+          supabase db lint --level error
 
   frontend-gate:
     name: Frontend Quality, Unit Tests & Production Build (OPS-020, OPS-022)

@@ -14,24 +14,21 @@ DEFAULT_GL_ACCOUNT_ID = "5cd5b5bd-d7a2-46ff-8a0f-5403c1f93bc3"
 
 def _resolve_default_gl_account_id(client) -> str:
     """Dynamically resolve default bank GL account ID from chart_of_accounts."""
-    try:
-        res = client.table("chart_of_accounts").select("id, code").eq("code", "1010").execute()
-        data = getattr(res, "data", [])
-        if data and len(data) > 0 and data[0].get("id"):
-            return str(data[0]["id"])
-        res = client.table("chart_of_accounts").select("id, code").eq("sub_type", "BANK_ACCOUNT").limit(1).execute()
-        data = getattr(res, "data", [])
-        if data and len(data) > 0 and data[0].get("id"):
-            return str(data[0]["id"])
-    except Exception as e:
-        log.warning("Could not dynamically resolve bank GL account ID: %s", e)
-    return DEFAULT_GL_ACCOUNT_ID
+    res = client.table("chart_of_accounts").select("id, code").eq("code", "1010").execute()
+    data = getattr(res, "data", [])
+    if data and len(data) > 0 and data[0].get("id"):
+        return str(data[0]["id"])
+    res = client.table("chart_of_accounts").select("id, code").eq("sub_type", "BANK_ACCOUNT").limit(1).execute()
+    data = getattr(res, "data", [])
+    if data and len(data) > 0 and data[0].get("id"):
+        return str(data[0]["id"])
+    raise ValueError("No BANK_ACCOUNT (or 1010) GL account found in chart_of_accounts")
 
 
 def to_uuid(val: Any) -> str:
     """Convert an ObjectId or arbitrary ID to a deterministic, valid UUID string."""
-    if not val:
-        return str(uuid.uuid4())
+    if not val or not str(val).strip():
+        raise ValueError("Cannot convert empty identifier to deterministic UUID")
     s = str(val).strip()
     try:
         # Check if already a valid UUID
@@ -44,35 +41,46 @@ def to_uuid(val: Any) -> str:
 def upsert_supabase_bank_account(account_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Synchronize / persist a bank account to public.bank_accounts in Supabase.
+    Requires explicit id/_id, account_number, and ifsc; fails explicitly instead of substituting fake defaults.
     """
     client = get_supabase_admin_client()
     if not client:
         return None
 
-    raw_id = account_data.get("id") or account_data.get("_id")
-    acc_id = to_uuid(raw_id)
-    raw_acc_num = str(account_data.get("account_number", "")).strip() or "0000000000"
-    last4 = account_data.get("account_number_last4") or (raw_acc_num[-4:] if len(raw_acc_num) >= 4 else raw_acc_num)
-    gl_account_id = account_data.get("gl_account_id") or _resolve_default_gl_account_id(client)
-
-    row = {
-        "id": acc_id,
-        "entity_id": account_data.get("entity_id") or DEFAULT_ENTITY_ID,
-        "gl_account_id": gl_account_id,
-        "account_name": account_data.get("account_name") or account_data.get("name") or "Bank Account",
-        "bank_name": account_data.get("bank_name") or "Primary Bank",
-        "account_number": raw_acc_num,
-        "account_number_last4": last4,
-        "ifsc": account_data.get("ifsc") or "SBIN0001234",
-        "branch": account_data.get("branch") or "",
-        "category": account_data.get("category") or "operating",
-        "opening_balance": float(account_data.get("opening_balance") or 0.0),
-        "opening_balance_date": str(account_data.get("opening_balance_date") or datetime.now(timezone.utc).date().isoformat())[:10],
-        "current_cleared_balance": float(account_data.get("current_cleared_balance") or account_data.get("current_balance") or 0.0),
-        "is_active": bool(account_data.get("is_active", True)),
-    }
-
     try:
+        raw_id = account_data.get("id") or account_data.get("_id")
+        if not raw_id:
+            raise ValueError("Bank account sync rejected: missing 'id' or '_id'")
+        acc_id = to_uuid(raw_id)
+
+        raw_acc_num = str(account_data.get("account_number") or "").strip()
+        if not raw_acc_num:
+            raise ValueError(f"Bank account {acc_id} sync rejected: missing 'account_number'")
+
+        ifsc_val = str(account_data.get("ifsc") or "").strip().upper()
+        if not ifsc_val:
+            raise ValueError(f"Bank account {acc_id} sync rejected: missing 'ifsc'")
+
+        last4 = account_data.get("account_number_last4") or (raw_acc_num[-4:] if len(raw_acc_num) >= 4 else raw_acc_num)
+        gl_account_id = account_data.get("gl_account_id") or _resolve_default_gl_account_id(client)
+
+        row = {
+            "id": acc_id,
+            "entity_id": account_data.get("entity_id") or DEFAULT_ENTITY_ID,
+            "gl_account_id": gl_account_id,
+            "account_name": account_data.get("account_name") or account_data.get("name") or "Bank Account",
+            "bank_name": account_data.get("bank_name") or "Primary Bank",
+            "account_number": raw_acc_num,
+            "account_number_last4": last4,
+            "ifsc": ifsc_val,
+            "branch": account_data.get("branch") or "",
+            "category": account_data.get("category") or "operating",
+            "opening_balance": float(account_data.get("opening_balance") or 0.0),
+            "opening_balance_date": str(account_data.get("opening_balance_date") or datetime.now(timezone.utc).date().isoformat())[:10],
+            "current_cleared_balance": float(account_data.get("current_cleared_balance") or account_data.get("current_balance") or 0.0),
+            "is_active": bool(account_data.get("is_active", True)),
+        }
+
         res = client.table("bank_accounts").upsert(row, on_conflict="id").execute()
         data = getattr(res, "data", None)
         if data and len(data) > 0:
@@ -80,7 +88,7 @@ def upsert_supabase_bank_account(account_data: Dict[str, Any]) -> Optional[Dict[
             return data[0]
         return row
     except Exception as e:
-        log.error("Failed to upsert bank account %s to Supabase: %s", acc_id, e)
+        log.error("Failed to upsert bank account to Supabase: %s", e)
         return None
 
 
@@ -139,8 +147,8 @@ def save_supabase_reconciliation_statement(recon_data: Dict[str, Any]) -> Option
 
     stmt_bal = float(recon_data.get("bank_statement_balance") or recon_data.get("statement_closing_balance") or 0.0)
     book_bal = float(recon_data.get("book_balance") or recon_data.get("gl_closing_balance") or recon_data.get("reconciled_balance") or 0.0)
-    diff = float(recon_data.get("reconciled_difference") or recon_data.get("unreconciled_difference") or abs(stmt_bal - book_bal))
-    is_bal = recon_data.get("is_balanced") if "is_balanced" in recon_data else (abs(stmt_bal - book_bal) < 0.01)
+    diff = round(abs(stmt_bal - book_bal), 2)
+    is_bal = diff < 0.01
 
     row = {
         "id": recon_id,

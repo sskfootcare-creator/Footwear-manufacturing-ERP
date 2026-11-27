@@ -45,18 +45,37 @@ async def requeue_failed_connection_events(db: Any) -> int:
         return 0
 
 
+async def recover_stale_processing_events(db: Any, stale_after_seconds: int = 300) -> int:
+    """Reset outbox events stuck in 'processing' (e.g. after a crash/restart) back to 'pending'."""
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat()
+        res = await db.outbox_events.update_many(
+            {"status": "processing", "updated_at": {"$lt": cutoff}},
+            {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        if res.modified_count:
+            log.warning(f"Recovered {res.modified_count} stale 'processing' outbox events back to 'pending'.")
+        return res.modified_count
+    except Exception as e:
+        log.warning(f"Failed to recover stale processing outbox events: {e}")
+        return 0
+
+
 async def process_outbox_events(db: Any):
     """
     Background worker that continuously polls the outbox_events collection
     and pushes pending events to Supabase.
     """
     log.info("Starting Supabase outbox processor background worker...")
+    await recover_stale_processing_events(db, stale_after_seconds=0)
     await requeue_failed_connection_events(db)
     _requeue_tick = 0
     while True:
         try:
             _requeue_tick += 1
-            if _requeue_tick % 12 == 0:  # Every ~60s when idle, check if Supabase recovered to retry failed events
+            if _requeue_tick % 12 == 0:  # Every ~60s when idle, check recovery & failed events
+                await recover_stale_processing_events(db, stale_after_seconds=300)
                 from db.supabase_client import get_supabase_admin_client
                 if get_supabase_admin_client():
                     await requeue_failed_connection_events(db)
@@ -175,8 +194,8 @@ async def process_outbox_events(db: Any):
                         raise RuntimeError("Supabase returned no confirmation for investor repayment sync.")
 
                 else:
-                    log.warning(f"Unknown outbox event type: {event_type}")
-                    
+                    raise ValueError(f"Unknown outbox event type: {event_type}")
+
                 success = True
             except Exception as e:
                 error_msg = str(e)
