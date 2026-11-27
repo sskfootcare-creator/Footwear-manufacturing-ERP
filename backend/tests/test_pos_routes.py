@@ -552,7 +552,8 @@ def test_production_job_procurement_gating(client, mock_pos_env, monkeypatch):
         "stage": "procurement",
         "quantity": 50,
         "inventory_consumed": True,
-        "components": {"upper_done": False, "bottom_done": False}
+        "components": {"upper_done": False, "bottom_done": False},
+        "assignments": {"upper": {"worker_id": "w-test-1", "worker_name": "Test Upper"}, "bottom": {"worker_id": "w-test-2", "worker_name": "Test Bottom"}},
     }))
 
     # Move to cutting (next stage) -> should succeed

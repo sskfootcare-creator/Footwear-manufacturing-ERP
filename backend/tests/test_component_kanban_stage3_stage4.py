@@ -117,6 +117,7 @@ async def test_component_stage_update_and_payroll_flow():
             "component": "bottom",
             "stage": "cutting",
             "completed_qty": 100,
+            "worker_id": worker_id,
         }, headers=headers)
         assert comp_res3.status_code == 200
         assert comp_res3.json()["component_tracks"]["bottom"]["status"] == "ready"

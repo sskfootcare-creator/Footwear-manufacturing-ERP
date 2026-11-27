@@ -93,6 +93,8 @@ def _format_worker(doc: dict) -> dict:
         return doc
     sd = stringify(doc)
     sd["has_pin"] = bool(doc.get("pin_hash"))
+    sd.setdefault("pay_basis", "per_pair")
+    sd.setdefault("wage_amount", 0)
     sd.pop("pin_hash", None)
     return sd
 

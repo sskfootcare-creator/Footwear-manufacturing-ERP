@@ -39,11 +39,25 @@ const SKILL_COLOR = {
   general: "slate",
 };
 
+const PAY_BASIS_OPTIONS = [
+  { key: "per_pair", label: "Per Pair (Piece Rate)" },
+  { key: "wage", label: "Wage (Fixed / Monthly)" },
+  { key: "working_basis", label: "Working Basis (Daily)" },
+];
+
+const PAY_BASIS_BADGE = {
+  per_pair: { label: "Per Pair", color: "blue" },
+  wage: { label: "Wage", color: "green" },
+  working_basis: { label: "Working Basis", color: "orange" },
+};
+
 const empty = {
   name: "",
   phone: "",
   skill: "general",
+  pay_basis: "per_pair",
   rate_per_pair: 0,
+  wage_amount: 0,
   active: true,
   notes: "",
   bonus_pct: 0,
@@ -56,6 +70,7 @@ export default function Workers() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(empty);
   const [filterSkill, setFilterSkill] = useState("");
+  const [filterPayBasis, setFilterPayBasis] = useState("");
   const [confirm, setConfirm] = useState(null);
 
   // PIN drawer state
@@ -112,7 +127,9 @@ export default function Workers() {
   const save = async () => {
     const body = {
       ...form,
+      pay_basis: form.pay_basis || "per_pair",
       rate_per_pair: Number(form.rate_per_pair || 0),
+      wage_amount: Number(form.wage_amount || 0),
       active: !!form.active,
       bonus_pct: Number(form.bonus_pct || 0),
       target_cycle_days: Number(form.target_cycle_days || 0),
@@ -146,7 +163,11 @@ export default function Workers() {
     }
   };
 
-  const filtered = items.filter((w) => !filterSkill || w.skill === filterSkill);
+  const filtered = items.filter(
+    (w) =>
+      (!filterSkill || w.skill === filterSkill) &&
+      (!filterPayBasis || (w.pay_basis || "per_pair") === filterPayBasis)
+  );
 
   const {
     paginatedItems: paginatedWorkers,
@@ -191,6 +212,21 @@ export default function Workers() {
               ))}
             </Select>
           </div>
+          <div className="w-56">
+            <Select
+              label="Filter by Pay Basis"
+              value={filterPayBasis}
+              onChange={(e) => setFilterPayBasis(e.target.value)}
+              testId="filter-pay-basis"
+            >
+              <option value="">All pay bases</option>
+              {PAY_BASIS_OPTIONS.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+            </Select>
+          </div>
           <div className="ml-auto text-xs uppercase tracking-wider text-slate-500 pb-2">
             <span className="font-bold text-slate-900 font-mono text-lg">
               {filtered.length}
@@ -207,7 +243,8 @@ export default function Workers() {
                   <th className="px-4 py-3 font-bold">Name</th>
                   <th className="px-4 py-3 font-bold">Skill</th>
                   <th className="px-4 py-3 font-bold">Phone</th>
-                  <th className="px-4 py-3 font-bold text-right">Rate/pair</th>
+                  <th className="px-4 py-3 font-bold">Pay Basis</th>
+                  <th className="px-4 py-3 font-bold text-right">Rate / Wage</th>
                   <th className="px-4 py-3 font-bold">App PIN</th>
                   <th className="px-4 py-3 font-bold">Status</th>
                   <th className="px-4 py-3 text-right">Actions</th>
@@ -241,8 +278,17 @@ export default function Workers() {
                         <Phone className="w-3 h-3 inline -mt-0.5 mr-1 text-slate-400" />
                         {w.phone || "—"}
                       </td>
+                      <td className="px-4 py-3">
+                        <Badge color={(PAY_BASIS_BADGE[w.pay_basis] || PAY_BASIS_BADGE.per_pair).color}>
+                          {(PAY_BASIS_BADGE[w.pay_basis] || PAY_BASIS_BADGE.per_pair).label}
+                        </Badge>
+                      </td>
                       <td className="px-4 py-3 text-right font-mono font-bold">
-                        ₹{w.rate_per_pair}
+                        {(w.pay_basis || "per_pair") === "per_pair"
+                          ? `₹${w.rate_per_pair}/pr`
+                          : w.pay_basis === "working_basis"
+                          ? `₹${w.wage_amount || w.rate_per_pair}/day`
+                          : `₹${w.wage_amount || w.rate_per_pair}/mo`}
                       </td>
                       <td className="px-4 py-3">
                         <Badge color={w.has_pin ? "green" : "orange"}>
@@ -325,15 +371,44 @@ export default function Workers() {
                 </option>
               ))}
             </Select>
-            <Input
-              label="Rate per pair (₹) – default"
-              type="number"
-              step="0.5"
-              value={form.rate_per_pair}
-              onChange={(e) =>
-                setForm({ ...form, rate_per_pair: e.target.value })
-              }
-            />
+            <Select
+              label="Pay Basis"
+              value={form.pay_basis || "per_pair"}
+              onChange={(e) => setForm({ ...form, pay_basis: e.target.value })}
+              testId="form-worker-pay-basis"
+            >
+              {PAY_BASIS_OPTIONS.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label}
+                </option>
+              ))}
+            </Select>
+            {(form.pay_basis || "per_pair") === "per_pair" ? (
+              <Input
+                label="Rate per pair (₹) – default"
+                type="number"
+                step="0.5"
+                value={form.rate_per_pair}
+                onChange={(e) =>
+                  setForm({ ...form, rate_per_pair: e.target.value })
+                }
+              />
+            ) : (
+              <Input
+                label={
+                  form.pay_basis === "working_basis"
+                    ? "Daily Working Rate (₹)"
+                    : "Fixed / Monthly Wage (₹)"
+                }
+                type="number"
+                step="10"
+                value={form.wage_amount}
+                onChange={(e) =>
+                  setForm({ ...form, wage_amount: e.target.value })
+                }
+                testId="form-worker-wage-amount"
+              />
+            )}
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-dashed border-slate-200">
               <Input
                 label="Productivity Bonus %"

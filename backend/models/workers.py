@@ -14,6 +14,8 @@ class WorkerIn(BaseModel):
     bonus_pct: float = 0
     target_cycle_days: float = 0
     opening_balance: Optional[float] = 0.0
+    pay_basis: Literal["per_pair", "wage", "working_basis"] = "per_pair"
+    wage_amount: float = 0
 
 
 class AssignmentUpdate(BaseModel):

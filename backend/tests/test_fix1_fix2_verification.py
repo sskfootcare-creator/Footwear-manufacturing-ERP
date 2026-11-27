@@ -60,6 +60,18 @@ def test_fix1_parallel_completion_gate(admin_session):
     orig_comp = test_job.get("components") or {}
 
     try:
+        # Ensure upper and bottom have a karigar assigned so component completion is allowed
+        workers_res = admin_session.get(f"{BASE_URL}/api/workers")
+        workers_list = workers_res.json() if workers_res.status_code == 200 else []
+        if workers_list:
+            w = workers_list[0]
+        else:
+            w = admin_session.post(f"{BASE_URL}/api/workers", json={"name": "Fix1 Test Karigar", "skill": "upper", "rate_per_pair": 10}).json()
+        a1 = admin_session.patch(f"{BASE_URL}/api/production/jobs/{jid}/assignment", json={"role": "upper", "worker_id": w["id"], "worker_name": w["name"]})
+        assert a1.status_code == 200, f"Assign upper failed: {a1.text}"
+        a2 = admin_session.patch(f"{BASE_URL}/api/production/jobs/{jid}/assignment", json={"role": "bottom", "worker_id": w["id"], "worker_name": w["name"]})
+        assert a2.status_code == 200, f"Assign bottom failed: {a2.text}"
+
         # Ensure components are initially incomplete
         admin_session.patch(f"{BASE_URL}/api/production/jobs/{jid}/components", json={"upper_done": False, "bottom_done": False})
 
