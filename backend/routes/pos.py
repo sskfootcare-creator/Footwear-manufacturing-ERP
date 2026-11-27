@@ -3831,13 +3831,15 @@ async def _enrich_jobs(docs: list, db) -> list:
 
 
 @pos_router.get("/production/jobs")
-async def list_jobs(request: Request, include_archived: bool = False, source_type: Optional[str] = "b2b_client"):
+async def list_jobs(request: Request, include_archived: bool = False, source_type: Optional[str] = "b2b_client", po_id: Optional[str] = None):
     u = await _get_user(request)
     require_roles("admin", "manager", "production")(u)
     db = get_db()
     q: dict = {}
     if not include_archived:
         q = {"archived": {"$ne": True}}
+    if po_id:
+        q["po_id"] = str(po_id)
     if source_type and source_type != "all":
         if source_type == "b2b_client":
             q["source_type"] = {"$in": ["b2b_client", None]}
