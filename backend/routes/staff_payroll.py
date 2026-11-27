@@ -55,6 +55,7 @@ class StaffEmployeeIn(BaseModel):
     monthly_salary: float = Field(..., ge=0)
     phone: Optional[str] = ""
     joining_date: Optional[str] = ""
+    relieving_date: Optional[str] = ""
     bank_account: Optional[str] = ""
     upi_id: Optional[str] = ""
     is_active: bool = True
@@ -279,7 +280,16 @@ async def get_monthly_salary_summary(request: Request, month: str = Query(..., d
     except Exception:
         raise HTTPException(400, "Invalid month format. Expected YYYY-MM.")
 
-    employees = await db.staff_employees.find({"is_active": True}).sort("name", 1).to_list(500)
+    month_start = date(yr, mo, 1)
+    month_end = date(yr, mo, days_in_month)
+    month_start_str = month_start.isoformat()
+
+    employees = await db.staff_employees.find({
+        "$or": [
+            {"is_active": True},
+            {"relieving_date": {"$gte": month_start_str}},
+        ]
+    }).sort("name", 1).to_list(500)
     holidays = await db.staff_holidays.find({"holiday_date": {"$regex": f"^{month.strip()}"}}).to_list(100)
     holiday_dates = {h["holiday_date"] for h in holidays}
 
@@ -306,6 +316,32 @@ async def get_monthly_salary_summary(request: Request, month: str = Query(..., d
         base_salary = float(emp.get("monthly_salary") or 0.0)
         emp_att = att_by_staff.get(eid, {})
 
+        doj_str = (emp.get("joining_date") or "").strip()[:10]
+        dor_str = (emp.get("relieving_date") or "").strip()[:10]
+        eff_start = month_start
+        eff_end = month_end
+        if doj_str:
+            try:
+                doj_dt = date.fromisoformat(doj_str)
+                if doj_dt > eff_start:
+                    eff_start = doj_dt
+            except ValueError:
+                pass
+        if dor_str:
+            try:
+                dor_dt = date.fromisoformat(dor_str)
+                if dor_dt < eff_end:
+                    eff_end = dor_dt
+            except ValueError:
+                pass
+
+        if eff_end < eff_start:
+            employed_days = 0
+            pro_rata_salary = 0.0
+        else:
+            employed_days = (eff_end - eff_start).days + 1
+            pro_rata_salary = base_salary if employed_days >= days_in_month else round((base_salary / days_in_month) * employed_days, 2)
+
         present_days = 0
         half_days = 0
         absent_days = 0
@@ -315,6 +351,9 @@ async def get_monthly_salary_summary(request: Request, month: str = Query(..., d
         overtime_hours = 0.0
 
         for d in range(1, days_in_month + 1):
+            cur_dt = date(yr, mo, d)
+            if cur_dt < eff_start or cur_dt > eff_end:
+                continue
             d_str = f"{yr:04d}-{mo:02d}-{d:02d}"
             rec = emp_att.get(d_str)
             if rec:
@@ -351,7 +390,7 @@ async def get_monthly_salary_summary(request: Request, month: str = Query(..., d
         adv_deduction = round(sum(float(p.get("advance_deduction") or 0.0) for p in emp_payments), 2)
         paid_amount = round(sum(float(p.get("amount") or 0.0) for p in emp_payments), 2)
 
-        net_payable = max(0.0, round(base_salary - lop_deduction + overtime_pay + bonus_total - adv_deduction, 2))
+        net_payable = max(0.0, round(pro_rata_salary - lop_deduction + overtime_pay + bonus_total - adv_deduction, 2))
         balance_due = max(0.0, round(net_payable - paid_amount, 2))
 
         rows.append({
@@ -360,7 +399,11 @@ async def get_monthly_salary_summary(request: Request, month: str = Query(..., d
             "role": emp.get("role"),
             "department": emp.get("department", "Operations"),
             "phone": emp.get("phone", ""),
+            "joining_date": doj_str,
+            "relieving_date": dor_str,
+            "employed_days": employed_days,
             "monthly_salary": base_salary,
+            "pro_rata_salary": pro_rata_salary,
             "days_in_month": days_in_month,
             "present_days": present_days,
             "half_days": half_days,

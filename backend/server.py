@@ -1436,18 +1436,24 @@ async def _compute_dashboard_stats_live(start_date: Optional[str] = None, end_da
             else:
                 b2b_stage_counts[st] = b2b_stage_counts.get(st, 0) + qty
 
-    # F-031: Clean revenue recognition
-    # 1. Authoritative recognized invoiced revenue (active non-voided invoices)
+    # F-031: Clean revenue recognition & AR receivable/collected
     invoiced_revenue = 0.0
+    ar_collected = 0.0
+    ar_receivable = 0.0
     if hasattr(db, "invoices") and db.invoices is not None:
         try:
             inv_docs = await _fetch_bounded_collection(
                 db.invoices,
                 query={"status": {"$ne": "voided"}},
-                projection={"grand_total": 1, "net_amount": 1, "subtotal": 1, "status": 1},
+                projection={"grand_total": 1, "net_amount": 1, "subtotal": 1, "paid_amount": 1, "received_amount": 1, "status": 1},
                 limit=5000,
             )
-            invoiced_revenue = sum(float(inv.get("grand_total") or inv.get("net_amount") or inv.get("subtotal") or 0.0) for inv in inv_docs)
+            for inv in inv_docs:
+                gt = float(inv.get("grand_total") or inv.get("net_amount") or inv.get("subtotal") or 0.0)
+                paid = float(inv.get("received_amount") if inv.get("received_amount") is not None else (inv.get("paid_amount") or 0.0))
+                invoiced_revenue += gt
+                ar_collected += paid
+                ar_receivable += max(0.0, gt - paid)
         except Exception as inv_err:
             log.warning(f"CODE-003: Error aggregating invoiced revenue: {inv_err}")
 
@@ -1490,6 +1496,68 @@ async def _compute_dashboard_stats_live(start_date: Optional[str] = None, end_da
             cash_docs = []
     total_cash_in_hand = round(sum(float(cd.get("remaining_balance") or 0.0) for cd in cash_docs), 2)
 
+    # Owner financial & operational summary
+    total_bank_balance = 0.0
+    if hasattr(db, "bank_accounts") and db.bank_accounts is not None:
+        try:
+            bank_docs = await _fetch_bounded_collection(
+                db.bank_accounts,
+                query={"active": {"$ne": False}},
+                projection={"current_balance": 1, "opening_balance": 1},
+                limit=500,
+            )
+            total_bank_balance = round(sum(float(b.get("current_balance") if b.get("current_balance") is not None else (b.get("opening_balance") or 0.0)) for b in bank_docs), 2)
+        except Exception:
+            pass
+
+    ap_payable = 0.0
+    if hasattr(db, "vendor_purchase_orders") and db.vendor_purchase_orders is not None:
+        try:
+            vpo_docs = await _fetch_bounded_collection(
+                db.vendor_purchase_orders,
+                query={"status": {"$nin": ["cancelled", "voided"]}},
+                projection={"grand_total": 1, "total_amount": 1, "paid_amount": 1},
+                limit=2000,
+            )
+            for vpo in vpo_docs:
+                vtot = float(vpo.get("grand_total") or vpo.get("total_amount") or 0.0)
+                vpaid = float(vpo.get("paid_amount") or 0.0)
+                ap_payable += max(0.0, vtot - vpaid)
+        except Exception:
+            pass
+
+    total_expenses = 0.0
+    if hasattr(db, "expenses") and db.expenses is not None:
+        try:
+            exp_docs = await _fetch_bounded_collection(
+                db.expenses,
+                query={"status": {"$ne": "voided"}},
+                projection={"amount": 1},
+                limit=5000,
+            )
+            total_expenses = round(sum(float(e.get("amount") or 0.0) for e in exp_docs), 2)
+        except Exception:
+            pass
+
+    low_stock_materials = 0
+    if hasattr(db, "materials") and db.materials is not None:
+        try:
+            mat_docs = await _fetch_bounded_collection(
+                db.materials,
+                projection={"stock_qty": 1, "current_stock": 1, "reorder_level": 1},
+                limit=2000,
+            )
+            for m in mat_docs:
+                rl = float(m.get("reorder_level") or 0.0)
+                sq = float(m.get("stock_qty") if m.get("stock_qty") is not None else (m.get("current_stock") or 0.0))
+                if rl > 0 and sq <= rl:
+                    low_stock_materials += 1
+        except Exception:
+            pass
+
+    active_workers_count = await db.workers.count_documents({"active": {"$ne": False}}) if hasattr(db, "workers") and db.workers is not None else 0
+    active_staff_count = await db.staff_employees.count_documents({"is_active": True}) if hasattr(db, "staff_employees") and db.staff_employees is not None else 0
+
     return {
         "total_pos": total_pos,
         "pending_pos": pending_pos,
@@ -1500,6 +1568,20 @@ async def _compute_dashboard_stats_live(start_date: Optional[str] = None, end_da
         "materials_count": await db.materials.count_documents({}),
         "styles_count": await db.styles.count_documents({}),
         "total_cash_in_hand": total_cash_in_hand,
+        "owner_metrics": {
+            "total_cash_in_hand": total_cash_in_hand,
+            "total_bank_balance": total_bank_balance,
+            "total_liquidity": round(total_cash_in_hand + total_bank_balance, 2),
+            "ar_receivable": round(ar_receivable, 2),
+            "ar_collected": round(ar_collected, 2),
+            "ap_payable": round(ap_payable, 2),
+            "net_working_capital": round((total_cash_in_hand + total_bank_balance + ar_receivable) - ap_payable, 2),
+            "total_expenses": total_expenses,
+            "gross_surplus": round((b2b_revenue + online_revenue) - total_expenses, 2),
+            "low_stock_materials": low_stock_materials,
+            "active_workers": active_workers_count,
+            "active_salaried_staff": active_staff_count,
+        },
         
         # Authoritative Ledger Invariants (F-031 & F-032)
         "ledger_invariants": {

@@ -1,12 +1,11 @@
 import { useEffect, useState, useMemo } from "react";
-import { http, inr } from "../lib/api";
+import { http } from "../lib/api";
 import { PageHeader, StatTile, Card, BtnSecondary } from "../components/ui-kit";
 import { Link } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import {
-  AlertTriangle, Clock, ArrowRight, ReceiptIndianRupee, Wrench,
-  Factory, ShoppingBag, BarChart3, Database, Calendar,
-  Wallet, Coins, Landmark
+  AlertTriangle, Clock, ArrowRight, Wrench,
+  Factory, ShoppingBag, BarChart3, Calendar,
 } from "lucide-react";
 
 const STAGE_COLORS = {
@@ -147,23 +146,7 @@ export default function Dashboard() {
 
       <div className="p-4 sm:p-8 space-y-6">
         
-        {/* Overdue B2B Invoices - Hide on online tab */}
-        {dashTab !== "online" && overdueInvoices.length > 0 && (
-          <Card className="bg-red-50 border-2 border-red-300 px-5 py-3 flex items-center justify-between" data-testid="overdue-invoices-banner">
-            <div className="flex items-center gap-3">
-              <ReceiptIndianRupee className="w-5 h-5 text-red-600" />
-              <div>
-                <div className="font-bold text-red-700 text-sm">
-                  {overdueInvoices.length} overdue payment{overdueInvoices.length > 1 ? "s" : ""} · {inr(overdueInvoices.reduce((s, r) => s + (r.outstanding || 0), 0))} receivable
-                </div>
-                <div className="text-xs text-red-600">B2B invoice terms exceeded — review and chase up.</div>
-              </div>
-            </div>
-            <Link to="/invoices" className="text-xs uppercase tracking-wider font-bold text-red-700 hover:underline">Open invoices →</Link>
-          </Card>
-        )}
-
-        {/* Unmatched Styles (SKU mapping alert) - Show only on online / consolidated */}
+        {/* ── PRIORITY 1: URGENT OPERATIONAL ALERTS ──────────────────── */}
         {dashTab !== "b2b" && unmatchedStyles.length > 0 && (
           <Card className="bg-amber-50 border-2 border-amber-400 overflow-hidden" data-testid="unmatched-styles-banner">
             <div className="bg-amber-500 text-white px-5 py-2 flex items-baseline justify-between">
@@ -195,7 +178,6 @@ export default function Dashboard() {
           </Card>
         )}
 
-        {/* Overdue B2B jobs alert - Hide on online */}
         {dashTab !== "online" && overdue.length > 0 && (
           <Card className="bg-red-50 border-2 border-red-300 overflow-hidden" data-testid="overdue-alert-banner">
             <div className="bg-red-600 text-white px-5 py-2 flex items-baseline justify-between">
@@ -217,7 +199,6 @@ export default function Dashboard() {
                       <td className="px-4 py-2 text-right font-mono font-bold text-red-700">
                         {j.overdue_hours >= 10 ? `${(j.overdue_hours / 10).toFixed(1)} d` : `${j.overdue_hours.toFixed(1)} h`}
                       </td>
-
                     </tr>
                   ))}
                 </tbody>
@@ -226,59 +207,44 @@ export default function Dashboard() {
           </Card>
         )}
 
-        {/* ── Stat Tiles ────────────────────────────────────────── */}
-        {dashTab === "consolidated" && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            <StatTile label="Grand Total Revenue" value={inr(stats.revenue)} sub="B2B + Online Commerce" accent="#0F172A" />
-            <StatTile label="Total WIP Pairs" value={stats.pairs_in_wip} sub="across both branches" accent="#C27842" />
-            <StatTile label="Active Styles" value={stats.styles_count} sub="available in catalog" accent="#16A34A" />
-            <StatTile label="Materials Count" value={stats.materials_count} sub="raw materials registered" accent="#2563EB" />
-            <Link to="/banking" className="block hover:opacity-95 transition-opacity" data-testid="dashboard-cash-in-hand-tile">
-              <StatTile
-                label="Total Cash on Hand"
-                value={inr(stats.total_cash_in_hand || 0)}
-                sub="Live Cash Pool Balance →"
-                accent="#059669"
-              />
+        {/* ── PRIORITY 2: ORDER BOOK & PRODUCTION FLOOR ──────────────── */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-black uppercase tracking-[0.18em] text-slate-500 flex items-center gap-2">
+              <Factory className="w-4 h-4 text-blue-600" /> 1. Order Book &amp; Production Floor
+            </h2>
+            <Link to="/production" className="text-[11px] font-bold uppercase text-blue-700 hover:underline">
+              Open Production Board →
             </Link>
           </div>
-        )}
+          {dashTab === "consolidated" && (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+              <StatTile label="Total WIP Pairs" value={stats.pairs_in_wip} sub="across both branches" accent="#C27842" />
+              <StatTile label="Dispatched Pairs" value={stats.dispatched} sub="B2B + Online fulfilled" accent="#16A34A" />
+              <StatTile label="Ready FG Stock" value={`${stats.ledger_invariants?.physical_fg_stock ?? 0} prs`} sub={`Reserved: ${stats.ledger_invariants?.reserved_fg_stock ?? 0} prs`} accent="#2563EB" />
+              <StatTile label="Active Purchase Orders" value={stats.total_pos} sub={`${stats.pending_pos} pending`} accent="#0F172A" />
+              <StatTile label="Active Workforce" value={(stats.owner_metrics?.active_workers || 0) + (stats.owner_metrics?.active_salaried_staff || 0)} sub={`${stats.owner_metrics?.active_workers || 0} karigars · ${stats.owner_metrics?.active_salaried_staff || 0} staff`} accent="#7C3AED" />
+            </div>
+          )}
+          {dashTab === "b2b" && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <StatTile label="B2B WIP Pairs" value={stats.b2b.wip} sub="active on production floor" accent="#C27842" />
+              <StatTile label="Dispatched Pairs" value={stats.b2b.dispatched} sub="lifetime B2B delivery" accent="#16A34A" />
+              <StatTile label="Active Purchase Orders" value={stats.b2b.total_pos} sub={`${stats.b2b.pending_pos} pending`} accent="#2563EB" />
+              <StatTile label="Active Styles" value={stats.styles_count} sub={`${stats.materials_count} materials`} accent="#7C3AED" />
+            </div>
+          )}
+          {dashTab === "online" && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <StatTile label="Online WIP Pairs" value={stats.online.wip} sub="active online orders" accent="#C27842" />
+              <StatTile label="Dispatched Pairs" value={stats.online.dispatched} sub="fulfilled marketplace shipments" accent="#16A34A" />
+              <StatTile label="Total Import Rows" value={stats.online.total_qty} sub={`${stats.online.total_orders} imported orders`} accent="#2563EB" />
+              <StatTile label="Returns Logged" value={stats.ledger_invariants?.total_returns_units || 0} sub="online returns records" accent="#E11D48" />
+            </div>
+          )}
+        </div>
 
-        {dashTab === "b2b" && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            <StatTile label="B2B Grand Total" value={inr(stats.b2b.revenue)} sub="from B2B POs" accent="#0F172A" />
-            <StatTile label="B2B WIP Pairs" value={stats.b2b.wip} sub="active on production floor" accent="#C27842" />
-            <StatTile label="Dispatched Pairs" value={stats.b2b.dispatched} sub="lifetime B2B delivery" accent="#16A34A" />
-            <StatTile label="Active Purchase Orders" value={stats.b2b.total_pos} sub={`${stats.b2b.pending_pos} pending`} accent="#2563EB" />
-            <Link to="/banking" className="block hover:opacity-95 transition-opacity">
-              <StatTile
-                label="Cash on Hand"
-                value={inr(stats.total_cash_in_hand || 0)}
-                sub="Live Cash Pool →"
-                accent="#059669"
-              />
-            </Link>
-          </div>
-        )}
-
-        {dashTab === "online" && (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            <StatTile label="Online Grand Total" value={inr(stats.online.revenue)} sub="from marketplace CSVs" accent="#0F172A" />
-            <StatTile label="Online WIP Pairs" value={stats.online.wip} sub="active online orders" accent="#C27842" />
-            <StatTile label="Dispatched Pairs" value={stats.online.dispatched} sub="fulfilled marketplace shipments" accent="#16A34A" />
-            <StatTile label="Total Import Rows" value={stats.online.total_qty} sub={`${stats.online.total_orders} imported orders`} accent="#2563EB" />
-            <Link to="/banking" className="block hover:opacity-95 transition-opacity">
-              <StatTile
-                label="Cash on Hand"
-                value={inr(stats.total_cash_in_hand || 0)}
-                sub="Live Cash Pool →"
-                accent="#059669"
-              />
-            </Link>
-          </div>
-        )}
-
-        {/* ── Consolidated Branch Breakdown ────────────────────────── */}
+        {/* ── PRIORITY 3: BRANCH OPERATIONAL BREAKDOWN ───────────────── */}
         {dashTab === "consolidated" && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <Card className="p-5 border-l-4 border-blue-500">
@@ -286,10 +252,10 @@ export default function Dashboard() {
                 <Factory className="w-4 h-4 text-blue-500" /> B2B Manufacturing Branch
               </h3>
               <div className="space-y-2.5">
-                <Row label="B2B Order Value" value={inr(stats.b2b.revenue)} />
                 <Row label="WIP Pairs" value={`${stats.b2b.wip} pairs`} />
                 <Row label="Dispatched Pairs" value={`${stats.b2b.dispatched} pairs`} />
                 <Row label="Active Purchase Orders" value={`${stats.b2b.total_pos} POs (${stats.b2b.pending_pos} pending)`} />
+                <Row label="Overdue Production Tasks" value={overdue.length} highlight={overdue.length > 0} />
               </div>
             </Card>
 
@@ -298,16 +264,16 @@ export default function Dashboard() {
                 <ShoppingBag className="w-4 h-4 text-pink-500" /> Online Commerce Branch
               </h3>
               <div className="space-y-2.5">
-                <Row label="Online Order Value" value={inr(stats.online.revenue)} />
                 <Row label="WIP Pairs" value={`${stats.online.wip} pairs`} />
                 <Row label="Fulfilled Pairs" value={`${stats.online.dispatched} pairs`} />
                 <Row label="Total Ingested Orders" value={`${stats.online.total_orders} orders`} />
+                <Row label="Unmatched Style Codes" value={unmatchedStyles.length} highlight={unmatchedStyles.length > 0} />
               </div>
             </Card>
           </div>
         )}
 
-        {/* ── Funnel & Side Panels ───────────────────────────────── */}
+        {/* ── PRIORITY 5: STAGE FUNNEL & INVENTORY / WORKFORCE HEALTH ───── */}
         <div className="grid lg:grid-cols-3 gap-6">
           <Card className="lg:col-span-2 p-4 sm:p-6">
             <div className="flex items-baseline justify-between mb-5">
@@ -331,9 +297,12 @@ export default function Dashboard() {
           </Card>
 
           <Card className="p-4 sm:p-6">
-            <h2 className="text-lg sm:text-xl font-bold mb-4 flex items-center gap-2"><Clock className="w-4 h-4 text-[#C27842]" /> Quick Stats</h2>
+            <h2 className="text-lg sm:text-xl font-bold mb-4 flex items-center gap-2"><Clock className="w-4 h-4 text-[#C27842]" /> Factory &amp; Inventory Health</h2>
             <div className="space-y-3 text-sm">
+              <Row label="Active Karigars" value={stats.owner_metrics?.active_workers ?? 0} />
+              <Row label="Salaried Staff" value={stats.owner_metrics?.active_salaried_staff ?? 0} />
               <Row label="Materials Count" value={stats.materials_count} />
+              <Row label="Low Stock Alerts" value={stats.owner_metrics?.low_stock_materials ?? 0} highlight={(stats.owner_metrics?.low_stock_materials ?? 0) > 0} />
               <Row label="Styles Registered" value={stats.styles_count} />
               {dashTab !== "online" && (
                 <>
@@ -351,6 +320,7 @@ export default function Dashboard() {
             <div className="mt-6 pt-4 border-t border-slate-200 space-y-2">
               <Link to="/pos" className="block text-xs uppercase tracking-wider font-bold text-[#2563EB] hover:underline">→ Manage Purchase Orders</Link>
               <Link to="/production" className="block text-xs uppercase tracking-wider font-bold text-[#C27842] hover:underline">→ View Production Board</Link>
+              <Link to="/payroll" className="block text-xs uppercase tracking-wider font-bold text-purple-700 hover:underline">→ Karigar &amp; Staff Payroll</Link>
               <Link to="/reports" className="block text-xs uppercase tracking-wider font-bold text-[#16A34A] hover:underline">→ View Visual Reports</Link>
             </div>
           </Card>
@@ -372,19 +342,17 @@ export default function Dashboard() {
                       <th className="px-6 py-3 font-bold">PO #</th>
                       <th className="px-6 py-3 font-bold">Client</th>
                       <th className="px-6 py-3 font-bold text-right">Qty</th>
-                      <th className="px-6 py-3 font-bold text-right">Value</th>
                       <th className="px-6 py-3 font-bold">Delivery</th>
                     </tr>
                   </thead>
                   <tbody>
                     {stats.b2b.recent_pos.length === 0 ? (
-                      <tr><td colSpan="5" className="px-6 py-10 text-center text-slate-400">No purchase orders yet.</td></tr>
+                      <tr><td colSpan="4" className="px-6 py-10 text-center text-slate-400">No purchase orders yet.</td></tr>
                     ) : stats.b2b.recent_pos.map((po) => (
                       <tr key={po.id} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="px-6 py-3 font-mono font-bold text-slate-700">{po.po_number}</td>
                         <td className="px-6 py-3">{po.client_name}</td>
                         <td className="px-6 py-3 text-right font-mono">{po.total_quantity}</td>
-                        <td className="px-6 py-3 text-right font-mono font-bold text-slate-800">{inr(po.grand_total)}</td>
                         <td className="px-6 py-3 text-xs text-slate-600">{po.delivery_date || "—"}</td>
                       </tr>
                     ))}
@@ -409,19 +377,17 @@ export default function Dashboard() {
                       <th className="px-6 py-3 font-bold">Channel</th>
                       <th className="px-6 py-3 font-bold">Style</th>
                       <th className="px-6 py-3 font-bold text-right">Qty</th>
-                      <th className="px-6 py-3 font-bold text-right">Value</th>
                     </tr>
                   </thead>
                   <tbody>
                     {stats.online.recent_orders.length === 0 ? (
-                      <tr><td colSpan="5" className="px-6 py-10 text-center text-slate-400">No online orders imported yet.</td></tr>
+                      <tr><td colSpan="4" className="px-6 py-10 text-center text-slate-400">No online orders imported yet.</td></tr>
                     ) : stats.online.recent_orders.map((ord) => (
                       <tr key={ord.id} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="px-6 py-3 font-mono font-bold text-slate-700">{ord.po_number}</td>
                         <td className="px-6 py-3 uppercase text-xs font-semibold text-slate-600">{ord.channel}</td>
                         <td className="px-6 py-3 font-mono text-xs">{ord.style_code} ({ord.color} · Sz {ord.size})</td>
                         <td className="px-6 py-3 text-right font-mono">{ord.quantity}</td>
-                        <td className="px-6 py-3 text-right font-mono font-bold text-slate-800">{inr(ord.amount)}</td>
                       </tr>
                     ))}
                   </tbody>

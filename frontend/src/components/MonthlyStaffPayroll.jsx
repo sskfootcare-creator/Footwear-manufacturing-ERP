@@ -42,6 +42,7 @@ export default function MonthlyStaffPayroll() {
   const [holidayForm, setHolidayForm] = useState({ holiday_date: "", name: "", holiday_type: "Public Holiday" });
   const [payModal, setPayModal] = useState(null);
   const [ledgerModal, setLedgerModal] = useState(null);
+  const [relieveModal, setRelieveModal] = useState(null);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -116,7 +117,13 @@ export default function MonthlyStaffPayroll() {
     try {
       const payload = {
         ...empForm,
+        role: empForm.role || "Staff",
+        department: empForm.department || "Operations",
         monthly_salary: Number(empForm.monthly_salary || 0),
+        phone: empForm.phone || "",
+        joining_date: empForm.joining_date || "",
+        relieving_date: empForm.relieving_date || "",
+        is_active: empForm.relieving_date ? false : empForm.is_active !== false,
       };
       if (empForm.id) {
         await http.put(`/staff-payroll/employees/${empForm.id}`, payload);
@@ -180,6 +187,27 @@ export default function MonthlyStaffPayroll() {
       setLedgerModal(res.data);
     } catch (err) {
       alert("Failed to load staff ledger");
+    }
+  };
+
+  const submitRelieve = async (e) => {
+    e.preventDefault();
+    if (!relieveModal?.relieving_date) return;
+    try {
+      await http.put(`/staff-payroll/employees/${relieveModal.id}`, {
+        name: relieveModal.name,
+        role: relieveModal.role || "Staff",
+        department: relieveModal.department || "Operations",
+        monthly_salary: Number(relieveModal.monthly_salary || 0),
+        phone: relieveModal.phone || "",
+        joining_date: relieveModal.joining_date || "",
+        relieving_date: relieveModal.relieving_date,
+        is_active: false,
+      });
+      setRelieveModal(null);
+      loadAll();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Failed to relieve staff member");
     }
   };
 
@@ -334,9 +362,21 @@ export default function MonthlyStaffPayroll() {
                     <tr key={r.staff_id} className="hover:bg-slate-50">
                       <td className="px-3 py-2.5">
                         <div className="font-bold text-slate-900">{r.name}</div>
-                        <div className="text-[10px] text-slate-500 font-mono">{r.role} · {r.department}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">
+                          {r.role} · {r.department}
+                          {r.employed_days < r.days_in_month && (
+                            <span className="ml-1.5 text-[#C27842] font-bold">
+                              ({r.employed_days}/{r.days_in_month}d pro-rata)
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      <td className="px-3 py-2.5 text-right font-mono font-bold">{inr(r.monthly_salary)}</td>
+                      <td className="px-3 py-2.5 text-right font-mono font-bold">
+                        <div>{inr(r.pro_rata_salary ?? r.monthly_salary)}</div>
+                        {r.employed_days < r.days_in_month && (
+                          <div className="text-[10px] text-slate-400 line-through">{inr(r.monthly_salary)}</div>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 text-center font-mono text-emerald-700 font-bold">{r.present_days}</td>
                       <td className="px-3 py-2.5 text-center font-mono text-amber-700">{r.half_days}</td>
                       <td className="px-3 py-2.5 text-center font-mono text-blue-700">{r.paid_leave_days}</td>
@@ -371,6 +411,29 @@ export default function MonthlyStaffPayroll() {
                             className="px-2 py-1 text-[10px] font-bold uppercase bg-emerald-700 text-white hover:bg-emerald-800"
                           >
                             Pay
+                          </button>
+                        )}
+                        {!r.relieving_date && (
+                          <button
+                            onClick={() => {
+                              const emp = employees.find((x) => x.id === r.staff_id);
+                              setRelieveModal({
+                                ...(emp || {
+                                  id: r.staff_id,
+                                  name: r.name,
+                                  role: r.role,
+                                  department: r.department,
+                                  monthly_salary: r.monthly_salary,
+                                  phone: r.phone,
+                                  joining_date: r.joining_date,
+                                }),
+                                relieving_date: new Date().toISOString().slice(0, 10),
+                              });
+                            }}
+                            className="px-2 py-1 text-[10px] font-bold uppercase border border-rose-300 text-rose-700 hover:bg-rose-50"
+                            title="Relieve Staff Member"
+                          >
+                            Relieve
                           </button>
                         )}
                       </td>
@@ -534,6 +597,7 @@ export default function MonthlyStaffPayroll() {
                 <th className="px-3 py-2.5">Role / Designation</th>
                 <th className="px-3 py-2.5">Department</th>
                 <th className="px-3 py-2.5">Phone</th>
+                <th className="px-3 py-2.5">DOJ / DOR</th>
                 <th className="px-3 py-2.5 text-right">Monthly Salary</th>
                 <th className="px-3 py-2.5 text-center">Status</th>
                 <th className="px-3 py-2.5 text-center">Actions</th>
@@ -546,15 +610,33 @@ export default function MonthlyStaffPayroll() {
                   <td className="px-3 py-2.5">{emp.role}</td>
                   <td className="px-3 py-2.5 font-mono">{emp.department}</td>
                   <td className="px-3 py-2.5 font-mono">{emp.phone || "—"}</td>
+                  <td className="px-3 py-2.5 font-mono text-[11px]">
+                    <div>DOJ: {emp.joining_date || "—"}</div>
+                    {emp.relieving_date && <div className="text-rose-600">DOR: {emp.relieving_date}</div>}
+                  </td>
                   <td className="px-3 py-2.5 text-right font-mono font-bold">{inr(emp.monthly_salary)}</td>
                   <td className="px-3 py-2.5 text-center">
                     <Badge color={emp.is_active ? "green" : "slate"}>{emp.is_active ? "Active" : "Inactive"}</Badge>
                   </td>
                   <td className="px-3 py-2.5 text-center space-x-2">
-                    <button onClick={() => setEmpForm(emp)} className="text-slate-600 hover:text-blue-600">
+                    <button onClick={() => setEmpForm(emp)} className="text-slate-600 hover:text-blue-600" title="Edit Staff">
                       <Edit3 className="w-4 h-4 inline" />
                     </button>
-                    <button onClick={() => deleteEmployee(emp.id)} className="text-slate-600 hover:text-rose-600">
+                    {!emp.relieving_date && emp.is_active !== false && (
+                      <button
+                        onClick={() =>
+                          setRelieveModal({
+                            ...emp,
+                            relieving_date: new Date().toISOString().slice(0, 10),
+                          })
+                        }
+                        className="px-2 py-0.5 text-[10px] font-bold uppercase border border-rose-300 text-rose-700 hover:bg-rose-50"
+                        title="Relieve Staff Member"
+                      >
+                        Relieve
+                      </button>
+                    )}
+                    <button onClick={() => deleteEmployee(emp.id)} className="text-slate-600 hover:text-rose-600" title="Delete Staff">
                       <Trash2 className="w-4 h-4 inline" />
                     </button>
                   </td>
@@ -598,9 +680,48 @@ export default function MonthlyStaffPayroll() {
                   <input type="text" value={empForm.phone || ""} onChange={(e) => setEmpForm({ ...empForm, phone: e.target.value })} className="w-full border-2 border-slate-300 px-2.5 py-1.5 font-mono" />
                 </div>
               </div>
+              <div>
+                <label className="text-[10px] uppercase font-bold text-slate-600 block mb-1">Date of Joining *</label>
+                <input required type="date" value={empForm.joining_date || ""} onChange={(e) => setEmpForm({ ...empForm, joining_date: e.target.value })} className="w-full border-2 border-slate-300 px-2.5 py-1.5 font-mono" />
+              </div>
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
                 <BtnSecondary type="button" onClick={() => setEmpForm(null)}>Cancel</BtnSecondary>
                 <BtnPrimary type="submit">Save Staff</BtnPrimary>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* RELIEVE STAFF MODAL */}
+      {relieveModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-slate-900 w-full max-w-sm p-5 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <h3 className="font-bold text-sm uppercase">Relieve Staff · {relieveModal.name}</h3>
+              <button onClick={() => setRelieveModal(null)}><X className="w-4 h-4" /></button>
+            </div>
+            <form onSubmit={submitRelieve} className="space-y-3 text-xs">
+              <div className="text-[11px] text-slate-600">
+                Date of Joining: <span className="font-mono font-bold">{relieveModal.joining_date || "—"}</span>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase font-bold text-slate-600 block mb-1">Date of Relieving *</label>
+                <input
+                  required
+                  type="date"
+                  min={relieveModal.joining_date || undefined}
+                  value={relieveModal.relieving_date || ""}
+                  onChange={(e) => setRelieveModal({ ...relieveModal, relieving_date: e.target.value })}
+                  className="w-full border-2 border-slate-300 px-2.5 py-1.5 font-mono"
+                />
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Salary for the relieving month will be automatically pro-rated up to this date.
+              </p>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                <BtnSecondary type="button" onClick={() => setRelieveModal(null)}>Cancel</BtnSecondary>
+                <BtnPrimary type="submit">Confirm Relieve</BtnPrimary>
               </div>
             </form>
           </div>
