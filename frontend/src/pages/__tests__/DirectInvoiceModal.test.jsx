@@ -82,8 +82,15 @@ describe("Direct Invoice (No PO) Flow in Invoices.jsx", () => {
       ).toBeInTheDocument();
     });
 
-    // Default line item: 10 pairs @ 500 = 5000.
-    // 2.5% CGST = 125, 2.5% SGST = 125. Grand total = 5250.
+    // Fill first row qty and unit_price (blank by default)
+    const numInputs = screen.getAllByRole("spinbutton");
+    // numInputs: [payment_terms_days, gst_rate(custom?), ...]; safer to query by placeholder or value
+    const qtyInput = screen.getByPlaceholderText("0");
+    const rateInput = screen.getByPlaceholderText("0.00");
+    fireEvent.change(qtyInput, { target: { value: "10" } });
+    fireEvent.change(rateInput, { target: { value: "500" } });
+
+    // 10 pairs @ 500 = 5000. 2.5% CGST = 125, 2.5% SGST = 125. Grand total = 5250.
     expect(screen.getByText(/Grand Total:/i)).toBeInTheDocument();
     expect(screen.getByText("₹5,250")).toBeInTheDocument();
   });
@@ -108,6 +115,10 @@ describe("Direct Invoice (No PO) Flow in Invoices.jsx", () => {
     await waitFor(() => {
       expect(screen.getByText(/Inter-State: 5% IGST/i)).toBeInTheDocument();
     });
+
+    // Fill qty and rate
+    fireEvent.change(screen.getByPlaceholderText("0"), { target: { value: "10" } });
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "500" } });
 
     // 10 pairs @ 500 = 5000. IGST 5% = 250. Grand total = 5250.
     expect(screen.getByText("₹5,250")).toBeInTheDocument();
@@ -137,9 +148,11 @@ describe("Direct Invoice (No PO) Flow in Invoices.jsx", () => {
     const clientInput = screen.getByPlaceholderText(/e\.g\. Apex Footwear Stores/i);
     fireEvent.change(clientInput, { target: { value: "Metro Shoes Mumbai" } });
 
-    // Fill Style code on first row
+    // Fill Style code, qty, and rate on first row
     const styleInput = screen.getByPlaceholderText(/e\.g\. DERBY-501/i);
     fireEvent.change(styleInput, { target: { value: "LOAFER-01" } });
+    fireEvent.change(screen.getByPlaceholderText("0"), { target: { value: "10" } });
+    fireEvent.change(screen.getByPlaceholderText("0.00"), { target: { value: "500" } });
 
     // Submit form
     const submitBtn = screen.getByText("Generate & Issue Direct Invoice");
