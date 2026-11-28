@@ -23,6 +23,7 @@ const NAV_GROUPS = [
     workspaces: ["b2b", "online", "management"],
     items: [
       { to: "/",                    label: "Dashboard",            icon: LayoutDashboard, end: true, roles: ["admin","manager","production","sales"] },
+      { to: "/daily-tasks",         label: "Daily Tasks & Lists",  icon: ClipboardList,   module: "daily_tasks" },
       { to: "/samples",             label: "Sample Development",   icon: Sparkles,        roles: ["admin","manager","production","sales"] },
       { to: "/styles",              label: "Styles Master",        icon: Layers,          roles: ["admin","manager","sales"] },
       { to: "/plm",                 label: "Digital Style Folder", icon: BookOpen,        roles: ["admin","manager","production","sales"] },
@@ -83,6 +84,7 @@ const NAV_GROUPS = [
 /* Route → page title map for mobile top bar */
 const PAGE_TITLES = {
   "/":                     "Dashboard",
+  "/daily-tasks":          "Daily Tasks & Shopping Lists",
   "/samples":              "Sample Development & Tracking",
   "/styles":               "Styles",
   "/materials":            "Materials",
@@ -200,9 +202,9 @@ function visibleGroups(workspace, user) {
     const items = g.items.filter((n) => {
       if (userRole === "admin") return true;
       if (n.module && userModules) {
-        if (!userModules.includes(n.module)) return false;
+        return userModules.includes(n.module);
       }
-      return !userRole || n.roles?.includes(userRole);
+      return !userRole || !n.roles || n.roles.includes(userRole);
     });
     return items.length ? { ...g, items } : null;
   }).filter(Boolean);
@@ -610,20 +612,63 @@ const STAGE_LABELS_NOTIF = {
   sole_pasting: "Sole Pasting", finishing: "Finishing", qc_pack: "QC & Pack",
 };
 
+function playNotificationChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    [587.33, 880].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, now + idx * 0.12);
+      gain.gain.setValueAtTime(0.14, now + idx * 0.12);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.12 + 0.25);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + idx * 0.12);
+      osc.stop(now + idx * 0.12 + 0.26);
+    });
+  } catch { /* ignore autoplay restrictions */ }
+}
+
 function NotificationBell({ userRole }) {
   const [notifs, setNotifs] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [toastNotif, setToastNotif] = useState(null);
   const ref = useRef(null);
+  const seenIdsRef = useRef(new Set());
+  const initializedRef = useRef(false);
   const navigate = useNavigate();
 
-  const canSee = NOTIF_ROLES.includes(userRole);
+  const canSee = Boolean(userRole);
 
   const fetchNotifs = useCallback(async () => {
     if (!canSee) return;
     try {
       const { data } = await http.get("/notifications?unread_only=true");
-      setNotifs(data || []);
+      const list = data || [];
+      if (!initializedRef.current) {
+        list.forEach((n) => seenIdsRef.current.add(n.id));
+        initializedRef.current = true;
+      } else {
+        const fresh = list.filter((n) => !seenIdsRef.current.has(n.id));
+        if (fresh.length > 0) {
+          fresh.forEach((n) => seenIdsRef.current.add(n.id));
+          playNotificationChime();
+          const latest = fresh[0];
+          setToastNotif(latest);
+          setTimeout(() => setToastNotif(null), 5000);
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            const title = latest.type === "daily_task" ? (latest.title || "New Task Notification") : "Pickup Alert";
+            const body = latest.type === "daily_task" ? (latest.message || "") : `${latest.style_code} ready`;
+            new Notification(title, { body });
+          }
+        }
+      }
+      setNotifs(list);
     } catch { /* silently ignore */ }
   }, [canSee]);
 
@@ -669,7 +714,8 @@ function NotificationBell({ userRole }) {
   const handleClickNotif = (n) => {
     markRead(n.id);
     setOpen(false);
-    navigate("/production");
+    setToastNotif(null);
+    navigate(n.type === "daily_task" ? (n.link || "/daily-tasks") : "/production");
   };
 
   if (!canSee) return null;
@@ -680,7 +726,13 @@ function NotificationBell({ userRole }) {
     <div className="relative" ref={ref}>
       {/* Bell button */}
       <button
-        onClick={() => { setOpen((v) => !v); fetchNotifs(); }}
+        onClick={() => {
+          setOpen((v) => !v);
+          fetchNotifs();
+          if (typeof Notification !== "undefined" && Notification.permission === "default") {
+            Notification.requestPermission().catch(() => {});
+          }
+        }}
         aria-label={`Notifications${unreadCount > 0 ? ` (${unreadCount} unread)` : ""}`}
         data-testid="notification-bell"
         className="relative p-2 text-slate-400 hover:text-white transition-colors rounded active:bg-slate-800"
@@ -706,7 +758,7 @@ function NotificationBell({ userRole }) {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-          <span className="text-sm font-black text-white tracking-tight">Pickup Alerts</span>
+          <span className="text-sm font-black text-white tracking-tight">Notifications</span>
           {unreadCount > 0 && (
             <span className="text-[10px] font-bold bg-red-500/15 text-red-400 border border-red-500/25 rounded-full px-2 py-0.5">
               {unreadCount} unread
@@ -727,17 +779,29 @@ function NotificationBell({ userRole }) {
                 className="w-full text-left px-4 py-3 hover:bg-slate-800/60 border-b border-slate-800/60 transition-colors last:border-0"
               >
                 <div className="flex items-start gap-3">
-                  <div className="w-2 h-2 rounded-full bg-amber-400 mt-1.5 flex-shrink-0" />
+                  <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${n.type === "daily_task" ? "bg-[#C27842]" : "bg-amber-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-bold text-white truncate">
-                      {n.style_code} — {STAGE_LABELS_NOTIF[n.stage] || n.stage}
-                    </div>
-                    <div className="text-xs text-slate-400 mt-0.5">
-                      {n.worker_name} · {n.completed_qty} pairs ready
-                    </div>
-                    <div className="text-[10px] text-slate-600 mt-0.5">
-                      {n.at ? new Date(n.at).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }) : ""}
-                    </div>
+                    {n.type === "daily_task" ? (
+                      <>
+                        <div className="text-sm font-bold text-white truncate">{n.title || "Task Update"}</div>
+                        <div className="text-xs text-slate-300 mt-0.5 line-clamp-2">{n.message}</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          {n.created_at ? new Date(n.created_at).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }) : ""}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-sm font-bold text-white truncate">
+                          {n.style_code} — {STAGE_LABELS_NOTIF[n.stage] || n.stage}
+                        </div>
+                        <div className="text-xs text-slate-400 mt-0.5">
+                          {n.worker_name} · {n.completed_qty} pairs ready
+                        </div>
+                        <div className="text-[10px] text-slate-600 mt-0.5">
+                          {n.at ? new Date(n.at).toLocaleString("en-IN", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }) : ""}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </button>
@@ -747,10 +811,25 @@ function NotificationBell({ userRole }) {
 
         {notifs.length > 0 && (
           <div className="px-4 py-2 border-t border-slate-800 text-center">
-            <span className="text-[10px] text-slate-600">Click an alert to open Production and advance the stage</span>
+            <span className="text-[10px] text-slate-500">Click an alert to open</span>
           </div>
         )}
       </div>
+
+      {/* Live Toast Alert */}
+      {toastNotif && (
+        <div
+          onClick={() => handleClickNotif(toastNotif)}
+          className="fixed bottom-5 right-5 z-50 max-w-xs bg-[#0F172A] text-white border border-[#C27842] rounded-xl px-4 py-3 shadow-2xl cursor-pointer animate-bounce"
+        >
+          <div className="text-xs font-bold text-[#C27842]">
+            🔔 {toastNotif.type === "daily_task" ? (toastNotif.title || "New Task") : "Pickup Ready"}
+          </div>
+          <div className="text-xs text-slate-200 mt-0.5 line-clamp-2">
+            {toastNotif.type === "daily_task" ? toastNotif.message : `${toastNotif.style_code} ready`}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

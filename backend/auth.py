@@ -210,19 +210,25 @@ ERP_MODULES = {
         "description": "User creation, Role & Modular permissions matrix, Company profile, System setup",
         "category": "Administration",
     },
+    "daily_tasks": {
+        "key": "daily_tasks",
+        "name": "Daily Tasks & Shopping Lists",
+        "description": "Daily task assignment, approver sign-off, messaging, voice/photo updates, and expense-linked shopping lists",
+        "category": "Operations",
+    },
 }
 
 ROLE_DEFAULT_MODULES = {
     "admin": list(ERP_MODULES.keys()),
     "ca": ["orders_sales", "procurement", "reports"],
     "accountant": ["orders_sales", "procurement"],
-    "production_manager": ["production", "inventory", "workers", "procurement"],
-    "production": ["production", "inventory"],
-    "inventory_manager": ["inventory", "procurement"],
-    "sales_manager": ["orders_sales", "online", "reports"],
-    "sales": ["orders_sales"],
-    "online_manager": ["online"],
-    "manager": ["production", "inventory", "workers", "orders_sales", "procurement", "online", "reports"],
+    "production_manager": ["production", "inventory", "workers", "procurement", "daily_tasks"],
+    "production": ["production", "inventory", "daily_tasks"],
+    "inventory_manager": ["inventory", "procurement", "daily_tasks"],
+    "sales_manager": ["orders_sales", "online", "reports", "daily_tasks"],
+    "sales": ["orders_sales", "daily_tasks"],
+    "online_manager": ["online", "daily_tasks"],
+    "manager": ["production", "inventory", "workers", "orders_sales", "procurement", "online", "reports", "daily_tasks"],
     "custom": [],
 }
 

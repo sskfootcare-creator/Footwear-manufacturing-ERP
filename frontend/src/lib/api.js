@@ -4,7 +4,15 @@ import { broadcastSync } from "./sync";
 export const getBackendUrl = () => {
   // 1. Explicitly configured REACT_APP_BACKEND_URL takes priority if present
   if (process.env.REACT_APP_BACKEND_URL && process.env.REACT_APP_BACKEND_URL.trim() !== "") {
-    return process.env.REACT_APP_BACKEND_URL.trim();
+    let url = process.env.REACT_APP_BACKEND_URL.trim();
+    // If accessed over LAN/Wi-Fi (e.g. 192.168.x.x), rewrite localhost backend URL to match the current host
+    if (typeof window !== "undefined" && window.location?.hostname) {
+      const host = window.location.hostname;
+      if (host !== "localhost" && host !== "127.0.0.1") {
+        url = url.replace("://localhost", `://${host}`).replace("://127.0.0.1", `://${host}`);
+      }
+    }
+    return url;
   }
   // 2. In browser environments, default to current origin
   if (typeof window !== "undefined" && window.location && window.location.origin) {

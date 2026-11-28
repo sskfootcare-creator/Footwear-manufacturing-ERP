@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "@/lib/auth";
 import Login from "@/pages/Login";
 import AppShell from "@/components/AppShell";
 import Dashboard from "@/pages/Dashboard";
+import DailyTasks from "@/pages/DailyTasks";
 import Materials from "@/pages/Materials";
 import Workers from "@/pages/Workers";
 import Inventory from "@/pages/Inventory";
@@ -56,6 +57,7 @@ import { Loader2 } from "lucide-react";
 // F-037: Route-to-module & role authorization matrix for frontend navigation guard
 const ROUTE_PERMISSIONS = {
   "analytics": { roles: ["admin", "manager", "production", "inventory", "sales", "finance"], modules: ["reports"] },
+  "daily-tasks": { modules: ["daily_tasks"] },
   "mobile/picklist": { roles: ["admin", "manager", "production", "inventory"], modules: ["inventory"] },
 
   "styles": { roles: ["admin", "manager", "production", "sales"], modules: ["production", "orders_sales"] },
@@ -165,6 +167,7 @@ function App() {
           <Route path="/" element={<Protected><AppShell /></Protected>}>
 
             <Route index element={<Dashboard />} />
+            <Route path="daily-tasks" element={<RouteGuard path="daily-tasks"><DailyTasks /></RouteGuard>} />
             <Route path="investors" element={<RouteGuard path="investors"><Investors /></RouteGuard>} />
             <Route path="styles" element={<RouteGuard path="styles"><Styles /></RouteGuard>} />
             <Route path="samples" element={<RouteGuard path="samples"><SampleDevelopment /></RouteGuard>} />

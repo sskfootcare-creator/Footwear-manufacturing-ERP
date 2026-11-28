@@ -123,6 +123,7 @@ from routes.components import (
     _record_component_movement,
 )
 from routes.expenses import expenses_router
+from routes.daily_tasks import daily_tasks_router
 from routes.sku_map import (
     sku_map_router,
     resolve_style,
@@ -464,6 +465,8 @@ for orig in set(_raw_origins):
         logger.warning(f"[CORS] Ignored invalid origin: '{orig}'")
 
 _default_cors_regex = r"^https:\/\/(?:[a-zA-Z0-9_-]+\.)*(?:ssk-footcare-manufacturing-erp|footwear-manufacturing(?:-[a-zA-Z0-9_-]+)?-ssk-footcare)\.vercel\.app$"
+if os.getenv("APP_ENV", "development").lower() != "production":
+    _default_cors_regex = r"^(?:https:\/\/(?:[a-zA-Z0-9_-]+\.)*(?:ssk-footcare-manufacturing-erp|footwear-manufacturing(?:-[a-zA-Z0-9_-]+)?-ssk-footcare)\.vercel\.app|http:\/\/(?:192\.168\.[0-9.]+|10\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]+|127\.0\.0\.1)(?::[0-9]+)?)$"
 _cors_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or _default_cors_regex
 
 _ALLOWED_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
@@ -2078,6 +2081,7 @@ app.include_router(vendors_router)
 app.include_router(notifications_router)
 app.include_router(components_router)
 app.include_router(expenses_router)
+app.include_router(daily_tasks_router)
 app.include_router(sku_map_router)
 app.include_router(online_reconciliation_router)
 app.include_router(materials_router)

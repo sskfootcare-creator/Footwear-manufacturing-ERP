@@ -47,22 +47,27 @@ async def _get_user(request: Request):
 @notifications_router.get("")
 @notifications_router.get("/")
 async def list_notifications(request: Request, unread_only: bool = True):
-    """List pickup-ready notifications (admin/manager/production only), newest first."""
+    """List pickup-ready (admin/manager/production) and daily_task notifications for the user, newest first."""
     u = await _get_user(request)
-    require_roles("admin", "manager", "production")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
-    q: dict = {"type": "pickup_ready"}
+    uid = str(u.get("id") or u.get("_id") or "")
+    role = (u.get("role") or "").lower()
+
+    or_clauses = [{"type": "daily_task", "user_id": uid}]
+    if role in ("admin", "manager", "production", "production_manager"):
+        or_clauses.append({"type": "pickup_ready"})
+
+    q: dict = {"$or": or_clauses}
     if unread_only:
         q["read"] = False
-    notifs = await db.notifications.find(q).sort("at", -1).to_list(200)
+    notifs = await db.notifications.find(q).sort([("created_at", -1), ("at", -1)]).to_list(200)
     return [stringify(n) for n in notifs]
 
 
 @notifications_router.patch("/{nid}/read")
 async def mark_notification_read(nid: str, request: Request):
-    """Mark a pickup-ready notification as read (admin/manager/production only)."""
+    """Mark a notification as read."""
     u = await _get_user(request)
-    require_roles("admin", "manager", "production")(u)
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     now = now_iso()
     result = await db.notifications.update_one(
