@@ -49,9 +49,11 @@ async def _get_user(request: Request):
 async def list_notifications(request: Request, unread_only: bool = True):
     """List pickup-ready (admin/manager/production) and daily_task notifications for the user, newest first."""
     u = await _get_user(request)
+    role = (u.get("role") or "").lower()
+    if role == "worker":
+        raise HTTPException(403, "Access denied for worker role")
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     uid = str(u.get("id") or u.get("_id") or "")
-    role = (u.get("role") or "").lower()
 
     or_clauses = [{"type": "daily_task", "user_id": uid}]
     if role in ("admin", "manager", "production", "production_manager"):
@@ -68,6 +70,8 @@ async def list_notifications(request: Request, unread_only: bool = True):
 async def mark_notification_read(nid: str, request: Request):
     """Mark a notification as read."""
     u = await _get_user(request)
+    if (u.get("role") or "").lower() == "worker":
+        raise HTTPException(403, "Access denied for worker role")
     db = getattr(request.app, "mongodb", None) or getattr(__import__("server"), "db")
     now = now_iso()
     result = await db.notifications.update_one(
