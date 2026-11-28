@@ -1555,8 +1555,19 @@ async def _compute_dashboard_stats_live(start_date: Optional[str] = None, end_da
         except Exception:
             pass
 
-    active_workers_count = await db.workers.count_documents({"active": {"$ne": False}}) if hasattr(db, "workers") and db.workers is not None else 0
-    active_staff_count = await db.staff_employees.count_documents({"is_active": True}) if hasattr(db, "staff_employees") and db.staff_employees is not None else 0
+    active_workers_count = 0
+    if hasattr(db, "workers") and db.workers is not None:
+        try:
+            active_workers_count = await db.workers.count_documents({"active": {"$ne": False}})
+        except Exception:
+            active_workers_count = 0
+
+    active_staff_count = 0
+    if hasattr(db, "staff_employees") and db.staff_employees is not None:
+        try:
+            active_staff_count = await db.staff_employees.count_documents({"is_active": True})
+        except Exception:
+            active_staff_count = 0
 
     return {
         "total_pos": total_pos,
